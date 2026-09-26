@@ -1,0 +1,16 @@
+Copyright (c) 2026 Artur Susdorf. All rights reserved.
+
+This software is not licensed for use, copying, modification or distribution.
+No permission is granted by its being readable.
+
+Why this and not an open licence. The second tree published everything, and it was right to:
+a format for parties who do not trust each other, with a closed implementation, is not a format.
+This tree is not that. It is a served product, and there is nothing it gains by being copyable
+that it does not lose by being operated by somebody who promises nothing.
+
+What is meant to be public is the pair of specifications: the record a dataset produces and the
+interface it answers. They are what a dataset somebody else operates would have to satisfy, and
+they will be published as documentation on the day the first one does. Until then nobody needs
+them and publishing them would be an announcement rather than a document.
+
+"Zetlyn" is a name, not a licence to use it.

@@ -1,0 +1,28 @@
+[package]
+name = "zetlyn"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+publish = false
+license-file = "LICENSE"
+
+[dependencies]
+# Browsing, faceting, filtering and full text are one query over one file.
+rusqlite = { version = "0.37", features = ["bundled", "serde_json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+sha2 = "0.10"
+csv = "1"
+# Outward only, and rustls: one crate asking for native TLS puts OpenSSL in every binary.
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
+# RSS and Atom. calamine pulls it too; named here because this asks for it directly.
+quick-xml = "0.31"
+calamine = "0.26"
+maud = "0.27"
+tiny_http = "0.12"
+# A finite-automaton engine, so a pattern in a declaration cannot take the process down.
+regex = { version = "1", default-features = false, features = ["std", "perf", "unicode-perl"] }
+
+[profile.release]
+strip = true

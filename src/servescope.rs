@@ -188,7 +188,19 @@ fn overview(scope: &Scope, url: &str, v: &Viewer, site: &Site) -> String {
             }
         }
 
-        h2 { (answer.entries.len()) " shown of " (answer.total) " records" }
+        h2 {
+            (answer.entries.len()) " shown of "
+            @if answer.truncated { "at least " }
+            (answer.total)
+            @if answer.subjects { " subjects" } @else { " records" }
+        }
+        @if answer.truncated {
+            div.note {
+                "A member had more candidates than were read. The filter is applied over the "
+                "assembled subject, so what is not read is not counted, and this number is a "
+                "floor. Narrow the query to get an exact one."
+            }
+        }
         table {
             thead { tr {
                 th { "Subject" }
@@ -374,12 +386,18 @@ fn record_page(scope: &Scope, member: &str, id: &str) -> Option<String> {
     Some(shell(&rec.title, body))
 }
 
-fn api(scope: &Scope, path: &str, url: &str, v: &Viewer) -> J {
+/// The second value is true when there is nothing at the address: no such call, or no such
+/// subject. A call that does not exist, answered as a search of everything, is a caller who thinks
+/// they asked something and gets the answer to another question.
+fn api(scope: &Scope, path: &str, url: &str, v: &Viewer) -> (J, bool) {
     let bound = account::bound(v, &scope.decl.name);
     // No API without a subscription. The overview and its counts stay current for everyone; the
     // records behind them do not.
     if bound.is_some() {
-        return json!({ "error": "this needs a subscription", "see": "/pricing" });
+        return (
+            json!({ "error": "this needs a subscription", "see": "/pricing" }),
+            false,
+        );
     }
     let p = params(url);
     let (text, pred) = expr::parse_query(p.get("q").map(String::as_str).unwrap_or(""));
@@ -393,7 +411,7 @@ fn api(scope: &Scope, path: &str, url: &str, v: &Viewer) -> J {
         offset: p.get("offset").and_then(|s| s.parse().ok()).unwrap_or(0),
         seen_before: bound.clone(),
     };
-    match path {
+    let answer = match path {
         "/api/describe" => scope.describe(),
         "/api/mark" => json!({ "mark": scope.mark() }),
         "/api/changes" => {
@@ -413,29 +431,72 @@ fn api(scope: &Scope, path: &str, url: &str, v: &Viewer) -> J {
                     "values": J::Array(counts.iter()
                         .map(|(v, n)| json!({ "value": v, "records": n })).collect()) })
         }
-        _ => {
+        // One subject, which is the page a reader opens and had no call of its own.
+        _ if path.starts_with("/api/entry/") => {
+            let rest: Vec<&str> = path["/api/entry/".len()..].splitn(2, '/').collect();
+            match rest.as_slice() {
+                [scheme, value] => {
+                    let value = crate::serve::urldecode(value);
+                    match scope.entry(scheme, &value) {
+                        Some(e) => entry_json(&e),
+                        None => {
+                            return (
+                                json!({ "error": "no such subject",
+                                        "scheme": scheme, "value": value }),
+                                true,
+                            )
+                        }
+                    }
+                }
+                _ => {
+                    return (
+                        json!({ "error": "an entry is named by a scheme and a value",
+                                "example": "/api/entry/cve/CVE-2021-44228" }),
+                        true,
+                    )
+                }
+            }
+        }
+        "/api/search" => {
             let answer = scope.search(&sq);
             json!({
                 "total": answer.total,
+                "counts": if answer.subjects { "subjects" } else { "records" },
+                "at_least": answer.truncated,
                 "answered": answer.answered,
                 "unanswered": J::Array(answer.unanswered.iter()
                     .map(|(m, w)| json!({ "member": m, "why": w })).collect()),
-                "entries": J::Array(answer.entries.iter().map(|e| json!({
-                    "rank": e.rank,
-                    "key": e.key.as_ref().map(|k| json!({ "scheme": k.scheme, "value": k.value })),
-                    "title": e.title,
-                    "why": e.why,
-                    "records": J::Array(e.parts.iter().map(|p| json!({
-                        "member": p.member, "kind": p.kind, "record_id": p.record_id,
-                        "title": p.title, "url": p.url, "known": p.known,
-                    })).collect()),
-                    "fields": J::Object(e.fields.iter().map(|(name, f)| (name.clone(), json!({
-                        "by": f.by, "means": f.means, "divergent": f.divergent,
-                    }))).collect()),
-                })).collect()),
+                "entries": J::Array(answer.entries.iter().map(entry_json).collect()),
             })
         }
-    }
+        _ => {
+            return (
+                json!({ "error": "no such call", "calls": [
+                    "/api/describe", "/api/search", "/api/entry/{scheme}/{value}",
+                    "/api/facet", "/api/changes", "/api/mark",
+                ] }),
+                true,
+            )
+        }
+    };
+    (answer, false)
+}
+
+/// One assembled subject, the same shape whether it arrives alone or inside a search.
+fn entry_json(e: &crate::scope::Entry) -> J {
+    json!({
+        "rank": e.rank,
+        "key": e.key.as_ref().map(|k| json!({ "scheme": k.scheme, "value": k.value })),
+        "title": e.title,
+        "why": e.why,
+        "records": J::Array(e.parts.iter().map(|p| json!({
+            "member": p.member, "kind": p.kind, "record_id": p.record_id,
+            "title": p.title, "url": p.url, "known": p.known,
+        })).collect()),
+        "fields": J::Object(e.fields.iter().map(|(name, f)| (name.clone(), json!({
+            "by": f.by, "means": f.means, "divergent": f.divergent,
+        }))).collect()),
+    })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1120,11 +1181,11 @@ pub fn serve(scope: Scope, addr: &str) -> Result<(), String> {
                 )
             }
 
-            _ if path.starts_with("/api/") => (
-                api(&scope, &path, &url, &v).to_string(),
-                "application/json",
-                None,
-            ),
+            _ if path.starts_with("/api/") => {
+                let (answer, nothing_there) = api(&scope, &path, &url, &v);
+                missing = nothing_there;
+                (answer.to_string(), "application/json", None)
+            }
             _ if parts.len() == 2 && parts[0] == "signin" => match accounts.spend_link(&parts[1]) {
                 Some(session) => (
                     shell(

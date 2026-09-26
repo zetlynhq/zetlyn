@@ -513,9 +513,12 @@ impl Store {
                     }
                     "id" => {
                         let p = lit(params, S::Text(right.display().to_lowercase()));
+                        // An identifier is stored as the source wrote it and compared with the
+                        // case folded, so both sides fold. Comparing a folded parameter against
+                        // the stored spelling is a filter that matches nothing.
                         return format!(
-                            "exists(select 1 from ident i where i.record_id = r.record_id \
-                             and i.value = {p})"
+                            "r.record_id in (select i.record_id from ident i \
+                             where lower(i.value) = {p})"
                         );
                     }
                     _ => {}
@@ -558,9 +561,13 @@ impl Store {
                         format!("lower(f.s) {} {p}", op.sql())
                     }
                 };
+                // `in`, not a correlated `exists`. An `exists` makes SQLite walk the record table
+                // and probe the field index once per row, and a count walks all of it; this way
+                // the index on (name, value) picks the few matching records first and the record
+                // table is reached by its own key.
                 format!(
-                    "exists(select 1 from field f where f.record_id = r.record_id \
-                     and f.name = {name} and {cmp})"
+                    "r.record_id in (select f.record_id from field f \
+                     where f.name = {name} and {cmp})"
                 )
             }
         }

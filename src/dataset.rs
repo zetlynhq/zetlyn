@@ -1,6 +1,6 @@
 //! A dataset: one source, one lifecycle, one directory. And the six calls it answers.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value as J};
@@ -330,10 +330,14 @@ impl Dataset {
             Vec::new()
         };
         if !named.is_empty() {
+            // A scope completing a page hands over every key on it, which is thousands. Keeping
+            // the order but checking membership against a set: the same list, without asking
+            // whether each new record is already in it by reading the whole list again.
             let mut ids = Vec::new();
+            let mut held = BTreeSet::new();
             for value in &named {
                 for record_id in self.store.by_identifier(value) {
-                    if !ids.contains(&record_id) {
+                    if held.insert(record_id.clone()) {
                         ids.push(record_id);
                     }
                 }

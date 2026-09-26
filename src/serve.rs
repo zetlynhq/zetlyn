@@ -563,8 +563,9 @@ fn changes_page(ds: &Dataset, url: &str) -> String {
     shell("Changes", body)
 }
 
-/// The same six calls, over HTTP. One interface and not two.
-fn api(ds: &Dataset, path: &str, url: &str) -> J {
+/// The same six calls, over HTTP. One interface and not two. The second value is true when the
+/// path names no call, because a caller who mistypes one should hear that and not a search.
+fn api(ds: &Dataset, path: &str, url: &str) -> (J, bool) {
     let p = params(url);
     let q = || {
         let (text, pred) = expr::parse_query(p.get("q").map(String::as_str).unwrap_or(""));
@@ -582,7 +583,7 @@ fn api(ds: &Dataset, path: &str, url: &str) -> J {
             offset: p.get("offset").and_then(|s| s.parse().ok()).unwrap_or(0),
         }
     };
-    match path {
+    let answer = match path {
         "/api/describe" => ds.describe(),
         "/api/mark" => json!({ "mark": ds.mark() }),
         "/api/changes" => ds.changes(
@@ -606,7 +607,7 @@ fn api(ds: &Dataset, path: &str, url: &str) -> J {
                 .unwrap_or_default();
             json!({ "records": J::Array(ds.fetch(&ids).iter().map(|r| r.to_json()).collect()) })
         }
-        _ => {
+        "/api/search" => {
             let query = q();
             match ds.search(&query) {
                 Ok((total, hits, unanswered)) => json!({
@@ -631,7 +632,17 @@ fn api(ds: &Dataset, path: &str, url: &str) -> J {
                 Err(e) => json!({ "error": e }),
             }
         }
-    }
+        _ => {
+            return (
+                json!({ "error": "no such call", "calls": [
+                    "/api/describe", "/api/search", "/api/fetch",
+                    "/api/facet", "/api/changes", "/api/mark",
+                ] }),
+                true,
+            )
+        }
+    };
+    (answer, false)
 }
 
 pub fn serve(ds: Dataset, addr: &str) -> Result<(), String> {
@@ -646,7 +657,11 @@ pub fn serve(ds: Dataset, addr: &str) -> Result<(), String> {
         let (body, content_type) = if path == "/style.css" {
             (STYLE.to_string(), "text/css; charset=utf-8")
         } else if path.starts_with("/api/") {
-            (api(&ds, &path, &url).to_string(), "application/json")
+            let (answer, no_such_call) = api(&ds, &path, &url);
+            if no_such_call {
+                status = 404;
+            }
+            (answer.to_string(), "application/json")
         } else if let Some(id) = path.strip_prefix("/record/") {
             match record_page(&ds, id, &url) {
                 Some(html) => (html, "text/html; charset=utf-8"),

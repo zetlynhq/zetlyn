@@ -139,7 +139,19 @@ pub struct Answer {
     pub entries: Vec<Entry>,
     pub answered: Vec<String>,
     pub unanswered: Vec<(String, Vec<String>)>,
+    /// The total is a floor: a member had more candidates than were read, and the second pass
+    /// could only count what it saw.
+    pub truncated: bool,
+    /// What the total counts. Without a predicate it is records, summed from what each member
+    /// says it holds. With one it is subjects, counted after the pass over assembled entries,
+    /// because that pass is the only place the question can be answered.
+    pub subjects: bool,
 }
+
+/// How deep each member is read when the query carries a predicate. The second pass runs over
+/// assembled entries, so a candidate that is never read is a candidate that never counts. Seven
+/// members at this depth is the CVE scope answering a filtered query in a tenth of a second.
+const CANDIDATES: usize = 20_000;
 
 impl Scope {
     /// Members are named, not pathed. A deployment holds its datasets in one place and a scope
@@ -415,6 +427,27 @@ impl Scope {
         vec!["kind".into(), "dataset".into()]
     }
 
+    /// Whether this member can select anything for this query at all. Free text goes to every
+    /// member that has an index; a filter goes only to the members carrying a field it names.
+    fn narrows(&self, q: &ScopeQuery, m: &Resolved) -> bool {
+        if !q.text.trim().is_empty() {
+            return true;
+        }
+        let named = q
+            .named
+            .as_deref()
+            .and_then(|n| self.named_view(n))
+            .and_then(|v| v.filter.as_deref())
+            .and_then(expr::parse_pred);
+        let by_field = q.pred.as_ref().and_then(|p| self.prune(p, m)).is_some()
+            || named.as_ref().and_then(|p| self.prune(p, m)).is_some();
+        // `dataset` is the scope's own word and no member carries it, so the prune drops it and
+        // the member would never be read. The member it names is the one that narrows.
+        by_field
+            || q.pred.as_ref().is_some_and(|p| names_member(p, m.name()))
+            || named.is_some_and(|p| names_member(&p, m.name()))
+    }
+
     fn member_query(&self, q: &ScopeQuery, m: &Resolved, limit: usize) -> Query {
         let member = m.name();
         // The sort falls through the same chain the columns do.
@@ -469,11 +502,41 @@ impl Scope {
         let want = limit + q.offset;
         let keys: Vec<&str> = self.decl.keys();
 
-        // One pass to select, member by member, each answering the query in its own words.
+        // The whole predicate, known before anybody is asked, because how deep each member has to
+        // be read depends on whether there is one.
+        let full: Vec<Pred> = q
+            .pred
+            .clone()
+            .into_iter()
+            .chain(
+                q.named
+                    .as_deref()
+                    .and_then(|n| self.named_view(n))
+                    .and_then(|v| v.filter.as_deref())
+                    .and_then(expr::parse_pred),
+            )
+            .collect();
+
+        // With no predicate, a page is a page and each member's own total is the truth. With one,
+        // the count is what survives the second pass over the assembled entry, so every candidate
+        // that could survive has to be read: a member asked for fifty and filtered afterwards
+        // reports the size of the page it was given, not the size of the answer.
+        let depth = if full.is_empty() {
+            want.max(50)
+        } else {
+            want.max(CANDIDATES)
+        };
+
+        // One pass to select, member by member, each answering the query in its own words. Only
+        // the members that can narrow this query are read: a member carrying no field the query
+        // names selects nothing, and the records it holds for the subjects the others selected are
+        // fetched by identifier afterwards, by `complete`. Reading it here instead would be tens
+        // of thousands of candidates read to be discarded.
         let mut per_member: Vec<Vec<Hit>> = Vec::new();
         let mut answered = Vec::new();
         let mut unanswered = Vec::new();
         let mut total = 0u64;
+        let mut truncated = false;
         for m in &self.members {
             if let Some(kind) = &q.kind {
                 if &m.kind() != kind {
@@ -481,7 +544,12 @@ impl Scope {
                     continue;
                 }
             }
-            let mq = self.member_query(q, m, want.max(50));
+            if !full.is_empty() && !self.narrows(q, m) {
+                answered.push(m.name().to_string());
+                per_member.push(Vec::new());
+                continue;
+            }
+            let mq = self.member_query(q, m, depth);
             match m.member.search(&mq) {
                 Ok((n, hits, un)) => {
                     if un.0.is_empty() {
@@ -490,6 +558,7 @@ impl Scope {
                         unanswered.push((m.name().to_string(), un.0.clone()));
                     }
                     total += n;
+                    truncated |= hits.len() >= depth && (n as usize) > hits.len();
                     per_member.push(hits);
                 }
                 Err(e) => {
@@ -549,18 +618,6 @@ impl Scope {
         // The whole predicate again, now that every member's words are in one place. A question
         // that spans sources is answered here or nowhere: no member holds both `exploited` and
         // `severity`, and asking each of them separately selects nothing.
-        let full: Vec<Pred> = q
-            .pred
-            .clone()
-            .into_iter()
-            .chain(
-                q.named
-                    .as_deref()
-                    .and_then(|n| self.named_view(n))
-                    .and_then(|v| v.filter.as_deref())
-                    .and_then(expr::parse_pred),
-            )
-            .collect();
         for p in &full {
             entries.retain(|e| self.entry_holds(e, p));
         }
@@ -575,6 +632,10 @@ impl Scope {
             entries: page,
             answered,
             unanswered,
+            // A filtered count read from a member that had more to give is a floor, not a total,
+            // and the page says which of the two it is showing.
+            truncated: truncated && !full.is_empty(),
+            subjects: !full.is_empty(),
         }
     }
 
@@ -1160,8 +1221,30 @@ impl Scope {
             Pred::And(a, b) => self.entry_holds(entry, a) && self.entry_holds(entry, b),
             Pred::Or(a, b) => self.entry_holds(entry, a) || self.entry_holds(entry, b),
             Pred::Cmp { left, op, right } => {
-                if left == "kind" {
-                    return entry.parts.iter().any(|p| p.kind == right.display());
+                // What an entry is, as against what its members say about it. These four are the
+                // same names a member answers them under, and they pass the prune, so a query on
+                // one of them reaches here and has to be answered rather than dropped.
+                let want = right.display();
+                match left.as_str() {
+                    "kind" => return entry.parts.iter().any(|p| cmp_str(&p.kind, op, &want)),
+                    "dataset" => return entry.parts.iter().any(|p| cmp_str(&p.member, op, &want)),
+                    "title" => {
+                        return cmp_str(&entry.title, op, &want)
+                            || entry.parts.iter().any(|p| cmp_str(&p.title, op, &want))
+                    }
+                    "known" => return entry.parts.iter().any(|p| cmp_str(&p.known, op, &want)),
+                    "url" => {
+                        return entry
+                            .parts
+                            .iter()
+                            .any(|p| p.url.as_deref().is_some_and(|u| cmp_str(u, op, &want)))
+                    }
+                    // Stored as the source wrote it, compared with the case folded.
+                    "id" => {
+                        return entry.key.iter().any(|k| cmp_str(&k.value, op, &want))
+                            || entry.parts.iter().any(|p| cmp_str(&p.record_id, op, &want));
+                    }
+                    _ => {}
                 }
                 let Some(field) = entry.fields.get(left) else {
                     return false;
@@ -1317,5 +1400,28 @@ impl Scope {
             wrong.push(format!("the promise does not hold: {}", late.join("; ")));
         }
         wrong
+    }
+}
+
+/// One comparison between two strings, case folded, for the four things an entry is rather than
+/// says. A date and a title order the same way here: lexically, which is what an ISO date wants.
+fn cmp_str(have: &str, op: &Op, want: &str) -> bool {
+    let o = have.to_lowercase().cmp(&want.to_lowercase());
+    match op {
+        Op::Eq => o.is_eq(),
+        Op::Ne => o.is_ne(),
+        Op::Lt => o.is_lt(),
+        Op::Le => o.is_le(),
+        Op::Gt => o.is_gt(),
+        Op::Ge => o.is_ge(),
+    }
+}
+
+/// Whether a predicate has a `dataset` clause this member satisfies. A member the query excludes
+/// is not read; a member it may include is.
+fn names_member(pred: &Pred, member: &str) -> bool {
+    match pred {
+        Pred::And(a, b) | Pred::Or(a, b) => names_member(a, member) || names_member(b, member),
+        Pred::Cmp { left, op, right } => left == "dataset" && cmp_str(member, op, &right.display()),
     }
 }

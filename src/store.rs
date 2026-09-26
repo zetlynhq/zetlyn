@@ -131,6 +131,22 @@ pub struct FieldSummary {
 /// open under a later one. Each of these is a column that arrived after the first release;
 /// SQLite refuses a duplicate and that refusal is the whole of the check.
 fn migrate(db: &Connection) {
+    // Existing full-text rows carry arbitrary rowids. Rebuilt once, aligned to the record
+    // they belong to, so a replacement is a lookup ever after.
+    let aligned: Option<String> = db
+        .query_row("select value from meta where key = 'fts_rowid'", [], |r| {
+            r.get(0)
+        })
+        .ok();
+    if aligned.is_none() {
+        let _ = db.execute_batch(
+            "drop table if exists fts;
+             create virtual table fts using fts5(record_id unindexed, title, text);
+             insert into fts(rowid, record_id, title, text)
+               select rowid, record_id, title, text from record;
+             insert or replace into meta(key, value) values('fts_rowid', '1');",
+        );
+    }
     for statement in [
         "alter table run add column fields text",
         "alter table run add column refused text",
@@ -353,20 +369,27 @@ impl Store {
             }
         }
 
-        // Only where there was one. `record_id` is unindexed in the FTS table, so this delete is a
-        // scan of it, and one per record turns a first run of 46,000 rows into a quadratic one.
+        // The full-text row carries the record's own rowid, so replacing it is a lookup rather
+        // than a scan. `record_id` cannot be indexed inside an FTS table, and deleting by it is
+        // linear: the day an upstream change rewrites 46,000 records, a scan per record turns a
+        // twenty-five second run into two hours.
+        let rowid: i64 = self
+            .db
+            .query_row(
+                "select rowid from record where record_id = ?1",
+                rusqlite::params![rec.record_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
         if held.is_some() {
             self.db
-                .execute(
-                    "delete from fts where record_id = ?1",
-                    rusqlite::params![rec.record_id],
-                )
+                .execute("delete from fts where rowid = ?1", rusqlite::params![rowid])
                 .map_err(|e| e.to_string())?;
         }
         self.db
             .execute(
-                "insert into fts(record_id, title, text) values(?1,?2,?3)",
-                rusqlite::params![rec.record_id, rec.title, rec.text],
+                "insert into fts(rowid, record_id, title, text) values(?1,?2,?3,?4)",
+                rusqlite::params![rowid, rec.record_id, rec.title, rec.text],
             )
             .map_err(|e| e.to_string())?;
         Ok(verdict)
@@ -555,6 +578,9 @@ impl Store {
             .join(" ")
     }
 
+    /// One query over one file: the text index, the typed fields, the paywall's bound and
+    /// the order, all of it resolved before a row is read.
+    #[allow(clippy::too_many_arguments)]
     pub fn search(
         &self,
         terms: &str,
@@ -803,11 +829,10 @@ impl Store {
             .unwrap_or_default()
     }
 
-    pub fn changes(
-        &self,
-        since: i64,
-        limit: usize,
-    ) -> (Vec<(String, String, String)>, Vec<(String, String)>) {
+    /// What moved and what went, as ids and titles. The field-level difference is the
+    /// dataset's to work out, because only it knows which revisions to hold against each
+    /// other.
+    pub fn changes(&self, since: i64, limit: usize) -> (Vec<Moved>, Vec<Gone>) {
         let mut changed = Vec::new();
         if let Ok(mut stmt) = self.db.prepare(
             "select record_id, title, case when first_run > ?1 then 'added' else 'changed' end
@@ -1076,3 +1101,8 @@ impl Store {
         .unwrap_or_default()
     }
 }
+
+/// A record that was added or changed: its id, its title, and which of the two.
+pub type Moved = (String, String, String);
+/// A record that was removed: its id and the title it had.
+pub type Gone = (String, String);

@@ -402,7 +402,7 @@ fn overview(ds: &Dataset, url: &str) -> String {
                             }
                             @for (v, n) in &counts {
                                 div.facet {
-                                    a href=(link("/", &format!("{q} {name}={v}").trim(),
+                                    a href=(link("/", format!("{q} {name}={v}").trim(),
                                                  &view_name, &sort, 1)) { (v) }
                                     span.n { (n) }
                                 }
@@ -640,6 +640,9 @@ pub fn serve(ds: Dataset, addr: &str) -> Result<(), String> {
     for request in server.incoming_requests() {
         let url = request.url().to_string();
         let path = url.split('?').next().unwrap_or("/").to_string();
+        // The same rule as the scope surface: a miss is a 404, and only the front page is the
+        // front page. Every other address that matches nothing is nothing.
+        let mut status = 200u16;
         let (body, content_type) = if path == "/style.css" {
             (STYLE.to_string(), "text/css; charset=utf-8")
         } else if path.starts_with("/api/") {
@@ -647,19 +650,36 @@ pub fn serve(ds: Dataset, addr: &str) -> Result<(), String> {
         } else if let Some(id) = path.strip_prefix("/record/") {
             match record_page(&ds, id, &url) {
                 Some(html) => (html, "text/html; charset=utf-8"),
-                None => (
-                    shell("Not here", html! { h1 { "No such record" } }),
-                    "text/html; charset=utf-8",
-                ),
+                None => {
+                    status = 404;
+                    (
+                        shell("Not here", html! { h1 { "No such record" } }),
+                        "text/html; charset=utf-8",
+                    )
+                }
             }
         } else if path == "/changes" {
             (changes_page(&ds, &url), "text/html; charset=utf-8")
+        } else if path != "/" {
+            status = 404;
+            (
+                shell(
+                    "Nothing here",
+                    html! {
+                        p { a href="/" { "← " (ds.decl.title) } }
+                        h1 { "Nothing here at that address" }
+                    },
+                ),
+                "text/html; charset=utf-8",
+            )
         } else {
             (overview(&ds, &url), "text/html; charset=utf-8")
         };
         let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], content_type.as_bytes())
             .map_err(|_| "bad header".to_string())?;
-        let response = tiny_http::Response::from_string(body).with_header(header);
+        let response = tiny_http::Response::from_string(body)
+            .with_status_code(status)
+            .with_header(header);
         let _ = request.respond(response);
     }
     Ok(())

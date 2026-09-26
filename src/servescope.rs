@@ -233,7 +233,7 @@ fn overview(scope: &Scope, url: &str, v: &Viewer, site: &Site) -> String {
                         }
                         @for (v, n) in &counts {
                             div.facet {
-                                a href=(link(&format!("{q} {name}={v}").trim(), &view, &kind, 1)) { (v) }
+                                a href=(link(format!("{q} {name}={v}").trim(), &view, &kind, 1)) { (v) }
                                 span.n { (n) }
                             }
                         }
@@ -914,6 +914,10 @@ pub fn serve(scope: Scope, addr: &str) -> Result<(), String> {
         }
 
         // (body, content type, extra header)
+        // A page that says "no such record" under a 200 is telling a person one thing and
+        // every machine another. 402 is the paywall, 404 is nothing there.
+        let mut status = 200u16;
+        let mut missing = false;
         let (body, kind, extra): (String, &str, Option<(String, String)>) = match path.as_str() {
             "/style.css" => (
                 crate::serve::STYLE.to_string(),
@@ -1152,33 +1156,58 @@ pub fn serve(scope: Scope, addr: &str) -> Result<(), String> {
                 } else {
                     match watch_feed(&scope, parts[1].trim_end_matches(".atom")) {
                         Some(xml) => (xml, "application/atom+xml; charset=utf-8", None),
-                        None => (
-                            shell("Not here", html! { h1 { "No such watch" } }),
-                            "text/html; charset=utf-8",
-                            None,
-                        ),
+                        None => {
+                            missing = true;
+                            (
+                                shell("Not here", html! { h1 { "No such watch" } }),
+                                "text/html; charset=utf-8",
+                                None,
+                            )
+                        }
                     }
                 }
             }
             _ if parts.len() == 3 && parts[0] == "entry" => {
                 match entry_page(&scope, &parts[1], &parts[2]) {
                     Some(html) => (html, "text/html; charset=utf-8", None),
-                    None => (
-                        shell("Not here", html! { h1 { "No such subject" } }),
-                        "text/html; charset=utf-8",
-                        None,
-                    ),
+                    None => {
+                        missing = true;
+                        (
+                            shell("Not here", html! { h1 { "No such subject" } }),
+                            "text/html; charset=utf-8",
+                            None,
+                        )
+                    }
                 }
             }
             _ if parts.len() == 3 && parts[0] == "record" => {
                 match record_page(&scope, &parts[1], &parts[2]) {
                     Some(html) => (html, "text/html; charset=utf-8", None),
-                    None => (
-                        shell("Not here", html! { h1 { "No such record" } }),
-                        "text/html; charset=utf-8",
-                        None,
-                    ),
+                    None => {
+                        missing = true;
+                        (
+                            shell("Not here", html! { h1 { "No such record" } }),
+                            "text/html; charset=utf-8",
+                            None,
+                        )
+                    }
                 }
+            }
+            // Only the front page is the front page. Every other address that matches nothing is
+            // nothing, and says so with the number to match.
+            _ if !parts.is_empty() => {
+                missing = true;
+                (
+                    shell(
+                        "Nothing here",
+                        html! {
+                            p { a href="/" { "← " (scope.decl.title) } }
+                            h1 { "Nothing here at that address" }
+                        },
+                    ),
+                    "text/html; charset=utf-8",
+                    None,
+                )
             }
             _ => (
                 overview(&scope, &url, &v, &site),
@@ -1187,7 +1216,20 @@ pub fn serve(scope: Scope, addr: &str) -> Result<(), String> {
             ),
         };
 
-        let mut response = tiny_http::Response::from_string(body);
+        // A refusal and a miss have their own words in the body already; this gives them
+        // the number as well. The four gated paths refuse on one predicate, so the number
+        // comes from that predicate and not from reading the words back out of the body.
+        let gated = path.starts_with("/api/")
+            || path.starts_with("/export")
+            || path.starts_with("/changes")
+            || path.starts_with("/watch/");
+        if gated && !v.entitled(&scope.decl.name) {
+            status = 402;
+        }
+        if missing {
+            status = 404;
+        }
+        let mut response = tiny_http::Response::from_string(body).with_status_code(status);
         if let Ok(h) = tiny_http::Header::from_bytes(&b"Content-Type"[..], kind.as_bytes()) {
             response = response.with_header(h);
         }
@@ -1225,13 +1267,14 @@ fn catalogue(scope: &Scope, v: &Viewer, message: Option<&str>) -> String {
     let held: Vec<(String, String, u64, String)> = datasets
         .iter()
         .filter_map(|(name, dir)| {
+            // Four values, not a description. A full describe() walks every field of every
+            // dataset, and this page shows none of that.
             let ds = crate::dataset::Dataset::open(dir).ok()?;
-            let d = crate::dataset::Member::describe(&ds);
             Some((
                 name.clone(),
-                d["kind"].as_str().unwrap_or("record").to_string(),
-                d["records"].as_u64().unwrap_or(0),
-                d["state"].as_str().unwrap_or("empty").to_string(),
+                ds.decl.kind.clone(),
+                ds.store.count(),
+                ds.state().to_string(),
             ))
         })
         .collect();

@@ -31,6 +31,10 @@ pub struct Declaration {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
+// The variants differ in size because `http` carries far more than `csv` does. Boxing one
+// of them to even that out would put an indirection in the hot path of every row for the
+// sake of a declaration that is read once.
+#[allow(clippy::large_enum_variant)]
 pub enum Source {
     /// A directory of files, recursively. May name a git repository, pulled before each run.
     Folder {
@@ -369,15 +373,10 @@ pub struct Search {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(Default)]
 pub struct Retention {
     #[serde(default)]
     pub history: bool,
-}
-
-impl Default for Retention {
-    fn default() -> Self {
-        Retention { history: false }
-    }
 }
 
 impl Declaration {

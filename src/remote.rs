@@ -64,7 +64,7 @@ impl Remote {
     /// The query as the surface takes it. A remote member is asked in the same words a person
     /// types, because that is the only query language this program has.
     fn as_params(q: &Query) -> Vec<(&'static str, String)> {
-        let mut out = vec![("q".into(), spell(q))];
+        let mut out = vec![("q", spell(q))];
         if !q.ids.is_empty() {
             out.push(("ids", q.ids.join(",")));
         }

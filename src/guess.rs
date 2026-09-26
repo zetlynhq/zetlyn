@@ -104,7 +104,10 @@ fn read_csv(path: &Path) -> Result<(Vec<String>, Vec<Vec<String>>), String> {
 
 /// Spreadsheets carry a title and a logo above the header. The header is the first row where most
 /// cells are text and the row below it has data.
-fn read_xlsx(path: &Path) -> Result<(String, usize, Vec<String>, Vec<Vec<String>>), String> {
+/// The sheet, the row the header sat on, the header, and the rows under it.
+type Sheet = (String, usize, Vec<String>, Vec<Vec<String>>);
+
+fn read_xlsx(path: &Path) -> Result<Sheet, String> {
     use calamine::Reader;
     let mut wb =
         calamine::open_workbook_auto(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -632,8 +635,9 @@ pub fn propose_url(
 ) -> Result<String, String> {
     let f = crate::fetch::Fetcher::new("zetlyn/3", &BTreeMap::new(), 0)?;
     let body = f.get(url)?;
-    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
 
+    // The directory is made once the shape is known. Refusing a JSON API after making it
+    // leaves an empty dataset directory that every later run trips over.
     let looks_like = if body.trim_start().starts_with('<') {
         "feed"
     } else if body.trim_start().starts_with('{') || body.trim_start().starts_with('[') {
@@ -654,7 +658,10 @@ pub fn propose_url(
 
     let toml = match looks_like {
         // A feed knows its own shape, so the declaration is the same every time.
-        "feed" => feed_declaration(&name, kind.unwrap_or("article"), url),
+        "feed" => {
+            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+            feed_declaration(&name, kind.unwrap_or("article"), url)
+        }
         "json" => {
             return Err(format!(
             "{url} answers JSON, and a JSON API needs a declaration somebody writes: which list \
@@ -663,6 +670,7 @@ pub fn propose_url(
         ))
         }
         _ => {
+            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
             let scratch = dir.join("source.csv");
             std::fs::write(&scratch, &body).map_err(|e| format!("{}: {e}", scratch.display()))?;
             let (headers, rows) = read_csv(&scratch)?;

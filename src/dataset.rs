@@ -508,3 +508,101 @@ impl Member for Dataset {
         Dataset::mark(self)
     }
 }
+
+/// What a declaration claims about itself, held against what the store actually holds.
+///
+/// Every one of these is a sentence a reader is shown. An example that returns nothing is a
+/// suggestion to type something that does not work; a column naming a field no record carries is
+/// an empty cell in every row. None of it is caught by the run, because none of it is wrong until
+/// somebody reads it.
+impl Dataset {
+    pub fn check(&self) -> Vec<String> {
+        let mut wrong = Vec::new();
+        let d = &self.decl;
+        let fields: Vec<String> = d.records.fields.keys().cloned().collect();
+        let known = |name: &str| {
+            matches!(name, "known" | "title" | "kind" | "url" | "id" | "text")
+                || fields.iter().any(|f| f == name)
+        };
+
+        if self.store.count() == 0 {
+            wrong.push("holds no records, so nothing below could be checked".into());
+            return wrong;
+        }
+
+        for example in &d.search.examples {
+            let (text, pred) = crate::expr::parse_query(example);
+            let q = Query {
+                text,
+                pred,
+                limit: 1,
+                ..Default::default()
+            };
+            match self.search(&q) {
+                Ok((0, _, un)) if un.0.is_empty() => {
+                    wrong.push(format!("the example {example:?} returns nothing"))
+                }
+                Ok((_, _, un)) if !un.0.is_empty() => wrong.push(format!(
+                    "the example {example:?} cannot be answered: {}",
+                    un.0.join("; ")
+                )),
+                Err(e) => wrong.push(format!("the example {example:?} fails: {e}")),
+                _ => {}
+            }
+        }
+
+        for name in d.search.compare.iter().chain(&d.search.suggest) {
+            if !known(name) {
+                wrong.push(format!("`search` names {name}, which no record carries"));
+            }
+        }
+        for v in &d.view {
+            for name in v.columns.iter().chain(&v.facets) {
+                if !known(name) {
+                    wrong.push(format!(
+                        "the view {:?} names {name}, which no record carries",
+                        v.name
+                    ));
+                }
+            }
+            if let Some(group) = &v.group {
+                if !known(group) {
+                    wrong.push(format!(
+                        "the view {:?} groups by {group}, which no record carries",
+                        v.name
+                    ));
+                }
+            }
+            if let Some(filter) = &v.filter {
+                match crate::expr::parse_pred(filter) {
+                    None => wrong.push(format!(
+                        "the view {:?} has a `where` nothing can parse",
+                        v.name
+                    )),
+                    Some(p) => {
+                        let mut named = Vec::new();
+                        crate::expr::fields_named(&p, &mut named);
+                        for n in named.iter().filter(|n| !known(n)) {
+                            wrong.push(format!(
+                                "the view {:?} filters on {n}, which no record carries",
+                                v.name
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // A field declared and never filled is a column of dashes, and the declaration is the only
+        // place that says it should not be.
+        for f in self.store.fields(d) {
+            if f.records == 0 {
+                wrong.push(format!(
+                    "the field {} is declared and no record carries it",
+                    f.name
+                ));
+            }
+        }
+        wrong
+    }
+}

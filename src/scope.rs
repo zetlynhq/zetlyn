@@ -959,9 +959,10 @@ pub fn scope_registry(scopes: &Path) -> BTreeMap<String, PathBuf> {
 }
 
 impl Scope {
-    /// Checked against every member's last complete run, and visible to everyone. A scope that is
-    /// stale says so on its own front page, rather than answering with less in it and saying
-    /// nothing.
+    /// Checked against when each member last finished a run, complete or not: this is a claim
+    /// about freshness, not about coverage. What a run reached is a separate fact and the
+    /// member's state carries it. A scope that is stale says so on its own front page, rather
+    /// than answering with less in it and saying nothing.
     pub fn promise(&self) -> (bool, Vec<String>) {
         let Some(within) = self.decl.promise.fresh_within.as_deref() else {
             return (true, Vec::new());
@@ -1160,7 +1161,7 @@ impl Scope {
             Pred::Or(a, b) => self.entry_holds(entry, a) || self.entry_holds(entry, b),
             Pred::Cmp { left, op, right } => {
                 if left == "kind" {
-                    return entry.parts.iter().any(|p| &p.kind == &right.display());
+                    return entry.parts.iter().any(|p| p.kind == right.display());
                 }
                 let Some(field) = entry.fields.get(left) else {
                     return false;
@@ -1219,5 +1220,102 @@ impl Scope {
             .filter_map(|m| m.member.search(&self.member_query(&q, m, 1)).ok())
             .map(|(total, _, _)| total)
             .sum()
+    }
+}
+
+impl Scope {
+    /// What a scope claims, held against what its members actually answer.
+    pub fn check(&self) -> Vec<String> {
+        let mut wrong = Vec::new();
+        for name in &self.missing {
+            wrong.push(format!("{name} is named and not installed here"));
+        }
+        if self.members.is_empty() {
+            wrong.push("no member resolved, so there is nothing to check".into());
+            return wrong;
+        }
+
+        // A join key only one member carries joins nothing. The scope still answers, and every
+        // entry is one record, which looks like a working scope and is not one.
+        for key in self.decl.keys() {
+            let carrying: Vec<&str> = self
+                .members
+                .iter()
+                .filter(|m| {
+                    m.described["schemes"]
+                        .as_array()
+                        .is_some_and(|a| a.iter().any(|s| s["scheme"].as_str() == Some(key)))
+                })
+                .map(|m| m.name())
+                .collect();
+            match carrying.len() {
+                0 => wrong.push(format!("the join key {key} is carried by no member")),
+                1 => wrong.push(format!(
+                    "the join key {key} is carried only by {}, so it joins nothing",
+                    carrying[0]
+                )),
+                _ => {}
+            }
+        }
+
+        for (field, n) in &self.decl.normalise {
+            for (member, their) in &n.from {
+                match self.members.iter().find(|m| m.name() == member) {
+                    None => wrong.push(format!(
+                        "normalise.{field} names {member}, which is not a member"
+                    )),
+                    Some(m) if m.field_records(their).is_none() => wrong.push(format!(
+                        "normalise.{field} reads {their} from {member}, which has no such field"
+                    )),
+                    _ => {}
+                }
+            }
+            for member in n.members.keys() {
+                if !self.members.iter().any(|m| m.name() == member) {
+                    wrong.push(format!(
+                        "normalise.{field} maps {member}, which is not a member"
+                    ));
+                }
+            }
+        }
+
+        for v in &self.decl.view.named {
+            if let Some(filter) = &v.filter {
+                match crate::expr::parse_pred(filter) {
+                    None => wrong.push(format!(
+                        "the view {:?} has a `where` nothing can parse",
+                        v.name
+                    )),
+                    Some(p) => {
+                        let q = ScopeQuery {
+                            named: Some(v.name.clone()),
+                            limit: 1,
+                            ..Default::default()
+                        };
+                        let _ = p;
+                        if self.search(&q).entries.is_empty() {
+                            wrong.push(format!("the view {:?} selects nothing", v.name));
+                        }
+                    }
+                }
+            }
+        }
+
+        for kind in self.decl.view.kinds.keys() {
+            if !self.kinds().iter().any(|(k, _)| k == kind) {
+                wrong.push(format!(
+                    "there is a view for {kind}, and no member holds one"
+                ));
+            }
+        }
+
+        if self.decl.promise.covers.trim().is_empty() {
+            wrong.push("the promise says nothing about what is covered".into());
+        }
+        let (holds, late) = self.promise();
+        if !holds {
+            wrong.push(format!("the promise does not hold: {}", late.join("; ")));
+        }
+        wrong
     }
 }

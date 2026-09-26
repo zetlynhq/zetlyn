@@ -127,6 +127,17 @@ fn run(args: &[String]) -> Result<(), String> {
         Some("dataset") => match args.get(1).map(String::as_str) {
             Some("new") => dataset_new(args),
             Some("run") => dataset_run(args),
+            Some("check") => {
+                let ds = Dataset::open(&dir_at(args, 2)?)?;
+                let wrong = ds.check();
+                for w in &wrong {
+                    println!("{}: {w}", ds.decl.name);
+                }
+                if wrong.is_empty() {
+                    println!("{}: nothing it claims is untrue", ds.decl.name);
+                }
+                Ok(())
+            }
             Some("describe") => {
                 let dir = dir_at(args, 2)?;
                 let ds = Dataset::open(&dir)?;
@@ -157,6 +168,18 @@ fn run(args: &[String]) -> Result<(), String> {
                 Ok(())
             }
             Some("search") => scope_search(args),
+            Some("check") => {
+                let (dir, datasets) = scope_at(args, 2)?;
+                let scope = scope::Scope::open(&dir, &datasets)?;
+                let wrong = scope.check();
+                for w in &wrong {
+                    println!("{}: {w}", scope.decl.name);
+                }
+                if wrong.is_empty() {
+                    println!("{}: nothing it claims is untrue", scope.decl.name);
+                }
+                Ok(())
+            }
             Some("measure") => {
                 let (dir, datasets) = scope_at(args, 2)?;
                 let scope = scope::Scope::open(&dir, &datasets)?;
@@ -403,7 +426,25 @@ fn schedule(args: &[String]) -> Result<(), String> {
     loop {
         let tick = now();
         let mut soonest: Option<i64> = None;
-        for (name, dir) in scope::registry(&root.join("datasets")) {
+        // The runs happen one after another in one process, so the order matters: a source
+        // that is being throttled can take twenty minutes, and an hourly dataset behind it
+        // would wait that out. Shortest cadence first, so what is asked for most often is
+        // asked for first.
+        let mut due: Vec<(i64, String, PathBuf)> = scope::registry(&root.join("datasets"))
+            .into_iter()
+            .filter_map(|(name, dir)| {
+                let every = Dataset::open(&dir)
+                    .ok()?
+                    .decl
+                    .schedule
+                    .every
+                    .as_deref()
+                    .and_then(fetch::duration)?;
+                Some((every, name, dir))
+            })
+            .collect();
+        due.sort();
+        for (_, name, dir) in due {
             let ds = match Dataset::open(&dir) {
                 Ok(ds) => ds,
                 Err(e) => {

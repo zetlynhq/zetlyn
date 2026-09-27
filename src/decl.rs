@@ -120,6 +120,11 @@ pub enum Source {
         /// subscriber holding them has to answer for them too.
         #[serde(default = "summary")]
         text_is: String,
+        /// The publisher's public key, pinned here. Where it is set, a version whose manifest is
+        /// not signed by it is not applied. It is the one thing a hub cannot produce, and the
+        /// reason a hub that is only a directory over HTTPS is enough.
+        #[serde(default)]
+        key: String,
     },
 }
 

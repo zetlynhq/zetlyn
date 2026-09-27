@@ -853,7 +853,13 @@ fn dataset_subscribe(args: &[String]) -> Result<(), String> {
         None => PathBuf::from("datasets").join(&reference.name),
     };
     let place = place::at(&from)?;
-    let (held, version) = artifact::subscribe(place.as_ref(), &reference, &into, &from)?;
+    let (held, version) = artifact::subscribe(
+        place.as_ref(),
+        &reference,
+        &into,
+        &from,
+        flag(args, "--key"),
+    )?;
     println!(
         "{reference} is {version}, {held} records, in {}",
         into.display()
@@ -865,15 +871,19 @@ fn dataset_subscribe(args: &[String]) -> Result<(), String> {
 fn dataset_update(args: &[String]) -> Result<(), String> {
     let dir = dir_at(args, 2)?;
     let decl = decl::Declaration::load(&dir)?;
-    let decl::Source::Hub { at, reference, .. } = &decl.source else {
+    let decl::Source::Hub {
+        at, reference, key, ..
+    } = &decl.source
+    else {
         return Err(format!(
             "{} is not subscribed. `zetlyn dataset run` fills it from its source",
             decl.name
         ));
     };
+    let pinned = Some(key.as_str()).filter(|k| !k.trim().is_empty());
     let reference = artifact::Reference::parse(reference)?;
     let place = place::at(at)?;
-    let manifest = artifact::manifest_at(place.as_ref(), &reference, "datasets")?;
+    let manifest = artifact::manifest_signed_by(place.as_ref(), &reference, "datasets", pinned)?;
     let offered = manifest["version"].as_str().unwrap_or_default();
     let held = artifact::held_version(&dir).unwrap_or_default();
     if offered == held {
@@ -891,7 +901,7 @@ fn dataset_update(args: &[String]) -> Result<(), String> {
             Err(e) => eprintln!("the delta did not apply, taking the whole: {e}"),
         }
     }
-    let (n, version) = artifact::subscribe(place.as_ref(), &reference, &dir, at)?;
+    let (n, version) = artifact::subscribe(place.as_ref(), &reference, &dir, at, pinned)?;
     println!("{reference} {held} → {version}, {n} records, whole");
     Ok(())
 }
@@ -964,6 +974,27 @@ fn hub_command(args: &[String]) -> Result<(), String> {
             println!("It writes under datasets/{name}/ and scopes/{name}/ and nowhere else.");
             Ok(())
         }
+        // The key a publisher signs with. It lives in the dataset directory and is read by
+        // `dataset publish`; there is nothing to turn on.
+        Some("key") => {
+            let dir = PathBuf::from(flag(args, "--at").unwrap_or("."));
+            if let Some(held) = artifact::public_key(&dir) {
+                println!("{held}");
+                println!("\nThat is the public half. Give it to subscribers; they pin it with");
+                println!("`zetlyn dataset subscribe … --key {held}`.");
+                return Ok(());
+            }
+            let public = artifact::new_key(&dir)?;
+            println!("{public}");
+            println!(
+                "\nThe private half is in {}/{}, readable by you and nobody else.",
+                dir.display(),
+                artifact::KEY_FILE
+            );
+            println!("Do not publish this dataset from a second machine with a second key: every");
+            println!("subscriber who pinned the first would stop trusting you.");
+            Ok(())
+        }
         Some("owners") => {
             let dir = PathBuf::from(flag(args, "--at").unwrap_or("."));
             let owners = hub::Owners::load(&dir);
@@ -1003,6 +1034,9 @@ const HUB_USAGE: &str = "\
 
   zetlyn hub owners [--at <dir>]
       Who holds what.
+
+  zetlyn hub key [--at <dataset dir>]
+      The key this dataset is published under. Makes one where there is none.
 
   zetlyn hub serve <dir> [--port 8090] [--addr 127.0.0.1:8090]
       GET for anybody. PUT for a token that speaks for the owner named in the path.

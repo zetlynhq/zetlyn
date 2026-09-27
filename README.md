@@ -96,6 +96,20 @@ zetlyn dataset publish datasets/prices --to https://hub.zetlyn.com   # ZETLYN_HU
 Only the last needs anybody's permission, because it is the only one where a name is contended
 for. `zetlyn hub` runs one of those, and `SPEC.md` says how the layout works.
 
+An update after the first takes only what changed. On `cve/kev`, five records altered out of
+1,726: 3,022 bytes against 2,102,623 for the whole, and the same store either way.
+
+Sign what you publish, and let subscribers pin it:
+
+```
+zetlyn hub key --at datasets/prices                    # prints the public half
+zetlyn dataset subscribe mine/prices --from … --key ed25519:…
+```
+
+A hash per payload catches a fetch that went wrong. It does not catch a hub that served something
+else on purpose, because whoever serves the payload serves the manifest beside it. The signature
+is the part a hub cannot write for you.
+
 ## Checking what it claims
 
 ```

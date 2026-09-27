@@ -396,6 +396,35 @@ lists that name.
 hash it already has. On a delta the payloads are what the delta ships: the records that were added
 or changed, and `removed.jsonl`, one record id per line.
 
+### Who published it
+
+A hash per payload says the bytes are the ones this manifest describes. It does not say who wrote
+the manifest, and it cannot: whoever serves the payload serves the manifest beside it, so a hub
+that wanted to hand somebody different records would write both and the hashes would agree.
+
+`manifest.sig` beside `manifest.json` is an ed25519 signature over the manifest exactly as served.
+The publisher keeps the private half in the dataset directory and hands out the public half; a
+subscriber pins that in their own declaration:
+
+```toml
+[source]
+type = "hub"
+at   = "https://hub.zetlyn.com"
+ref  = "cve/kev@latest"
+key  = "ed25519:7d05a945…"
+```
+
+Where a key is pinned, a version whose manifest is not signed by it is not applied, and that
+includes a version with no signature at all. Where none is pinned, nothing is checked, and a
+subscriber who fetched from a hub that later changed hands has no way to notice.
+
+One key per dataset, and publishing the same dataset from a second machine under a second key
+stops every subscriber who pinned the first. That is the cost of the guarantee and not a fault in
+it: a publisher is a key, and two keys are two publishers.
+
+Signing is the only thing here a hub cannot do for a publisher, and it is the reason a hub can be
+a directory over HTTPS and nothing more. Everything else a hub holds, a hub could have written.
+
 ### A delta
 
 A dataset that runs hourly over a source where one row changed cannot ask every subscriber for the

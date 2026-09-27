@@ -199,12 +199,16 @@ pub fn publish(
             &reference.version_path("datasets", &version, "records.jsonl"),
             &body,
         )?;
-        place.put(
-            &manifest_path,
-            serde_json::to_string_pretty(&manifest)
-                .map_err(|e| e.to_string())?
-                .as_bytes(),
-        )?;
+        // The signature is over the manifest exactly as it is served, so the bytes are written
+        // once and both the put and the signing use the same ones.
+        let served = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
+        place.put(&manifest_path, served.as_bytes())?;
+        if let Some(signature) = sign(&ds.dir, served.as_bytes())? {
+            place.put(
+                &reference.version_path("datasets", &version, "manifest.sig"),
+                signature.as_bytes(),
+            )?;
+        }
     }
 
     // What the tag pointed at before is what most subscribers hold, so that is the one delta
@@ -362,12 +366,36 @@ fn move_tag(
 
 /// What a subscriber reads before deciding to fetch 61 MB.
 pub fn manifest_at(place: &dyn Place, reference: &Reference, tree: &str) -> Result<J, String> {
+    manifest_signed_by(place, reference, tree, None)
+}
+
+/// The manifest, held against the key a subscriber pinned.
+///
+/// A hash per payload says the bytes are the ones this manifest describes, and whoever serves one
+/// serves the other. The key says who wrote the manifest, and it is the only thing here a hub
+/// cannot produce. Where nothing is pinned, nothing is checked and the fetch is what it was
+/// before.
+pub fn manifest_signed_by(
+    place: &dyn Place,
+    reference: &Reference,
+    tree: &str,
+    pinned: Option<&str>,
+) -> Result<J, String> {
     let tag = place.get(&reference.tag_path(tree))?;
     let version = String::from_utf8_lossy(&tag).trim().to_string();
     if version.is_empty() {
         return Err(format!("{reference}: the tag names no version"));
     }
     let raw = place.get(&reference.version_path(tree, &version, "manifest.json"))?;
+    if let Some(key) = pinned.filter(|k| !k.trim().is_empty()) {
+        let signature = place
+            .get(&reference.version_path(tree, &version, "manifest.sig"))
+            .map_err(|_| {
+                format!("{reference} {version} is not signed, and you pinned a key for it")
+            })?;
+        verify(key, &raw, &String::from_utf8_lossy(&signature))
+            .map_err(|e| format!("{reference} {version}: {e}"))?;
+    }
     let manifest: J = serde_json::from_slice(&raw).map_err(|e| format!("{reference}: {e}"))?;
     Ok(manifest)
 }
@@ -378,8 +406,9 @@ pub fn subscribe(
     reference: &Reference,
     into: &Path,
     location: &str,
+    pinned: Option<&str>,
 ) -> Result<(u64, String), String> {
-    let manifest = manifest_at(place, reference, "datasets")?;
+    let manifest = manifest_signed_by(place, reference, "datasets", pinned)?;
     let version = manifest["version"].as_str().unwrap_or_default().to_string();
     let spec = manifest["spec_version"].as_str().unwrap_or_default();
     if spec != SPEC_VERSION {
@@ -401,7 +430,7 @@ pub fn subscribe(
     std::fs::create_dir_all(into).map_err(|e| format!("{}: {e}", into.display()))?;
     std::fs::write(
         into.join("dataset.toml"),
-        declaration(&manifest, location, reference)?,
+        declaration(&manifest, location, reference, pinned.unwrap_or(""))?,
     )
     .map_err(|e| format!("{}: {e}", into.display()))?;
     std::fs::write(
@@ -456,7 +485,12 @@ pub fn subscribe(
 /// The declaration a subscribed dataset carries. It holds no source expressions, because nothing
 /// is extracted here: the records arrived built. What it does carry is what the dataset says
 /// about how to read it, which is the publisher's and travels with them.
-fn declaration(manifest: &J, location: &str, reference: &Reference) -> Result<String, String> {
+fn declaration(
+    manifest: &J,
+    location: &str,
+    reference: &Reference,
+    key: &str,
+) -> Result<String, String> {
     let s = |k: &str| manifest[k].as_str().unwrap_or_default();
     let mut out = String::new();
     out.push_str(&format!("name  = {}\n", quoted(s("dataset"))));
@@ -469,7 +503,11 @@ fn declaration(manifest: &J, location: &str, reference: &Reference) -> Result<St
     out.push_str("[source]\n");
     out.push_str("type = \"hub\"\n");
     out.push_str(&format!("at   = {}\n", quoted(location)));
-    out.push_str(&format!("ref  = {}\n\n", quoted(&reference.to_string())));
+    out.push_str(&format!("ref  = {}\n", quoted(&reference.to_string())));
+    if !key.trim().is_empty() {
+        out.push_str(&format!("key  = {}\n", quoted(key.trim())));
+    }
+    out.push('\n');
 
     out.push_str("[records]\n");
     out.push_str(&format!("title = {}\n", quoted("field:title")));
@@ -648,7 +686,7 @@ pub fn subscribe_scope(
             continue;
         }
         let member_ref = Reference::parse(name)?;
-        subscribe(place, &member_ref, &here, location)?;
+        subscribe(place, &member_ref, &here, location, None)?;
         taken.push(name.to_string());
     }
     Ok((
@@ -748,13 +786,13 @@ pub fn apply_delta(
     // The declaration too, and not only the records. A publisher may have added a field, changed
     // a view or replaced a search example between the two versions, and a subscriber who took the
     // records and kept the old declaration would hold a dataset that fails its own check.
-    let location = match &crate::decl::Declaration::load(into)?.source {
-        crate::decl::Source::Hub { at, .. } => at.clone(),
-        _ => String::new(),
+    let (location, pinned) = match &crate::decl::Declaration::load(into)?.source {
+        crate::decl::Source::Hub { at, key, .. } => (at.clone(), key.clone()),
+        _ => (String::new(), String::new()),
     };
     std::fs::write(
         into.join("dataset.toml"),
-        declaration(full, &location, reference)?,
+        declaration(full, &location, reference, &pinned)?,
     )
     .map_err(|e| format!("{}: {e}", into.display()))?;
     std::fs::write(
@@ -773,4 +811,98 @@ pub fn apply_delta(
         ));
     }
     Ok(Some((added, changed, removed)))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Who published this.
+
+/// A hash per payload catches a fetch that went wrong. It does not catch a hub that served
+/// something else on purpose, because whoever serves the payload serves the manifest that
+/// describes it. A signature over the manifest is what separates the two, and it is only worth
+/// anything to a subscriber who knows whose signature to expect.
+pub const KEY_FILE: &str = "publishing.key";
+
+fn key_bytes(raw: &str) -> Result<[u8; 32], String> {
+    let hex = raw.trim().trim_start_matches("ed25519:");
+    if hex.len() != 64 {
+        return Err("a key is 32 bytes, written as 64 hex characters".into());
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
+            .map_err(|_| "a key is hexadecimal".to_string())?;
+    }
+    Ok(out)
+}
+
+fn hex_of(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A new pair. The private half is written where the publisher keeps it and nowhere else; the
+/// public half is what they tell subscribers, and it is not a secret.
+pub fn new_key(dir: &Path) -> Result<String, String> {
+    let path = dir.join(KEY_FILE);
+    if path.exists() {
+        return Err(format!(
+            "{} exists. A second key makes every subscriber who pinned the first stop trusting you",
+            path.display()
+        ));
+    }
+    let seed = key_bytes(&crate::account::token())?;
+    let signing = ed25519_dalek::SigningKey::from_bytes(&seed);
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    std::fs::write(&path, format!("ed25519:{}\n", hex_of(&seed)))
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    // Readable by nobody else, on the systems that can say so.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(format!(
+        "ed25519:{}",
+        hex_of(signing.verifying_key().as_bytes())
+    ))
+}
+
+/// The public half of the key in a directory, which is what a publisher hands out.
+pub fn public_key(dir: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(dir.join(KEY_FILE)).ok()?;
+    let seed = key_bytes(&raw).ok()?;
+    let signing = ed25519_dalek::SigningKey::from_bytes(&seed);
+    Some(format!(
+        "ed25519:{}",
+        hex_of(signing.verifying_key().as_bytes())
+    ))
+}
+
+fn sign(dir: &Path, message: &[u8]) -> Result<Option<String>, String> {
+    let Ok(raw) = std::fs::read_to_string(dir.join(KEY_FILE)) else {
+        return Ok(None);
+    };
+    use ed25519_dalek::Signer;
+    let signing = ed25519_dalek::SigningKey::from_bytes(&key_bytes(&raw)?);
+    Ok(Some(format!(
+        "ed25519:{}",
+        hex_of(&signing.sign(message).to_bytes())
+    )))
+}
+
+/// Held against the key the subscriber pinned, over the manifest exactly as it was served.
+pub fn verify(pinned: &str, manifest: &[u8], signature: &str) -> Result<(), String> {
+    use ed25519_dalek::Verifier;
+    let key = ed25519_dalek::VerifyingKey::from_bytes(&key_bytes(pinned)?)
+        .map_err(|e| format!("the pinned key is not one: {e}"))?;
+    let raw = signature.trim().trim_start_matches("ed25519:");
+    if raw.len() != 128 {
+        return Err("a signature is 64 bytes, written as 128 hex characters".into());
+    }
+    let mut bytes = [0u8; 64];
+    for (i, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&raw[i * 2..i * 2 + 2], 16)
+            .map_err(|_| "a signature is hexadecimal".to_string())?;
+    }
+    key.verify(manifest, &ed25519_dalek::Signature::from_bytes(&bytes))
+        .map_err(|_| "the signature is not this publisher's, over these bytes".to_string())
 }

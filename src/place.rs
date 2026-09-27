@@ -329,3 +329,82 @@ impl Place for S3 {
             .map_err(|e| format!("{url}: {e}"))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The one piece of cryptography in this program written by hand, and it is checked against
+    /// somebody else's implementation rather than against itself. The expected values below came
+    /// from `openssl dgst -sha256 -mac HMAC` driving the same four derivations in a shell, on the
+    /// same inputs, which is the closest thing to an independent witness available without a
+    /// bucket to ask.
+    ///
+    /// What this does not say is whether a real endpoint accepts the request. That needs an
+    /// endpoint.
+    #[test]
+    fn sigv4_agrees_with_openssl() {
+        let s3 = S3 {
+            endpoint: "https://s3.example.com".into(),
+            region: "us-east-1".into(),
+            bucket: "b".into(),
+            prefix: String::new(),
+            key: "AKIDEXAMPLE".into(),
+            secret: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".into(),
+            agent: ureq::Agent::config_builder().build().into(),
+        };
+        let headers = s3.signed(
+            "GET",
+            "datasets/x/y/tags/latest",
+            b"",
+            ("20260927".into(), "20260927T101530Z".into()),
+        );
+        let authorization = headers.get("authorization").expect("signed");
+        assert!(
+            authorization.ends_with(
+                "Signature=bfaabbee5c6db1ef019cec4950da766d7ee9d00c209d878e1db3f4af8cff1bad"
+            ),
+            "{authorization}"
+        );
+        assert!(authorization.starts_with(
+            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260927/us-east-1/s3/aws4_request, \
+             SignedHeaders=host;x-amz-content-sha256;x-amz-date, "
+        ));
+    }
+
+    /// An empty body hashes to the value every S3 implementation expects to see in
+    /// `x-amz-content-sha256`, which is one of the two places a wrong hash is silent.
+    #[test]
+    fn the_empty_payload_hash() {
+        assert_eq!(
+            sha256(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    /// Without keys there is no authorization header, and a public bucket is read through the
+    /// same call unsigned. A request with no key is not a request with a bad one.
+    #[test]
+    fn unsigned_without_keys() {
+        let s3 = S3 {
+            endpoint: "https://s3.example.com".into(),
+            region: "us-east-1".into(),
+            bucket: "b".into(),
+            prefix: String::new(),
+            key: String::new(),
+            secret: String::new(),
+            agent: ureq::Agent::config_builder().build().into(),
+        };
+        let headers = s3.signed(
+            "GET",
+            "a/b",
+            b"",
+            ("20260927".into(), "20260927T101530Z".into()),
+        );
+        assert!(!headers.contains_key("authorization"));
+        assert_eq!(
+            headers.get("host").map(String::as_str),
+            Some("s3.example.com")
+        );
+    }
+}

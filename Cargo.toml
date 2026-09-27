@@ -23,6 +23,9 @@ maud = "0.27"
 tiny_http = "0.12"
 # A finite-automaton engine, so a pattern in a declaration cannot take the process down.
 regex = { version = "1", default-features = false, features = ["std", "perf", "unicode-perl"] }
+# A published version is signed by its publisher, and a subscriber following a tag pins the key.
+# Verifying is the whole of what a subscriber does with this; the rest is the publisher's.
+ed25519-dalek = { version = "2.1.1", default-features = false, features = ["std", "fast", "zeroize"] }
 
 [profile.release]
 strip = true

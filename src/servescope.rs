@@ -794,7 +794,7 @@ fn export(scope: &Scope, url: &str, v: &Viewer, as_csv: bool) -> Option<(String,
 
 /// A browser encodes the name as well as the value, so `why_cve/kev` arrives as
 /// `why_cve%2Fkev`. Decoding only the value finds nothing and says the field was empty.
-fn form_field(body: &str, name: &str) -> String {
+pub fn form_field(body: &str, name: &str) -> String {
     body.split('&')
         .filter_map(|p| p.split_once('='))
         .find(|(k, _)| crate::serve::urldecode(k) == name)

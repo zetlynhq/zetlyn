@@ -15,6 +15,7 @@ mod hub;
 mod identity;
 mod key;
 mod place;
+mod platform;
 mod record;
 mod remote;
 mod scope;
@@ -223,6 +224,7 @@ fn run(args: &[String]) -> Result<(), String> {
         Some("console") => console_command(args),
         Some("hub") => hub_command(args),
         Some("id") => id_command(args),
+        Some("platform") => platform_command(args),
         Some("serve") => {
             let port = flag(args, "--port").unwrap_or("8080");
             // Loopback unless asked otherwise: a scope reachable from the network is a decision
@@ -1038,6 +1040,7 @@ fn hub_command(args: &[String]) -> Result<(), String> {
         Some("console") => console_command(args),
         Some("hub") => hub_command(args),
         Some("id") => id_command(args),
+        Some("platform") => platform_command(args),
         Some("serve") => {
             let dir = PathBuf::from(
                 positional(args, 2)
@@ -1298,3 +1301,75 @@ fn id_command(args: &[String]) -> Result<(), String> {
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Zetlyn run for somebody instead of by them.
+
+fn platform_command(args: &[String]) -> Result<(), String> {
+    match args.get(1).map(String::as_str) {
+        Some("hold") => {
+            let root = PathBuf::from(flag(args, "--at").unwrap_or("."));
+            let name = flag(args, "--name").ok_or("--name what shall it be called here?")?;
+            let address = flag(args, "--console").ok_or("--console where does it answer?")?;
+            let from = PathBuf::from(flag(args, "--grant").ok_or("--grant which file?")?);
+            if name.contains('/') || name.contains("..") {
+                return Err(format!("{name}: a name, not a path"));
+            }
+            let dir = root.join("deployments");
+            std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+            let grants = root.join("grants");
+            std::fs::create_dir_all(&grants).map_err(|e| format!("{}: {e}", grants.display()))?;
+            let grant_file = format!("{name}.toml");
+            std::fs::copy(&from, grants.join(&grant_file))
+                .map_err(|e| format!("{}: {e}", from.display()))?;
+            let held = format!(
+                "at    = \"{}\"\ngrant = \"{grant_file}\"\ntitle = \"{}\"\n",
+                address.trim_end_matches('/'),
+                flag(args, "--title").unwrap_or("")
+            );
+            std::fs::write(dir.join(format!("{name}.toml")), held)
+                .map_err(|e| format!("{}: {e}", dir.display()))?;
+
+            // Held against the thing itself rather than against the file that was handed over.
+            let platform = platform::Platform::open(&root)?;
+            match platform.driver(name).and_then(|d| d.ask("GET", "/", b"")) {
+                Ok(j) => {
+                    println!(
+                        "{name} answers: {} datasets, {} scopes",
+                        j["datasets"].as_array().map(Vec::len).unwrap_or(0),
+                        j["scopes"].as_array().map(Vec::len).unwrap_or(0)
+                    );
+                    Ok(())
+                }
+                Err(e) => Err(format!("held, and it did not answer: {e}")),
+            }
+        }
+        Some("serve") | None => {
+            let root = PathBuf::from(
+                positional(args, 2)
+                    .first()
+                    .map(|s| s.as_str())
+                    .unwrap_or("."),
+            );
+            let addr = match (flag(args, "--addr"), flag(args, "--port")) {
+                (Some(a), _) => a.to_string(),
+                (None, Some(p)) => format!("127.0.0.1:{p}"),
+                _ => "127.0.0.1:8110".to_string(),
+            };
+            platform::serve(&root, &addr)
+        }
+        _ => {
+            print!("{PLATFORM_USAGE}");
+            Ok(())
+        }
+    }
+}
+
+const PLATFORM_USAGE: &str = "\
+  zetlyn platform hold --name <n> --console <url> --grant <file> [--at <dir>]
+      Take a grant somebody signed, and check the deployment answers under it.
+
+  zetlyn platform serve <dir> [--port 8110]
+      Every deployment it holds a grant for. It holds no records and no accounts: what a
+      page shows was asked for when the page was asked for.
+";

@@ -282,6 +282,10 @@ fn runs(ds: &Dataset) -> J {
                 "complete": r.complete, "added": r.added, "changed": r.changed,
                 "removed": r.removed, "unchanged": r.unchanged,
                 "error": r.error, "refused": r.refused,
+                // What the run could not make sense of. A fact rather than a guess, and the only
+                // honest input to anything that proposes a change to a declaration.
+                "unparsed": r.unparsed, "no_text": r.no_text, "no_known": r.no_known,
+                "duplicates": r.duplicates, "note": r.note,
             }))
         })
         .collect();
@@ -367,4 +371,88 @@ fn apply(root: &Path, named: &str, body: &[u8]) -> (u16, J) {
         200,
         json!({ "dataset": ds.decl.name, "applied": true, "kept": "dataset.toml.before" }),
     )
+}
+
+// ---------------------------------------------------------------------------------------------
+// Driving one.
+
+/// One signed call to a console somewhere else. This is the whole of what a platform does to a
+/// deployment, so it lives beside the console it talks to rather than in whatever calls it.
+pub struct Driver {
+    pub at: String,
+    /// The grant, as the operator signed it, carried on every call.
+    pub grant: Vec<u8>,
+    agent: ureq::Agent,
+}
+
+impl Driver {
+    pub fn new(at: &str, grant: Vec<u8>) -> Driver {
+        let agent = ureq::Agent::config_builder()
+            .user_agent(concat!("zetlyn/", env!("CARGO_PKG_VERSION")))
+            .timeout_global(Some(std::time::Duration::from_secs(600)))
+            // A refusal carries its reason in the body, and a client that turns the status into
+            // an error throws the reason away.
+            .http_status_as_error(false)
+            .build()
+            .into();
+        Driver {
+            at: at.trim_end_matches('/').to_string(),
+            grant,
+            agent,
+        }
+    }
+
+    /// Signs as the identity, because the grant names it.
+    pub fn call(&self, method: &str, path: &str, body: &[u8]) -> Result<(u16, String), String> {
+        let at = crate::iso_stamp(crate::now());
+        let statement = crate::grant::request_statement(method, path, body, &at);
+        let signature = crate::identity::sign(statement.as_bytes())?.ok_or(
+            "no identity to sign with. `zetlyn id new` makes one, and a console takes nothing \
+             unsigned",
+        )?;
+        let carried = encode(&self.grant);
+        let address = format!("{}{path}", self.at);
+        let mut response = match method {
+            "GET" => self
+                .agent
+                .get(&address)
+                .header("Zetlyn-Grant", &carried)
+                .header("Zetlyn-Date", &at)
+                .header("Zetlyn-Signature", &signature)
+                .call(),
+            "POST" | "PUT" => {
+                let builder = if method == "POST" {
+                    self.agent.post(&address)
+                } else {
+                    self.agent.put(&address)
+                };
+                builder
+                    .header("Zetlyn-Grant", &carried)
+                    .header("Zetlyn-Date", &at)
+                    .header("Zetlyn-Signature", &signature)
+                    .header("Content-Type", "text/plain")
+                    .send(body)
+            }
+            other => return Err(format!("{other}: a console answers GET, POST and PUT")),
+        }
+        .map_err(|e| format!("{address}: {e}"))?;
+        let status = response.status().as_u16();
+        let text = response
+            .body_mut()
+            .read_to_string()
+            .map_err(|e| format!("{address}: {e}"))?;
+        Ok((status, text))
+    }
+
+    /// The same, where the answer is expected to be JSON and a refusal is a failure.
+    pub fn ask(&self, method: &str, path: &str, body: &[u8]) -> Result<J, String> {
+        let (status, text) = self.call(method, path, body)?;
+        let answer: J = serde_json::from_str(&text)
+            .unwrap_or_else(|_| json!({ "refused": text.trim().to_string() }));
+        if status >= 400 {
+            let why = answer["refused"].as_str().unwrap_or("refused").to_string();
+            return Err(format!("{}{path}: {why}", self.at));
+        }
+        Ok(answer)
+    }
 }

@@ -156,6 +156,21 @@ private half of the key it names, and a call carries a signature over the method
 body and the time rather than a token. Editing a grant to give yourself longer stops the signature
 describing it.
 
+Whoever holds grants can run a platform over them, which is the same calls with pages on top:
+
+```
+zetlyn platform hold --name cve --console https://… --grant cve.toml --at /srv/platform
+zetlyn platform serve /srv/platform --port 8110
+```
+
+It holds no records and no accounts. Everything a page shows was asked for when the page was
+asked for, and for a deployment of 98,546 records what the platform keeps on disk is 831 bytes:
+an address and a grant somebody else signed.
+
+Name a command under `[draft]` in `platform.toml` and it can propose a declaration from what the
+runs reported they could not make sense of. It proposes; you apply. Zetlyn ships no model and
+holds no key for one, the same way it ships no mail client.
+
 ## What it does not do
 
 No summaries, no answers, no rewriting a source's prose. Every value keeps the source that said it

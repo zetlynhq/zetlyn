@@ -461,6 +461,7 @@ fn schedule(args: &[String]) -> Result<(), String> {
     loop {
         let tick = now();
         let mut soonest: Option<i64> = None;
+        let mut moved: Vec<String> = Vec::new();
         // The runs happen one after another in one process, so the order matters: a source
         // that is being throttled can take twenty minutes, and an hourly dataset behind it
         // would wait that out. Shortest cadence first, so what is asked for most often is
@@ -493,25 +494,57 @@ fn schedule(args: &[String]) -> Result<(), String> {
                 continue;
             }
             match ds.run() {
-                Ok(r) => println!(
-                    "{} run {} {}: +{} ~{} −{} ={}{}",
-                    name,
-                    r.id,
-                    if r.complete { "complete" } else { "partial" },
-                    r.added,
-                    r.changed,
-                    r.removed,
-                    r.unchanged,
-                    r.refused
-                        .map(|w| format!("  refused: {w}"))
-                        .unwrap_or_default()
-                ),
+                Ok(r) => {
+                    println!(
+                        "{} run {} {}: +{} ~{} −{} ={}{}",
+                        name,
+                        r.id,
+                        if r.complete { "complete" } else { "partial" },
+                        r.added,
+                        r.changed,
+                        r.removed,
+                        r.unchanged,
+                        r.refused
+                            .map(|w| format!("  refused: {w}"))
+                            .unwrap_or_default()
+                    );
+                    // What follows this one has nothing to do until it has found something.
+                    if r.added + r.changed + r.removed > 0 {
+                        moved.push(name.clone());
+                    }
+                }
                 Err(e) => eprintln!("{name}: {e}"),
             }
             if let Ok(ds) = Dataset::open(&dir) {
                 if let Some(next) = due_at(&ds) {
                     soonest = Some(soonest.map_or(next, |s: i64| s.min(next)));
                 }
+            }
+        }
+
+        // A dataset that takes its subjects from another has nothing to ask about until that one
+        // has found something new. `models/hf` asks Hugging Face about the models `models/gguf`
+        // names: 2,684 calls to be told what it already holds, or none.
+        for (name, dir) in follows(&root, &moved) {
+            let ds = match Dataset::open(&dir) {
+                Ok(ds) => ds,
+                Err(e) => {
+                    eprintln!("{name}: {e}");
+                    continue;
+                }
+            };
+            match ds.run() {
+                Ok(r) => println!(
+                    "{name} run {} {} after {}: +{} ~{} −{} ={}",
+                    r.id,
+                    if r.complete { "complete" } else { "partial" },
+                    ds.decl.source.after().unwrap_or(""),
+                    r.added,
+                    r.changed,
+                    r.removed,
+                    r.unchanged
+                ),
+                Err(e) => eprintln!("{name}: {e}"),
             }
         }
 
@@ -1373,3 +1406,22 @@ const PLATFORM_USAGE: &str = "\
       Every deployment it holds a grant for. It holds no records and no accounts: what a
       page shows was asked for when the page was asked for.
 ";
+
+/// Which datasets take their subjects from one of these, and are therefore worth running now.
+///
+/// Read from the declarations rather than from a file somebody keeps in step with them. A
+/// dataset already says what it follows, in the `for_each` that makes it follow.
+fn follows(root: &Path, moved: &[String]) -> Vec<(String, PathBuf)> {
+    if moved.is_empty() {
+        return Vec::new();
+    }
+    scope::registry(&root.join("datasets"))
+        .into_iter()
+        .filter(|(_, dir)| {
+            decl::Declaration::load(dir)
+                .ok()
+                .and_then(|d| d.source.after().map(str::to_string))
+                .is_some_and(|after| moved.contains(&after))
+        })
+        .collect()
+}

@@ -1270,3 +1270,16 @@ impl Store {
         Ok(true)
     }
 }
+
+impl Store {
+    /// Every field name any record carries. The shape check holds a run's fields against the
+    /// last one's, so a run that read nothing has to say what is there rather than nothing.
+    pub fn field_names(&self) -> std::collections::BTreeSet<String> {
+        let Ok(mut stmt) = self.db.prepare("select distinct name from field") else {
+            return Default::default();
+        };
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    }
+}

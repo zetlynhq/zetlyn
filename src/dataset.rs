@@ -55,6 +55,11 @@ impl Dataset {
     // -- the run ------------------------------------------------------------------------------
 
     pub fn run(&self) -> Result<RunReport, String> {
+        // Where the source is one address and says it has not changed, there is nothing to read.
+        // An hourly cadence against a file that changes twice a week is mostly this.
+        if let Some(short) = self.nothing_changed()? {
+            return Ok(short);
+        }
         self.decl.source.prepare(&self.dir)?;
         // A run that started from a stored mark read a slice of the source, not the whole
         // of it. It may not remove: every record it did not touch is one it never asked
@@ -608,5 +613,56 @@ impl Dataset {
             }
         }
         wrong
+    }
+}
+
+impl Dataset {
+    /// A run that does not have to happen, and the record of it.
+    ///
+    /// Only where the source is one address and answers `304`. A source that pages, crawls or
+    /// reads a directory has no single thing to ask about; a source that offers neither an
+    /// `ETag` nor a `Last-Modified` is asked once and then never again, because asking it every
+    /// hour and learning nothing is the cost this is meant to avoid.
+    ///
+    /// The run is written down. A run that never happened and a run that found nothing look the
+    /// same to a reader, and only one of them is true.
+    fn nothing_changed(&self) -> Result<Option<RunReport>, String> {
+        let Some(url) = self.decl.source.single_url() else {
+            return Ok(None);
+        };
+        let held = self.store.meta("validators");
+        // Nothing held, or held and empty: the first says ask, the second says this source
+        // cannot be asked.
+        if held.as_deref() == Some("") {
+            return Ok(None);
+        }
+        let answer = match crate::fetch::unchanged(url, self.decl.source.agent(), held.as_deref()) {
+            Ok(a) => a,
+            // A source that will not answer this is a source to fetch the old way, and the run
+            // that follows will say what went wrong with it properly.
+            Err(_) => return Ok(None),
+        };
+        match answer {
+            Some(fresh) => {
+                self.store.set_meta("validators", &fresh)?;
+                Ok(None)
+            }
+            None => {
+                let held = self.store.count();
+                let run = self.store.begin_run()?;
+                self.store.finish_run(
+                    run,
+                    true,
+                    0,
+                    0,
+                    0,
+                    held,
+                    &self.store.field_names(),
+                    &Notes::default(),
+                    None,
+                )?;
+                Ok(self.store.run_report(run))
+            }
+        }
     }
 }

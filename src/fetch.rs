@@ -636,3 +636,62 @@ fn feed_date(raw: &str) -> Option<String> {
 
 #[allow(dead_code)]
 fn unused(_: FileInfo) {}
+
+/// What a source said last time about the version of a file it served.
+///
+/// Two headers, kept as one string because they travel together and neither means anything
+/// without the request that produced it.
+pub fn validators_of(etag: Option<&str>, modified: Option<&str>) -> String {
+    format!(
+        "{}\n{}",
+        etag.unwrap_or_default(),
+        modified.unwrap_or_default()
+    )
+}
+
+/// Ask whether a file has changed, without asking for the file.
+///
+/// `Ok(None)` means it has not: the source answered 304 and sent no body. `Ok(Some(v))` means it
+/// has, or would not say, and `v` is what to hand back next time.
+///
+/// This is worth having because of what a cadence costs when nothing happens. `cve/kev` runs
+/// hourly against a megabyte that changed on 78 days out of the last 180: 4,320 fetches to find
+/// 78 days of change, and the other 4,242 are a megabyte asking whether anything happened.
+pub fn unchanged(url: &str, agent: &str, held: Option<&str>) -> Result<Option<String>, String> {
+    let client: ureq::Agent = ureq::Agent::config_builder()
+        .user_agent(agent)
+        .timeout_global(Some(Duration::from_secs(60)))
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let mut request = client.get(url);
+    if let Some(raw) = held {
+        let mut parts = raw.splitn(2, '\n');
+        let etag = parts.next().unwrap_or_default();
+        let modified = parts.next().unwrap_or_default();
+        if !etag.is_empty() {
+            request = request.header("If-None-Match", etag);
+        }
+        if !modified.is_empty() {
+            request = request.header("If-Modified-Since", modified);
+        }
+    }
+    let response = request.call().map_err(|e| format!("{url}: {e}"))?;
+    if response.status().as_u16() == 304 {
+        return Ok(None);
+    }
+    let header = |name: &str| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+    };
+    let (etag, modified) = (header("etag"), header("last-modified"));
+    // A source that offers neither cannot be asked this, and saying so is better than asking it
+    // every hour and learning nothing.
+    if etag.is_none() && modified.is_none() {
+        return Ok(Some(String::new()));
+    }
+    Ok(Some(validators_of(etag.as_deref(), modified.as_deref())))
+}

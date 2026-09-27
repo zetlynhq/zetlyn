@@ -550,3 +550,42 @@ pub struct ForEach {
     pub dataset: String,
     pub scheme: String,
 }
+
+impl Source {
+    /// The one address this source reads, where there is exactly one. A source that pages, or
+    /// crawls, or reads a directory has no single thing to ask about, so the answer is `None`
+    /// and it is fetched the way it always was.
+    pub fn single_url(&self) -> Option<&str> {
+        let named = match self {
+            Source::Csv { path, .. } | Source::Xlsx { path, .. } => path.as_str(),
+            Source::Feed { urls, .. } if urls.len() == 1 => urls[0].as_str(),
+            _ => return None,
+        };
+        named
+            .starts_with("http://")
+            .then_some(named)
+            .or_else(|| named.starts_with("https://").then_some(named))
+    }
+
+    /// What to call itself when asking. A source that declares one is asked under it.
+    pub fn agent(&self) -> &str {
+        match self {
+            Source::Http { user_agent, .. } | Source::Feed { user_agent, .. } => user_agent,
+            _ => "zetlyn/3",
+        }
+    }
+}
+
+impl Source {
+    /// The dataset this one takes its subjects from, where it takes them from one. `models/hf`
+    /// asks Hugging Face about the models `models/gguf` names, so it has nothing to do until
+    /// that one has found something new.
+    pub fn after(&self) -> Option<&str> {
+        match self {
+            Source::Http {
+                for_each: Some(f), ..
+            } if !f.dataset.is_empty() => Some(&f.dataset),
+            _ => None,
+        }
+    }
+}

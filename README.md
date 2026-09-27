@@ -121,6 +121,26 @@ An example that returns nothing, a column naming a field no record carries, a jo
 member has, a promise that no longer holds. None of it is wrong until somebody reads it, which is
 why a run never catches it.
 
+## Letting somebody else run it
+
+A deployment can answer for itself, so that whoever keeps it current does not have to be at its
+terminal.
+
+```
+zetlyn console serve /srv/zetlyn/deployment --port 8100
+zetlyn console grant --to ed25519:… --can read,run --until 2027-01-01 --at /srv/zetlyn/deployment
+```
+
+The console holds no secret. It holds the public half of your key, and it takes nothing that does
+not trace back to it: a grant you signed, and a call signed by the key that grant names. `read`,
+`run` and `apply` are the three things a grant can carry, and `apply` is separate because
+replacing a declaration and filling a store are different sorts of act.
+
+A grant is not a secret and not a way in on its own. Whoever holds one still has to hold the
+private half of the key it names, and a call carries a signature over the method, the path, the
+body and the time rather than a token. Editing a grant to give yourself longer stops the signature
+describing it.
+
 ## What it does not do
 
 No summaries, no answers, no rewriting a source's prose. Every value keeps the source that said it

@@ -4,12 +4,15 @@
 mod account;
 mod artifact;
 mod build;
+mod console;
 mod dataset;
 mod decl;
 mod expr;
 mod fetch;
+mod grant;
 pub mod guess;
 mod hub;
+mod key;
 mod place;
 mod record;
 mod remote;
@@ -203,6 +206,7 @@ fn run(args: &[String]) -> Result<(), String> {
             }
         },
         // One command, and the directory says which it is.
+        Some("console") => console_command(args),
         Some("hub") => hub_command(args),
         Some("serve") => {
             let port = flag(args, "--port").unwrap_or("8080");
@@ -1006,6 +1010,7 @@ fn hub_command(args: &[String]) -> Result<(), String> {
             }
             Ok(())
         }
+        Some("console") => console_command(args),
         Some("hub") => hub_command(args),
         Some("serve") => {
             let dir = PathBuf::from(
@@ -1041,4 +1046,181 @@ const HUB_USAGE: &str = "\
   zetlyn hub serve <dir> [--port 8090] [--addr 127.0.0.1:8090]
       GET for anybody. PUT for a token that speaks for the owner named in the path.
       A folder, a mount and a private bucket need none of this.
+";
+
+// ---------------------------------------------------------------------------------------------
+// A deployment answering for itself, and whoever is allowed to ask.
+
+fn console_command(args: &[String]) -> Result<(), String> {
+    match args.get(1).map(String::as_str) {
+        Some("key") => {
+            let dir = PathBuf::from(flag(args, "--at").unwrap_or("."));
+            let file = flag(args, "--name").unwrap_or(grant::OPERATOR_KEY);
+            if let Some(held) = key::public(&dir, file) {
+                println!("{held}");
+                return Ok(());
+            }
+            println!("{}", key::new(&dir, file)?);
+            println!(
+                "\nThe private half is in {}/{file}, readable by you and nobody else.",
+                dir.display()
+            );
+            Ok(())
+        }
+        Some("grant") => {
+            let root = PathBuf::from(flag(args, "--at").unwrap_or("."));
+            let to = flag(args, "--to").ok_or("--to which key? the one the other side made")?;
+            let can: Vec<String> = flag(args, "--can")
+                .unwrap_or("read")
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            let until = flag(args, "--until").ok_or("--until when? a date")?;
+            let name = deployment_name(&root);
+            let signed = grant::issue(
+                &root,
+                &name,
+                to,
+                &can,
+                until,
+                flag(args, "--why").unwrap_or(""),
+            )?;
+            let out = PathBuf::from(flag(args, "--out").unwrap_or("grant.toml"));
+            signed.write(&out)?;
+            println!("{} may {} on {name} until {until}", to, can.join(", "));
+            println!(
+                "written to {}. It is not a secret and it is not a way in on its own:",
+                out.display()
+            );
+            println!("whoever uses it still has to hold the private half of that key.");
+            Ok(())
+        }
+        Some("call") => console_call(args),
+        Some("serve") | None => {
+            let root = PathBuf::from(
+                positional(args, 2)
+                    .first()
+                    .map(|s| s.as_str())
+                    .unwrap_or("."),
+            );
+            let addr = match (flag(args, "--addr"), flag(args, "--port")) {
+                (Some(a), _) => a.to_string(),
+                (None, Some(p)) => format!("127.0.0.1:{p}"),
+                _ => "127.0.0.1:8100".to_string(),
+            };
+            console::serve(&root, &addr)
+        }
+        _ => {
+            print!("{CONSOLE_USAGE}");
+            Ok(())
+        }
+    }
+}
+
+/// A deployment is its directory, so it is called what the directory is called.
+fn deployment_name(root: &Path) -> String {
+    root.canonicalize()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .unwrap_or_else(|| "deployment".into())
+}
+
+/// The smallest thing that can drive a console, which is what a platform will be a larger one of.
+fn console_call(args: &[String]) -> Result<(), String> {
+    let url = positional(args, 2)
+        .first()
+        .map(|s| s.to_string())
+        .ok_or("which address? http://host:port/dataset/kev")?;
+    let method = flag(args, "--method").unwrap_or("GET").to_uppercase();
+    let grant_path = PathBuf::from(flag(args, "--grant").ok_or("--grant which file?")?);
+    let key_dir = PathBuf::from(flag(args, "--key").unwrap_or("."));
+    let key_file = flag(args, "--key-name").unwrap_or("caller.key");
+    let body = match flag(args, "--body") {
+        Some(p) => std::fs::read(p).map_err(|e| format!("{p}: {e}"))?,
+        None => Vec::new(),
+    };
+
+    let raw = std::fs::read(&grant_path).map_err(|e| format!("{}: {e}", grant_path.display()))?;
+    let (base, path) = split(&url)?;
+    let at = crate::iso_stamp(crate::now());
+    let statement = grant::request_statement(&method, &path, &body, &at);
+    let signature = key::sign(&key_dir, key_file, statement.as_bytes())?
+        .ok_or_else(|| format!("{}/{key_file}: no key to sign with", key_dir.display()))?;
+
+    // A refusal carries its reason in the body, and a client that turns the status into an error
+    // throws the reason away. The status is printed beside the answer instead.
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .user_agent(concat!("zetlyn/", env!("CARGO_PKG_VERSION")))
+        .timeout_global(Some(std::time::Duration::from_secs(600)))
+        .http_status_as_error(false)
+        .build()
+        .into();
+    // ureq types a request by whether it carries a body, so the two shapes are built apart and
+    // only the answer is shared.
+    let address = format!("{base}{path}");
+    let carried = console::encode(&raw);
+    let mut response = match method.as_str() {
+        "GET" => agent
+            .get(&address)
+            .header("Zetlyn-Grant", &carried)
+            .header("Zetlyn-Date", &at)
+            .header("Zetlyn-Signature", &signature)
+            .call(),
+        "POST" | "PUT" => {
+            let builder = if method == "POST" {
+                agent.post(&address)
+            } else {
+                agent.put(&address)
+            };
+            builder
+                .header("Zetlyn-Grant", &carried)
+                .header("Zetlyn-Date", &at)
+                .header("Zetlyn-Signature", &signature)
+                .header("Content-Type", "text/plain")
+                .send(&body[..])
+        }
+        other => return Err(format!("{other}: a console answers GET, POST and PUT")),
+    }
+    .map_err(|e| format!("{address}: {e}"))?;
+    let status = response.status().as_u16();
+    let text = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| format!("{address}: {e}"))?;
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(j) => println!("{}", serde_json::to_string_pretty(&j).unwrap_or(text)),
+        Err(_) => println!("{text}"),
+    }
+    if status >= 400 {
+        return Err(format!("{status} from {address}"));
+    }
+    Ok(())
+}
+
+/// `http://host:port/a/b` into the two halves a signature is over separately.
+fn split(url: &str) -> Result<(String, String), String> {
+    let after = url
+        .find("://")
+        .map(|i| i + 3)
+        .ok_or_else(|| format!("{url}: an address with a scheme"))?;
+    match url[after..].find('/') {
+        Some(i) => Ok((url[..after + i].to_string(), url[after + i..].to_string())),
+        None => Ok((url.to_string(), "/".to_string())),
+    }
+}
+
+const CONSOLE_USAGE: &str = "\
+  zetlyn console serve <deployment> [--port 8100]
+      The deployment answering for itself. It holds no secret: every call has to trace back
+      to a grant this operator signed.
+
+  zetlyn console key [--at <dir>] [--name operator.key]
+      The key in a directory. Makes one where there is none, and prints the public half.
+
+  zetlyn console grant --to <key> --can read,run,apply --until <date> [--at <deployment>]
+      What the operator signs. Not a secret, and not a way in on its own.
+
+  zetlyn console call <url> [--method GET] [--body <file>] --grant <file> [--key <dir>]
+      One signed call. This is the whole of what a platform does, in one command.
 ";

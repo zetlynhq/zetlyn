@@ -203,7 +203,7 @@ pub fn publish(
         // once and both the put and the signing use the same ones.
         let served = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
         place.put(&manifest_path, served.as_bytes())?;
-        if let Some(signature) = sign(&ds.dir, served.as_bytes())? {
+        if let Some(signature) = crate::key::sign(&ds.dir, KEY_FILE, served.as_bytes())? {
             place.put(
                 &reference.version_path("datasets", &version, "manifest.sig"),
                 signature.as_bytes(),
@@ -822,87 +822,15 @@ pub fn apply_delta(
 /// anything to a subscriber who knows whose signature to expect.
 pub const KEY_FILE: &str = "publishing.key";
 
-fn key_bytes(raw: &str) -> Result<[u8; 32], String> {
-    let hex = raw.trim().trim_start_matches("ed25519:");
-    if hex.len() != 64 {
-        return Err("a key is 32 bytes, written as 64 hex characters".into());
-    }
-    let mut out = [0u8; 32];
-    for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
-            .map_err(|_| "a key is hexadecimal".to_string())?;
-    }
-    Ok(out)
-}
-
-fn hex_of(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// A new pair. The private half is written where the publisher keeps it and nowhere else; the
-/// public half is what they tell subscribers, and it is not a secret.
 pub fn new_key(dir: &Path) -> Result<String, String> {
-    let path = dir.join(KEY_FILE);
-    if path.exists() {
-        return Err(format!(
-            "{} exists. A second key makes every subscriber who pinned the first stop trusting you",
-            path.display()
-        ));
-    }
-    let seed = key_bytes(&crate::account::token())?;
-    let signing = ed25519_dalek::SigningKey::from_bytes(&seed);
-    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    std::fs::write(&path, format!("ed25519:{}\n", hex_of(&seed)))
-        .map_err(|e| format!("{}: {e}", path.display()))?;
-    // Readable by nobody else, on the systems that can say so.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
-    Ok(format!(
-        "ed25519:{}",
-        hex_of(signing.verifying_key().as_bytes())
-    ))
+    crate::key::new(dir, KEY_FILE)
 }
 
-/// The public half of the key in a directory, which is what a publisher hands out.
 pub fn public_key(dir: &Path) -> Option<String> {
-    let raw = std::fs::read_to_string(dir.join(KEY_FILE)).ok()?;
-    let seed = key_bytes(&raw).ok()?;
-    let signing = ed25519_dalek::SigningKey::from_bytes(&seed);
-    Some(format!(
-        "ed25519:{}",
-        hex_of(signing.verifying_key().as_bytes())
-    ))
-}
-
-fn sign(dir: &Path, message: &[u8]) -> Result<Option<String>, String> {
-    let Ok(raw) = std::fs::read_to_string(dir.join(KEY_FILE)) else {
-        return Ok(None);
-    };
-    use ed25519_dalek::Signer;
-    let signing = ed25519_dalek::SigningKey::from_bytes(&key_bytes(&raw)?);
-    Ok(Some(format!(
-        "ed25519:{}",
-        hex_of(&signing.sign(message).to_bytes())
-    )))
+    crate::key::public(dir, KEY_FILE)
 }
 
 /// Held against the key the subscriber pinned, over the manifest exactly as it was served.
 pub fn verify(pinned: &str, manifest: &[u8], signature: &str) -> Result<(), String> {
-    use ed25519_dalek::Verifier;
-    let key = ed25519_dalek::VerifyingKey::from_bytes(&key_bytes(pinned)?)
-        .map_err(|e| format!("the pinned key is not one: {e}"))?;
-    let raw = signature.trim().trim_start_matches("ed25519:");
-    if raw.len() != 128 {
-        return Err("a signature is 64 bytes, written as 128 hex characters".into());
-    }
-    let mut bytes = [0u8; 64];
-    for (i, byte) in bytes.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&raw[i * 2..i * 2 + 2], 16)
-            .map_err(|_| "a signature is hexadecimal".to_string())?;
-    }
-    key.verify(manifest, &ed25519_dalek::Signature::from_bytes(&bytes))
-        .map_err(|_| "the signature is not this publisher's, over these bytes".to_string())
+    crate::key::verify(pinned, manifest, signature)
 }

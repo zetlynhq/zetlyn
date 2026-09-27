@@ -479,8 +479,14 @@ and there is no name to contend for. The rule below is for the one case that is 
 is a hub several people publish to.
 
 An owner name is registered, first come and for good, and it allows writing under
-`datasets/{owner}/` and `scopes/{owner}/` and nowhere else. A token is minted once and only its
-hash is kept, so a copy of the owners file is not a licence to publish.
+`datasets/{owner}/` and `scopes/{owner}/` and nowhere else. What it belongs to is a key. Nothing
+is handed out at registration, because the person registering already holds the half that signs
+and the hub is only being told which key that is. A copy of the owners file says who publishes
+here and lets the reader do nothing.
+
+A write is signed, over the method, the path, the body and the time, the same way a console call
+is. A hub anybody may read therefore gives nothing away by being read, and a signature cannot be
+lifted into a different request the way a token can be copied into one.
 
 Some names are not available to anybody. Three kinds, and each is somebody being deceived rather
 than inconvenienced: a name that would read as this project speaking, a name the layout already
@@ -490,6 +496,10 @@ not. `cve` is not available; `cve-mirror` is.
 A name is lower-case letters, digits and hyphens, two to thirty-nine characters, no hyphen at
 either end and no two in a row. No dots, because the first segment of a reference is a host when
 it has one.
+
+One key holds one name on one hub, and asking for a second under a key that already has one is
+refused. A person who wants two names has two keys and is two publishers, which is what they
+would look like to a subscriber anyway.
 
 ### What a hub is not
 

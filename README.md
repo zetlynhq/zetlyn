@@ -90,7 +90,7 @@ or a web server is one:
 ```
 zetlyn dataset publish datasets/prices --to /Volumes/share/hub
 zetlyn dataset publish datasets/prices --to s3://my-bucket/hub
-zetlyn dataset publish datasets/prices --to https://hub.zetlyn.com   # ZETLYN_HUB_TOKEN
+zetlyn dataset publish datasets/prices --to https://hub.zetlyn.com
 ```
 
 Only the last needs anybody's permission, because it is the only one where a name is contended
@@ -99,10 +99,25 @@ for. `zetlyn hub` runs one of those, and `SPEC.md` says how the layout works.
 An update after the first takes only what changed. On `cve/kev`, five records altered out of
 1,726: 3,022 bytes against 2,102,623 for the whole, and the same store either way.
 
-Sign what you publish, and let subscribers pin it:
+## Who you are
+
+One key, everywhere you act: publishing to a hub, operating a deployment, driving a console.
 
 ```
-zetlyn hub key --at datasets/prices                    # prints the public half
+zetlyn id new --name "Acme Security" --contact ops@acme.example
+zetlyn id
+```
+
+It lives in `~/.zetlyn`, or `$ZETLYN_HOME`. There is no account and no service behind it. A key
+says who signed something; who that is allowed to be is a hub's owners file or a deployment's
+grant, and both of those are somebody's decision about a particular key.
+
+Readers are not this. A person who subscribes to a scope is an email address in that deployment
+and holds no key.
+
+What you publish is signed with it, and subscribers pin it:
+
+```
 zetlyn dataset subscribe mine/prices --from … --key ed25519:…
 ```
 

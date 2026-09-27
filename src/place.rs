@@ -126,21 +126,28 @@ impl Place for Web {
         Ok(body)
     }
     /// A plain web server is read-only, and writing to one means writing to the folder or the
-    /// bucket behind it. A hub that runs the service takes a `PUT` with a token, which is the
-    /// one case where a name is contended for and somebody has to say who holds it.
+    /// bucket behind it. A hub that runs the service takes a signed `PUT`, which is the one case
+    /// where a name is contended for and somebody has to say who holds it.
+    ///
+    /// Signed as the identity, over the same statement a console call is signed over. A token
+    /// would be the permission itself, so a copy of one would be the permission again.
     fn put(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
-        let token = std::env::var("ZETLYN_HUB_TOKEN").unwrap_or_default();
-        if token.is_empty() {
+        let Some(who) = crate::identity::key() else {
             return Err(format!(
-                "{}: no ZETLYN_HUB_TOKEN. A web server without one is read-only, and publishing \
-                 goes to the folder or the bucket behind it",
+                "{}: no identity. `zetlyn id new` makes one, and a hub takes nothing unsigned",
                 self.base
             ));
-        }
+        };
+        let at = crate::iso_stamp(crate::now());
+        let statement = crate::grant::request_statement("PUT", &format!("/{path}"), bytes, &at);
+        let signature =
+            crate::identity::sign(statement.as_bytes())?.ok_or("no identity to sign with")?;
         let url = format!("{}/{path}", self.base);
         self.agent
             .put(&url)
-            .header("Authorization", &format!("Bearer {token}"))
+            .header("Zetlyn-Key", &who)
+            .header("Zetlyn-Date", &at)
+            .header("Zetlyn-Signature", &signature)
             .send(bytes)
             .map(|_| ())
             .map_err(|e| format!("{url}: {e}"))

@@ -12,8 +12,6 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::account::{digest, token};
-
 /// Names nobody gets, whoever asks first.
 ///
 /// Three reasons, and each of them is somebody being deceived rather than inconvenienced: a name
@@ -88,8 +86,14 @@ pub struct Owners {
 pub struct Owner {
     pub email: String,
     pub registered: String,
-    /// SHA-256 of the token. A copy of this file is not a licence to publish.
-    pub token: String,
+    /// The public half of the key that may write under this name. Not a secret, and not a way
+    /// in: a copy of this file tells you who publishes here and lets you do nothing.
+    ///
+    /// This used to be the hash of a bearer token, and it was the same mistake a token always
+    /// is. Whoever held it could publish, so it had to live wherever publishing happened, and a
+    /// publisher was a different person from the same human operating a deployment. One key,
+    /// everywhere somebody acts.
+    pub key: String,
 }
 
 /// What a name has to be before anybody may have it: lower case, a digit or a letter at each end,
@@ -138,45 +142,64 @@ impl Owners {
         std::fs::write(Self::path(dir), text).map_err(|e| format!("{}: {e}", dir.display()))
     }
 
-    /// First come, first served, and once taken it stays taken. Returns the token, which is shown
-    /// once: only its hash is kept.
-    pub fn register(&mut self, dir: &Path, name: &str, email: &str) -> Result<String, String> {
+    /// First come, first served, and once taken it stays taken. Nothing secret comes back: the
+    /// person registering already holds the key, and the hub is only told which one it is.
+    pub fn register(
+        &mut self,
+        dir: &Path,
+        name: &str,
+        email: &str,
+        key: &str,
+    ) -> Result<(), String> {
         if let Some(why) = why_not(name) {
             return Err(format!("{name}: {why}"));
         }
+        crate::key::bytes(key).map_err(|e| format!("{key}: {e}"))?;
         if let Some(held) = self.owner.get(name) {
             return Err(format!(
                 "{name} was taken on {} and does not come free",
                 held.registered
             ));
         }
-        let secret = token();
+        if let Some((held, _)) = self.owner.iter().find(|(_, o)| o.key == key.trim()) {
+            return Err(format!("that key already publishes as {held}"));
+        }
         self.owner.insert(
             name.to_string(),
             Owner {
                 email: email.to_string(),
                 registered: crate::iso_date(crate::now()),
-                token: digest(&secret),
+                key: key.trim().to_string(),
             },
         );
-        self.save(dir)?;
-        Ok(secret)
+        self.save(dir)
     }
 
-    /// Which owner a token speaks for, if any.
-    pub fn speaks_for(&self, secret: &str) -> Option<&str> {
-        let hash = digest(secret);
+    /// Which owner a key speaks for, if any.
+    pub fn speaks_for(&self, key: &str) -> Option<&str> {
         self.owner
             .iter()
-            .find(|(_, o)| o.token == hash)
+            .find(|(_, o)| o.key == key.trim())
             .map(|(name, _)| name.as_str())
     }
 
-    /// Whether this token may write to this path. The path's second segment is the owner, and
-    /// that is the whole of the rule.
-    pub fn may_write(&self, secret: &str, path: &str) -> Result<(), String> {
-        let Some(owner) = self.speaks_for(secret) else {
-            return Err("that token belongs to nobody here".into());
+    /// Whether whoever signed this call may write here. The path's second segment is the owner,
+    /// and that is the whole of the rule.
+    ///
+    /// The call is signed the same way a console call is: over the method, the path, the body and
+    /// the time. A signature cannot be lifted into a different request, and a hub that is read by
+    /// everybody therefore hands out nothing by being read.
+    pub fn may_write(
+        &self,
+        key: &str,
+        path: &str,
+        target: &str,
+        body: &[u8],
+        at: &str,
+        signature: &str,
+    ) -> Result<(), String> {
+        let Some(owner) = self.speaks_for(key) else {
+            return Err("that key publishes as nobody here".into());
         };
         let mut parts = path.split('/');
         let tree = parts.next().unwrap_or_default();
@@ -187,7 +210,20 @@ impl Owners {
         if named != owner {
             return Err(format!("{owner} may not write under {named}"));
         }
-        Ok(())
+        let now = crate::now();
+        let then = crate::fetch::seconds_of(at);
+        if then == 0 || (now - then).abs() > crate::grant::WINDOW_SECONDS {
+            return Err(format!(
+                "that call is stamped {at}, which is not within {} seconds of now",
+                crate::grant::WINDOW_SECONDS
+            ));
+        }
+        crate::key::verify(
+            key,
+            crate::grant::request_statement("PUT", target, body, at).as_bytes(),
+            signature,
+        )
+        .map_err(|e| format!("the call is not signed by that key: {e}"))
     }
 }
 
@@ -214,12 +250,19 @@ pub fn serve(dir: &Path, addr: &str) -> Result<(), String> {
             .unwrap_or("")
             .to_string();
         let method = request.method().as_str().to_string();
-        let bearer = request
-            .headers()
-            .iter()
-            .find(|h| h.field.equiv("Authorization"))
-            .map(|h| h.value.as_str().trim_start_matches("Bearer ").to_string())
-            .unwrap_or_default();
+        let header = |name: &'static str| -> String {
+            request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv(name))
+                .map(|h| h.value.as_str().to_string())
+                .unwrap_or_default()
+        };
+        let (who, at, signature) = (
+            header("Zetlyn-Key"),
+            header("Zetlyn-Date"),
+            header("Zetlyn-Signature"),
+        );
 
         let (status, body) = match method.as_str() {
             "GET" | "HEAD" => match crate::place::Place::get(&place, &path) {
@@ -231,7 +274,10 @@ pub fn serve(dir: &Path, addr: &str) -> Result<(), String> {
                 let read = std::io::Read::read_to_end(request.as_reader(), &mut bytes);
                 // Loaded fresh each time: an owner registered a minute ago may publish now.
                 let owners = Owners::load(dir);
-                match (read, owners.may_write(&bearer, &path)) {
+                // Signed over the address as it was asked for, which is the path with its slash.
+                let allowed =
+                    owners.may_write(&who, &path, &format!("/{path}"), &bytes, &at, &signature);
+                match (read, allowed) {
                     (Err(e), _) => (400, format!("{e}\n").into_bytes()),
                     (_, Err(why)) => (403, format!("{why}\n").into_bytes()),
                     (Ok(_), Ok(())) => match crate::place::Place::put(&place, &path, &bytes) {

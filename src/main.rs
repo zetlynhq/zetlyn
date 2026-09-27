@@ -12,6 +12,7 @@ mod fetch;
 mod grant;
 pub mod guess;
 mod hub;
+mod identity;
 mod key;
 mod place;
 mod record;
@@ -97,6 +98,19 @@ zetlyn
 
   zetlyn serve <dir> [--port 8080] [--addr 0.0.0.0:8080]
       Overview, views, browse with facets and columns, search, a record page.
+
+  zetlyn dataset publish <dir> --to <hub> [--tag latest]
+  zetlyn dataset subscribe <reference> --from <hub> [--at <dir>] [--key ed25519:…]
+  zetlyn dataset update <dir>
+      A hub is a folder, a mount, s3://bucket/prefix or an address. What travels is the
+      records, so a subscriber needs none of the publisher's credentials.
+
+  zetlyn id [new --name <n> --contact <c>]
+      One key, everywhere you act. Readers are not this and hold none.
+
+  zetlyn console serve <deployment> | grant | call
+  zetlyn hub register | owners | serve
+      Letting somebody else run it, and letting somebody else fetch from you.
 ";
 
 fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
@@ -208,6 +222,7 @@ fn run(args: &[String]) -> Result<(), String> {
         // One command, and the directory says which it is.
         Some("console") => console_command(args),
         Some("hub") => hub_command(args),
+        Some("id") => id_command(args),
         Some("serve") => {
             let port = flag(args, "--port").unwrap_or("8080");
             // Loopback unless asked otherwise: a scope reachable from the network is a decision
@@ -972,17 +987,27 @@ fn hub_command(args: &[String]) -> Result<(), String> {
             let dir = PathBuf::from(flag(args, "--at").unwrap_or("."));
             let name = flag(args, "--owner").ok_or("--owner which name?")?;
             let email = flag(args, "--email").ok_or("--email for whom?")?;
+            // Your own key by default, because a publisher and an operator should be one person.
+            let who = match flag(args, "--key") {
+                Some(k) => k.to_string(),
+                None => identity::key().ok_or(
+                    "no identity. `zetlyn id new --name … --contact …` makes one, and a name on \
+                     a hub belongs to a key rather than to a token",
+                )?,
+            };
             let mut owners = hub::Owners::load(&dir);
-            let secret = owners.register(&dir, name, email)?;
-            println!("{name} is yours, first come. The token is shown once:\n\n  {secret}\n");
-            println!("It writes under datasets/{name}/ and scopes/{name}/ and nowhere else.");
+            owners.register(&dir, name, email, &who)?;
+            println!("{name} is yours, first come, and it belongs to");
+            println!("  {who}");
+            println!("\nNothing was handed out: you already hold the half that signs. It writes");
+            println!("under datasets/{name}/ and scopes/{name}/ and nowhere else.");
             Ok(())
         }
         // The key a publisher signs with. It lives in the dataset directory and is read by
         // `dataset publish`; there is nothing to turn on.
         Some("key") => {
             let dir = PathBuf::from(flag(args, "--at").unwrap_or("."));
-            if let Some(held) = artifact::public_key(&dir) {
+            if let Some(held) = identity::or_local(&dir, artifact::KEY_FILE) {
                 println!("{held}");
                 println!("\nThat is the public half. Give it to subscribers; they pin it with");
                 println!("`zetlyn dataset subscribe … --key {held}`.");
@@ -1012,6 +1037,7 @@ fn hub_command(args: &[String]) -> Result<(), String> {
         }
         Some("console") => console_command(args),
         Some("hub") => hub_command(args),
+        Some("id") => id_command(args),
         Some("serve") => {
             let dir = PathBuf::from(
                 positional(args, 2)
@@ -1035,16 +1061,16 @@ fn hub_command(args: &[String]) -> Result<(), String> {
 
 const HUB_USAGE: &str = "\
   zetlyn hub register --owner <name> --email <a> [--at <dir>]
-      Takes an owner name, first come and for good. Prints the token once.
+      Takes an owner name, first come and for good, for your identity or a key you name.
 
   zetlyn hub owners [--at <dir>]
       Who holds what.
 
   zetlyn hub key [--at <dataset dir>]
-      The key this dataset is published under. Makes one where there is none.
+      The key this dataset is published under. Your identity where it has none.
 
   zetlyn hub serve <dir> [--port 8090] [--addr 127.0.0.1:8090]
-      GET for anybody. PUT for a token that speaks for the owner named in the path.
+      GET for anybody. PUT signed by a key that holds the owner named in the path.
       A folder, a mount and a private bucket need none of this.
 ";
 
@@ -1134,8 +1160,15 @@ fn console_call(args: &[String]) -> Result<(), String> {
         .ok_or("which address? http://host:port/dataset/kev")?;
     let method = flag(args, "--method").unwrap_or("GET").to_uppercase();
     let grant_path = PathBuf::from(flag(args, "--grant").ok_or("--grant which file?")?);
-    let key_dir = PathBuf::from(flag(args, "--key").unwrap_or("."));
-    let key_file = flag(args, "--key-name").unwrap_or("caller.key");
+    // Your own identity by default. A caller with a key of its own is a caller somebody has to
+    // remember is also them.
+    let (key_dir, key_file) = match flag(args, "--key") {
+        Some(dir) => (
+            PathBuf::from(dir),
+            flag(args, "--key-name").unwrap_or("caller.key"),
+        ),
+        None => (identity::home(), identity::KEY_FILE),
+    };
     let body = match flag(args, "--body") {
         Some(p) => std::fs::read(p).map_err(|e| format!("{p}: {e}"))?,
         None => Vec::new(),
@@ -1224,3 +1257,44 @@ const CONSOLE_USAGE: &str = "\
   zetlyn console call <url> [--method GET] [--body <file>] --grant <file> [--key <dir>]
       One signed call. This is the whole of what a platform does, in one command.
 ";
+
+// ---------------------------------------------------------------------------------------------
+// Who you are, where that has to be the same person twice.
+
+fn id_command(args: &[String]) -> Result<(), String> {
+    match args.get(1).map(String::as_str) {
+        Some("new") => {
+            let name = flag(args, "--name").unwrap_or("");
+            let contact = flag(args, "--contact").unwrap_or("");
+            let public = identity::new(name, contact)?;
+            println!("{public}");
+            println!("\nThat is you, everywhere you act: publishing to a hub, operating a");
+            println!(
+                "deployment, driving a console. The private half is in {}/{},",
+                identity::home().display(),
+                identity::KEY_FILE
+            );
+            println!("readable by you and nobody else, and it is the one file worth backing up.");
+            println!("\nReaders are not this. A person who subscribes to a scope is an email");
+            println!("address in that deployment, and has no key.");
+            Ok(())
+        }
+        _ => {
+            let Some(public) = identity::key() else {
+                return Err(
+                    "no identity yet. `zetlyn id new --name … --contact …` makes one".into(),
+                );
+            };
+            let who = identity::read();
+            println!("{public}");
+            if !who.name.is_empty() {
+                println!("{}", who.name);
+            }
+            if !who.contact.is_empty() {
+                println!("{}", who.contact);
+            }
+            println!("\nin {}", identity::home().display());
+            Ok(())
+        }
+    }
+}

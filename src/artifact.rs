@@ -203,7 +203,14 @@ pub fn publish(
         // once and both the put and the signing use the same ones.
         let served = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
         place.put(&manifest_path, served.as_bytes())?;
-        if let Some(signature) = crate::key::sign(&ds.dir, KEY_FILE, served.as_bytes())? {
+        // The dataset's own key where it has one, because subscribers pinned that and a key that
+        // changes under them is a publisher they stop trusting. Your identity otherwise, which is
+        // what a dataset made today signs with.
+        let signature = match crate::key::sign(&ds.dir, KEY_FILE, served.as_bytes())? {
+            Some(s) => Some(s),
+            None => crate::identity::sign(served.as_bytes())?,
+        };
+        if let Some(signature) = signature {
             place.put(
                 &reference.version_path("datasets", &version, "manifest.sig"),
                 signature.as_bytes(),
@@ -824,10 +831,6 @@ pub const KEY_FILE: &str = "publishing.key";
 
 pub fn new_key(dir: &Path) -> Result<String, String> {
     crate::key::new(dir, KEY_FILE)
-}
-
-pub fn public_key(dir: &Path) -> Option<String> {
-    crate::key::public(dir, KEY_FILE)
 }
 
 /// Held against the key the subscriber pinned, over the manifest exactly as it was served.

@@ -127,6 +127,10 @@ pub fn manifest_of(ds: &Dataset, payloads: &BTreeMap<String, (u64, String)>) -> 
     json!({
         "spec_version": SPEC_VERSION,
         "built_by": concat!("zetlyn ", env!("CARGO_PKG_VERSION")),
+        // Whose signature to expect beside this. A subscriber who pinned nothing pins this on the
+        // first fetch, so a key that changes under them afterwards is caught; on that first
+        // fetch there is nothing to catch it with, which is what pinning by hand is for.
+        "signed_by": crate::identity::or_local(&ds.dir, KEY_FILE),
         "dataset": d.name,
         "version": version_of(payloads),
         "built_at": crate::now(),
@@ -380,8 +384,11 @@ pub fn manifest_at(place: &dyn Place, reference: &Reference, tree: &str) -> Resu
 ///
 /// A hash per payload says the bytes are the ones this manifest describes, and whoever serves one
 /// serves the other. The key says who wrote the manifest, and it is the only thing here a hub
-/// cannot produce. Where nothing is pinned, nothing is checked and the fetch is what it was
-/// before.
+/// cannot produce.
+///
+/// Where nothing is pinned, the manifest's own `signed_by` is used and handed back, so a caller
+/// can keep it and be protected from the second fetch onward. On the first there is nothing to
+/// catch a hub that lied about both, which is what pinning the key by hand is for.
 pub fn manifest_signed_by(
     place: &dyn Place,
     reference: &Reference,
@@ -394,16 +401,24 @@ pub fn manifest_signed_by(
         return Err(format!("{reference}: the tag names no version"));
     }
     let raw = place.get(&reference.version_path(tree, &version, "manifest.json"))?;
-    if let Some(key) = pinned.filter(|k| !k.trim().is_empty()) {
+    let manifest: J = serde_json::from_slice(&raw).map_err(|e| format!("{reference}: {e}"))?;
+
+    let pinned = pinned.map(str::trim).filter(|k| !k.is_empty());
+    let claimed = manifest["signed_by"].as_str().unwrap_or_default().trim();
+    let against = pinned.unwrap_or(claimed);
+    if !against.is_empty() {
         let signature = place
             .get(&reference.version_path(tree, &version, "manifest.sig"))
             .map_err(|_| {
-                format!("{reference} {version} is not signed, and you pinned a key for it")
+                if pinned.is_some() {
+                    format!("{reference} {version} is not signed, and you pinned a key for it")
+                } else {
+                    format!("{reference} {version} says {against} signed it and is not signed")
+                }
             })?;
-        verify(key, &raw, &String::from_utf8_lossy(&signature))
+        verify(against, &raw, &String::from_utf8_lossy(&signature))
             .map_err(|e| format!("{reference} {version}: {e}"))?;
     }
-    let manifest: J = serde_json::from_slice(&raw).map_err(|e| format!("{reference}: {e}"))?;
     Ok(manifest)
 }
 
@@ -437,7 +452,16 @@ pub fn subscribe(
     std::fs::create_dir_all(into).map_err(|e| format!("{}: {e}", into.display()))?;
     std::fs::write(
         into.join("dataset.toml"),
-        declaration(&manifest, location, reference, pinned.unwrap_or(""))?,
+        // The key it was pinned to, or the one that actually signed what arrived. Written down
+        // either way, so the next fetch is held against this one.
+        declaration(
+            &manifest,
+            location,
+            reference,
+            pinned
+                .filter(|k| !k.trim().is_empty())
+                .unwrap_or_else(|| manifest["signed_by"].as_str().unwrap_or_default()),
+        )?,
     )
     .map_err(|e| format!("{}: {e}", into.display()))?;
     std::fs::write(
@@ -624,6 +648,7 @@ pub fn publish_scope(
     let manifest = json!({
         "spec_version": SPEC_VERSION,
         "built_by": concat!("zetlyn ", env!("CARGO_PKG_VERSION")),
+        "signed_by": crate::identity::key(),
         "scope": decl.name,
         "version": version,
         "built_at": crate::now(),
@@ -645,12 +670,17 @@ pub fn publish_scope(
     let reference = Reference::parse(&format!("{}@{tag}", decl.name))?;
     let manifest_path = reference.version_path("scopes", &version, "manifest.json");
     if !place.exists(&manifest_path) {
-        place.put(
-            &manifest_path,
-            serde_json::to_string_pretty(&manifest)
-                .map_err(|e| e.to_string())?
-                .as_bytes(),
-        )?;
+        let served = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
+        place.put(&manifest_path, served.as_bytes())?;
+        // A scope is signed for the same reason a dataset is, and rather more: the manifest
+        // carries the composition whole, so whoever can change it can change which datasets a
+        // subscriber assembles and what their words are taken to mean.
+        if let Some(signature) = crate::identity::sign(served.as_bytes())? {
+            place.put(
+                &reference.version_path("scopes", &version, "manifest.sig"),
+                signature.as_bytes(),
+            )?;
+        }
     }
     move_tag(place, &reference.tag_path("scopes"), &version, expect)?;
     Ok(version)

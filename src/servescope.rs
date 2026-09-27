@@ -48,7 +48,7 @@ fn cell(e: &Entry, name: &str) -> Markup {
         other => match e.fields.get(other) {
             Some(f) => {
                 let distinct: Vec<&String> = {
-                    let mut v: Vec<&String> = f.means.values().collect();
+                    let mut v: Vec<&String> = f.means.values().flatten().collect();
                     v.sort();
                     v.dedup();
                     v
@@ -296,19 +296,22 @@ fn entry_page(scope: &Scope, scheme: &str, value: &str) -> Option<String> {
                 thead { tr { th { "Field" } th { "Member" } th { "Said" } th { "Means here" } } }
                 tbody {
                     @for (name, f) in &entry.fields {
-                        @for (member, raw) in &f.by {
-                            tr {
-                                td { (name)
-                                    @if f.divergent { " " span.chip.on { "divergent" } } }
-                                td.dim { (member) }
-                                td { (raw)
-                                    @if let Some(means) = definition(scope, member, raw) {
-                                        div.why { (means) }
+                        @for (member, said) in &f.by {
+                            @let mapped = f.means.get(member).cloned().unwrap_or_default();
+                            @for (i, raw) in said.iter().enumerate() {
+                                tr {
+                                    td { (name)
+                                        @if f.divergent { " " span.chip.on { "divergent" } } }
+                                    td.dim { @if i == 0 { (member) } }
+                                    td { (raw)
+                                        @if let Some(means) = definition(scope, member, raw) {
+                                            div.why { (means) }
+                                        }
                                     }
-                                }
-                                td {
-                                    @let m = f.means.get(member).cloned().unwrap_or_default();
-                                    @if f.mapped && &m != raw { (m) } @else { span.dim { "—" } }
+                                    td {
+                                        @let m = mapped.get(i).cloned().unwrap_or_default();
+                                        @if f.mapped && m != *raw { (m) } @else { span.dim { "—" } }
+                                    }
                                 }
                             }
                         }
@@ -779,7 +782,7 @@ fn export(scope: &Scope, url: &str, v: &Viewer, as_csv: bool) -> Option<(String,
                 .fields
                 .get(n)
                 .map(|f| {
-                    let mut v: Vec<&String> = f.means.values().collect();
+                    let mut v: Vec<&String> = f.means.values().flatten().collect();
                     v.sort();
                     v.dedup();
                     v.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" / ")

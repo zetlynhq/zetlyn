@@ -90,8 +90,11 @@ pub struct Part {
 
 /// Per field, every value with the member that said it, and what this scope makes of it.
 pub struct FieldView {
-    pub by: BTreeMap<String, String>,
-    pub means: BTreeMap<String, String>,
+    /// Per member, every distinct value that member said, sorted. A member can say a field
+    /// several times for one subject: four quantisations of one model carry four licences, and
+    /// keeping one of them would mean keeping whichever arrived last.
+    pub by: BTreeMap<String, Vec<String>>,
+    pub means: BTreeMap<String, Vec<String>>,
     pub divergent: bool,
     pub mapped: bool,
 }
@@ -735,31 +738,38 @@ impl Scope {
             names.extend(p.fields.keys().cloned());
         }
         for name in names {
-            let mut by = BTreeMap::new();
-            let mut means = BTreeMap::new();
+            let mut by: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+            let mut means: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
             let n = self.decl.normalise_for(&name);
             for p in &entry.parts {
                 let Some(raw) = p.fields.get(&name) else {
                     continue;
                 };
-                by.insert(p.member.clone(), raw.clone());
+                by.entry(p.member.clone()).or_default().insert(raw.clone());
                 let mapped = match n {
                     Some(n) => n.means(&p.member, raw),
                     None => raw.clone(),
                 };
-                means.insert(p.member.clone(), mapped);
+                means.entry(p.member.clone()).or_default().insert(mapped);
             }
             if by.is_empty() {
                 continue;
             }
-            let distinct: BTreeSet<&String> = means.values().collect();
+            // Collected into sets and read out in order, so an entry is the same whatever order
+            // its records arrived in. Keeping one value per member kept whichever arrived last,
+            // and two stores holding the same records answered differently.
+            let distinct: BTreeSet<&String> = means.values().flatten().collect();
+            let divergent = distinct.len() > 1;
             entry.fields.insert(
                 name,
                 FieldView {
-                    divergent: distinct.len() > 1,
+                    divergent,
                     mapped: n.is_some(),
-                    by,
-                    means,
+                    by: by.into_iter().map(|(m, v)| (m, into_sorted(v))).collect(),
+                    means: means
+                        .into_iter()
+                        .map(|(m, v)| (m, into_sorted(v)))
+                        .collect(),
                 },
             );
         }
@@ -1253,7 +1263,7 @@ impl Scope {
                     .decl
                     .normalise_for(left)
                     .filter(|n| !n.scale.is_empty());
-                field.means.values().any(|v| match scale {
+                field.means.values().flatten().any(|v| match scale {
                     // On a declared scale, best first, so `>= high` is a smaller index.
                     Some(n) => match (n.position(v), n.position(&right.display())) {
                         (Some(a), Some(b)) => match op {
@@ -1424,4 +1434,9 @@ fn names_member(pred: &Pred, member: &str) -> bool {
         Pred::And(a, b) | Pred::Or(a, b) => names_member(a, member) || names_member(b, member),
         Pred::Cmp { left, op, right } => left == "dataset" && cmp_str(member, op, &right.display()),
     }
+}
+
+/// A set, read out in its own order, which is the order that does not depend on arrival.
+fn into_sorted(values: std::collections::BTreeSet<String>) -> Vec<String> {
+    values.into_iter().collect()
 }

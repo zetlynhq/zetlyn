@@ -1,3 +1,0 @@
-# Two jobs, not every core. A build that takes the machine with it is a build nobody runs twice.
-[build]
-jobs = 2

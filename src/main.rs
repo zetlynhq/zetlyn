@@ -799,8 +799,9 @@ fn scope_search(args: &[String]) -> Result<(), String> {
                 .means
                 .iter()
                 .map(|(m, v)| {
-                    let raw = view.by.get(m).cloned().unwrap_or_default();
-                    if &raw == v {
+                    let v = v.join(", ");
+                    let raw = view.by.get(m).cloned().unwrap_or_default().join(", ");
+                    if raw == v {
                         format!("{m}={v}")
                     } else {
                         format!("{m}={raw}→{v}")

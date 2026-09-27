@@ -233,7 +233,7 @@ fn satisfies(entry: &crate::scope::Entry, pred: &Pred) -> bool {
             let Some(field) = entry.fields.get(left) else {
                 return false;
             };
-            field.means.values().any(|v| {
+            field.means.values().flatten().any(|v| {
                 let ord = v.to_lowercase().cmp(&right.display().to_lowercase());
                 match op {
                     expr::Op::Eq => ord.is_eq(),

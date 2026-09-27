@@ -317,6 +317,8 @@ manifest that arrives by a copied key or a mis-synced bucket still says what the
 | `version` | content hash of the payloads this manifest covers |
 | `applies_to` | on a delta, the one version it applies to. Absent on a full version |
 | `built_at` | unix seconds, supplied by the builder and never read from a clock, so a build is reproducible |
+| `built_by` | what made it, as a name and a version |
+| `signed_by` | whose signature to expect in `manifest.sig` |
 | `kind` | what one record is |
 | `title`, `about` | the publisher's own words, shown wherever the dataset is |
 
@@ -402,9 +404,12 @@ A hash per payload says the bytes are the ones this manifest describes. It does 
 the manifest, and it cannot: whoever serves the payload serves the manifest beside it, so a hub
 that wanted to hand somebody different records would write both and the hashes would agree.
 
-`manifest.sig` beside `manifest.json` is an ed25519 signature over the manifest exactly as served.
-The publisher keeps the private half in the dataset directory and hands out the public half; a
-subscriber pins that in their own declaration:
+`manifest.sig` beside `manifest.json` is an ed25519 signature over the manifest exactly as served,
+and the manifest's `signed_by` says whose. A scope carries both too: its manifest is the
+composition whole, so whoever can change it can change which datasets a subscriber assembles and
+what their words are taken to mean.
+
+A subscriber pins the key in their own declaration:
 
 ```toml
 [source]
@@ -415,11 +420,15 @@ key  = "ed25519:7d05a945…"
 ```
 
 Where a key is pinned, a version whose manifest is not signed by it is not applied, and that
-includes a version with no signature at all. Where none is pinned, nothing is checked, and a
-subscriber who fetched from a hub that later changed hands has no way to notice.
+includes a version with no signature at all.
+
+Where none is pinned, the manifest's own `signed_by` is used and written into the declaration, so
+every fetch after the first is held against the first. On the first there is nothing to catch a
+hub that wrote both halves of the claim, and that is what pinning by hand is for. A subscriber who
+took a scope gets each member pinned this way, because they never named those keys themselves.
 
 One key per dataset, and publishing the same dataset from a second machine under a second key
-stops every subscriber who pinned the first. That is the cost of the guarantee and not a fault in
+stops every subscriber who holds the first. That is the cost of the guarantee and not a fault in
 it: a publisher is a key, and two keys are two publishers.
 
 Signing is the only thing here a hub cannot do for a publisher, and it is the reason a hub can be
@@ -459,8 +468,11 @@ finds no delta for the version they hold takes the whole and is not told twice.
 
 ### A scope on the hub
 
-No payload. Its version is the content hash of its manifest, which carries the scope declaration
-whole: the members, the join, the maps, the views, the promise.
+No payload. Its manifest carries the scope declaration whole — the members, the join, the maps,
+the views, the promise — and its version is the content hash of that declaration rather than of
+the manifest around it. The manifest carries a build time, so hashing it would make every
+republication a new version and lose the thing a version is for: two publications of the same
+composition are one version.
 
 Members are named by reference without a version, so a scope follows each member's `latest` and
 stays current as they publish. The manifest also records which versions the curator last checked it

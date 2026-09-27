@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
 publish = false
-license-file = "LICENSE"
+license = "Apache-2.0"
 
 [dependencies]
 # Browsing, faceting, filtering and full text are one query over one file.

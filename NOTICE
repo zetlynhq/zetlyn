@@ -1,0 +1,17 @@
+Zetlyn
+Copyright (c) Artur Susdorf
+
+Licensed under the Apache License, Version 2.0. The licence is in LICENSE, and at
+
+    https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software distributed under the licence
+is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
+or implied.
+
+"Zetlyn" is a trademark. The licence grants no rights in it: a fork may take the code and must
+take another name.
+
+This file is here because LICENSE is the licence and nothing else. A word of preamble in front of
+it is enough to stop the tools that read licences from recognising one, and a project whose whole
+argument for being copied is its licence should not be a project whose licence goes unread.

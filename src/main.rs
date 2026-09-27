@@ -875,17 +875,24 @@ fn dataset_update(args: &[String]) -> Result<(), String> {
     let place = place::at(at)?;
     let manifest = artifact::manifest_at(place.as_ref(), &reference, "datasets")?;
     let offered = manifest["version"].as_str().unwrap_or_default();
-    let held = std::fs::read_to_string(dir.join("manifest.json"))
-        .ok()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-        .and_then(|m| m["version"].as_str().map(str::to_string))
-        .unwrap_or_default();
+    let held = artifact::held_version(&dir).unwrap_or_default();
     if offered == held {
         println!("{reference} is at {held}, which is what you hold");
         return Ok(());
     }
+    // The delta first, and the whole where there is none or it did not hold together.
+    if !held.is_empty() {
+        match artifact::apply_delta(place.as_ref(), &reference, &dir, &held, offered, &manifest) {
+            Ok(Some((added, changed, removed))) => {
+                println!("{reference} {held} → {offered} by delta: +{added} ~{changed} −{removed}");
+                return Ok(());
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("the delta did not apply, taking the whole: {e}"),
+        }
+    }
     let (n, version) = artifact::subscribe(place.as_ref(), &reference, &dir, at)?;
-    println!("{reference} {held} → {version}, {n} records");
+    println!("{reference} {held} → {version}, {n} records, whole");
     Ok(())
 }
 

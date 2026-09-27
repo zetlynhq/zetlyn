@@ -59,7 +59,6 @@ impl Reference {
         }
     }
 
-
     fn under(&self, tree: &str) -> String {
         format!("{tree}/{}/{}", self.owner, self.name)
     }
@@ -70,6 +69,13 @@ impl Reference {
 
     pub fn version_path(&self, tree: &str, version: &str, file: &str) -> String {
         format!("{}/versions/{version}/{file}", self.under(tree))
+    }
+
+    /// A delta sits inside the version it produces, under the version it applies to. The
+    /// directory names what a subscriber holds after applying it; `from` names what to apply it
+    /// to.
+    pub fn delta_path(&self, tree: &str, version: &str, from: &str, file: &str) -> String {
+        format!("{}/versions/{version}/from/{from}/{file}", self.under(tree))
     }
 }
 
@@ -200,8 +206,127 @@ pub fn publish(
                 .as_bytes(),
         )?;
     }
+
+    // What the tag pointed at before is what most subscribers hold, so that is the one delta
+    // worth writing. Where it is missing or unreadable the publication still stands: a delta is
+    // a saving and never the only way to the records.
+    let held = place
+        .get(&reference.tag_path("datasets"))
+        .ok()
+        .map(|b| String::from_utf8_lossy(&b).trim().to_string())
+        .filter(|p| !p.is_empty() && *p != version);
+    if let Some(previous) = held {
+        if let Err(e) = write_delta(ds, place, &reference, &previous, &version, &manifest) {
+            eprintln!("no delta from {previous}: {e}");
+        }
+    }
+
     move_tag(place, &reference.tag_path("datasets"), &version, expect)?;
     Ok(version)
+}
+
+/// What changed between the version on the hub and the one in this store, written so a subscriber
+/// holding the first can reach the second without the whole of it.
+///
+/// The publisher reads their own last publication back rather than keeping a copy: the hub is
+/// what subscribers hold, so it is the thing to compute against.
+fn write_delta(
+    ds: &Dataset,
+    place: &dyn Place,
+    reference: &Reference,
+    previous: &str,
+    version: &str,
+    full: &J,
+) -> Result<(), String> {
+    let before = place.get(&reference.version_path("datasets", previous, "records.jsonl"))?;
+    let mut held: BTreeMap<String, String> = BTreeMap::new();
+    for line in String::from_utf8_lossy(&before).lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let j: J = serde_json::from_str(line).map_err(|e| e.to_string())?;
+        let (Some(id), Some(hash)) = (j["record_id"].as_str(), j["hash"].as_str()) else {
+            continue;
+        };
+        held.insert(id.to_string(), hash.to_string());
+    }
+
+    let mut body = Vec::new();
+    let mut added = 0u64;
+    let mut changed = 0u64;
+    let mut seen = std::collections::BTreeSet::new();
+    ds.store.for_each_record(|r| {
+        seen.insert(r.record_id.clone());
+        match held.get(&r.record_id) {
+            Some(hash) if *hash == r.hash => return Ok(()),
+            Some(_) => changed += 1,
+            None => added += 1,
+        }
+        let line = serde_json::to_string(&r.to_json()).map_err(|e| e.to_string())?;
+        body.extend_from_slice(line.as_bytes());
+        body.push(b'\n');
+        Ok(())
+    })?;
+
+    let mut gone = Vec::new();
+    for id in held.keys() {
+        if !seen.contains(id) {
+            gone.push(format!("{}\n", serde_json::json!({ "record_id": id })));
+        }
+    }
+    let removed_body = gone.concat().into_bytes();
+
+    // A delta nobody gains from is not written. The whole is one fetch and the delta is two.
+    let cost = body.len() + removed_body.len();
+    let whole = full["payloads"]["records.jsonl"]["bytes"]
+        .as_u64()
+        .unwrap_or(u64::MAX) as usize;
+    if cost >= whole {
+        return Err(format!(
+            "{cost} bytes against {whole} for the whole, so the whole is the cheaper fetch"
+        ));
+    }
+
+    let mut payloads = BTreeMap::new();
+    payloads.insert(
+        "records.jsonl".to_string(),
+        (body.len() as u64, sha256(&body)),
+    );
+    payloads.insert(
+        "removed.jsonl".to_string(),
+        (removed_body.len() as u64, sha256(&removed_body)),
+    );
+    let manifest = serde_json::json!({
+        "spec_version": SPEC_VERSION,
+        "built_by": concat!("zetlyn ", env!("CARGO_PKG_VERSION")),
+        "dataset": full["dataset"],
+        "version": version,
+        "applies_to": previous,
+        "built_at": crate::now(),
+        "added": added,
+        "changed": changed,
+        "removed": gone.len(),
+        "records": full["records"],
+        "payloads": J::Object(payloads.iter()
+            .map(|(n, (bytes, hash))| (n.clone(), serde_json::json!({ "bytes": bytes, "sha256": hash })))
+            .collect()),
+    });
+
+    place.put(
+        &reference.delta_path("datasets", version, previous, "records.jsonl"),
+        &body,
+    )?;
+    place.put(
+        &reference.delta_path("datasets", version, previous, "removed.jsonl"),
+        &removed_body,
+    )?;
+    place.put(
+        &reference.delta_path("datasets", version, previous, "manifest.json"),
+        serde_json::to_string_pretty(&manifest)
+            .map_err(|e| e.to_string())?
+            .as_bytes(),
+    )?;
+    Ok(())
 }
 
 /// Moving a tag says which version it expects to replace. Two publishers of one dataset pull a
@@ -530,4 +655,122 @@ pub fn subscribe_scope(
         manifest["version"].as_str().unwrap_or_default().to_string(),
         taken,
     ))
+}
+
+/// What a subscriber holds, read from the manifest they kept when they last fetched.
+pub fn held_version(dir: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(dir.join("manifest.json")).ok()?;
+    let j: J = serde_json::from_str(&raw).ok()?;
+    j["version"].as_str().map(str::to_string)
+}
+
+/// Apply the delta from what is held to what the hub offers. `Ok(None)` where there is no delta
+/// to apply, which is not a failure: the caller takes the whole instead.
+pub fn apply_delta(
+    place: &dyn Place,
+    reference: &Reference,
+    into: &Path,
+    from: &str,
+    to: &str,
+    full: &J,
+) -> Result<Option<(u64, u64, u64)>, String> {
+    let path = reference.delta_path("datasets", to, from, "manifest.json");
+    let Ok(raw) = place.get(&path) else {
+        return Ok(None);
+    };
+    let manifest: J = serde_json::from_slice(&raw).map_err(|e| format!("{path}: {e}"))?;
+    if manifest["applies_to"].as_str() != Some(from) || manifest["version"].as_str() != Some(to) {
+        return Err(format!(
+            "{path}: it does not say it goes from {from} to {to}"
+        ));
+    }
+
+    let mut fetched = Vec::new();
+    for name in ["records.jsonl", "removed.jsonl"] {
+        let bytes = place.get(&reference.delta_path("datasets", to, from, name))?;
+        let want = manifest["payloads"][name]["sha256"]
+            .as_str()
+            .unwrap_or_default();
+        let got = sha256(&bytes);
+        if want != got {
+            return Err(format!("{name} is {got} and the manifest says {want}"));
+        }
+        fetched.push(bytes);
+    }
+
+    let store = Store::open(into)?;
+    let run = store.begin_run()?;
+    let at = crate::iso_stamp(crate::now());
+    let name = full["dataset"].as_str().unwrap_or_default();
+    let mut added = 0u64;
+    let mut changed = 0u64;
+    let mut fields = std::collections::BTreeSet::new();
+    for (n, line) in String::from_utf8_lossy(&fetched[0]).lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let j: J = serde_json::from_str(line).map_err(|e| format!("line {}: {e}", n + 1))?;
+        let record = Record::from_json(name, &j).map_err(|e| format!("line {}: {e}", n + 1))?;
+        for f in record.fields.keys() {
+            fields.insert(f.clone());
+        }
+        match store.put(&record, run, &at, false)? {
+            "added" => added += 1,
+            _ => changed += 1,
+        }
+    }
+    let mut removed = 0u64;
+    for line in String::from_utf8_lossy(&fetched[1]).lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let j: J = serde_json::from_str(line).map_err(|e| e.to_string())?;
+        if let Some(id) = j["record_id"].as_str() {
+            if store.remove(id, run, &at)? {
+                removed += 1;
+            }
+        }
+    }
+
+    // No sweep. A delta says what left, and a record it did not mention is a record that stayed.
+    let unchanged = store.count().saturating_sub(added + changed);
+    store.finish_run(
+        run,
+        full["complete"].as_bool().unwrap_or(false),
+        added,
+        changed,
+        removed,
+        unchanged,
+        &fields,
+        &crate::build::Notes::default(),
+        full["reached"].as_str(),
+    )?;
+    // The declaration too, and not only the records. A publisher may have added a field, changed
+    // a view or replaced a search example between the two versions, and a subscriber who took the
+    // records and kept the old declaration would hold a dataset that fails its own check.
+    let location = match &crate::decl::Declaration::load(into)?.source {
+        crate::decl::Source::Hub { at, .. } => at.clone(),
+        _ => String::new(),
+    };
+    std::fs::write(
+        into.join("dataset.toml"),
+        declaration(full, &location, reference)?,
+    )
+    .map_err(|e| format!("{}: {e}", into.display()))?;
+    std::fs::write(
+        into.join("manifest.json"),
+        serde_json::to_string_pretty(full).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("{}: {e}", into.display()))?;
+
+    // The count the publisher declared is what the store must now hold. A delta that leaves it
+    // somewhere else has been applied to something other than what it was computed against.
+    let want = full["records"].as_u64().unwrap_or_default();
+    let got = store.count();
+    if want != got {
+        return Err(format!(
+            "after the delta this holds {got} records and the manifest says {want}"
+        ));
+    }
+    Ok(Some((added, changed, removed)))
 }

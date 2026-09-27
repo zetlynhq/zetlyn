@@ -1231,3 +1231,42 @@ impl Store {
             .unwrap_or((None, None))
     }
 }
+
+impl Store {
+    /// One record, gone, named rather than swept. A delta says which identifiers left, so there
+    /// is nothing to infer from a run that did not mention them.
+    pub fn remove(&self, record_id: &str, run: i64, at: &str) -> Result<bool, String> {
+        let title: Option<String> = self
+            .db
+            .query_row(
+                "select title from record where record_id = ?1",
+                rusqlite::params![record_id],
+                |r| r.get(0),
+            )
+            .ok();
+        let Some(title) = title else {
+            return Ok(false);
+        };
+        self.db
+            .execute(
+                "insert or replace into removed(record_id, run, at, title) values(?1,?2,?3,?4)",
+                rusqlite::params![record_id, run, at, title],
+            )
+            .map_err(|e| e.to_string())?;
+        for table in ["ident", "field", "fts"] {
+            self.db
+                .execute(
+                    &format!("delete from {table} where record_id = ?1"),
+                    rusqlite::params![record_id],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        self.db
+            .execute(
+                "delete from record where record_id = ?1",
+                rusqlite::params![record_id],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(true)
+    }
+}

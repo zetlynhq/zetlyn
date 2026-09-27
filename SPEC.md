@@ -131,8 +131,8 @@ year gets last year's answer.
 
 ## The interface
 
-A scope does not read a member's store; it asks, and the questions are the same six for
-every dataset whatever it was built from.
+A scope does not read a member's store; it asks, and the questions are the
+same six for every dataset whatever it was built from.
 
 | | |
 |---|---|
@@ -398,17 +398,35 @@ or changed, and `removed.jsonl`, one record id per line.
 
 ### A delta
 
-A version directory is written once and never changed. A delta sits in the same tree under the same
-kind of name, and its directory is the hash of the dataset a subscriber holds *after* applying it,
-not of the files inside it. Every hash in `tags/` and every hash a subscriber pins is therefore a
-dataset and never a transport.
-
-The chain is linear: a version carries at most one delta, and two manifests naming the same
-`applies_to` are a fork. A subscriber holding a version applies the chain from it, or fetches the
-full version if that is smaller.
-
 A dataset that runs hourly over a source where one row changed cannot ask every subscriber for the
-whole of it, which is why this is in the first version of the layout and not a later one.
+whole of it.
+
+A version directory is written once and never changed, and it always holds the whole dataset. A
+delta sits inside the version it produces, under the version it applies to:
+
+```
+/datasets/{owner}/{name}/versions/{v}/manifest.json
+/datasets/{owner}/{name}/versions/{v}/records.jsonl          the whole of it
+/datasets/{owner}/{name}/versions/{v}/from/{p}/manifest.json
+/datasets/{owner}/{name}/versions/{v}/from/{p}/records.jsonl the records that arrived or changed
+/datasets/{owner}/{name}/versions/{v}/from/{p}/removed.jsonl one record id per line
+```
+
+The directory names what a subscriber holds *after* applying it, so every hash in `tags/` and every
+hash a subscriber pins is a dataset and never a transport. `from/{p}` names what to apply it to.
+
+A subscriber holding `p` asks for `from/{p}`. Where it is not there, or is not smaller than the
+whole, they take the whole, and the two give the same store: the delta carries every record that
+arrived or changed and every identifier that left, and nothing else moved.
+
+A subscriber holding nothing takes one version and applies no chain. That is the reason the full
+payloads stay beside the delta rather than being replaced by it. It costs the publisher a copy of
+the records per version, which is the cheaper of the two mistakes: the other one makes a first
+subscription walk a chain from whenever the publisher started.
+
+Several `from/` may sit under one version, because a subscriber two versions behind is not
+unusual. A publisher who keeps only the newest is right most of the time, and a subscriber who
+finds no delta for the version they hold takes the whole and is not told twice.
 
 ### A scope on the hub
 

@@ -27,6 +27,10 @@ pub struct Declaration {
     pub search: Search,
     #[serde(default)]
     pub retention: Retention,
+    /// What a subscriber may do with these records, in the publisher's own words. Nothing checks
+    /// it. It is the claim a person makes and answers for, and it travels in the manifest.
+    #[serde(default)]
+    pub terms: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -104,6 +108,19 @@ pub enum Source {
         #[serde(default = "thousand")]
         pause_ms: u64,
     },
+    /// Subscribed rather than fetched. The records arrived built, so there is nothing here to
+    /// extract and nothing to re-run: a run against this asks the hub for a newer version.
+    Hub {
+        /// Where the hub is: a folder, a mount, `s3://bucket/prefix`, or an address.
+        at: String,
+        /// `[host/]owner/name[@tag]`.
+        #[serde(rename = "ref")]
+        reference: String,
+        /// What the publisher declared. The licence fact travels with the records, because a
+        /// subscriber holding them has to answer for them too.
+        #[serde(default = "summary")]
+        text_is: String,
+    },
 }
 
 fn agent() -> String {
@@ -140,6 +157,39 @@ impl Source {
             Source::Xlsx { .. } => "xlsx",
             Source::Http { .. } => "http",
             Source::Feed { .. } => "feed",
+            Source::Hub { .. } => "hub",
+        }
+    }
+
+    /// Where these records came from, in one line, for a reader deciding whether they may hold
+    /// them. A folder is the operator's own machine and says so rather than naming a path.
+    pub fn address(&self) -> String {
+        match self {
+            Source::Folder { git: Some(url), .. } => url.clone(),
+            Source::Folder { .. } => "a directory on the publisher's machine".into(),
+            Source::Csv { path, .. } | Source::Xlsx { path, .. } => path.clone(),
+            Source::Http { list, detail, .. } => {
+                let named = if list.is_empty() {
+                    detail.clone().unwrap_or_default()
+                } else {
+                    list.clone()
+                };
+                named.split(['?', '{']).next().unwrap_or("").to_string()
+            }
+            Source::Feed { urls, .. } => urls.join(", "),
+            Source::Hub { at, reference, .. } => format!("{at} {reference}"),
+        }
+    }
+
+    /// Whether the text in these records is what the source published about itself or the thing
+    /// itself. Fetching, indexing and republishing are three acts, and this is the third one
+    /// stated in one word. A source that carries no text of its own says `none`.
+    pub fn text_is(&self) -> &str {
+        match self {
+            Source::Feed { text_is, .. } => text_is,
+            Source::Folder { .. } | Source::Csv { .. } | Source::Xlsx { .. } => "whole",
+            Source::Http { .. } => "whole",
+            Source::Hub { text_is, .. } => text_is,
         }
     }
     /// What `file:` paths resolve against, and what a run reads.
@@ -157,7 +207,9 @@ impl Source {
             }
             Source::Csv { path, .. } => path,
             Source::Xlsx { path, .. } => path,
-            Source::Http { .. } | Source::Feed { .. } => return base.to_path_buf(),
+            Source::Http { .. } | Source::Feed { .. } | Source::Hub { .. } => {
+                return base.to_path_buf()
+            }
         };
         let full = base.join(p);
         if full.is_dir() {
@@ -245,6 +297,7 @@ pub struct Records {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Spec {
+    #[serde(default)]
     pub from: String,
     #[serde(rename = "match")]
     pub matches: Option<String>,
@@ -258,6 +311,7 @@ pub struct Spec {
 #[serde(deny_unknown_fields)]
 pub struct IdSpec {
     pub scheme: Option<String>,
+    #[serde(default)]
     pub from: String,
     #[serde(rename = "match")]
     pub matches: Option<String>,
@@ -316,6 +370,7 @@ pub struct FieldSpec {
     #[serde(rename = "type")]
     pub kind: FieldType,
     pub vocabulary: Option<String>,
+    #[serde(default)]
     pub from: String,
     #[serde(rename = "match")]
     pub matches: Option<String>,
@@ -388,6 +443,34 @@ impl Declaration {
             toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
         if d.title.is_empty() {
             d.title = d.name.clone();
+        }
+        // A subscribed dataset has nothing to extract from, so its specs carry a name and a type
+        // and no expression. Everywhere else an absent `from` is a field that would silently
+        // produce nothing, and saying so here costs one pass over the declaration.
+        if !matches!(d.source, Source::Hub { .. }) {
+            let mut missing: Vec<String> = Vec::new();
+            if d.records.title.trim().is_empty() {
+                missing.push("title".into());
+            }
+            for (name, spec) in &d.records.fields {
+                if spec.from.trim().is_empty() {
+                    missing.push(name.clone());
+                }
+            }
+            if let Some(ids) = &d.records.id {
+                for (i, one) in ids.each().iter().enumerate() {
+                    if one.from.trim().is_empty() {
+                        missing.push(format!("id[{i}]"));
+                    }
+                }
+            }
+            if !missing.is_empty() {
+                return Err(format!(
+                    "{}: {} says where it comes from with `from`, and does not",
+                    path.display(),
+                    missing.join(", ")
+                ));
+            }
         }
         Ok(d)
     }

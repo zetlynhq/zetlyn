@@ -502,6 +502,11 @@ pub fn each_row(
             crate::fetch::feed_rows(&f, urls, text_is, root, &mut on_row)?;
             Ok(None)
         }
+        // Nothing to read here. A subscribed dataset holds records somebody else produced, and
+        // asking its hub for newer ones is a different command.
+        Source::Hub { reference, .. } => Err(format!(
+            "{reference} is subscribed. `zetlyn dataset update` asks its hub for a newer version"
+        )),
     }
 }
 

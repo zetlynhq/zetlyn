@@ -2,12 +2,15 @@
 //! one page; it is not what makes them usable.
 
 mod account;
+mod artifact;
 mod build;
 mod dataset;
 mod decl;
 mod expr;
 mod fetch;
 pub mod guess;
+mod hub;
+mod place;
 mod record;
 mod remote;
 mod scope;
@@ -127,6 +130,9 @@ fn run(args: &[String]) -> Result<(), String> {
         Some("dataset") => match args.get(1).map(String::as_str) {
             Some("new") => dataset_new(args),
             Some("run") => dataset_run(args),
+            Some("publish") => dataset_publish(args),
+            Some("subscribe") => dataset_subscribe(args),
+            Some("update") => dataset_update(args),
             Some("check") => {
                 let ds = Dataset::open(&dir_at(args, 2)?)?;
                 let wrong = ds.check();
@@ -158,6 +164,8 @@ fn run(args: &[String]) -> Result<(), String> {
         Some("watch") => watch_cmd(args),
         Some("account") => account_cmd(args),
         Some("scope") => match args.get(1).map(String::as_str) {
+            Some("publish") => scope_publish(args),
+            Some("subscribe") => scope_subscribe(args),
             Some("describe") => {
                 let (dir, datasets) = scope_at(args, 2)?;
                 let scope = scope::Scope::open(&dir, &datasets)?;
@@ -195,6 +203,7 @@ fn run(args: &[String]) -> Result<(), String> {
             }
         },
         // One command, and the directory says which it is.
+        Some("hub") => hub_command(args),
         Some("serve") => {
             let port = flag(args, "--port").unwrap_or("8080");
             // Loopback unless asked otherwise: a scope reachable from the network is a decision
@@ -225,6 +234,11 @@ fn run(args: &[String]) -> Result<(), String> {
                 );
             }
             serve::serve(ds, &addr)
+        }
+        // A published artifact names the build that made it, so the build has to name itself.
+        Some("--version") | Some("-V") | Some("version") => {
+            println!("zetlyn {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
         }
         _ => {
             print!("{USAGE}");
@@ -794,3 +808,196 @@ fn search(args: &[String]) -> Result<(), String> {
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------------------------
+// Publishing, and taking what somebody else published.
+
+/// `zetlyn dataset publish <dir> --to <hub> [--tag latest] [--expect <version>|-]`
+fn dataset_publish(args: &[String]) -> Result<(), String> {
+    let dir = dir_at(args, 2)?;
+    let to = flag(args, "--to").ok_or("--to where? a folder, a mount, s3://bucket/prefix")?;
+    let tag = flag(args, "--tag").unwrap_or("latest");
+    let ds = Dataset::open(&dir)?;
+    // Nothing is published that the dataset itself says is untrue.
+    let wrong = ds.check();
+    if !wrong.is_empty() {
+        for w in &wrong {
+            eprintln!("{}: {w}", ds.decl.name);
+        }
+        return Err("publishing would put that on somebody else's machine".into());
+    }
+    let place = place::at(to)?;
+    let version = artifact::publish(&ds, place.as_ref(), tag, flag(args, "--expect"))?;
+    println!(
+        "{}@{tag} is {version}, {} records, at {}",
+        ds.decl.name,
+        ds.store.count(),
+        place.describe()
+    );
+    Ok(())
+}
+
+/// `zetlyn dataset subscribe <reference> --from <hub> [--at <dir>]`
+fn dataset_subscribe(args: &[String]) -> Result<(), String> {
+    let raw = positional(args, 2)
+        .first()
+        .map(|s| s.to_string())
+        .ok_or("which dataset? owner/name, with an optional @tag")?;
+    let reference = artifact::Reference::parse(&raw)?;
+    let from = flag(args, "--from")
+        .map(str::to_string)
+        .or_else(|| reference.host.as_ref().map(|h| format!("https://{h}")))
+        .ok_or("--from where? a folder, a mount, s3://bucket/prefix, or an address")?;
+    let into = match flag(args, "--at") {
+        Some(p) => PathBuf::from(p),
+        None => PathBuf::from("datasets").join(&reference.name),
+    };
+    let place = place::at(&from)?;
+    let (held, version) = artifact::subscribe(place.as_ref(), &reference, &into, &from)?;
+    println!(
+        "{reference} is {version}, {held} records, in {}",
+        into.display()
+    );
+    Ok(())
+}
+
+/// `zetlyn dataset update <dir>`: ask the hub this one came from whether there is a newer version.
+fn dataset_update(args: &[String]) -> Result<(), String> {
+    let dir = dir_at(args, 2)?;
+    let decl = decl::Declaration::load(&dir)?;
+    let decl::Source::Hub { at, reference, .. } = &decl.source else {
+        return Err(format!(
+            "{} is not subscribed. `zetlyn dataset run` fills it from its source",
+            decl.name
+        ));
+    };
+    let reference = artifact::Reference::parse(reference)?;
+    let place = place::at(at)?;
+    let manifest = artifact::manifest_at(place.as_ref(), &reference, "datasets")?;
+    let offered = manifest["version"].as_str().unwrap_or_default();
+    let held = std::fs::read_to_string(dir.join("manifest.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|m| m["version"].as_str().map(str::to_string))
+        .unwrap_or_default();
+    if offered == held {
+        println!("{reference} is at {held}, which is what you hold");
+        return Ok(());
+    }
+    let (n, version) = artifact::subscribe(place.as_ref(), &reference, &dir, at)?;
+    println!("{reference} {held} → {version}, {n} records");
+    Ok(())
+}
+
+/// `zetlyn scope publish <dir> --to <hub> [--tag latest] [--expect <version>]`
+fn scope_publish(args: &[String]) -> Result<(), String> {
+    let (dir, datasets) = scope_at(args, 2)?;
+    let to = flag(args, "--to").ok_or("--to where? a folder, a mount, s3://bucket/prefix")?;
+    let tag = flag(args, "--tag").unwrap_or("latest");
+    // A scope that does not hold together is not published, for the same reason a dataset is not.
+    let scope = scope::Scope::open(&dir, &datasets)?;
+    let wrong = scope.check();
+    if !wrong.is_empty() {
+        for w in &wrong {
+            eprintln!("{}: {w}", scope.decl.name);
+        }
+        return Err("publishing would put that on somebody else's machine".into());
+    }
+    let place = place::at(to)?;
+    let version =
+        artifact::publish_scope(&dir, &datasets, place.as_ref(), tag, flag(args, "--expect"))?;
+    println!(
+        "{}@{tag} is {version}, {} members, at {}",
+        scope.decl.name,
+        scope.members.len(),
+        place.describe()
+    );
+    Ok(())
+}
+
+/// `zetlyn scope subscribe <reference> --from <hub> [--at <deployment>]`
+fn scope_subscribe(args: &[String]) -> Result<(), String> {
+    let raw = positional(args, 2)
+        .first()
+        .map(|s| s.to_string())
+        .ok_or("which scope? owner/name, with an optional @tag")?;
+    let reference = artifact::Reference::parse(&raw)?;
+    let from = flag(args, "--from")
+        .map(str::to_string)
+        .or_else(|| reference.host.as_ref().map(|h| format!("https://{h}")))
+        .ok_or("--from where? a folder, a mount, s3://bucket/prefix, or an address")?;
+    let root = PathBuf::from(flag(args, "--at").unwrap_or("."));
+    let into = root.join("scopes").join(&reference.name);
+    let datasets = root.join("datasets");
+    let place = place::at(&from)?;
+    let (version, taken) =
+        artifact::subscribe_scope(place.as_ref(), &reference, &into, &datasets, &from)?;
+    println!("{reference} is {version}, in {}", into.display());
+    for name in &taken {
+        println!("  took {name}");
+    }
+    if taken.is_empty() {
+        println!("  every member was held already");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------------------------
+// A hub several people publish to.
+
+fn hub_command(args: &[String]) -> Result<(), String> {
+    match args.get(1).map(String::as_str) {
+        Some("register") => {
+            let dir = PathBuf::from(flag(args, "--at").unwrap_or("."));
+            let name = flag(args, "--owner").ok_or("--owner which name?")?;
+            let email = flag(args, "--email").ok_or("--email for whom?")?;
+            let mut owners = hub::Owners::load(&dir);
+            let secret = owners.register(&dir, name, email)?;
+            println!("{name} is yours, first come. The token is shown once:\n\n  {secret}\n");
+            println!("It writes under datasets/{name}/ and scopes/{name}/ and nowhere else.");
+            Ok(())
+        }
+        Some("owners") => {
+            let dir = PathBuf::from(flag(args, "--at").unwrap_or("."));
+            let owners = hub::Owners::load(&dir);
+            for (name, o) in &owners.owner {
+                println!("{name:<20} {:<32} {}", o.email, o.registered);
+            }
+            if owners.owner.is_empty() {
+                println!("nobody yet");
+            }
+            Ok(())
+        }
+        Some("hub") => hub_command(args),
+        Some("serve") => {
+            let dir = PathBuf::from(
+                positional(args, 2)
+                    .first()
+                    .map(|s| s.as_str())
+                    .unwrap_or("."),
+            );
+            let addr = match (flag(args, "--addr"), flag(args, "--port")) {
+                (Some(a), _) => a.to_string(),
+                (None, Some(p)) => format!("127.0.0.1:{p}"),
+                _ => "127.0.0.1:8090".to_string(),
+            };
+            hub::serve(&dir, &addr)
+        }
+        _ => {
+            print!("{HUB_USAGE}");
+            Ok(())
+        }
+    }
+}
+
+const HUB_USAGE: &str = "\
+  zetlyn hub register --owner <name> --email <a> [--at <dir>]
+      Takes an owner name, first come and for good. Prints the token once.
+
+  zetlyn hub owners [--at <dir>]
+      Who holds what.
+
+  zetlyn hub serve <dir> [--port 8090] [--addr 127.0.0.1:8090]
+      GET for anybody. PUT for a token that speaks for the owner named in the path.
+      A folder, a mount and a private bucket need none of this.
+";

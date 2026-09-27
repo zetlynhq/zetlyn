@@ -147,6 +147,22 @@ fn migrate(db: &Connection) {
              insert or replace into meta(key, value) values('fts_rowid', '1');",
         );
     }
+    // A changed record used to be given a new rowid, and its old full-text row stayed behind
+    // matching searches under a record that no longer said that. `cve/kev` carried 3,453 index
+    // rows for 1,726 records, and a search for one word answered eleven where five was the truth.
+    let swept: Option<String> = db
+        .query_row(
+            "select value from meta where key = 'fts_orphans'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    if swept.is_none() {
+        let _ = db.execute_batch(
+            "delete from fts where rowid not in (select rowid from record);
+             insert or replace into meta(key, value) values('fts_orphans', '1');",
+        );
+    }
     for statement in [
         "alter table run add column fields text",
         "alter table run add column refused text",
@@ -256,6 +272,19 @@ impl Store {
             return Ok("unchanged");
         }
         let verdict = if held.is_some() { "changed" } else { "added" };
+        // The row keeps the rowid it already had. `insert or replace` deletes the old row and
+        // assigns a new one otherwise, and the full-text row is keyed on this rowid: a changed
+        // record would leave its old index entry behind, matching a search forever under a
+        // record that no longer says that. One generation of that doubled a store's index.
+        let kept_rowid: Option<i64> = held.as_ref().and_then(|_| {
+            self.db
+                .query_row(
+                    "select rowid from record where record_id = ?1",
+                    rusqlite::params![rec.record_id],
+                    |r| r.get(0),
+                )
+                .ok()
+        });
         // Every version, where the dataset asked for history. Nothing is written for a
         // record whose hash matched, so an unchanged source costs nothing.
         if history {
@@ -299,10 +328,10 @@ impl Store {
         };
         self.db
             .execute(
-                "insert or replace into record(record_id, kind, title, url, text, known,
+                "insert or replace into record(rowid, record_id, kind, title, url, text, known,
                    valid_from, valid_to, ids, fields, origin, attachments, hash, first_seen,
                    first_run, changed_run, last_run)
-                 values(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?16,?14,?15,?15)",
+                 values(?17,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?16,?14,?15,?15)",
                 rusqlite::params![
                     rec.record_id,
                     rec.kind,
@@ -320,6 +349,7 @@ impl Store {
                     first_run,
                     run,
                     first_seen,
+                    kept_rowid,
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -1113,3 +1143,91 @@ impl Store {
 pub type Moved = (String, String, String);
 /// A record that was removed: its id and the title it had.
 pub type Gone = (String, String);
+
+impl Store {
+    /// Every record, in one pass, handed over one at a time. A published artifact is written
+    /// while the store is read, so a dataset larger than memory publishes the same way a small
+    /// one does.
+    pub fn for_each_record(
+        &self,
+        mut each: impl FnMut(Record) -> Result<(), String>,
+    ) -> Result<u64, String> {
+        let mut stmt = self
+            .db
+            .prepare(
+                "select record_id, kind, title, url, text, known, valid_from, valid_to,
+                        ids, fields, origin, hash
+                 from record order by record_id",
+            )
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        let mut n = 0u64;
+        while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+            let ids: String = r.get(8).map_err(|e| e.to_string())?;
+            let fields: String = r.get(9).map_err(|e| e.to_string())?;
+            let origin: String = r.get(10).map_err(|e| e.to_string())?;
+            let o: J = serde_json::from_str(&origin).unwrap_or(J::Null);
+            let valid_from: Option<String> = r.get(6).map_err(|e| e.to_string())?;
+            let valid_to: Option<String> = r.get(7).map_err(|e| e.to_string())?;
+            each(Record {
+                record_id: r.get(0).map_err(|e| e.to_string())?,
+                dataset: String::new(),
+                kind: r.get(1).map_err(|e| e.to_string())?,
+                title: r.get(2).map_err(|e| e.to_string())?,
+                url: r.get(3).map_err(|e| e.to_string())?,
+                text: r.get(4).map_err(|e| e.to_string())?,
+                known: r.get(5).map_err(|e| e.to_string())?,
+                valid: if valid_from.is_some() || valid_to.is_some() {
+                    Some((valid_from, valid_to))
+                } else {
+                    None
+                },
+                ids: parse_ids(&ids),
+                fields: parse_fields(&fields),
+                from: Origin {
+                    url: o.get("url").and_then(J::as_str).map(str::to_string),
+                    file: o.get("file").and_then(J::as_str).map(str::to_string),
+                    row: o.get("row").and_then(J::as_u64),
+                    span: None,
+                },
+                attachments: Vec::new(),
+                hash: r.get(11).map_err(|e| e.to_string())?,
+            })?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
+    /// Per identifier scheme, how many distinct values this store holds, folded. A scope joins
+    /// on a scheme and on the folded value, so this is the count a curator reads to see whether
+    /// it can. `schemes` counts records instead, which is the number a reader wants on a page.
+    pub fn distinct_identifiers(&self) -> BTreeMap<String, u64> {
+        let mut out = BTreeMap::new();
+        let Ok(mut stmt) = self
+            .db
+            .prepare("select scheme, count(distinct lower(value)) from ident group by scheme")
+        else {
+            return out;
+        };
+        let Ok(rows) = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))
+        }) else {
+            return out;
+        };
+        for row in rows.flatten() {
+            out.insert(row.0, row.1);
+        }
+        out
+    }
+
+    /// The first and last `known` in the store, which is the coverage in time.
+    pub fn known_span(&self) -> (Option<String>, Option<String>) {
+        self.db
+            .query_row(
+                "select min(known), max(known) from record where known <> ''",
+                [],
+                |r| Ok((r.get(0).ok(), r.get(1).ok())),
+            )
+            .unwrap_or((None, None))
+    }
+}

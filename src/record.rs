@@ -275,3 +275,74 @@ impl Id {
         self.scheme == other.scheme && self.value.eq_ignore_ascii_case(&other.value)
     }
 }
+
+impl Record {
+    /// The inverse of `to_json`, for a record that arrives in a published artifact rather than
+    /// out of a source. The hash travels with it and is checked against a recomputation, because
+    /// a record whose hash does not describe it would be a record this store cannot compare.
+    pub fn from_json(dataset: &str, j: &J) -> Result<Record, String> {
+        let s = |k: &str| j.get(k).and_then(J::as_str).unwrap_or("").to_string();
+        let opt = |k: &str| j.get(k).and_then(J::as_str).map(str::to_string);
+        let ids = j
+            .get("ids")
+            .and_then(J::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| {
+                        Some(Id {
+                            scheme: v.get("scheme")?.as_str()?.to_string(),
+                            value: v.get("value")?.as_str()?.to_string(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let fields = j
+            .get("fields")
+            .and_then(J::as_object)
+            .map(|o| {
+                o.iter()
+                    .filter_map(|(k, v)| Some((k.clone(), Value::from_json(v)?)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let from = j.get("from").cloned().unwrap_or(J::Null);
+        let valid = j.get("valid").filter(|v| !v.is_null()).map(|v| {
+            (
+                v.get("from").and_then(J::as_str).map(str::to_string),
+                v.get("to").and_then(J::as_str).map(str::to_string),
+            )
+        });
+        let record = Record {
+            record_id: s("record_id"),
+            dataset: dataset.to_string(),
+            kind: s("kind"),
+            ids,
+            title: s("title"),
+            url: opt("url"),
+            text: s("text"),
+            fields,
+            known: s("known"),
+            valid,
+            from: Origin {
+                url: from.get("url").and_then(J::as_str).map(str::to_string),
+                file: from.get("file").and_then(J::as_str).map(str::to_string),
+                row: from.get("row").and_then(J::as_u64),
+                span: None,
+            },
+            attachments: Vec::new(),
+            hash: s("hash"),
+        };
+        if record.record_id.is_empty() {
+            return Err("a record with no id".into());
+        }
+        let recomputed = record.compute_hash();
+        if record.hash != recomputed {
+            return Err(format!(
+                "{}: the hash does not describe the record",
+                record.record_id
+            ));
+        }
+        Ok(record)
+    }
+}

@@ -20,7 +20,7 @@ did not point it at.
 ## Install
 
 ```
-cargo install --git https://github.com/zetlynhq/zetlyn-core
+cargo install --git https://github.com/zetlynhq/zetlyn
 ```
 
 Or from a checkout:

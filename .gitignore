@@ -3,3 +3,6 @@ target/
 # A local build setting, not a published one. Two jobs is what this machine wants; a stranger
 # cloning this should get their own machine, not mine.
 .cargo/
+
+# The Linux binary `deploy/build-linux.sh` makes. Built, not written.
+dist/

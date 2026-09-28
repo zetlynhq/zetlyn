@@ -22,6 +22,13 @@ use crate::store::Store;
 
 pub const SPEC_VERSION: &str = "1.0";
 
+/// Where a reference with no host is fetched from and published to.
+///
+/// A reference names a host or it does not, and one that does not means this one. Naming it in a
+/// flag as well would be saying the same thing twice, so `--from` and `--to` are for the other
+/// cases: a folder, a mount, a bucket, or somebody else's hub.
+pub const DEFAULT_HUB: &str = "https://hub.zetlyn.com";
+
 /// `[host/]owner/name[@tag]`.
 #[derive(Debug, Clone)]
 pub struct Reference {
@@ -171,6 +178,24 @@ pub fn manifest_of(ds: &Dataset, payloads: &BTreeMap<String, (u64, String)>) -> 
     })
 }
 
+
+/// Whether a manifest already on a hub says anything different from the one just built.
+///
+/// `built_at` is taken off both sides: it comes from a clock, so it differs on every run and a
+/// publication that changed nothing would rewrite the manifest and its signature for ever.
+fn differs(held: &[u8], built: &J) -> bool {
+    let Ok(mut old) = serde_json::from_slice::<J>(held) else {
+        return true;
+    };
+    let mut new = built.clone();
+    for side in [&mut old, &mut new] {
+        if let Some(o) = side.as_object_mut() {
+            o.remove("built_at");
+        }
+    }
+    old != new
+}
+
 /// Write `records.jsonl`, the manifest and the tag. Returns the version.
 pub fn publish(
     ds: &Dataset,
@@ -195,17 +220,22 @@ pub fn publish(
     let version = manifest["version"].as_str().unwrap_or_default().to_string();
     let reference = Reference::parse(&format!("{}@{tag}", ds.decl.name))?;
 
-    // A version directory is written once and never changed, so a republish of the same records
-    // moves the tag and writes nothing else.
+    // A version's payloads are written once and never changed: the version is their hash, so
+    // anything that would change them is a different version. The manifest describing them can be
+    // corrected — a title the publisher fixed is not a different set of records, and the payload
+    // hashes inside it are the same either way.
     let manifest_path = reference.version_path("datasets", &version, "manifest.json");
-    if !place.exists(&manifest_path) {
+    // The signature is over the manifest exactly as it is served, so the bytes are made once and
+    // both the put and the signing use the same ones.
+    let served = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
+    let held = place.get(&manifest_path).ok();
+    if held.is_none() {
         place.put(
             &reference.version_path("datasets", &version, "records.jsonl"),
             &body,
         )?;
-        // The signature is over the manifest exactly as it is served, so the bytes are written
-        // once and both the put and the signing use the same ones.
-        let served = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
+    }
+    if held.as_deref().map(|b| differs(b, &manifest)).unwrap_or(true) {
         place.put(&manifest_path, served.as_bytes())?;
         // The dataset's own key where it has one, because subscribers pinned that and a key that
         // changes under them is a publisher they stop trusting. Your identity otherwise, which is
@@ -509,6 +539,12 @@ pub fn subscribe(
         &crate::build::Notes::default(),
         manifest["reached"].as_str(),
     )?;
+    // What a reader is told about freshness is the age of the records, so this run carries the
+    // time the publisher's run finished and not the time it was fetched. A publisher whose
+    // manifest names none leaves the fetch time, which is the only thing there is.
+    if let Some(theirs) = manifest["finished"].as_str() {
+        store.set_finished(run, theirs)?;
+    }
     store.set_meta("subscribed", &format!("{location} {reference} {version}"))?;
     Ok((held, version))
 }
@@ -820,6 +856,10 @@ pub fn apply_delta(
         &crate::build::Notes::default(),
         full["reached"].as_str(),
     )?;
+    // The same reason as a full subscribe: freshness is the age of the records.
+    if let Some(theirs) = full["finished"].as_str() {
+        store.set_finished(run, theirs)?;
+    }
     // The declaration too, and not only the records. A publisher may have added a field, changed
     // a view or replaced a search example between the two versions, and a subscriber who took the
     // records and kept the old declaration would hold a dataset that fails its own check.

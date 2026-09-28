@@ -142,6 +142,56 @@ fn link(base: &str, q: &str, view: &str, sort: &str, page: usize) -> String {
     url
 }
 
+
+/// Where this surface is mounted, so several of them can sit on one host. Empty at the root.
+///
+/// One process serves one thing, so this is set once before the loop starts and read from
+/// everywhere a link is written. The router strips it; every address a browser is given carries
+/// it.
+static MOUNT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// A prefix with a leading slash and no trailing one, or nothing at all.
+pub fn mount(prefix: &str) {
+    let p = prefix.trim().trim_end_matches('/');
+    let p = if p.is_empty() {
+        String::new()
+    } else if let Some(rest) = p.strip_prefix('/') {
+        format!("/{rest}")
+    } else {
+        format!("/{p}")
+    };
+    let _ = MOUNT.set(p);
+}
+
+pub fn mounted() -> &'static str {
+    MOUNT.get().map(String::as_str).unwrap_or("")
+}
+
+/// An address on this surface, as a browser has to ask for it.
+pub fn at(path: &str) -> String {
+    format!("{}{}", mounted(), path)
+}
+
+/// What was asked for, with the mount taken off, so the router matches one set of addresses
+/// whatever the surface is mounted under. A request for the mount itself is a request for `/`.
+pub fn unmount(url: &str) -> String {
+    let m = mounted();
+    if m.is_empty() {
+        return url.to_string();
+    }
+    match url.strip_prefix(m) {
+        Some("") => "/".to_string(),
+        Some(rest) if rest.starts_with('/') || rest.starts_with('?') => {
+            if rest.starts_with('?') {
+                format!("/{rest}")
+            } else {
+                rest.to_string()
+            }
+        }
+        _ => url.to_string(),
+    }
+}
+
 pub fn shell(title: &str, body: Markup) -> String {
     let page = html! {
         (DOCTYPE)
@@ -150,7 +200,7 @@ pub fn shell(title: &str, body: Markup) -> String {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 title { (title) }
-                link rel="stylesheet" href="/style.css";
+                link rel="stylesheet" href=(at("/style.css"));
             }
             body { main { (body) } }
         }
@@ -166,7 +216,7 @@ fn column_of(hit: &Hit, name: &str) -> Markup {
     match name {
         "known" => html! { (hit.known) },
         "kind" => html! { (hit.kind) },
-        "title" => html! { a href={"/record/" (hit.record_id)} { (hit.title) } },
+        "title" => html! { a href={(at("/record/")) (hit.record_id)} { (hit.title) } },
         other => match hit.fields.get(other) {
             Some(v) => value_cell(v),
             None => html! { span.dim { "—" } },
@@ -203,7 +253,7 @@ fn table(ds: &Dataset, hits: &[Hit], view: Option<&View>, q: &str, sort: &str) -
                 @for hit in hits {
                     tr {
                         td {
-                            a href={"/record/" (hit.record_id)} { (hit.title) }
+                            a href={(at("/record/")) (hit.record_id)} { (hit.title) }
                             @if !hit.why_text.is_empty() || hit.why_id.is_some() {
                                 div.why {
                                     @if let Some(id) = &hit.why_id {
@@ -318,7 +368,7 @@ fn overview(ds: &Dataset, url: &str) -> String {
             }
         }
 
-        form.bar method="get" action="/" {
+        form.bar method="get" action=(at("/")) {
             input type="search" name="q" value=(q) placeholder="Search, or filter with name=value";
             @if !view_name.is_empty() { input type="hidden" name="view" value=(view_name); }
             button type="submit" { "Search" }
@@ -452,8 +502,8 @@ fn overview(ds: &Dataset, url: &str) -> String {
 
         footer {
             (d.name) " · " (d.source.kind_name()) " · kind " (d.kind)
-            " · " a href="/api/describe" { "describe" }
-            " · " a href="/changes" { "changes" }
+            " · " a href=(at("/api/describe")) { "describe" }
+            " · " a href=(at("/changes")) { "changes" }
         }
     };
     shell(&d.title, body)
@@ -472,14 +522,14 @@ fn record_page(ds: &Dataset, id: &str, url: &str) -> Option<String> {
     }
     let d = &ds.decl;
     let body = html! {
-        p { a href="/" { "← " (d.title) } }
+        p { a href=(at("/")) { "← " (d.title) } }
         h1 { (rec.title) }
-        @if let Some(at) = &asked {
+        @if let Some(when) = &asked {
             @if found {
-                div.note { "As it stood on " (at) ". "
-                    a href={"/record/" (rec.record_id)} { "Now" } }
+                div.note { "As it stood on " (when) ". "
+                    a href={(at("/record/")) (rec.record_id)} { "Now" } }
             } @else {
-                div.note { "No version of this record from on or before " (at)
+                div.note { "No version of this record from on or before " (when)
                     " is kept, so these are today's values." }
             }
         }
@@ -521,7 +571,7 @@ fn record_page(ds: &Dataset, id: &str, url: &str) -> Option<String> {
         footer {
             "from " (rec.from.address())
             " · " (rec.hash)
-            " · " a href={"/api/fetch?id=" (rec.record_id)} { "json" }
+            " · " a href={(at("/api/fetch?id=")) (rec.record_id)} { "json" }
         }
     };
     Some(shell(&rec.title, body))
@@ -538,7 +588,7 @@ fn changes_page(ds: &Dataset, url: &str) -> String {
     let changed = j["changed"].as_array().unwrap_or(&empty);
     let removed = j["removed"].as_array().unwrap_or(&empty);
     let body = html! {
-        p { a href="/" { "← " (ds.decl.title) } }
+        p { a href=(at("/")) { "← " (ds.decl.title) } }
         h1 { "Changes" }
         p.dim { "Since run " (since) ". The mark now is " (ds.mark()) "." }
         @if changed.is_empty() && removed.is_empty() {
@@ -548,7 +598,7 @@ fn changes_page(ds: &Dataset, url: &str) -> String {
             @for c in changed {
                 tr {
                     td style="width: 6rem" { span.chip { (c["how"].as_str().unwrap_or("")) } }
-                    td { a href={"/record/" (c["record_id"].as_str().unwrap_or(""))} {
+                    td { a href={(at("/record/")) (c["record_id"].as_str().unwrap_or(""))} {
                         (c["title"].as_str().unwrap_or("")) } }
                 }
             }
@@ -649,7 +699,7 @@ pub fn serve(ds: Dataset, addr: &str) -> Result<(), String> {
     let server = tiny_http::Server::http(addr).map_err(|e| e.to_string())?;
     println!("{} on http://{addr}", ds.decl.name);
     for request in server.incoming_requests() {
-        let url = request.url().to_string();
+        let url = unmount(request.url());
         let path = url.split('?').next().unwrap_or("/").to_string();
         // The same rule as the scope surface: a miss is a 404, and only the front page is the
         // front page. Every other address that matches nothing is nothing.
@@ -681,7 +731,7 @@ pub fn serve(ds: Dataset, addr: &str) -> Result<(), String> {
                 shell(
                     "Nothing here",
                     html! {
-                        p { a href="/" { "← " (ds.decl.title) } }
+                        p { a href=(at("/")) { "← " (ds.decl.title) } }
                         h1 { "Nothing here at that address" }
                     },
                 ),

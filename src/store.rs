@@ -498,6 +498,22 @@ impl Store {
         Ok(())
     }
 
+    /// Stamp a run with a time that is not now.
+    ///
+    /// A subscriber's run is a fetch, and stamping it with the moment of the fetch would make a
+    /// year-old version look as fresh as the minute it arrived. What a reader is told about
+    /// freshness has to be the age of the records, so a subscribed run carries the time the
+    /// publisher's run finished.
+    pub fn set_finished(&self, run: i64, stamp: &str) -> Result<(), String> {
+        self.db
+            .execute(
+                "update run set finished=?2 where id=?1",
+                rusqlite::params![run, stamp],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     // -- reading ------------------------------------------------------------------------------
 
     /// A predicate becomes SQL. What it names and this dataset cannot answer is returned rather

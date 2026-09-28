@@ -52,7 +52,7 @@ views it declares, browse with facets and columns, search by text and by field, 
 name = "mine/vulns"
 
 [[members]]
-dataset  = "cve/kev"
+dataset  = "zetlyn/cve-kev"
 priority = "primary"
 why      = "The only source that says a vulnerability is being exploited right now."
 
@@ -79,10 +79,15 @@ A dataset travels as bytes: the records, not the instructions for producing them
 the publisher's credentials and are not subject to the source's rate limits.
 
 ```
-zetlyn dataset subscribe cve/kev --from https://hub.zetlyn.com
-zetlyn scope subscribe zetlyn/cve --from https://hub.zetlyn.com   # and its members
-zetlyn dataset update datasets/kev
+zetlyn dataset subscribe zetlyn/cve-kev
+zetlyn scope subscribe zetlyn/cve          # and its members
+zetlyn dataset update datasets/cve-kev
 ```
+
+A reference names a host or it does not, and one that does not means `hub.zetlyn.com`. That is the
+whole of the default: `--from` and `--to` are for the other cases. It carries these, and serves two
+of the scopes it carries so you can see what one answers before subscribing:
+<https://hub.zetlyn.com/zetlyn/cve> and <https://hub.zetlyn.com/zetlyn/local-models>.
 
 A hub is a directory layout over HTTPS and nothing more. A folder, a mounted drive, an S3 bucket
 or a web server is one:
@@ -90,13 +95,14 @@ or a web server is one:
 ```
 zetlyn dataset publish datasets/prices --to /Volumes/share/hub
 zetlyn dataset publish datasets/prices --to s3://my-bucket/hub
-zetlyn dataset publish datasets/prices --to https://hub.zetlyn.com
+zetlyn dataset publish datasets/prices --to https://hub.example.com
+zetlyn dataset publish datasets/prices                          # hub.zetlyn.com
 ```
 
-Only the last needs anybody's permission, because it is the only one where a name is contended
-for. `zetlyn hub` runs one of those, and `SPEC.md` says how the layout works.
+Only the last two need anybody's permission, because they are the only ones where a name is
+contended for. `zetlyn hub` runs one of those, and `SPEC.md` says how the layout works.
 
-An update after the first takes only what changed. On `cve/kev`, five records altered out of
+An update after the first takes only what changed. On `zetlyn/cve-kev`, five records altered out of
 1,726: 3,022 bytes against 2,102,623 for the whole, and the same store either way.
 
 ## Who you are

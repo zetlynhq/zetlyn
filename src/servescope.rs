@@ -1,6 +1,7 @@
 //! A scope, opened. The same three surfaces a dataset has, over members of unlike shape.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use maud::{html, Markup};
 use serde_json::{json, Value as J};
@@ -8,10 +9,10 @@ use serde_json::{json, Value as J};
 use crate::account::{self, Accounts, Site, Viewer};
 use crate::expr;
 use crate::scope::{Entry, Scope, ScopeQuery};
-use crate::serve::{flatten, params, shell, urlencode};
+use crate::serve::{at, flatten, mounted, params, shell, unmount, urlencode};
 
 fn link(q: &str, view: &str, kind: &str, page: usize) -> String {
-    let mut url = format!("/?q={}", urlencode(q));
+    let mut url = format!("{}/?q={}", mounted(), urlencode(q));
     if !view.is_empty() {
         url.push_str(&format!("&view={}", urlencode(view)));
     }
@@ -27,7 +28,8 @@ fn link(q: &str, view: &str, kind: &str, page: usize) -> String {
 fn entry_link(e: &Entry) -> Option<String> {
     let k = e.key.as_ref()?;
     Some(format!(
-        "/entry/{}/{}",
+        "{}/entry/{}/{}",
+        mounted(),
         urlencode(&k.scheme),
         urlencode(&k.value)
     ))
@@ -123,7 +125,12 @@ fn overview(scope: &Scope, url: &str, v: &Viewer, site: &Site) -> String {
             (scope.records()) " records · " (scope.members.len()) " members · "
             @for (k, n) in scope.kinds() { (k) " " (n) " · " }
             @if let Some(f) = &d.promise.fresh_within {
-                @if holds { "fresh within " (f) ", checked just now" }
+                @if holds {
+                    "fresh within " (f)
+                    @if let Some(age) = scope.oldest_finish() {
+                        ", the member that ran longest ago " (crate::scope::human(age)) " ago"
+                    }
+                }
                 @else { "the promise of " (f) " does not hold" }
             }
         }
@@ -141,7 +148,7 @@ fn overview(scope: &Scope, url: &str, v: &Viewer, site: &Site) -> String {
                 @if !d.promise.excludes.is_empty() { " " strong { "Excludes. " } (d.promise.excludes) } }
         }
 
-        form.bar method="get" action="/" {
+        form.bar method="get" action=(at("/")) {
             input type="search" name="q" value=(q) placeholder="Search, or filter with name=value";
             @if !view.is_empty() { input type="hidden" name="view" value=(view); }
             @if !kind.is_empty() { input type="hidden" name="kind" value=(kind); }
@@ -270,11 +277,11 @@ fn overview(scope: &Scope, url: &str, v: &Viewer, site: &Site) -> String {
 
         footer {
             (d.name) " · joined on " (d.keys().join(", "))
-            " · " a href="/changes" { "changes" }
-            " · " a href="/catalogue" { "catalogue" }
-            " · " a href="/pricing" { "pricing" }
-            " · " a href="/terms" { "terms" }
-            " · " a href="/api/describe" { "describe" }
+            " · " a href=(at("/changes")) { "changes" }
+            " · " a href=(at("/catalogue")) { "catalogue" }
+            " · " a href=(at("/pricing")) { "pricing" }
+            " · " a href=(at("/terms")) { "terms" }
+            " · " a href=(at("/api/describe")) { "describe" }
             @if !site.title.is_empty() { " · " (site.title) }
         }
     };
@@ -285,7 +292,7 @@ fn entry_page(scope: &Scope, scheme: &str, value: &str) -> Option<String> {
     let entry = scope.entry(scheme, value)?;
     let d = &scope.decl;
     let body = html! {
-        p { a href="/" { "← " (d.title) } }
+        p { a href=(at("/")) { "← " (d.title) } }
         h1 { (entry.title) }
         p.state { span.chip { (scheme) " " (value) } " "
             span.dim { (entry.members().len()) " members, " (entry.parts.len()) " records" } }
@@ -326,7 +333,7 @@ fn entry_page(scope: &Scope, scheme: &str, value: &str) -> Option<String> {
                 @for p in parts {
                     tr {
                         td {
-                            a href={"/record/" (urlencode(&p.member)) "/" (p.record_id)} { (p.title) }
+                            a href={(at("/record/")) (urlencode(&p.member)) "/" (p.record_id)} { (p.title) }
                             div.why { (p.member) " · " (p.known) }
                         }
                         td {
@@ -362,7 +369,7 @@ fn record_page(scope: &Scope, member: &str, id: &str) -> Option<String> {
         .into_iter()
         .next()?;
     let body = html! {
-        p { a href="/" { "← " (scope.decl.title) } }
+        p { a href=(at("/")) { "← " (scope.decl.title) } }
         h1 { (rec.title) }
         p.state { span.chip { (member) } " " span.chip { (rec.kind) } " "
             @for i in &rec.ids { span.chip { (i.scheme) " " (i.value) } " " }
@@ -398,7 +405,7 @@ fn api(scope: &Scope, path: &str, url: &str, v: &Viewer) -> (J, bool) {
     // records behind them do not.
     if bound.is_some() {
         return (
-            json!({ "error": "this needs a subscription", "see": "/pricing" }),
+            json!({ "error": "this needs a subscription", "see": at("/pricing") }),
             false,
         );
     }
@@ -454,7 +461,7 @@ fn api(scope: &Scope, path: &str, url: &str, v: &Viewer) -> (J, bool) {
                 _ => {
                     return (
                         json!({ "error": "an entry is named by a scheme and a value",
-                                "example": "/api/entry/cve/CVE-2021-44228" }),
+                                "example": at("/api/entry/cve/CVE-2021-44228") }),
                         true,
                     )
                 }
@@ -516,15 +523,15 @@ fn banner(v: &Viewer, scope: &Scope, hidden: u64) -> Markup {
                         span.chip { "free" }
                     }
                     @if v.by_key { span.chip { "by key" } }
-                    @else { a.chip href="/account" { (mail) } }
+                    @else { a.chip href=(at("/account")) { (mail) } }
                 }
                 None => {
                     span.chip { "free" }
-                    a.chip href="/signin" { "Sign in" }
+                    a.chip href=(at("/signin")) { "Sign in" }
                 }
             }
             @if hidden > 0 {
-                a.chip href="/pricing" {
+                a.chip href=(at("/pricing")) {
                     (hidden) " records are newer than " (account::FREE_DELAY_DAYS)
                     " days and need a subscription"
                 }
@@ -535,14 +542,14 @@ fn banner(v: &Viewer, scope: &Scope, hidden: u64) -> Markup {
 
 fn signin_page(site: &Site, message: Option<&str>) -> String {
     let body = html! {
-        p { a href="/" { "←" } }
+        p { a href=(at("/")) { "←" } }
         h1 { "Sign in" }
         p.about {
             "Type your address and a link arrives. There is no password, so there is nothing to "
             "forget and nothing anybody can take."
         }
         @if let Some(m) = message { div.note { (m) } }
-        form.bar method="post" action="/signin" {
+        form.bar method="post" action=(at("/signin")) {
             input type="search" name="email" placeholder="you@example.com";
             button type="submit" { "Send the link" }
         }
@@ -558,7 +565,7 @@ fn account_page(scope: &Scope, accounts: &Accounts, site: &Site, v: &Viewer) -> 
     let keys = accounts.keys(a.id);
     let entitled = a.entitled(&scope.decl.name);
     let body = html! {
-        p { a href="/" { "← " (scope.decl.title) } }
+        p { a href=(at("/")) { "← " (scope.decl.title) } }
         h1 { (a.email) }
         p.state.(if entitled { "current" } else { "empty" }) {
             (a.state)
@@ -568,7 +575,7 @@ fn account_page(scope: &Scope, accounts: &Accounts, site: &Site, v: &Viewer) -> 
         @if !entitled {
             div.note {
                 "Reading is " (account::FREE_DELAY_DAYS) " days behind, and there are no change "
-                "feeds, no API and no export. " a href="/pricing" { "What a subscription costs" } "."
+                "feeds, no API and no export. " a href=(at("/pricing")) { "What a subscription costs" } "."
             }
         }
 
@@ -583,7 +590,7 @@ fn account_page(scope: &Scope, accounts: &Accounts, site: &Site, v: &Viewer) -> 
                         td.dim { "made " (created) }
                         td.dim { @match used { Some(u) => (u), None => "never used" } }
                         td {
-                            form method="post" action="/account/key/drop" {
+                            form method="post" action=(at("/account/key/drop")) {
                                 input type="hidden" name="name" value=(name);
                                 button type="submit" { "Revoke" }
                             }
@@ -592,7 +599,7 @@ fn account_page(scope: &Scope, accounts: &Accounts, site: &Site, v: &Viewer) -> 
                 }
             } }
             @if keys.is_empty() { p.dim { "None yet." } }
-            form.bar method="post" action="/account/key" {
+            form.bar method="post" action=(at("/account/key")) {
                 input type="search" name="name" placeholder="what this key is for";
                 button type="submit" { "Make a key" }
             }
@@ -601,7 +608,7 @@ fn account_page(scope: &Scope, accounts: &Accounts, site: &Site, v: &Viewer) -> 
 
         h2 { "Subscription" }
         @if entitled {
-            form method="post" action="/account/cancel" {
+            form method="post" action=(at("/account/cancel")) {
                 button type="submit" { "Cancel" }
             }
             p.dim {
@@ -609,17 +616,17 @@ fn account_page(scope: &Scope, accounts: &Accounts, site: &Site, v: &Viewer) -> 
                 @match &a.paid_until { Some(u) => (u), None => "the end of the period" } "."
             }
         } @else {
-            p { a href="/pricing" { "Subscribe" } }
+            p { a href=(at("/pricing")) { "Subscribe" } }
         }
 
-        p.bar { a href="/signout" { "Sign out" } }
+        p.bar { a href=(at("/signout")) { "Sign out" } }
     };
     shell(&a.email, body)
 }
 
 fn key_made(key: &str) -> String {
     let body = html! {
-        p { a href="/account" { "← account" } }
+        p { a href=(at("/account")) { "← account" } }
         h1 { "Your key" }
         div.note { "Shown once. Zetlyn keeps its hash and cannot show it again." }
         p { code { (key) } }
@@ -631,7 +638,7 @@ fn key_made(key: &str) -> String {
 fn pricing_page(scope: &Scope, site: &Site, v: &Viewer) -> String {
     let p = &site.price;
     let body = html! {
-        p { a href="/" { "← " (scope.decl.title) } }
+        p { a href=(at("/")) { "← " (scope.decl.title) } }
         h1 { "What it costs" }
         p.about {
             "Free is the whole of this scope, " (account::FREE_DELAY_DAYS) " days behind. "
@@ -672,9 +679,9 @@ fn pricing_page(scope: &Scope, site: &Site, v: &Viewer) -> String {
         }
         p.dim {
             "What is sold is currency and coverage. "
-            a href="/terms" { "Terms" } " · "
-            @if v.email().is_some() { a href="/account" { "Your account" } }
-            @else { a href="/signin" { "Sign in" } }
+            a href=(at("/terms")) { "Terms" } " · "
+            @if v.email().is_some() { a href=(at("/account")) { "Your account" } }
+            @else { a href=(at("/signin")) { "Sign in" } }
         }
     };
     shell("Pricing", body)
@@ -687,7 +694,7 @@ fn terms_page(scope: &Scope, site: &Site) -> String {
         &site.contact
     };
     let body = html! {
-        p { a href="/" { "← " (scope.decl.title) } }
+        p { a href=(at("/")) { "← " (scope.decl.title) } }
         h1 { "Terms" }
         div.note {
             "A draft. It says what this deployment actually does, and it has not been read by a "
@@ -872,12 +879,12 @@ fn changes_page(scope: &Scope, url: &str) -> String {
         .filter_map(J::as_str)
         .collect();
     let body = html! {
-        p { a href="/" { "← " (scope.decl.title) } }
+        p { a href=(at("/")) { "← " (scope.decl.title) } }
         h1 { "Changes" }
         p.dim { "Since " (since) ". The mark now is " (scope.mark()) "." }
         p.bar {
-            a.chip href={"/changes.atom?since=" (urlencode(&since))} { "Atom" }
-            a.chip href={"/api/changes?since=" (urlencode(&since))} { "JSON" }
+            a.chip href={(at("/changes.atom?since=")) (urlencode(&since))} { "Atom" }
+            a.chip href={(at("/api/changes?since=")) (urlencode(&since))} { "JSON" }
         }
         @if !without.is_empty() {
             div.note {
@@ -892,7 +899,7 @@ fn changes_page(scope: &Scope, url: &str) -> String {
             h3 {
                 @if key.is_empty() { (e["title"].as_str().unwrap_or("")) }
                 @else {
-                    a href={"/entry/" (urlencode(scheme)) "/" (urlencode(key))} {
+                    a href={(at("/entry/")) (urlencode(scheme)) "/" (urlencode(key))} {
                         (e["title"].as_str().unwrap_or(""))
                     }
                 }
@@ -939,12 +946,18 @@ fn watch_feed(scope: &Scope, name: &str) -> Option<String> {
     };
     Some(atom(
         &title,
-        &format!("/watch/{name}.atom"),
+        &at(&format!("/watch/{name}.atom")),
         &state.delivered,
         &crate::iso_stamp(crate::now()),
     ))
 }
-pub fn serve(scope: Scope, addr: &str) -> Result<(), String> {
+
+/// How long a reading of the members stands before it is taken again. The scheduler runs in
+/// another process, so a surface that read its members once would serve the counts it started
+/// with for ever and say they were current.
+const REREAD: i64 = 60;
+
+pub fn serve(mut scope: Scope, dir: &Path, datasets: &Path, addr: &str) -> Result<(), String> {
     let accounts = Accounts::open(&scope.root)?;
     let site = Site::load(&scope.root);
     let server = tiny_http::Server::http(addr).map_err(|e| e.to_string())?;
@@ -952,9 +965,19 @@ pub fn serve(scope: Scope, addr: &str) -> Result<(), String> {
     if site.mail.run.is_empty() {
         println!("no mailer named in zetlyn.toml, so sign-in links are printed here");
     }
+    let mut read_at = crate::now();
 
     for mut request in server.incoming_requests() {
-        let url = request.url().to_string();
+        // Before anything is read off it, and only between requests, so no page is drawn from
+        // two readings.
+        if crate::now() - read_at >= REREAD {
+            match Scope::open(dir, datasets) {
+                Ok(fresh) => scope = fresh,
+                Err(e) => eprintln!("{}: read again failed, serving the last one: {e}", dir.display()),
+            }
+            read_at = crate::now();
+        }
+        let url = unmount(request.url());
         let path = url.split('?').next().unwrap_or("/").to_string();
         let parts: Vec<String> = path
             .split('/')
@@ -1042,7 +1065,7 @@ pub fn serve(scope: Scope, addr: &str) -> Result<(), String> {
                         } else {
                             site.url.clone()
                         };
-                        let link = format!("{base}/signin/{raw}");
+                        let link = format!("{base}{}/signin/{raw}", mounted());
                         let sent = site
                             .send(
                                 &a.email,
@@ -1084,12 +1107,12 @@ pub fn serve(scope: Scope, addr: &str) -> Result<(), String> {
                 (
                     shell(
                         "Signed out",
-                        html! { p { a href="/" { "← back" } } h1 { "Signed out" } },
+                        html! { p { a href=(at("/")) { "← back" } } h1 { "Signed out" } },
                     ),
                     "text/html; charset=utf-8",
                     Some((
                         "Set-Cookie".into(),
-                        "zs=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax".into(),
+                        "zs=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax".to_string(),
                     )),
                 )
             }
@@ -1175,7 +1198,7 @@ pub fn serve(scope: Scope, addr: &str) -> Result<(), String> {
                 (
                     atom(
                         &scope.decl.title,
-                        "/changes.atom",
+                        &at("/changes.atom"),
                         entries,
                         &crate::iso_stamp(crate::now()),
                     ),
@@ -1193,7 +1216,7 @@ pub fn serve(scope: Scope, addr: &str) -> Result<(), String> {
                 Some(session) => (
                     shell(
                         "Signed in",
-                        html! { p { a href="/account" { "→ your account" } } h1 { "Signed in" } },
+                        html! { p { a href=(at("/account")) { "→ your account" } } h1 { "Signed in" } },
                     ),
                     "text/html; charset=utf-8",
                     Some((
@@ -1265,7 +1288,7 @@ pub fn serve(scope: Scope, addr: &str) -> Result<(), String> {
                     shell(
                         "Nothing here",
                         html! {
-                            p { a href="/" { "← " (scope.decl.title) } }
+                            p { a href=(at("/")) { "← " (scope.decl.title) } }
                             h1 { "Nothing here at that address" }
                         },
                     ),
@@ -1344,7 +1367,7 @@ fn catalogue(scope: &Scope, v: &Viewer, message: Option<&str>) -> String {
         .collect();
 
     let body = html! {
-        p { a href="/" { "← " (scope.decl.title) } }
+        p { a href=(at("/")) { "← " (scope.decl.title) } }
         h1 { "The catalogue" }
         p.about {
             "Every dataset and scope this deployment holds. A dataset belongs to no scope: several "
@@ -1380,7 +1403,7 @@ fn catalogue(scope: &Scope, v: &Viewer, message: Option<&str>) -> String {
                 "Adding a dataset or composing a scope needs a curator. "
                 @match v.email() {
                     Some(mail) => { (mail) " is not one yet." }
-                    None => { a href="/signin" { "Sign in" } " and ask the operator." }
+                    None => { a href=(at("/signin")) { "Sign in" } " and ask the operator." }
                 }
             }
         } @else {
@@ -1389,7 +1412,7 @@ fn catalogue(scope: &Scope, v: &Viewer, message: Option<&str>) -> String {
                 "A link to a CSV or to a feed. The declaration is proposed from what is behind it, "
                 "and the scheduler fills the store on its next tick."
             }
-            form.bar method="post" action="/catalogue/dataset" {
+            form.bar method="post" action=(at("/catalogue/dataset")) {
                 input type="search" name="url" placeholder="https://…/something.csv";
                 input type="search" name="name" placeholder="owner/name";
                 input type="search" name="kind" placeholder="what one record is";
@@ -1402,7 +1425,7 @@ fn catalogue(scope: &Scope, v: &Viewer, message: Option<&str>) -> String {
                 "member needs a sentence saying what it contributes that the others do not: a "
                 "member nobody can justify in a sentence is one somebody added and nobody removed."
             }
-            form method="post" action="/catalogue/scope" {
+            form method="post" action=(at("/catalogue/scope")) {
                 p.bar {
                     input type="search" name="name" placeholder="owner/name";
                     input type="search" name="title" placeholder="Title";

@@ -1059,9 +1059,26 @@ impl Scope {
         }
         (late.is_empty(), late)
     }
+
+    /// How long ago the member that finished least recently finished, in seconds. `None` where
+    /// any member has never completed a run, because then there is no oldest to name.
+    pub fn oldest_finish(&self) -> Option<i64> {
+        let now = crate::now();
+        let mut oldest: Option<i64> = None;
+        for m in &self.members {
+            let at = m.described["last_run"]["finished"]
+                .as_str()
+                .map(crate::fetch::seconds_of)?;
+            let age = now - at;
+            if oldest.map(|o| age > o).unwrap_or(true) {
+                oldest = Some(age);
+            }
+        }
+        oldest
+    }
 }
 
-fn human(seconds: i64) -> String {
+pub fn human(seconds: i64) -> String {
     match seconds {
         s if s < 90 => format!("{s}s"),
         s if s < 5400 => format!("{}m", s / 60),

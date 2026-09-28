@@ -24,7 +24,7 @@ One dataset's statement about one thing.
 
 ```json
 {"record_id": "…",
- "dataset": "cve/redhat",
+ "dataset": "zetlyn/cve-redhat",
  "kind": "vulnerability",
  "ids": [{"scheme": "cve", "value": "cve-2021-44228"}],
  "title": "log4j: Remote code execution in Log4j 2.x",
@@ -149,7 +149,7 @@ The one that carries the weight. Everything a scope needs to build an overview, 
 box is in it, and none of it requires touching a record.
 
 ```json
-{"dataset": "cve/redhat", "kind": "vulnerability",
+{"dataset": "zetlyn/cve-redhat", "kind": "vulnerability",
  "title": "Red Hat security advisories",
  "about": "Red Hat's own analysis of a vulnerability, and the state of each affected package.",
  "records": 41208,
@@ -254,7 +254,7 @@ A dataset travels as bytes. A scope travels as a statement.
 The publisher runs the source and ships what came out. A subscriber holds records, not instructions
 for producing them, and therefore needs none of the publisher's credentials, is not subject to the
 source's rate limits, and does not add a caller to a source that has one publisher and could have
-had a thousand. `models/hf` is the case: unauthenticated, it is throttled off after 578 to 734 of
+had a thousand. `zetlyn/models-hf` is the case: unauthenticated, it is throttled off after 578 to 734 of
 2,684 subjects, and every subscriber running it themselves would find that out separately.
 
 A scope has no payload because it has no records. Its members are datasets, it holds no index, and
@@ -269,23 +269,26 @@ names it, and a dataset belongs to no scope.
 ```
 
 ```
-cve/kev                           the default hub
-cve/kev@2026-09                   a tag
-hub.example.com/cve/kev@2026-09   another hub
+zetlyn/cve-kev                           the default hub
+zetlyn/cve-kev@2026-09                   a tag
+hub.example.com/zetlyn/cve-kev@2026-09   another hub
 ```
 
 The first segment is a host when it contains a dot, which is why an owner may not contain one. A
-reference with no tag resolves `latest`, which is an ordinary tag a publisher sets and not an
-automatic one; a publisher who sets none has no untagged reference.
+reference with no host resolves `hub.zetlyn.com`, and every command that takes a hub takes it that
+way: `--from` and `--to` are for a folder, a mount, a bucket or another hub, and naming the default
+in one of them says the same thing twice. A reference with no tag resolves `latest`, which is an
+ordinary tag a publisher sets and not an automatic one; a publisher who sets none has no untagged
+reference.
 
-A reference is not the dataset's name. Two hubs may serve `cve/kev` and the manifests inside carry
+A reference is not the dataset's name. Two hubs may serve `zetlyn/cve-kev` and the manifests inside carry
 the same name, which one deployment cannot hold twice. A subscriber who wants both renames one
 locally: the name in the artifact is the publisher's, the name in a deployment is the operator's,
 and the host in a reference says where the bytes came from.
 
 ### The artifact is not the store
 
-A store holds more than the records. `cve/kev` holds 1,726 records, 11,907 fields and 1,726
+A store holds more than the records. `zetlyn/cve-kev` holds 1,726 records, 11,907 fields and 1,726
 identifiers, and alongside them 5,180 revisions, twelve runs with their errors and refusals, and
 six tables of full-text index. A dataset whose source takes a watermark keeps that here too.
 
@@ -313,7 +316,7 @@ manifest that arrives by a copied key or a mis-synced bucket still says what the
 | | |
 |---|---|
 | `spec_version` | the version of this specification the artifact was built against |
-| `dataset` | the publisher's name for it, as the declaration carries it: `cve/kev` |
+| `dataset` | the publisher's name for it, as the declaration carries it: `zetlyn/cve-kev` |
 | `version` | content hash of the payloads this manifest covers |
 | `applies_to` | on a delta, the one version it applies to. Absent on a full version |
 | `built_at` | unix seconds, supplied by the builder and never read from a clock, so a build is reproducible |
@@ -415,7 +418,7 @@ A subscriber pins the key in their own declaration:
 [source]
 type = "hub"
 at   = "https://hub.zetlyn.com"
-ref  = "cve/kev@latest"
+ref  = "zetlyn/cve-kev@latest"
 key  = "ed25519:7d05a945…"
 ```
 
@@ -513,8 +516,31 @@ One key holds one name on one hub, and asking for a second under a key that alre
 refused. A person who wants two names has two keys and is two publishers, which is what they
 would look like to a subscriber anyway.
 
+### What a hub carries
+
+Two addresses beyond the layout, and both are about the hub rather than about anything in it.
+
+| | |
+|---|---|
+| `/index.json` | one entry per tag the hub carries: tree, reference, tag, version, title, about, `built_at`, and the record count and payload size the manifest states |
+| `/` | the same list as a page |
+
+Both are built by reading each tag and the manifest it names. No record is opened.
+
 ### What a hub is not
 
 It does not answer queries, hold a scope's index, or know what a subscriber does with a dataset. It
 serves files. A dataset fetched from a hub is read locally, and no question ever reaches the hub.
 
+A host may serve other things under the same name. `hub.zetlyn.com` carries the bytes and also
+serves two scopes, at `/zetlyn/cve` and `/zetlyn/local-models`. Those are deployments: each holds
+its own store, answers its own queries and has its own readers, and a query reaches one of them and
+never the hub. The paths do not collide because the hub's own trees are `datasets/` and `scopes/`,
+which no owner name may be.
+
+### Freshness at a subscriber
+
+A subscriber's run is a fetch. Stamping it with the moment of the fetch would make a year-old
+version look as fresh as the minute it arrived, so a subscribed run carries the time the
+publisher's run finished, which the manifest states. A scope's `fresh_within` is therefore about
+the age of the records and not about when somebody last downloaded them.

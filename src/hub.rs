@@ -235,9 +235,217 @@ impl Owners {
 /// This is the only piece a folder, a mount or a private bucket does not need. It exists because
 /// a hub several people publish to has one namespace, and a namespace needs somebody to say who
 /// holds what.
-pub fn serve(dir: &Path, addr: &str) -> Result<(), String> {
+
+// ---------------------------------------------------------------------------------------------
+// What this hub carries.
+//
+// A list of what is here, not an index of what is in it. The hub reads no records and answers no
+// query: it walks its own directory, reads the tag and the manifest each tag names, and prints
+// what those say. A subscriber that wants more fetches the manifest itself.
+
+/// One thing the hub carries, as the front page and `/index.json` say it.
+struct Carried {
+    tree: &'static str,
+    owner: String,
+    name: String,
+    tag: String,
+    version: String,
+    title: String,
+    about: String,
+    built_at: u64,
+    records: u64,
+    members: usize,
+    bytes: u64,
+}
+
+impl Carried {
+    fn reference(&self) -> String {
+        format!("{}/{}", self.owner, self.name)
+    }
+}
+
+fn read_dir_names(dir: &Path) -> Vec<String> {
+    let mut out: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with('.') == false)
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    out.sort();
+    out
+}
+
+/// Everything under `datasets/` and `scopes/`, one row per tag.
+fn carried(dir: &Path) -> Vec<Carried> {
+    let mut out = Vec::new();
+    for tree in ["datasets", "scopes"] {
+        let root = dir.join(tree);
+        for owner in read_dir_names(&root) {
+            for name in read_dir_names(&root.join(&owner)) {
+                let tags = root.join(&owner).join(&name).join("tags");
+                for tag in read_dir_names(&tags) {
+                    let version = match std::fs::read_to_string(tags.join(&tag)) {
+                        Ok(v) => v.trim().to_string(),
+                        Err(_) => continue,
+                    };
+                    let versions = root.join(&owner).join(&name).join("versions").join(&version);
+                    let manifest: serde_json::Value =
+                        match std::fs::read(versions.join("manifest.json"))
+                            .ok()
+                            .and_then(|b| serde_json::from_slice(&b).ok())
+                        {
+                            Some(m) => m,
+                            None => continue,
+                        };
+                    let s = |k: &str| manifest[k].as_str().unwrap_or_default().to_string();
+                    out.push(Carried {
+                        tree,
+                        owner: owner.clone(),
+                        name: name.clone(),
+                        tag: tag.clone(),
+                        version,
+                        title: if s("title").is_empty() {
+                            format!("{owner}/{name}")
+                        } else {
+                            s("title")
+                        },
+                        about: s("about"),
+                        built_at: manifest["built_at"].as_u64().unwrap_or(0),
+                        records: manifest["records"].as_u64().unwrap_or(0),
+                        members: manifest["members"].as_array().map(Vec::len).unwrap_or(0),
+                        bytes: manifest["payloads"]["records.jsonl"]["bytes"]
+                            .as_u64()
+                            .unwrap_or(0),
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+fn index_json(dir: &Path) -> Vec<u8> {
+    let rows: Vec<serde_json::Value> = carried(dir)
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "tree": c.tree, "reference": c.reference(), "tag": c.tag,
+                "version": c.version, "title": c.title, "about": c.about,
+                "built_at": c.built_at, "records": c.records,
+                "members": c.members, "bytes": c.bytes,
+            })
+        })
+        .collect();
+    let body = serde_json::json!({ "spec_version": crate::artifact::SPEC_VERSION, "carries": rows });
+    serde_json::to_vec_pretty(&body).unwrap_or_default()
+}
+
+fn thousands(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn megabytes(n: u64) -> String {
+    if n == 0 {
+        return String::new();
+    }
+    if n < 1024 * 1024 {
+        format!("{} kB", n / 1024)
+    } else {
+        format!("{} MB", n / (1024 * 1024))
+    }
+}
+
+/// The front page. Served where a person asks for the hub itself.
+fn index_page(dir: &Path, serving: &[String]) -> Vec<u8> {
+    use maud::html;
+    let rows = carried(dir);
+    let (scopes, datasets): (Vec<&Carried>, Vec<&Carried>) =
+        rows.iter().partition(|c| c.tree == "scopes");
+    let page = html! {
+        (maud::DOCTYPE)
+        html lang="en" {
+            head {
+                meta charset="utf-8";
+                meta name="viewport" content="width=device-width, initial-scale=1";
+                title { "Zetlyn hub" }
+                meta name="description" content="Scopes and datasets you can subscribe to, and the ones served here.";
+                style { (maud::PreEscaped(crate::serve::STYLE)) }
+            }
+            body { main {
+                h1 { "Zetlyn hub" }
+                p.about {
+                    "Every scope and dataset here is bytes somebody already built. Subscribing "
+                    "fetches those bytes and reads them on your own machine: the hub holds no "
+                    "index, answers no query, and never learns what you asked."
+                }
+
+                h2 { "Scopes" }
+                @if scopes.is_empty() { p.dim { "None yet." } }
+                div.grid {
+                    @for c in &scopes {
+                        div.card {
+                            h4 {
+                                @let mount = format!("/{}", c.reference());
+                                @if serving.iter().any(|s| *s == c.reference()) {
+                                    a href=(mount) { (c.title) }
+                                } @else { (c.title) }
+                                span.cover { (c.reference()) }
+                            }
+                            @if !c.about.is_empty() { p.dim { (c.about) } }
+                            p.dim {
+                                (c.members) " members · version " (c.version)
+                                @if c.tag != "latest" { " · tag " (c.tag) }
+                            }
+                            pre { "zetlyn scope subscribe " (c.reference()) }
+                        }
+                    }
+                }
+
+                h2 { "Datasets" }
+                @if datasets.is_empty() { p.dim { "None yet." } }
+                table {
+                    thead { tr { th { "Dataset" } th { "Records" } th { "Bytes" } th { "Version" } } }
+                    tbody {
+                        @for c in &datasets {
+                            tr {
+                                td { (c.reference()) @if !c.title.is_empty() {
+                                    div.why { (c.title) } } }
+                                td { (thousands(c.records)) }
+                                td { (megabytes(c.bytes)) }
+                                td { (c.version) }
+                            }
+                        }
+                    }
+                }
+                p.dim { "zetlyn dataset subscribe owner/name" }
+
+                footer {
+                    "A hub serves files. "
+                    a href="https://zetlyn.com" { "zetlyn.com" }
+                    " · "
+                    a href="/index.json" { "index.json" }
+                }
+            } }
+        }
+    };
+    page.into_string().into_bytes()
+}
+
+pub fn serve(dir: &Path, addr: &str, serving: &[String]) -> Result<(), String> {
     let server = tiny_http::Server::http(addr).map_err(|e| e.to_string())?;
     println!("a hub at {} on http://{addr}", dir.display());
+    for name in serving {
+        println!("  a scope surface is mounted on this host at /{name}");
+    }
     let place = crate::place::Folder {
         root: dir.to_path_buf(),
     };
@@ -265,6 +473,8 @@ pub fn serve(dir: &Path, addr: &str) -> Result<(), String> {
         );
 
         let (status, body) = match method.as_str() {
+            "GET" | "HEAD" if path.is_empty() => (200, index_page(dir, serving)),
+            "GET" | "HEAD" if path == "index.json" => (200, index_json(dir)),
             "GET" | "HEAD" => match crate::place::Place::get(&place, &path) {
                 Ok(bytes) => (200, bytes),
                 Err(_) => (404, b"nothing at that address\n".to_vec()),
@@ -288,7 +498,9 @@ pub fn serve(dir: &Path, addr: &str) -> Result<(), String> {
             }
             _ => (405, b"a hub answers GET and PUT\n".to_vec()),
         };
-        let kind = if path.ends_with(".json") {
+        let kind = if path.is_empty() {
+            "text/html; charset=utf-8"
+        } else if path.ends_with(".json") {
             "application/json"
         } else if path.ends_with(".jsonl") {
             "application/x-ndjson"

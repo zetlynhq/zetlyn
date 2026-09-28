@@ -89,6 +89,11 @@ zetlyn
       A scope holds no index. It rewrites the query per member, fans out, merges ranked lists,
       and gathers the hits into one entry per subject.
 
+  zetlyn scope publish <dir> [--to <hub>] [--tag latest]
+  zetlyn scope subscribe <reference> [--from <hub>] [--at <deployment>]
+      A scope travels as its statement. Subscribing takes the statement and every dataset
+      it names, and rebuilds the stores here.
+
   zetlyn account [list] <deployment>
   zetlyn account grant --email <a> [--days 31] [--scopes a,b] <deployment>
   zetlyn account cancel --email <a> <deployment>
@@ -97,13 +102,14 @@ zetlyn
   zetlyn account dunning [--within 7] [--send] <deployment>
       The first customers arrive before a payment provider does, and are set by hand.
 
-  zetlyn serve <dir> [--port 8080] [--addr 0.0.0.0:8080]
+  zetlyn serve <dir> [--port 8080] [--addr 0.0.0.0:8080] [--base /owner/name]
       Overview, views, browse with facets and columns, search, a record page.
 
-  zetlyn dataset publish <dir> --to <hub> [--tag latest]
-  zetlyn dataset subscribe <reference> --from <hub> [--at <dir>] [--key ed25519:…]
+  zetlyn dataset publish <dir> [--to <hub>] [--tag latest]
+  zetlyn dataset subscribe <reference> [--from <hub>] [--at <dir>] [--key ed25519:…]
   zetlyn dataset update <dir>
-      A hub is a folder, a mount, s3://bucket/prefix or an address. What travels is the
+      A hub is a folder, a mount, s3://bucket/prefix or an address. Named nowhere, it is
+      hub.zetlyn.com; a reference that carries a host means that host. What travels is the
       records, so a subscriber needs none of the publisher's credentials.
 
   zetlyn id [new --name <n> --contact <c>]
@@ -227,6 +233,9 @@ fn run(args: &[String]) -> Result<(), String> {
         Some("platform") => platform_command(args),
         Some("serve") => {
             let port = flag(args, "--port").unwrap_or("8080");
+            // Several scopes can sit on one host, one process each, so a surface is told where
+            // it hangs and writes every address it gives out under that.
+            serve::mount(flag(args, "--base").unwrap_or(""));
             // Loopback unless asked otherwise: a scope reachable from the network is a decision
             // an operator makes, not a default they discover.
             let addr = flag(args, "--addr")
@@ -244,7 +253,7 @@ fn run(args: &[String]) -> Result<(), String> {
                         "zetlyn: {name} is not installed here, and the scope opens without it"
                     );
                 }
-                return servescope::serve(scope, &addr);
+                return servescope::serve(scope, &dir, &datasets, &addr);
             }
             let dir = dir_at(args, 1)?;
             let ds = Dataset::open(&dir)?;
@@ -867,10 +876,10 @@ fn search(args: &[String]) -> Result<(), String> {
 // ---------------------------------------------------------------------------------------------
 // Publishing, and taking what somebody else published.
 
-/// `zetlyn dataset publish <dir> --to <hub> [--tag latest] [--expect <version>|-]`
+/// `zetlyn dataset publish <dir> [--to <hub>] [--tag latest] [--expect <version>|-]`
 fn dataset_publish(args: &[String]) -> Result<(), String> {
     let dir = dir_at(args, 2)?;
-    let to = flag(args, "--to").ok_or("--to where? a folder, a mount, s3://bucket/prefix")?;
+    let to = flag(args, "--to").unwrap_or(artifact::DEFAULT_HUB);
     let tag = flag(args, "--tag").unwrap_or("latest");
     let ds = Dataset::open(&dir)?;
     // Nothing is published that the dataset itself says is untrue.
@@ -902,7 +911,7 @@ fn dataset_subscribe(args: &[String]) -> Result<(), String> {
     let from = flag(args, "--from")
         .map(str::to_string)
         .or_else(|| reference.host.as_ref().map(|h| format!("https://{h}")))
-        .ok_or("--from where? a folder, a mount, s3://bucket/prefix, or an address")?;
+        .unwrap_or_else(|| artifact::DEFAULT_HUB.to_string());
     let into = match flag(args, "--at") {
         Some(p) => PathBuf::from(p),
         None => PathBuf::from("datasets").join(&reference.name),
@@ -961,10 +970,10 @@ fn dataset_update(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// `zetlyn scope publish <dir> --to <hub> [--tag latest] [--expect <version>]`
+/// `zetlyn scope publish <dir> [--to <hub>] [--tag latest] [--expect <version>]`
 fn scope_publish(args: &[String]) -> Result<(), String> {
     let (dir, datasets) = scope_at(args, 2)?;
-    let to = flag(args, "--to").ok_or("--to where? a folder, a mount, s3://bucket/prefix")?;
+    let to = flag(args, "--to").unwrap_or(artifact::DEFAULT_HUB);
     let tag = flag(args, "--tag").unwrap_or("latest");
     // A scope that does not hold together is not published, for the same reason a dataset is not.
     let scope = scope::Scope::open(&dir, &datasets)?;
@@ -987,7 +996,7 @@ fn scope_publish(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// `zetlyn scope subscribe <reference> --from <hub> [--at <deployment>]`
+/// `zetlyn scope subscribe <reference> [--from <hub>] [--at <deployment>]`
 fn scope_subscribe(args: &[String]) -> Result<(), String> {
     let raw = positional(args, 2)
         .first()
@@ -997,7 +1006,7 @@ fn scope_subscribe(args: &[String]) -> Result<(), String> {
     let from = flag(args, "--from")
         .map(str::to_string)
         .or_else(|| reference.host.as_ref().map(|h| format!("https://{h}")))
-        .ok_or("--from where? a folder, a mount, s3://bucket/prefix, or an address")?;
+        .unwrap_or_else(|| artifact::DEFAULT_HUB.to_string());
     let root = PathBuf::from(flag(args, "--at").unwrap_or("."));
     let into = root.join("scopes").join(&reference.name);
     let datasets = root.join("datasets");
@@ -1087,7 +1096,15 @@ fn hub_command(args: &[String]) -> Result<(), String> {
                 (None, Some(p)) => format!("127.0.0.1:{p}"),
                 _ => "127.0.0.1:8090".to_string(),
             };
-            hub::serve(&dir, &addr)
+            // Which of the scopes this hub carries are also served on this host, so the front
+            // page can link them. The hub itself still answers nothing about them.
+            let serving: Vec<String> = flag(args, "--serving")
+                .unwrap_or("")
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            hub::serve(&dir, &addr, &serving)
         }
         _ => {
             print!("{HUB_USAGE}");
@@ -1106,7 +1123,7 @@ const HUB_USAGE: &str = "\
   zetlyn hub key [--at <dataset dir>]
       The key this dataset is published under. Your identity where it has none.
 
-  zetlyn hub serve <dir> [--port 8090] [--addr 127.0.0.1:8090]
+  zetlyn hub serve <dir> [--port 8090] [--addr 127.0.0.1:8090] [--serving owner/name,…]
       GET for anybody. PUT signed by a key that holds the owner named in the path.
       A folder, a mount and a private bucket need none of this.
 ";

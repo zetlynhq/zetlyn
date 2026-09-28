@@ -365,76 +365,137 @@ fn megabytes(n: u64) -> String {
 }
 
 /// The front page. Served where a person asks for the hub itself.
+///
+/// The design is not in this binary. The page names `/style.css`, `/mark.png` and `/favicon.png`,
+/// which the hub serves out of its own directory like anything else, so whoever runs a hub puts
+/// their own there. Where there is no stylesheet the hub answers that address with the product's
+/// own, which is plain and legible and nobody's brand.
 fn index_page(dir: &Path, serving: &[String]) -> Vec<u8> {
     use maud::html;
     let rows = carried(dir);
     let (scopes, datasets): (Vec<&Carried>, Vec<&Carried>) =
         rows.iter().partition(|c| c.tree == "scopes");
+    let has = |name: &str| dir.join(name).exists();
     let page = html! {
         (maud::DOCTYPE)
         html lang="en" {
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
-                title { "Zetlyn hub" }
-                meta name="description" content="Scopes and datasets you can subscribe to, and the ones served here.";
-                style { (maud::PreEscaped(crate::serve::STYLE)) }
+                meta name="theme-color" content="#f2efe7";
+                // The same one the website carries: a choice already made is honoured before the
+                // first paint, and a reader who made none gets their system's.
+                script { (maud::PreEscaped("document.documentElement.className+=\" js\";try{var t=localStorage.getItem(\"theme\");if(t)document.documentElement.dataset.theme=t}catch(e){}")) }
+                title { "The hub — Zetlyn" }
+                meta name="description" content="Scopes and datasets you can subscribe to, and the ones answering here.";
+                @if has("favicon.png") { link rel="icon" href="/favicon.png" type="image/png"; }
+                link rel="stylesheet" href="/style.css";
             }
-            body { main {
-                h1 { "Zetlyn hub" }
-                p.about {
-                    "Every scope and dataset here is bytes somebody already built. Subscribing "
-                    "fetches those bytes and reads them on your own machine: the hub holds no "
-                    "index, answers no query, and never learns what you asked."
+            body {
+                header.site-header.shell {
+                    a.brand href="https://zetlyn.com" {
+                        @if has("mark.png") { img src="/mark.png" alt="" class="brand-mark"; }
+                        span { "Zetlyn" }
+                    }
+                    nav {
+                        a href="https://zetlyn.com/scopes" { "Scopes" }
+                        a href="https://zetlyn.com/datasets" { "Datasets" }
+                        a href="https://zetlyn.com/hub" { "Hub" }
+                    }
                 }
 
-                h2 { "Scopes" }
-                @if scopes.is_empty() { p.dim { "None yet." } }
-                div.grid {
-                    @for c in &scopes {
-                        div.card {
-                            h4 {
-                                @let mount = format!("/{}", c.reference());
-                                @if serving.iter().any(|s| *s == c.reference()) {
-                                    a href=(mount) { (c.title) }
-                                } @else { (c.title) }
-                                span.cover { (c.reference()) }
+                main {
+                    section.hero.shell {
+                        p.overline { "THE HUB" }
+                        h1 { "Bytes somebody else " span { "already built." } }
+                        p.intro {
+                            "Subscribing fetches those bytes and reads them on your own machine. "
+                            "The hub holds no index, answers no query and never learns what you "
+                            "asked: the question is answered by your copy."
+                        }
+                    }
+
+                    section.comparison.shell {
+                        div.comparison-head {
+                            p.overline { "SCOPES" }
+                            h2 { "A topic, and the datasets it is made of." }
+                        }
+                        @if scopes.is_empty() { p.caption { "None yet." } }
+                        div.rules {
+                            p.overline { "WHAT IS HERE" }
+                            div {
+                                ul.rule-list {
+                                    @for c in &scopes {
+                                        li {
+                                            code { (c.reference()) }
+                                            span {
+                                                @if !c.about.is_empty() { (c.about) " " }
+                                                (c.members) " members."
+                                                @if serving.iter().any(|s| *s == c.reference()) {
+                                                    " " a href=(format!("/{}", c.reference())) { "Ask it here" } "."
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                div.terminal {
+                                    div.term-head { span {} span {} span {} b { "taking one" } }
+                                    pre {
+                                        span.prompt { "$ " } "zetlyn scope subscribe "
+                                        (scopes.first().map(|c| c.reference()).unwrap_or_else(|| "owner/name".into()))
+                                        "\n"
+                                        span.cmt { "# the statement, and every dataset it names" }
+                                    }
+                                }
+                                p.caption {
+                                    "A reference that names no host means this hub, so there is "
+                                    "nothing else to type."
+                                }
                             }
-                            @if !c.about.is_empty() { p.dim { (c.about) } }
-                            p.dim {
-                                (c.members) " members · version " (c.version)
-                                @if c.tag != "latest" { " · tag " (c.tag) }
+                        }
+                    }
+
+                    section.page.shell {
+                        article.prose {
+                            h2 { "Datasets" }
+                            @if datasets.is_empty() { p { "None yet." } }
+                            table {
+                                thead { tr {
+                                    th { "Dataset" } th { "Records" } th { "Bytes" } th { "Version" }
+                                } }
+                                tbody {
+                                    @for c in &datasets {
+                                        tr {
+                                            td {
+                                                code { (c.reference()) }
+                                                @if !c.title.is_empty() && c.title != c.reference() {
+                                                    br; (c.title)
+                                                }
+                                            }
+                                            td { (thousands(c.records)) }
+                                            td { (megabytes(c.bytes)) }
+                                            td { code { (c.version) } }
+                                        }
+                                    }
+                                }
                             }
-                            pre { "zetlyn scope subscribe " (c.reference()) }
+                            p { code { "zetlyn dataset subscribe owner/name" } }
                         }
                     }
                 }
 
-                h2 { "Datasets" }
-                @if datasets.is_empty() { p.dim { "None yet." } }
-                table {
-                    thead { tr { th { "Dataset" } th { "Records" } th { "Bytes" } th { "Version" } } }
-                    tbody {
-                        @for c in &datasets {
-                            tr {
-                                td { (c.reference()) @if !c.title.is_empty() {
-                                    div.why { (c.title) } } }
-                                td { (thousands(c.records)) }
-                                td { (megabytes(c.bytes)) }
-                                td { (c.version) }
-                            }
+                footer.site-footer.shell {
+                    span { "A hub serves files." }
+                    div {
+                        a href="https://zetlyn.com" { "zetlyn.com" }
+                        a href="/index.json" { "index.json" }
+                        @if has("app.js") {
+                            button.theme-toggle type="button" id="theme-toggle" { "Theme" }
                         }
                     }
                 }
-                p.dim { "zetlyn dataset subscribe owner/name" }
-
-                footer {
-                    "A hub serves files. "
-                    a href="https://zetlyn.com" { "zetlyn.com" }
-                    " · "
-                    a href="/index.json" { "index.json" }
-                }
-            } }
+                @if has("app.js") { script src="/app.js" {} }
+            }
         }
     };
     page.into_string().into_bytes()
@@ -477,6 +538,9 @@ pub fn serve(dir: &Path, addr: &str, serving: &[String]) -> Result<(), String> {
             "GET" | "HEAD" if path == "index.json" => (200, index_json(dir)),
             "GET" | "HEAD" => match crate::place::Place::get(&place, &path) {
                 Ok(bytes) => (200, bytes),
+                // A hub with no stylesheet of its own still has to be readable, so that one
+                // address falls back to the product's own sheet. Nothing else does.
+                Err(_) if path == "style.css" => (200, crate::serve::STYLE.as_bytes().to_vec()),
                 Err(_) => (404, b"nothing at that address\n".to_vec()),
             },
             "PUT" => {
@@ -498,12 +562,22 @@ pub fn serve(dir: &Path, addr: &str, serving: &[String]) -> Result<(), String> {
             }
             _ => (405, b"a hub answers GET and PUT\n".to_vec()),
         };
+        // A tag and a payload are the two things a program fetches, and they are the two the
+        // layout names. The rest is what a person's browser asked for on the way to reading this.
         let kind = if path.is_empty() {
             "text/html; charset=utf-8"
         } else if path.ends_with(".json") {
             "application/json"
         } else if path.ends_with(".jsonl") {
             "application/x-ndjson"
+        } else if path.ends_with(".css") {
+            "text/css; charset=utf-8"
+        } else if path.ends_with(".png") {
+            "image/png"
+        } else if path.ends_with(".svg") {
+            "image/svg+xml"
+        } else if path.ends_with(".js") {
+            "text/javascript; charset=utf-8"
         } else {
             "text/plain; charset=utf-8"
         };

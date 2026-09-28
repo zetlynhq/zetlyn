@@ -12,24 +12,38 @@ use crate::record::Value;
 use crate::store::Hit;
 
 pub const STYLE: &str = r#"
+/* The palette is the website's, to the value. A reader who arrives from zetlyn.com or from a hub
+   should not be told by the colours that they have left. The layout is this program's own: a
+   scope surface is a dense thing and the site's vocabulary has no rows, facets or chips in it. */
 :root {
-  --bg: #fbfaf8; --fg: #1a1a18; --dim: #6b6862; --line: #e2ded6;
-  --panel: #ffffff; --accent: #8a4b1e; --chip: #f1ece3;
-  color-scheme: light dark;
+  --bg: #f2efe7; --fg: #14202a; --dim: #667078; --line: #cfd1ca;
+  --panel: #fbfaf6; --accent: #dc4a20; --chip: #dfe2db;
+  color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
-  :root { --bg: #171614; --fg: #e9e6e0; --dim: #97928a; --line: #302d29;
-          --panel: #1f1e1b; --accent: #d79a63; --chip: #282520; }
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #11181d; --fg: #e9e6de; --dim: #98a3ab; --line: #2b353c;
+    --panel: #161e24; --accent: #ff6a3d; --chip: #1c252b;
+  }
 }
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #11181d; --fg: #e9e6de; --dim: #98a3ab; --line: #2b353c;
+  --panel: #161e24; --accent: #ff6a3d; --chip: #1c252b;
+}
+:root[data-theme="light"] { color-scheme: light; }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--fg);
-       font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+       font: 15px/1.55 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+             "Segoe UI", sans-serif; -webkit-font-smoothing: antialiased; }
 main { max-width: 68rem; margin: 0 auto; padding: 2rem 1rem 5rem; }
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
-h1 { font-size: 1.5rem; margin: 0 0 .2rem; }
-h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .09em;
-     color: var(--dim); margin: 2.2rem 0 .7rem; font-weight: 600; }
+h1 { font-size: 1.5rem; margin: 0 0 .2rem; letter-spacing: -.02em; font-weight: 750; }
+h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .12em;
+     color: var(--dim); margin: 2.2rem 0 .7rem; font-weight: 600;
+     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
 h3 { font-size: 1rem; margin: 1.4rem 0 .4rem; }
 .about { color: var(--dim); margin: 0 0 1.2rem; max-width: 48rem; }
 .bar { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; margin: 1rem 0; }

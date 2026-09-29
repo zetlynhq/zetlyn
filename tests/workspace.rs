@@ -448,3 +448,107 @@ fn a_subscriber_holds_the_same_receipts() {
     assert_eq!(ours[0]["excerpt"], theirs[0]["excerpt"]);
     assert_eq!(ours[0]["versions"], theirs[0]["versions"]);
 }
+
+fn json_of(printed: &str) -> serde_json::Value {
+    serde_json::from_str(printed).unwrap()
+}
+
+/// `key property` of every open conflict, sorted.
+fn open_conflicts(ws: &Workspace) -> Vec<String> {
+    let mut out: Vec<String> = json_of(&ws.z(&["tracker", "conflicts", &ws.scope()]))
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| format!("{} {}", c["key"].as_str().unwrap(), c["property"].as_str().unwrap()))
+        .collect();
+    out.sort();
+    out
+}
+
+/// `kind key property` of every signal, sorted.
+fn signals(ws: &Workspace) -> Vec<String> {
+    let mut out: Vec<String> = json_of(&ws.z(&["tracker", "signals", &ws.scope()]))
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| {
+            format!(
+                "{} {} {}",
+                s["kind"].as_str().unwrap_or(""),
+                s["key"].as_str().unwrap_or("-"),
+                s["property"].as_str().unwrap_or("-")
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn a_tracker_keeps_its_conflicts_and_says_what_changed() {
+    let ws = Workspace::new("signals");
+    let first = ws.z(&["tracker", "refresh", &ws.scope()]);
+    assert!(first.contains("the first look, so none"), "{first}");
+    // Two sources, two judgements: 0002 is critical to one and medium to the other, 9.8 and 7.5.
+    // 0001 is `important` and `high`, which the map says are one word.
+    assert_eq!(
+        open_conflicts(&ws),
+        ["cve:cve-2026-0002 cvss", "cve:cve-2026-0002 severity"]
+    );
+    assert!(signals(&ws).is_empty());
+
+    ws.update();
+    ws.z(&["tracker", "refresh", &ws.scope()]);
+    assert_eq!(
+        open_conflicts(&ws),
+        [
+            "cve:cve-2026-0001 cvss",
+            "cve:cve-2026-0002 cvss",
+            "cve:cve-2026-0002 severity"
+        ]
+    );
+    assert_eq!(
+        signals(&ws),
+        [
+            "changed cve:cve-2026-0001 cvss",
+            "changed cve:cve-2026-0004 cvss",
+            "changed cve:cve-2026-0004 severity",
+            "conflict cve:cve-2026-0001 cvss",
+        ]
+    );
+
+    // Back as it was, and the conflict that appeared resolves itself.
+    std::fs::copy(
+        fixtures().join("workspace/sources/vendor-a/advisories.csv"),
+        ws.root.join("sources/vendor-a/advisories.csv"),
+    )
+    .unwrap();
+    ws.z(&["source", "update", &ws.dataset("vendor-a")]);
+    ws.z(&["tracker", "refresh", &ws.scope()]);
+    assert!(signals(&ws).contains(&"resolved cve:cve-2026-0001 cvss".to_string()));
+
+    // A rebuild starts the log again and judges the same.
+    let rebuilt = ws.z(&["tracker", "refresh", &ws.scope(), "--rebuild"]);
+    assert!(rebuilt.contains("2 conflicts"), "{rebuilt}");
+    assert!(signals(&ws).is_empty());
+}
+
+#[test]
+fn a_tolerance_and_a_word_nobody_mapped_are_not_conflicts() {
+    let ws = Workspace::new("tolerance");
+    let declared = ws.root.join("trackers/cve/tracker.yaml");
+    let text = std::fs::read_to_string(&declared).unwrap();
+    std::fs::write(&declared, text.replacen("align:\n", "align:\n  cvss:\n    tolerance: \"2\"\n", 1))
+        .unwrap();
+    // Vendor B calls 0002 something no map covers.
+    let b = ws.root.join("sources/vendor-b/advisories.csv");
+    let rows = std::fs::read_to_string(&b).unwrap();
+    std::fs::write(&b, rows.replace("Heap overflow in bar,medium", "Heap overflow in bar,severe")).unwrap();
+    ws.z(&["source", "update", &ws.dataset("vendor-b")]);
+    ws.update();
+
+    let said = ws.z(&["tracker", "refresh", &ws.scope()]);
+    // 9.8 against 7.5 is more than 2 apart, 8.1 against 9.8 is not; `severe` is wording.
+    assert_eq!(open_conflicts(&ws), ["cve:cve-2026-0002 cvss"]);
+    assert!(said.contains("1 that differ only in wording"), "{said}");
+}

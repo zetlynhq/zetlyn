@@ -56,6 +56,8 @@ impl Resolved {
 }
 
 pub struct Tracker {
+    /// The directory the tracker is, where its own store is kept beside its declaration.
+    pub dir: PathBuf,
     /// The workspace this tracker was opened in, where its watches live.
     pub root: PathBuf,
     pub decl: TrackerDecl,
@@ -210,6 +212,7 @@ impl Tracker {
         }
         members.sort_by_key(|m| m.decl.priority.rank());
         Ok(Tracker {
+            dir: dir.to_path_buf(),
             root: datasets.parent().unwrap_or(datasets).to_path_buf(),
             decl,
             members,
@@ -1467,4 +1470,123 @@ fn names_member(pred: &Pred, member: &str) -> bool {
 /// A set, read out in its own order, which is the order that does not depend on arrival.
 fn into_sorted(values: std::collections::BTreeSet<String>) -> Vec<String> {
     values.into_iter().collect()
+}
+
+impl Tracker {
+    /// Everything the sources say, as a tracker store holds it: per thing, per source, per
+    /// property, the words, what the tracker makes of them, and whether it understood them. Read
+    /// through `search`, the call a reader has, as `measure` reads it.
+    pub fn snapshot(&self) -> crate::thingstore::Snapshot {
+        use crate::thingstore::{kind_of, Said, Snap, Snapshot};
+        let keys = self.decl.keys();
+        let mut snap = Snapshot::default();
+        // Sources in priority order, so a thing's title is its highest-priority source's.
+        for m in &self.members {
+            snap.states.insert(m.name().to_string(), m.state().to_string());
+            let mut offset = 0usize;
+            loop {
+                let q = Query {
+                    text: String::new(),
+                    pred: None,
+                    view: None,
+                    ids: Vec::new(),
+                    seen_before: None,
+                    sort: None,
+                    limit: 5000,
+                    offset,
+                };
+                let Ok((_, hits, _)) = m.member.search(&q) else {
+                    break;
+                };
+                if hits.is_empty() {
+                    break;
+                }
+                for hit in &hits {
+                    // One identifier makes a thing, the first scheme of the tracker's the claim
+                    // carries. Others it carries are shown on the thing and make no thing of
+                    // their own.
+                    let Some(id) = keys
+                        .iter()
+                        .find_map(|k| hit.ids.iter().find(|i| i.scheme == *k))
+                    else {
+                        continue;
+                    };
+                    let key = format!("{}:{}", id.scheme, id.value.to_lowercase());
+                    let thing = snap.things.entry(key).or_insert_with(|| Snap {
+                        scheme: id.scheme.clone(),
+                        value: id.value.clone(),
+                        title: hit.title.clone(),
+                        ..Snap::default()
+                    });
+                    thing
+                        .claims
+                        .entry(m.name().to_string())
+                        .or_default()
+                        .insert(hit.record_id.clone());
+                    let props = thing.by.entry(m.name().to_string()).or_default();
+                    for (name, value) in &hit.fields {
+                        let property = self.field_out(m.name(), name);
+                        let align = self.decl.normalise_for(&property);
+                        let words: Vec<String> = match value {
+                            crate::claim::Value::List(items) => items.iter().map(|v| v.display()).collect(),
+                            v => vec![v.display()],
+                        };
+                        let said = props.entry(property.clone()).or_insert_with(|| Said {
+                            kind: kind_of(value).to_string(),
+                            understood: true,
+                            ..Said::default()
+                        });
+                        for w in words {
+                            let mapped = match align {
+                                Some(a) => a.means(m.name(), &w),
+                                None => w.clone(),
+                            };
+                            // Understood where the map names the word or the scale holds what it
+                            // became. A word that passed through unchanged and is on no scale is
+                            // one nobody has said the meaning of.
+                            let named = align
+                                .map(|a| {
+                                    a.position(&mapped).is_some()
+                                        || a.members.get(m.name()).is_some_and(|map| {
+                                            map.contains_key(&w) || map.contains_key(&w.to_lowercase())
+                                        })
+                                })
+                                .unwrap_or(false);
+                            if !named {
+                                said.understood = false;
+                            }
+                            said.raw.insert(w);
+                            said.means.insert(mapped);
+                        }
+                    }
+                }
+                offset += hits.len();
+                if hits.len() < 5000 {
+                    break;
+                }
+            }
+        }
+        snap
+    }
+
+    /// The tracker's own store, made to hold what the sources say now.
+    pub fn refresh(&self, rebuild: bool) -> Result<crate::thingstore::Refreshed, String> {
+        let now = self.snapshot();
+        let mut store = crate::thingstore::ThingStore::open(&self.dir)?;
+        let r = store.refresh(&self.decl, &now, rebuild)?;
+        store.set_meta("mark", &self.mark())?;
+        Ok(r)
+    }
+
+    /// Refreshed where a source has moved since the last refresh, and left alone otherwise, so a
+    /// surface that reads its sources again every minute does the work once an update, not once
+    /// a minute.
+    pub fn refresh_if_moved(&self) -> Result<Option<crate::thingstore::Refreshed>, String> {
+        let store = crate::thingstore::ThingStore::open(&self.dir)?;
+        if store.meta("mark").as_deref() == Some(self.mark().as_str()) {
+            return Ok(None);
+        }
+        drop(store);
+        self.refresh(false).map(Some)
+    }
 }

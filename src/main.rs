@@ -25,6 +25,7 @@ mod serve;
 mod servetracker;
 mod rows;
 mod store;
+mod thingstore;
 mod watch;
 mod yaml;
 
@@ -94,6 +95,9 @@ zetlyn
   zetlyn tracker describe <dir> [--sources <dir>]
   zetlyn tracker search <dir> <query> [--view <name>] [--kind <word>] [--limit <n>]
   zetlyn tracker measure <dir>
+  zetlyn tracker refresh <dir> [--rebuild]
+  zetlyn tracker conflicts <dir>
+  zetlyn tracker signals <dir> [--since <id>]
       A tracker holds no index. It rewrites the query per source, fans out, merges ranked
       lists, and gathers the claims into one thing per identifier.
 
@@ -256,6 +260,47 @@ fn run(args: &[String]) -> Result<(), String> {
                 if wrong.is_empty() {
                     println!("{}: nothing it claims is untrue", scope.decl.name);
                 }
+                Ok(())
+            }
+            // The tracker's own store: things, conflicts and what changed. `--rebuild` makes it
+            // again from the sources and writes no signals.
+            Some("refresh") => {
+                let (dir, sources) = scope_at(args, 2)?;
+                let t = tracker::Tracker::open(&dir, &sources)?;
+                let started = std::time::Instant::now();
+                let r = t.refresh(args.iter().any(|a| a == "--rebuild"))?;
+                println!(
+                    "{} things, {} conflicts, {} that differ only in wording, {} signals{} in {:.1}s",
+                    r.things,
+                    r.conflicts,
+                    r.wording,
+                    r.signals,
+                    if r.first { " (the first look, so none)" } else { "" },
+                    started.elapsed().as_secs_f64()
+                );
+                Ok(())
+            }
+            Some("conflicts") => {
+                let (dir, _) = scope_at(args, 2)?;
+                let store = thingstore::ThingStore::open(&dir)?;
+                let limit = flag(args, "--limit").and_then(|s| s.parse().ok()).unwrap_or(1000);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!(store.conflicts(None, limit)))
+                        .unwrap_or_default()
+                );
+                Ok(())
+            }
+            Some("signals") => {
+                let (dir, _) = scope_at(args, 2)?;
+                let store = thingstore::ThingStore::open(&dir)?;
+                let since = flag(args, "--since").and_then(|s| s.parse().ok());
+                let limit = flag(args, "--limit").and_then(|s| s.parse().ok()).unwrap_or(1000);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!(store.signals(since, limit)))
+                        .unwrap_or_default()
+                );
                 Ok(())
             }
             Some("measure") => {
@@ -615,6 +660,16 @@ fn schedule(args: &[String]) -> Result<(), String> {
                     r.unchanged
                 ),
                 Err(e) => eprintln!("{name}: {e}"),
+            }
+        }
+
+        // Every tracker whose sources moved looks again, so what changed is a signal before a
+        // watch is asked about it.
+        for dir in tracker::scope_registry(&root.join("trackers")).values() {
+            match tracker::Tracker::open(dir, &root.join("sources")).and_then(|t| t.refresh_if_moved()) {
+                Ok(Some(r)) => println!("{}: {} signals, {} conflicts", dir.display(), r.signals, r.conflicts),
+                Ok(None) => {}
+                Err(e) => eprintln!("{}: {e}", dir.display()),
             }
         }
 

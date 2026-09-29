@@ -84,6 +84,11 @@ pub struct Align {
     /// A source's field name onto the tracker's, where they differ.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub from: BTreeMap<String, String>,
+    /// How far apart two sources may be and still agree: a number (`0.1`), or for dates a count
+    /// of days (`1d`). Absent, every difference is a conflict, because a small real difference
+    /// hidden by a default is worse than a loud one somebody can declare away.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tolerance: Option<String>,
     /// Per source, what its words mean on the scale above.
     #[serde(flatten)]
     pub members: BTreeMap<String, BTreeMap<String, String>>,
@@ -204,5 +209,23 @@ impl TrackerDecl {
 
     pub fn normalise_for(&self, field: &str) -> Option<&Align> {
         self.normalise.get(field)
+    }
+}
+
+impl Align {
+    /// The tolerance as a number, for numbers.
+    pub fn number_tolerance(&self) -> f64 {
+        self.tolerance
+            .as_deref()
+            .and_then(|t| t.trim().parse::<f64>().ok())
+            .unwrap_or(0.0)
+    }
+    /// The tolerance in days, for dates: `1d`, or a bare number.
+    pub fn day_tolerance(&self) -> i64 {
+        self.tolerance
+            .as_deref()
+            .map(|t| t.trim().trim_end_matches('d'))
+            .and_then(|t| t.parse::<i64>().ok())
+            .unwrap_or(0)
     }
 }

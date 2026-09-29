@@ -1293,6 +1293,7 @@ impl Store {
         records: u64,
         read: u64,
         fields: &std::collections::BTreeSet<String>,
+        whole: bool,
     ) -> Option<String> {
         let (before, had) = self.last_shape(run)?;
         if before == 0 {
@@ -1300,12 +1301,15 @@ impl Store {
         }
         if records * 5 < before * 3 {
             return Some(format!(
-                "{records} records against {before} on the last complete run, which is more than \
+                "{records} claims against {before} on the last complete update, which is more than \
                  forty per cent fewer"
             ));
         }
-        // A run that read nothing carries no fields, and has nothing to say about them.
-        if read == 0 {
+        // An update that read nothing carries no fields, and has nothing to say about them. Nor
+        // does one that read a slice: nine claims changed since yesterday need not carry every
+        // property twenty thousand do, and holding them to it refused every small update Red Hat
+        // made from 2026-09-26 to 2026-09-29, each rolled back and none of them seen.
+        if read == 0 || !whole {
             return None;
         }
         let lost: Vec<&String> = had.iter().filter(|f| !fields.contains(*f)).collect();
@@ -1524,5 +1528,38 @@ impl Store {
         stmt.query_map([], |r| r.get::<_, String>(0))
             .map(|rows| rows.flatten().collect())
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store(name: &str) -> (Store, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("zetlyn-store-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        (Store::open(&dir).unwrap(), dir)
+    }
+
+    /// A slice is not the whole, and nine claims need not carry every property twenty thousand do.
+    #[test]
+    fn a_slice_is_not_held_to_every_property() {
+        let (s, dir) = store("slice");
+        let all: std::collections::BTreeSet<String> =
+            ["cvss", "packages", "severity"].iter().map(|s| s.to_string()).collect();
+        let first = s.begin_run().unwrap();
+        s.finish_run(first, true, 20, 0, 0, 0, &all, &crate::build::Notes::default(), None)
+            .unwrap();
+        // The store holds twenty, as it would have after that update.
+        s.db.execute("update run set records = 20 where id = ?1", [first]).unwrap();
+        let second = s.begin_run().unwrap();
+        let some: std::collections::BTreeSet<String> = ["cvss".to_string()].into_iter().collect();
+        assert_eq!(s.shape_refusal(second, 20, 9, &some, false), None);
+        // Read whole, the same loss is the source dropping a property, and it is refused.
+        assert!(s
+            .shape_refusal(second, 20, 20, &some, true)
+            .is_some_and(|why| why.contains("packages")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

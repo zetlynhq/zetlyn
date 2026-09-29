@@ -116,6 +116,12 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
         None => 0,
     };
     let stale = !holds || scope.members.iter().any(|m| m.state() != "current");
+    // What the tracker store counted: how many things, how many only one source names, and
+    // the conflicts. Current for everybody, as every count on this page is.
+    let coverage = crate::thingstore::ThingStore::open(&scope.dir)
+        .ok()
+        .filter(|s| s.meta("refreshed").is_some())
+        .map(|s| s.coverage());
 
     let body = html! {
         h1 { (d.title) }
@@ -132,6 +138,23 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
                     }
                 }
                 @else { "the promise of " (f) " does not hold" }
+            }
+        }
+        @if let Some(c) = &coverage {
+            @let by = c["by_sources"].as_object().cloned().unwrap_or_default();
+            @let several: i64 = by.iter().filter(|(n, _)| n.parse::<i64>().unwrap_or(0) > 1).map(|(_, v)| v.as_i64().unwrap_or(0)).sum();
+            p.bar {
+                span.chip { (c["things"].as_i64().unwrap_or(0)) " things" } " "
+                span.chip { (several) " named by two sources or more" } " "
+                a.chip href=(at("/conflicts")) { (c["conflicts"].as_i64().unwrap_or(0)) " conflicts" } " "
+                a.chip href=(at("/changes")) { "what changed" }
+            }
+            @if let Some(only) = c["only"].as_object() {
+                p.dim { "Only one source knows: "
+                    @for (i, (source, n)) in only.iter().enumerate() {
+                        @if i > 0 { " · " } (source) " " (n)
+                    }
+                }
             }
         }
         @if !scope.missing.is_empty() {
@@ -290,6 +313,15 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
 
 fn entry_page(scope: &Tracker, scheme: &str, value: &str) -> Option<String> {
     let entry = scope.entry(scheme, value)?;
+    // What the tracker store judges, which is what the lists and the signals judge too. A thing
+    // page that decided for itself could call a conflict what the conflicts page calls wording.
+    let key = format!("{scheme}:{}", value.to_lowercase());
+    // Where the store has not looked yet, the page judges as it always did, rather than calling
+    // everything agreed.
+    let judged = crate::thingstore::ThingStore::open(&scope.dir)
+        .ok()
+        .filter(|s| s.meta("refreshed").is_some())
+        .map(|s| s.conflicts_of(&key));
     let d = &scope.decl;
     // Each claim once, with its versions and its receipt. A thing has a handful of claims and
     // this page is one thing, so it is a handful of fetches and never a scan.
@@ -299,6 +331,18 @@ fn entry_page(scope: &Tracker, scheme: &str, value: &str) -> Option<String> {
             held.insert((p.member.clone(), p.record_id.clone()), c);
         }
     }
+    // The summary is a source's own text, the highest-priority source that has any, and says
+    // whose it is. Nothing here is written by this program: a generated sentence would be a fact
+    // with no receipt.
+    let summary = scope.members.iter().find_map(|m| {
+        entry
+            .parts
+            .iter()
+            .filter(|p| p.member == m.name())
+            .filter_map(|p| held.get(&(p.member.clone(), p.record_id.clone())))
+            .find(|c| !c.text.trim().is_empty())
+            .map(|c| (said_by(scope, m.name()).0, c))
+    });
     // The claim that says this value, of the ones this source holds about the thing.
     let saying = |member: &str, name: &str, raw: &str| {
         let parts: Vec<_> = entry.parts.iter().filter(|p| p.member == member).collect();
@@ -313,6 +357,14 @@ fn entry_page(scope: &Tracker, scheme: &str, value: &str) -> Option<String> {
         h1 { (entry.title) }
         p.state { span.chip { (scheme) " " (value) } " "
             span.dim { (entry.members().len()) " sources, " (entry.parts.len()) " claims" } }
+        @if let Some((source, c)) = &summary {
+            div.note {
+                span.dim { (source) " writes:" } br;
+                @let text = c.text.trim();
+                @if text.chars().count() > 600 { (text.chars().take(600).collect::<String>()) "…" } @else { (text) }
+                " " a href={(at("/claim/")) (urlencode(&c.dataset)) "/" (c.record_id)} { "the claim" }
+            }
+        }
 
         @if !entry.fields.is_empty() {
             h2 { "What each source says" }
@@ -325,7 +377,11 @@ fn entry_page(scope: &Tracker, scheme: &str, value: &str) -> Option<String> {
                             @for (i, raw) in said.iter().enumerate() {
                                 tr {
                                     td { (name)
-                                        @if f.divergent { " " span.chip.on { "conflict" } } }
+                                        @if judged.as_ref().map(|j| j.contains(name)).unwrap_or(f.divergent && f.by.len() > 1) { " " span.chip.on { "conflict" } }
+                                        @else if f.divergent && f.by.len() > 1 {
+                                            @if f.means.values().flatten().all(|v| v.parse::<f64>().is_ok()) { " " span.chip { "within tolerance" } }
+                                            @else { " " span.chip { "different words" } }
+                                        } }
                                     td.dim { @if i == 0 { (member) } }
                                     td { (raw)
                                         @if let Some(means) = definition(scope, member, raw) {
@@ -899,70 +955,118 @@ fn atom(title: &str, self_url: &str, entries: &[J], updated: &str) -> String {
 
 fn changes_page(scope: &Tracker, url: &str) -> String {
     let p = params(url);
-    let since = p
-        .get("since")
-        .cloned()
-        .unwrap_or_else(|| scope.mark_before());
-    let report = scope.changes(&since, 200);
-    let empty = Vec::new();
-    let entries = report["things"].as_array().unwrap_or(&empty);
-    let without: Vec<&str> = report["without_history"]
-        .as_array()
-        .unwrap_or(&empty)
+    let before: Option<i64> = p.get("before").and_then(|s| s.parse().ok());
+    let store = crate::thingstore::ThingStore::open(&scope.dir).ok();
+    let all = store.as_ref().map(|s| s.signals(None, 5000)).unwrap_or_default();
+    let signals: Vec<&J> = all
         .iter()
-        .filter_map(J::as_str)
+        .filter(|s| before.map(|b| s["id"].as_i64().unwrap_or(0) < b).unwrap_or(true))
+        .take(300)
         .collect();
+    let today = crate::iso_date(crate::now());
+    let yesterday = crate::iso_date(crate::now() - 86_400);
+    // By day, newest first, as an inbox is read.
+    let mut days: Vec<(String, Vec<&J>)> = Vec::new();
+    for s in &signals {
+        let day = s["at"].as_str().unwrap_or("").get(..10).unwrap_or("").to_string();
+        match days.last_mut() {
+            Some((d, list)) if *d == day => list.push(s),
+            _ => days.push((day, vec![s])),
+        }
+    }
+    let label = |day: &str| -> String {
+        if day == today {
+            "Today".into()
+        } else if day == yesterday {
+            "Yesterday".into()
+        } else {
+            day.to_string()
+        }
+    };
+    let words = |kind: &str, n: usize| -> String {
+        let (one, many) = match kind {
+            "new_thing" => ("new thing", "new things"),
+            "new_perspective" => ("new perspective", "new perspectives"),
+            "changed" => ("change", "changes"),
+            "conflict" => ("new conflict", "new conflicts"),
+            "resolved" => ("conflict resolved", "conflicts resolved"),
+            "withdrawn" => ("withdrawn", "withdrawn"),
+            _ => ("source health", "source health"),
+        };
+        format!("{n} {}", if n == 1 { one } else { many })
+    };
+    let thing = |s: &J| -> Markup {
+        let title = s["title"].as_str().filter(|t| !t.is_empty()).or(s["value"].as_str()).unwrap_or("");
+        match (s["scheme"].as_str(), s["value"].as_str()) {
+            (Some(scheme), Some(value)) => html! {
+                a href={(at("/thing/")) (urlencode(scheme)) "/" (urlencode(value))} { (title) }
+            },
+            _ => html! { (s["key"].as_str().unwrap_or("")) },
+        }
+    };
+    let list = |v: &J| -> String {
+        match v {
+            J::Array(a) => a.iter().filter_map(J::as_str).collect::<Vec<_>>().join(", "),
+            J::Object(o) => o
+                .iter()
+                .map(|(k, v)| format!("{k} {}", v.as_array().map(|a| a.iter().filter_map(J::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default()))
+                .collect::<Vec<_>>()
+                .join(" · "),
+            J::String(s) => s.clone(),
+            _ => "—".into(),
+        }
+    };
     let body = html! {
         p { a href=(at("/")) { "← " (scope.decl.title) } }
         h1 { "Changes" }
-        p.dim { "Since " (since) ". The mark now is " (scope.mark()) "." }
         p.bar {
-            a.chip href={(at("/changes.atom?since=")) (urlencode(&since))} { "Atom" }
-            a.chip href={(at("/api/changes?since=")) (urlencode(&since))} { "JSON" }
+            a.chip href=(at("/conflicts")) { "Conflicts" }
+            a.chip href=(at("/changes.atom")) { "Atom" }
         }
-        @if !without.is_empty() {
-            div.note {
-                "These sources keep no history, so a change from them says that a claim moved and "
-                "not what in it did: " (without.join(", ")) "."
-            }
+        @if store.is_none() || all.is_empty() {
+            p.dim { "Nothing has changed since this tracker first looked at its sources. What changes from now on is kept here." }
         }
-        @if entries.is_empty() { p.dim { "Nothing since then." } }
-        @for e in entries {
-            @let key = e["identifier"]["value"].as_str().unwrap_or("");
-            @let scheme = e["identifier"]["scheme"].as_str().unwrap_or("");
-            h3 {
-                @if key.is_empty() { (e["title"].as_str().unwrap_or("")) }
-                @else {
-                    a href={(at("/thing/")) (urlencode(scheme)) "/" (urlencode(key))} {
-                        (e["title"].as_str().unwrap_or(""))
-                    }
-                }
-            }
+        @for (day, list_of) in &days {
+            h2 { (label(day)) }
+            @let mut kinds: BTreeMap<&str, usize> = BTreeMap::new();
+            @for s in list_of { @let _ = { *kinds.entry(s["kind"].as_str().unwrap_or("")).or_default() += 1; }; }
+            p.bar { @for (k, n) in &kinds { span.chip { (words(k, *n)) } " " } }
             table { tbody {
-                @for c in e["changes"].as_array().unwrap_or(&empty) {
+                @for s in list_of {
+                    @let kind = s["kind"].as_str().unwrap_or("");
+                    @let source = s["source"].as_str().unwrap_or("");
+                    @let property = s["property"].as_str().unwrap_or("");
                     tr {
-                        td style="width: 10rem" {
-                            span.chip { (c["how"].as_str().unwrap_or("")) } " "
-                            span.dim { (c["source"].as_str().unwrap_or("")) }
-                        }
+                        td.dim style="width: 5rem" { (s["at"].as_str().unwrap_or("").get(11..16).unwrap_or("")) }
                         td {
-                            @let moved = c["properties"].as_array();
-                            @match moved {
-                                Some(fields) if !fields.is_empty() => {
-                                    @for f in fields {
-                                        div {
-                                            (f["property"].as_str().unwrap_or("")) ": "
-                                            span.dim { (f["was"].as_str().unwrap_or("—")) }
-                                            " → " strong { (f["is"].as_str().unwrap_or("—")) }
-                                        }
-                                    }
+                            @match kind {
+                                "new_thing" => { "New: " (thing(s)) span.dim { " · first said by " (source) } }
+                                "new_perspective" => { (source) " now speaks about " (thing(s)) }
+                                "changed" => {
+                                    (thing(s)) ": " strong { (property) } " at " (source) " "
+                                    span.dim { (list(&s["was"])) } " → " strong { (list(&s["is"])) }
                                 }
-                                _ => span.dim { "the claim moved; this source keeps no history" },
+                                "conflict" => {
+                                    span.chip.on { "conflict" } " " (thing(s)) ": sources now disagree about "
+                                    strong { (property) } " " span.dim { (list(&s["is"])) }
+                                }
+                                "resolved" => { (thing(s)) ": sources agree again about " strong { (property) } }
+                                "withdrawn" => {
+                                    @if source.is_empty() { (list(&s["was"])) " is no longer said by any source" }
+                                    @else { (source) " no longer says anything about " (thing(s)) }
+                                }
+                                "health" => { (source) ": " span.dim { (list(&s["was"])) } " → " strong { (list(&s["is"])) } }
+                                _ => { (kind) }
                             }
                         }
                     }
                 }
             } }
+        }
+        @if signals.len() == 300 {
+            @if let Some(last) = signals.last().and_then(|s| s["id"].as_i64()) {
+                p { a href={(at("/changes?before=")) (last)} { "Older" } }
+            }
         }
     };
     shell("Changes", body)
@@ -999,6 +1103,10 @@ pub fn serve(mut scope: Tracker, dir: &Path, datasets: &Path, addr: &str) -> Res
     if site.mail.run.is_empty() {
         println!("no mailer named in workspace.yaml, so sign-in links are printed here");
     }
+    // A tracker whose store is behind its sources, or has none, refreshes before it answers.
+    if let Err(e) = scope.refresh_if_moved() {
+        eprintln!("{}: the tracker store was not refreshed: {e}", dir.display());
+    }
     let mut read_at = crate::now();
 
     for mut request in server.incoming_requests() {
@@ -1006,7 +1114,13 @@ pub fn serve(mut scope: Tracker, dir: &Path, datasets: &Path, addr: &str) -> Res
         // two readings.
         if crate::now() - read_at >= REREAD {
             match Tracker::open(dir, datasets) {
-                Ok(fresh) => scope = fresh,
+                Ok(fresh) => {
+                    scope = fresh;
+                    // What changed since the last look becomes signals, once per update.
+                    if let Err(e) = scope.refresh_if_moved() {
+                        eprintln!("{}: the tracker store was not refreshed: {e}", dir.display());
+                    }
+                }
                 Err(e) => eprintln!("{}: read again failed, serving the last one: {e}", dir.display()),
             }
             read_at = crate::now();
@@ -1214,6 +1328,23 @@ pub fn serve(mut scope: Tracker, dir: &Path, datasets: &Path, addr: &str) -> Res
                 }
             }
 
+            "/conflicts" | "/conflicts/mark" if !v.entitled(&scope.decl.name) => (
+                pricing_page(&scope, &site, &v),
+                "text/html; charset=utf-8",
+                None,
+            ),
+            "/conflicts" => (conflicts_page(&scope, &url, &v, None), "text/html; charset=utf-8", None),
+            "/conflicts/mark" if post => {
+                let said = match (v.email(), crate::thingstore::ThingStore::open(&scope.dir)) {
+                    (Some(reader), Ok(store)) => store
+                        .mark(reader, &form_field(&form, "key"), &form_field(&form, "property"), &form_field(&form, "state"))
+                        .map(|_| "Marked. The mark is yours alone.".to_string())
+                        .unwrap_or_else(|e| e),
+                    (None, _) => "Sign in to mark a conflict.".to_string(),
+                    (_, Err(e)) => e,
+                };
+                (conflicts_page(&scope, &url, &v, Some(&said)), "text/html; charset=utf-8", None)
+            }
             "/changes" | "/changes.atom" if !v.entitled(&scope.decl.name) => (
                 pricing_page(&scope, &site, &v),
                 "text/html; charset=utf-8",
@@ -1343,6 +1474,7 @@ pub fn serve(mut scope: Tracker, dir: &Path, datasets: &Path, addr: &str) -> Res
         let gated = path.starts_with("/api/")
             || path.starts_with("/export")
             || path.starts_with("/changes")
+            || path.starts_with("/conflicts")
             || path.starts_with("/watch/");
         if gated && !v.entitled(&scope.decl.name) {
             status = 402;
@@ -1570,4 +1702,104 @@ fn add_scope(scope: &Tracker, form: &str) -> Result<String, String> {
          write themselves.",
         path.display()
     ))
+}
+
+/// Every open conflict, by property. A reader marks one seen or mutes it, for themselves; nobody
+/// resolves one, because it is the sources' and resolves when they agree.
+fn conflicts_page(scope: &Tracker, url: &str, v: &Viewer, said: Option<&str>) -> String {
+    let p = params(url);
+    let showing = p.get("state").cloned().unwrap_or_else(|| "open".into());
+    let property = p.get("property").cloned();
+    let store = crate::thingstore::ThingStore::open(&scope.dir).ok();
+    let reader = v.email();
+    let all = store.as_ref().map(|s| s.conflicts(reader, 100_000)).unwrap_or_default();
+    let counts = store.as_ref().map(|s| s.conflict_counts()).unwrap_or_default();
+    let shown: Vec<&J> = all
+        .iter()
+        .filter(|c| property.as_deref().map(|p| c["property"] == p).unwrap_or(true))
+        .filter(|c| {
+            let state = c["state"].as_str().unwrap_or("new");
+            match showing.as_str() {
+                "open" => state != "muted",
+                "all" => true,
+                s => state == s,
+            }
+        })
+        .take(500)
+        .collect();
+    let new = all.iter().filter(|c| c["state"] == "new").count();
+    let body = html! {
+        p { a href=(at("/")) { "← " (scope.decl.title) } }
+        h1 { "Conflicts" }
+        @if let Some(m) = said { div.note { (m) } }
+        p.state {
+            (all.len()) " open" @if reader.is_some() { ", " (new) " new to you" } ". "
+            span.dim { "Two or more sources say different things after the tracker's map. "
+                "Where only the words differ and no map says what they mean together, it is "
+                "counted as wording and not listed here." }
+        }
+        p.bar {
+            a.chip.on[property.is_none()] href=(at("/conflicts")) { "every property" }
+            @for (name, n) in &counts {
+                " " a.chip.on[property.as_deref() == Some(name.as_str())]
+                    href={(at("/conflicts?property=")) (urlencode(name))} { (name) " " (n) }
+            }
+            " · "
+            @for s in ["open", "new", "seen", "muted", "all"] {
+                " " a.chip.on[showing == s] href={(at("/conflicts?state=")) (s)
+                    @if let Some(p) = &property { "&property=" (urlencode(p)) }} { (s) }
+            }
+        }
+        @if shown.is_empty() { p.dim { "None." } }
+        table {
+            @if !shown.is_empty() {
+                thead { tr { th { "Thing" } th { "Property" } th { "What each source says" } th { "Since" } th {} } }
+            }
+            tbody {
+                @for c in &shown {
+                    @let scheme = c["scheme"].as_str().unwrap_or("");
+                    @let value = c["value"].as_str().unwrap_or("");
+                    @let state = c["state"].as_str().unwrap_or("new");
+                    tr {
+                        td {
+                            a href={(at("/thing/")) (urlencode(scheme)) "/" (urlencode(value))} {
+                                (c["title"].as_str().unwrap_or(value))
+                            }
+                            div.why { (scheme) " " (value) }
+                        }
+                        td { (c["property"].as_str().unwrap_or("")) }
+                        td {
+                            @if let Some(o) = c["sources"].as_object() {
+                                @for (source, words) in o {
+                                    div { span.dim { (source) } " "
+                                        strong { (words.as_array().map(|a| a.iter().filter_map(J::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default()) } }
+                                }
+                            }
+                        }
+                        td.dim { (c["since"].as_str().unwrap_or("").get(..10).unwrap_or("")) }
+                        td {
+                            @if reader.is_some() {
+                                form method="post" action=(at("/conflicts/mark")) {
+                                    input type="hidden" name="key" value=(c["key"].as_str().unwrap_or(""));
+                                    input type="hidden" name="property" value=(c["property"].as_str().unwrap_or(""));
+                                    @if state == "new" {
+                                        button name="state" value="seen" { "seen" } " "
+                                    }
+                                    @if state == "muted" {
+                                        button name="state" value="new" { "unmute" }
+                                    } @else {
+                                        button name="state" value="muted" { "mute" }
+                                    }
+                                }
+                            } @else if state != "new" { span.chip { (state) } }
+                        }
+                    }
+                }
+            }
+        }
+        @if reader.is_none() {
+            p.dim { "Sign in to mark a conflict seen or mute it. The marks are yours and nobody else sees them." }
+        }
+    };
+    shell("Conflicts", body)
 }

@@ -145,7 +145,7 @@ impl Source {
         let read = added + changed + unchanged;
         let after = if whole { read } else { self.store.count() };
         let refusal = if complete {
-            self.store.shape_refusal(run, after, read, &seen_fields)
+            self.store.shape_refusal(run, after, read, &seen_fields, whole)
         } else {
             None
         };

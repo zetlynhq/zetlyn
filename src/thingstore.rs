@@ -809,6 +809,40 @@ impl ThingStore {
             .collect())
     }
 
+
+    /// The thing the website shows: exploited if any is, in dispute, and said by as many sources
+    /// as any. The same one tomorrow unless the sources change, so the page does not flicker.
+    pub fn showcase(&self, prefer: &str) -> Option<String> {
+        self.db
+            .query_row(
+                "select c.key from conflict c join speaks s on s.key = c.key
+                 group by c.key
+                 order by max(s.source = ?1) desc, count(distinct s.source) desc, c.key
+                 limit 1",
+                [prefer],
+                |r| r.get(0),
+            )
+            .ok()
+    }
+
+    /// What each source says of one thing: source, property, its words, what they mean here.
+    pub fn said_of(&self, key: &str) -> Vec<(String, String, Vec<String>, Vec<String>)> {
+        let Ok(mut stmt) = self.db.prepare("select source, property, raw, means from said where key = ?1 order by property, source") else {
+            return Vec::new();
+        };
+        let list = |s: String| serde_json::from_str::<Vec<String>>(&s).unwrap_or_default();
+        stmt.query_map([key], |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?)))
+            .map(|rows| rows.flatten().map(|(s, p, raw, means)| (s, p, list(raw), list(means))).collect())
+            .unwrap_or_default()
+    }
+
+    /// The sources that speak about one thing.
+    pub fn speakers(&self, key: &str) -> Vec<String> {
+        let Ok(mut stmt) = self.db.prepare("select source from speaks where key = ?1 order by source") else {
+            return Vec::new();
+        };
+        stmt.query_map([key], |r| r.get(0)).map(|rows| rows.flatten().collect()).unwrap_or_default()
+    }
     /// Title, scheme and value of a thing, for a list that shows it.
     pub fn named(&self, key: &str) -> Option<(String, String, String)> {
         self.db

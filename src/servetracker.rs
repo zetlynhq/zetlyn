@@ -1177,6 +1177,14 @@ impl TrackerSite {
                 "text/css; charset=utf-8",
                 None,
             ),
+            // For the website's front page: what the overview and a thing page already show to
+            // anyone, as one answer another site may fetch. Nothing gated is in it, so it is open
+            // to every origin and carries no cookie.
+            "/demo.json" => (
+                demo(&scope).to_string(),
+                "application/json",
+                Some(("Access-Control-Allow-Origin".to_string(), "*".to_string())),
+            ),
             "/pricing" => (
                 pricing_page(&scope, &site, &v),
                 "text/html; charset=utf-8",
@@ -2114,4 +2122,51 @@ fn watch_question(scope: &Tracker, q: &str, title: &str) -> String {
         Ok(()) => format!("Watched as {name}: its first check remembers what it holds, and each one after says what entered, what left and what changed. The feed is {}.", at(&format!("/watch/{name}.atom"))),
         Err(e) => e,
     }
+}
+
+/// The tracker as the website shows it: its counts, its sources, how much it noticed today, and
+/// one thing its sources disagree about, with what each of them says. Every figure is one a
+/// public page of this tracker shows, and each carries the address that shows it.
+fn demo(scope: &Tracker) -> J {
+    let Ok(store) = crate::thingstore::ThingStore::open(&scope.dir) else {
+        return json!({ "error": "this tracker has no store yet" });
+    };
+    let title_of = |name: &str| -> String {
+        scope.members.iter().find(|m| m.name() == name).map(|m| said_by(scope, m.name()).0).unwrap_or_else(|| name.to_string())
+    };
+    let day = crate::iso_date(crate::now());
+    let mut today: BTreeMap<String, u64> = BTreeMap::new();
+    for s in store.signals(None, 20_000) {
+        if s["at"].as_str().is_some_and(|a| a.starts_with(&day)) {
+            *today.entry(s["kind"].as_str().unwrap_or("").to_string()).or_default() += 1;
+        }
+    }
+    let prefer = scope.members.iter().find(|m| m.name().ends_with("-kev")).map(|m| m.name().to_string()).unwrap_or_default();
+    let thing = store.showcase(&prefer).and_then(|key| {
+        let (title, scheme, value) = store.named(&key)?;
+        let conflicts = store.conflicts_of(&key);
+        let mut by: BTreeMap<String, Vec<J>> = BTreeMap::new();
+        for (source, property, raw, means) in store.said_of(&key) {
+            by.entry(property).or_default().push(json!({ "source": title_of(&source), "said": raw, "means": means }));
+        }
+        let values: Vec<J> = by
+            .into_iter()
+            .map(|(p, said)| json!({ "property": p, "conflict": conflicts.contains(&p), "by": said }))
+            .collect();
+        Some(json!({
+            "title": title, "scheme": scheme, "value": value,
+            "page": at(&format!("/thing/{}/{}", urlencode(&scheme), urlencode(&value))),
+            "sources": store.speakers(&key).iter().map(|s| title_of(s)).collect::<Vec<_>>(),
+            "conflicts": conflicts,
+            "values": values,
+        }))
+    });
+    json!({
+        "tracker": { "name": scope.decl.name, "title": scope.decl.title, "page": at("/") },
+        "taken": crate::iso_stamp(crate::now()),
+        "counts": store.coverage(),
+        "sources": scope.members.iter().map(|m| json!({ "title": said_by(scope, m.name()).0, "why": m.decl.why })).collect::<Vec<_>>(),
+        "today": today,
+        "thing": thing,
+    })
 }

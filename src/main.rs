@@ -228,7 +228,8 @@ fn run(args: &[String]) -> Result<(), String> {
                 if wrong.is_empty() {
                     println!("{}: nothing it claims is untrue", ds.decl.name);
                 }
-                Ok(())
+                // Non-zero, so a check in CI stops the build that would publish it.
+                if wrong.is_empty() { Ok(()) } else { Err(format!("{} untrue", wrong.len())) }
             }
             Some("describe") => {
                 let dir = dir_at(args, 2)?;
@@ -303,7 +304,8 @@ fn run(args: &[String]) -> Result<(), String> {
                 if wrong.is_empty() {
                     println!("{}: nothing it claims is untrue", scope.decl.name);
                 }
-                Ok(())
+                // Non-zero, so a check in CI stops the build that would publish it.
+                if wrong.is_empty() { Ok(()) } else { Err(format!("{} untrue", wrong.len())) }
             }
             // The tracker's own store: things, conflicts and what changed. `--rebuild` makes it
             // again from the sources and writes no signals.

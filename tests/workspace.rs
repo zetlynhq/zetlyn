@@ -741,3 +741,17 @@ fn a_question_in_words_becomes_a_filter_or_is_refused() {
     let (ok, said) = assisted(&ws, &["assist", "ask", &scope, "What does vendor C say is high?", "--send"]);
     assert!(!ok && said.contains("no filter came out of it") && said.contains("no source here is called that"), "{said}");
 }
+
+#[test]
+fn a_check_that_finds_something_untrue_fails() {
+    let ws = Workspace::new("check");
+    // Held and true: zero.
+    let (ok, said) = run(&ws.root, &["source", "check", &ws.dataset("kev")]);
+    assert!(ok && said.contains("nothing it claims is untrue"), "{said}");
+    // Never updated, so it holds nothing it could be checked on, which a CI must not pass.
+    let empty = ws.root.join("sources/empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    std::fs::copy(ws.root.join("sources/kev/source.yaml"), empty.join("source.yaml")).unwrap();
+    let (ok, said) = run(&ws.root, &["source", "check", &empty.display().to_string()]);
+    assert!(!ok && said.contains("holds no claims"), "{said}");
+}

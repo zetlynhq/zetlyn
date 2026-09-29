@@ -357,3 +357,94 @@ fn a_hub_carries_a_source_and_what_changed() {
     assert_eq!(theirs.lines().next(), ours.lines().next(), "{ours}");
     assert!(ours.starts_with("2 claims"), "{ours}");
 }
+
+/// `zetlyn claim` on a source, as JSON: one claim per object, printed one after another.
+fn claims_of(printed: &str) -> Vec<serde_json::Value> {
+    serde_json::Deserializer::from_str(printed)
+        .into_iter::<serde_json::Value>()
+        .map(|v| v.unwrap())
+        .collect()
+}
+
+/// The raw words a version's receipt holds for one property.
+fn raw(version: &serde_json::Value, property: &str) -> Vec<String> {
+    version["excerpt"]["properties"][property]["raw"]
+        .as_array()
+        .map(|a| a.iter().map(|v| v.as_str().unwrap_or("").to_string()).collect())
+        .unwrap_or_default()
+}
+
+#[test]
+fn every_value_has_a_receipt_and_a_history() {
+    let ws = Workspace::new("receipts");
+    ws.update();
+    let c = claims_of(&ws.z(&["claim", &ws.dataset("vendor-a"), "CVE-2026-0001"]));
+    assert_eq!(c.len(), 1);
+    let claim = &c[0];
+
+    // What the source handed over, as it handed it over: the row, and per property the
+    // expression that read it and the words it read.
+    assert_eq!(claim["excerpt"]["row"]["cvss"], "8.1");
+    assert_eq!(claim["excerpt"]["properties"]["cvss"]["from"], "field:cvss");
+    assert_eq!(raw(claim, "severity"), ["important"]);
+
+    // And every version before it, each with its own receipt and the time it was first seen.
+    let versions = claim["versions"].as_array().unwrap();
+    assert_eq!(versions.len(), 2, "{versions:#?}");
+    assert_eq!(raw(&versions[0], "cvss"), ["9.8"]);
+    assert_eq!(raw(&versions[1], "cvss"), ["8.1"]);
+    assert_eq!(versions[0]["excerpt"]["row"]["cvss"], "9.8");
+    assert!(versions[0]["at"].as_str().unwrap() <= versions[1]["at"].as_str().unwrap());
+    assert_eq!(claim["source"], "test/vendor-a");
+}
+
+#[test]
+fn history_is_kept_without_being_asked_for() {
+    let ws = Workspace::new("default-history");
+    let dir = ws.root.join("sources/proposed");
+    let csv = ws.root.join("advisories.csv");
+    std::fs::copy(ws.root.join("sources/vendor-a/advisories.csv"), &csv).unwrap();
+    let dir_s = dir.display().to_string();
+    ws.z(&["source", "new", "--from", &csv.display().to_string(), "--at", &dir_s, "--name", "local/proposed"]);
+    let declared = std::fs::read_to_string(dir.join("source.yaml")).unwrap();
+    assert!(!declared.contains("retention"), "a default is not written: {declared}");
+    ws.z(&["source", "update", &dir_s]);
+    std::fs::copy(fixtures().join("update-2/vendor-a.csv"), &csv).unwrap();
+    ws.z(&["source", "update", &dir_s]);
+    let c = claims_of(&ws.z(&["claim", &dir_s, "CVE-2026-0004"]));
+    let versions = c[0]["versions"].as_array().unwrap();
+    assert_eq!(versions.len(), 2, "{versions:#?}");
+    assert_eq!(raw(&versions[0], "severity"), ["moderate"]);
+    assert_eq!(raw(&versions[1], "severity"), ["critical"]);
+}
+
+#[test]
+fn a_subscriber_holds_the_same_receipts() {
+    let ws = Workspace::new("hub-receipts");
+    let hub = ws.root.join("hub").display().to_string();
+    let held = ws.root.join("elsewhere").display().to_string();
+    let with_home = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_zetlyn"))
+            .args(args)
+            .env("ZETLYN_HOME", ws.root.join("home"))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    with_home(&["source", "publish", &ws.dataset("vendor-a"), "--to", &hub]);
+    with_home(&["source", "subscribe", "test/vendor-a", "--from", &hub, "--at", &held]);
+    let first = claims_of(&with_home(&["claim", &held, "CVE-2026-0001"]));
+    assert_eq!(first[0]["versions"].as_array().map(Vec::len), Some(1));
+    assert_eq!(first[0]["excerpt"]["row"]["cvss"], "9.8");
+
+    ws.update();
+    with_home(&["source", "publish", &ws.dataset("vendor-a"), "--to", &hub]);
+    let pulled = with_home(&["source", "pull", &held]);
+    assert!(pulled.contains("by delta"), "{pulled}");
+
+    let theirs = claims_of(&ws.z(&["claim", &ws.dataset("vendor-a"), "CVE-2026-0001"]));
+    let ours = claims_of(&with_home(&["claim", &held, "CVE-2026-0001"]));
+    assert_eq!(ours[0]["excerpt"], theirs[0]["excerpt"]);
+    assert_eq!(ours[0]["versions"], theirs[0]["versions"]);
+}

@@ -1,6 +1,6 @@
 # The Zetlyn specifications
 
-Version 2.0. What changed from 1.0 is at the end.
+Version 2.1. What changed from 1.0, and from 2.0, is at the end.
 
 Three contracts, and nothing else here is one. The rest of how Zetlyn works is documentation: read
 `README.md`, or read the code, which is the same length and more honest.
@@ -59,6 +59,32 @@ properties, and it is what an update compares to decide whether a claim changed.
 `from` is where it came from: a URL, a file and row, or a character span where the claim is part of
 a larger document. `attachments` are files the claim points at, each with its media type, its size
 and its hash, stored under `blobs/`. An image claim is a claim with one attachment.
+
+### Its receipt
+
+A claim may carry `excerpt`: what its source handed over when it was made, and per property the
+expression that read it and the words it read.
+
+```json
+"excerpt": {
+  "row": {"cve": "CVE-2026-0001", "cvss": "9.8", "severity": "important", "…": "…"},
+  "properties": {
+    "cvss":     {"from": "field:cvss",     "raw": ["9.8"]},
+    "severity": {"from": "field:severity", "raw": ["important"]}
+  }
+}
+```
+
+`row` is the object a JSON source answered with, the row of a table, the item of a feed, or the
+element `each` took from a container. Past 256 KB it is left out and `row_bytes` says how large it
+was. A file read as text has no `row`: the text is the claim's own.
+
+The excerpt is not in the hash. It is the receipt for what the claim says and not part of what it
+says, so a source that reformats its answer without changing it has not changed its claim.
+
+A claim fetched with its versions carries `versions`: every version it was at, oldest first, each
+with `update`, `at` (when an update first saw it), `hash`, `title`, `known`, `properties` and its
+own `excerpt`.
 
 ### Identifiers
 
@@ -138,7 +164,7 @@ same six for every source whatever it was built from.
 | `describe()` | what I am, what I hold, what I can be asked |
 | `search(query)` | ranked claims matching a query |
 | `facet(query, property)` | how many claims per value of a property, under that query |
-| `fetch(ids)` | whole claims by identifier or claim id |
+| `fetch(ids, versions)` | whole claims by identifier or claim id, with every version where asked |
 | `changes(since, query)` | what was added, changed and removed since a mark |
 | `mark()` | the current mark, to be handed back to `changes` later |
 
@@ -288,23 +314,23 @@ the host in a reference says where the bytes came from.
 
 ### The artifact is not the store
 
-A store holds more than the claims. `zetlyn/cve-kev` holds 1,726 claims, 11,907 properties and 1,726
-identifiers, and alongside them 5,180 revisions, twelve updates with their errors and refusals, and
-six tables of full-text index. A source whose fetch takes a watermark keeps that here too.
+A store holds more than the claims: the full-text index, the identifier and property indexes, every
+update with its errors and refusals, and the watermark a source whose fetch takes one resumes from.
 
-The revisions, the updates and the watermark are the publisher's operating history. The full-text
-index is derived from the text and rebuilt on arrival. None of it travels, and the difference is
-not small: over the eleven sources here, 98,546 claims, the stores are 398 MB and the claims
-themselves are 61 MB.
+The claims travel with their receipts, and since 2.1 so does every version the publisher kept. A
+subscriber shows the same receipt and the same history as the publisher, because the public pages a
+hub serves are built from subscribed sources and a history that stayed behind would leave every
+receipt there empty.
 
 | | |
 |---|---|
-| travels | the claims: identity, kind, title, url, text, known, identifiers, typed properties, hash |
+| travels | the claims: identity, kind, title, url, text, known, identifiers, typed properties, hash, receipt |
+| travels since 2.1 | every version the publisher kept, each with its receipt, in `history.jsonl` |
 | rebuilt on arrival | the full-text index, the identifier index, the property index |
-| stays with the publisher | the revision history, the update history, the watermarks, the secrets |
+| stays with the publisher | the update history, the watermarks, the secrets |
 
-A subscriber who wants history keeps their own, built from the versions they have applied. It
-begins the day they subscribed and not the day the publisher started.
+A subscriber keeps no history of its own for a subscribed source. The publisher's is the source's,
+and a subscriber's updates only ever saw what the publisher had already said.
 
 ### The manifest
 
@@ -388,7 +414,8 @@ and `zetlyn source check` holds them against the claims that arrived.
 
 ```json
 "payloads": {
-  "claims.jsonl": {"bytes": 19173376, "sha256": "…"}
+  "claims.jsonl":  {"bytes": 19173376, "sha256": "…"},
+  "history.jsonl": {"bytes": 4812004,  "sha256": "…"}
 }
 ```
 
@@ -400,6 +427,10 @@ lists that name.
 `claims.jsonl` is one claim per line, in the shape section *A claim* defines, each carrying the
 hash it already has. On a delta the payloads are what the delta ships: the claims that were added
 or changed, and `removed.jsonl`, one claim id per line.
+
+`history.jsonl` is one version per line: `claim_id`, and the version as *Its receipt* describes it.
+A source that keeps no history ships none, and its manifest names no such payload. On a delta it
+carries the versions a subscriber at the previous version does not hold yet.
 
 ### Who published it
 
@@ -451,6 +482,7 @@ delta sits inside the version it produces, under the version it applies to:
 /sources/{owner}/{name}/versions/{v}/from/{p}/manifest.json
 /sources/{owner}/{name}/versions/{v}/from/{p}/claims.jsonl the claims that arrived or changed
 /sources/{owner}/{name}/versions/{v}/from/{p}/removed.jsonl one claim id per line
+/sources/{owner}/{name}/versions/{v}/from/{p}/history.jsonl the versions kept since
 ```
 
 The directory names what a subscriber holds *after* applying it, so every hash in `tags/` and every
@@ -565,3 +597,15 @@ hub carries are the same as they were; each has another name.
 
 A 1.0 artifact is refused by a 2.0 subscriber with the version it was built against, rather than
 read under names it does not carry.
+
+## What changed from 2.0
+
+Receipts and history, and nothing taken away.
+
+| | |
+|---|---|
+| `excerpt` | a claim may carry its receipt: what the source handed over, and per property the expression and the raw words |
+| `fetch(ids, versions)` | `/api/fetch?id=…&versions=1` returns every version each claim was at |
+| `history.jsonl` | a new payload, on a whole version and on a delta |
+| a delta's claims | a claim whose receipt changed travels in a delta as a claim that changed does |
+| reading | a 2.1 subscriber reads a 2.0 artifact, which is a 2.1 one with no receipts and no history. An artifact of another major version is refused |

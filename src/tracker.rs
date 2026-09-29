@@ -854,11 +854,11 @@ impl Tracker {
         Some(entry)
     }
 
-    pub fn records_of(&self, member: &str, ids: &[String]) -> Vec<Claim> {
+    pub fn records_of(&self, member: &str, ids: &[String], versions: bool) -> Vec<Claim> {
         self.members
             .iter()
             .find(|m| m.name() == member)
-            .map(|m| m.member.fetch(ids))
+            .map(|m| m.member.fetch(ids, versions))
             .unwrap_or_default()
     }
 

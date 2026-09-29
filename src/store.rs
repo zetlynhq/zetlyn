@@ -9,7 +9,7 @@ use serde_json::Value as J;
 
 use crate::sourcedecl::{SourceDecl, PropertyType};
 use crate::expr::{Lit, Op, Pred};
-use crate::claim::{Attachment, Id, Origin, Claim, Value};
+use crate::claim::{Attachment, Claim, Id, Origin, Value, Version};
 
 pub struct Store {
     pub db: Connection,
@@ -86,6 +86,10 @@ create table if not exists run(
   unparsed integer default 0, duplicates integer default 0, note text, error text,
   -- What the run saw, for the next run to hold its shape against.
   fields text, refused text);
+
+-- What a source handed over, once per distinct excerpt: compressed, and named by its own hash, so
+-- a version that did not change what the source said costs nothing more.
+create table if not exists excerpt(digest text primary key, body blob not null);
 
 create virtual table if not exists fts using fts5(record_id unindexed, title, text);
 ";
@@ -169,6 +173,8 @@ fn migrate(db: &Connection) {
         "alter table run add column records integer",
         "alter table run add column duplicates integer default 0",
         "alter table record add column first_seen text not null default ''",
+        "alter table record add column excerpt text",
+        "alter table revision add column excerpt text",
         // Claims held before the column existed take the stamp of the update that first saw them.
         "update record set first_seen = coalesce((select started from run where id = first_run), '')
          where first_seen = ''",
@@ -262,13 +268,23 @@ impl Store {
                 |r| r.get(0),
             )
             .ok();
+        let excerpt = match &rec.excerpt {
+            Some(e) => Some(self.keep_excerpt(e)?),
+            None => None,
+        };
         if held.as_deref() == Some(rec.hash.as_str()) {
+            // A claim held from before receipts were kept takes the one this update saw, once.
+            // The claim did not change, so what the source handed over now is what it said then.
             self.db
                 .execute(
-                    "update record set last_run = ?2 where record_id = ?1",
-                    rusqlite::params![rec.record_id, run],
+                    "update record set last_run = ?2, excerpt = coalesce(excerpt, ?3)
+                     where record_id = ?1",
+                    rusqlite::params![rec.record_id, run, excerpt],
                 )
                 .map_err(|e| e.to_string())?;
+            if history {
+                self.keep_current_version(&rec.record_id, excerpt.as_deref())?;
+            }
             return Ok("unchanged");
         }
         let verdict = if held.is_some() { "changed" } else { "added" };
@@ -290,8 +306,9 @@ impl Store {
         if history {
             self.db
                 .execute(
-                    "insert or replace into revision(record_id, run, at, hash, title, known, fields)
-                     values(?1,?2,?3,?4,?5,?6,?7)",
+                    "insert or replace into revision(record_id, run, at, hash, title, known, fields,
+                       excerpt)
+                     values(?1,?2,?3,?4,?5,?6,?7,?8)",
                     rusqlite::params![
                         rec.record_id,
                         run,
@@ -300,6 +317,7 @@ impl Store {
                         rec.title,
                         rec.known,
                         rec.fields_json().to_string(),
+                        excerpt,
                     ],
                 )
                 .map_err(|e| e.to_string())?;
@@ -330,8 +348,8 @@ impl Store {
             .execute(
                 "insert or replace into record(rowid, record_id, kind, title, url, text, known,
                    valid_from, valid_to, ids, fields, origin, attachments, hash, first_seen,
-                   first_run, changed_run, last_run)
-                 values(?17,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?16,?14,?15,?15)",
+                   first_run, changed_run, last_run, excerpt)
+                 values(?17,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?16,?14,?15,?15,?18)",
                 rusqlite::params![
                     rec.record_id,
                     rec.kind,
@@ -350,6 +368,7 @@ impl Store {
                     run,
                     first_seen,
                     kept_rowid,
+                    excerpt,
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -843,11 +862,195 @@ impl Store {
             .unwrap_or_default()
     }
 
-    pub fn get(&self, record_id: &str) -> Option<Claim> {
+    /// An excerpt, kept once under its own hash. JSON serialises objects in key order here, so
+    /// the same excerpt is the same bytes whichever update saw it.
+    pub fn keep_excerpt(&self, e: &J) -> Result<String, String> {
+        let bytes = serde_json::to_vec(e).map_err(|e| e.to_string())?;
+        let digest = crate::place::sha256(&bytes)[..32].to_string();
+        let body = miniz_oxide::deflate::compress_to_vec(&bytes, 6);
         self.db
+            .execute(
+                "insert or ignore into excerpt(digest, body) values(?1, ?2)",
+                rusqlite::params![digest, body],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(digest)
+    }
+
+    /// The receipt a claim is at, as its publisher sent it. A subscriber holds the publisher's
+    /// receipt, whatever it held before: the publisher is the one who saw the source.
+    pub fn set_excerpt(&self, record_id: &str, e: &J) -> Result<(), String> {
+        let digest = self.keep_excerpt(e)?;
+        self.db
+            .execute(
+                "update record set excerpt = ?2 where record_id = ?1",
+                rusqlite::params![record_id, digest],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn excerpt(&self, digest: &str) -> Option<J> {
+        let body: Vec<u8> = self
+            .db
+            .query_row(
+                "select body from excerpt where digest = ?1",
+                rusqlite::params![digest],
+                |r| r.get(0),
+            )
+            .ok()?;
+        let bytes = miniz_oxide::inflate::decompress_to_vec(&body).ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    /// The version a claim is at, written down where it is not. History turned on part-way
+    /// through a source's life has nothing for the claims that have not changed since, and the
+    /// version they are at began with the update that last changed them.
+    fn keep_current_version(&self, record_id: &str, excerpt: Option<&str>) -> Result<(), String> {
+        let held: Option<i64> = self
+            .db
+            .query_row(
+                "select changed_run from record r where record_id = ?1 and not exists
+                   (select 1 from revision v where v.record_id = r.record_id and v.hash = r.hash)",
+                rusqlite::params![record_id],
+                |r| r.get(0),
+            )
+            .ok();
+        match held {
+            Some(changed) => {
+                self.db
+                    .execute(
+                        "insert or replace into revision(record_id, run, at, hash, title, known,
+                           fields, excerpt)
+                         select record_id, changed_run,
+                           coalesce((select started from run where id = ?2), first_seen),
+                           hash, title, known, fields, coalesce(?3, excerpt)
+                         from record where record_id = ?1",
+                        rusqlite::params![record_id, changed, excerpt],
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
+            None => {
+                // It has one: give it this receipt where it had none.
+                self.db
+                    .execute(
+                        "update revision set excerpt = ?2 where record_id = ?1 and excerpt is null
+                           and hash = (select hash from record where record_id = ?1)",
+                        rusqlite::params![record_id, excerpt],
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Every version of every claim, claim by claim and oldest first. A published history is
+    /// written while the store is read, as the claims are.
+    pub fn for_each_version(
+        &self,
+        mut each: impl FnMut(&str, Version) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let mut stmt = self
+            .db
+            .prepare("select distinct record_id from revision order by record_id")
+            .map_err(|e| e.to_string())?;
+        let ids: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .map_err(|e| e.to_string())?
+            .flatten()
+            .collect();
+        for id in ids {
+            for v in self.versions(&id) {
+                each(&id, v)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Every version a claim was at, oldest first, each with its receipt.
+    pub fn versions(&self, record_id: &str) -> Vec<Version> {
+        let Ok(mut stmt) = self.db.prepare(
+            "select run, at, hash, title, known, fields, excerpt from revision
+             where record_id = ?1 order by run",
+        ) else {
+            return Vec::new();
+        };
+        let rows = stmt.query_map(rusqlite::params![record_id], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, Option<String>>(6)?,
+            ))
+        });
+        let Ok(rows) = rows else {
+            return Vec::new();
+        };
+        rows.flatten()
+            .map(|(update, at, hash, title, known, fields, excerpt)| Version {
+                update,
+                at,
+                hash,
+                title,
+                known,
+                properties: serde_json::from_str(&fields).unwrap_or(J::Null),
+                excerpt: excerpt.and_then(|d| self.excerpt(&d)),
+            })
+            .collect()
+    }
+
+    /// The versions a publisher kept, as they arrived. They replace what this store held for the
+    /// claim, because the publisher's history is the claim's history and a subscriber's own
+    /// updates only ever saw what the publisher had already said.
+    pub fn put_versions(
+        &self,
+        record_id: &str,
+        versions: &[Version],
+        replace: bool,
+    ) -> Result<(), String> {
+        if replace {
+            self.db
+                .execute(
+                    "delete from revision where record_id = ?1",
+                    rusqlite::params![record_id],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        for v in versions {
+            let excerpt = match &v.excerpt {
+                Some(e) => Some(self.keep_excerpt(e)?),
+                None => None,
+            };
+            self.db
+                .execute(
+                    "insert or replace into revision(record_id, run, at, hash, title, known, fields,
+                       excerpt)
+                     values(?1,?2,?3,?4,?5,?6,?7,?8)",
+                    rusqlite::params![
+                        record_id,
+                        v.update,
+                        v.at,
+                        v.hash,
+                        v.title,
+                        v.known,
+                        v.properties.to_string(),
+                        excerpt,
+                    ],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    pub fn get(&self, record_id: &str) -> Option<Claim> {
+        let (mut claim, digest) = self
+            .db
             .query_row(
                 "select record_id, kind, title, url, text, known, valid_from, valid_to,
-                        ids, fields, origin, attachments, hash
+                        ids, fields, origin, attachments, hash, excerpt
                  from record where record_id = ?1",
                 rusqlite::params![record_id],
                 |r| {
@@ -857,7 +1060,8 @@ impl Store {
                     let valid_from: Option<String> = r.get(6)?;
                     let valid_to: Option<String> = r.get(7)?;
                     let o: J = serde_json::from_str(&origin).unwrap_or(J::Null);
-                    Ok(Claim {
+                    let digest: Option<String> = r.get(13)?;
+                    Ok((Claim {
                         record_id: r.get(0)?,
                         dataset: String::new(),
                         kind: r.get(1)?,
@@ -880,10 +1084,14 @@ impl Store {
                         },
                         attachments: Vec::new(),
                         hash: r.get(12)?,
-                    })
+                        excerpt: None,
+                        versions: Vec::new(),
+                    }, digest))
                 },
             )
-            .ok()
+            .ok()?;
+        claim.excerpt = digest.and_then(|d| self.excerpt(&d));
+        Some(claim)
     }
 
     pub fn by_identifier(&self, value: &str) -> Vec<String> {
@@ -1188,7 +1396,7 @@ impl Store {
             .db
             .prepare(
                 "select record_id, kind, title, url, text, known, valid_from, valid_to,
-                        ids, fields, origin, hash
+                        ids, fields, origin, hash, excerpt
                  from record order by record_id",
             )
             .map_err(|e| e.to_string())?;
@@ -1201,6 +1409,7 @@ impl Store {
             let o: J = serde_json::from_str(&origin).unwrap_or(J::Null);
             let valid_from: Option<String> = r.get(6).map_err(|e| e.to_string())?;
             let valid_to: Option<String> = r.get(7).map_err(|e| e.to_string())?;
+            let digest: Option<String> = r.get(12).map_err(|e| e.to_string())?;
             each(Claim {
                 record_id: r.get(0).map_err(|e| e.to_string())?,
                 dataset: String::new(),
@@ -1224,6 +1433,8 @@ impl Store {
                 },
                 attachments: Vec::new(),
                 hash: r.get(11).map_err(|e| e.to_string())?,
+                excerpt: digest.and_then(|d| self.excerpt(&d)),
+                versions: Vec::new(),
             })?;
             n += 1;
         }

@@ -195,8 +195,12 @@ impl Interface for Remote {
             .collect()
     }
 
-    fn fetch(&self, ids: &[String]) -> Vec<Claim> {
-        let Ok(answer) = self.ask("/api/fetch", &[("id", ids.join(","))]) else {
+    fn fetch(&self, ids: &[String], versions: bool) -> Vec<Claim> {
+        let mut params = vec![("id", ids.join(","))];
+        if versions {
+            params.push(("versions", "1".to_string()));
+        }
+        let Ok(answer) = self.ask("/api/fetch", &params) else {
             return Vec::new();
         };
         let empty = Vec::new();
@@ -223,6 +227,12 @@ impl Interface for Remote {
                 },
                 attachments: Vec::new(),
                 hash: v["hash"].as_str().unwrap_or("").to_string(),
+                excerpt: v.get("excerpt").filter(|e| !e.is_null()).cloned(),
+                versions: v
+                    .get("versions")
+                    .and_then(J::as_array)
+                    .map(|a| a.iter().map(crate::claim::Version::from_json).collect())
+                    .unwrap_or_default(),
             })
             .collect()
     }

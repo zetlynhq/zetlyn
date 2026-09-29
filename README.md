@@ -46,6 +46,18 @@ zetlyn serve sources/prices
 whole configuration. `serve` opens the source itself, with no tracker anywhere: an overview, the
 views it declares, browse with facets and columns, search by text and by property, a claim page.
 
+## Every value has a receipt
+
+```
+zetlyn claim sources/prices SKU-1042
+```
+
+prints the claim, what its source handed over for it (the row, the JSON object, the feed item),
+per property the expression that read it and the words it read, and every version it was at with
+the time an update first saw it. The pages show the same under each value: who said it, in which
+words, since when, and what it said before. A subscriber holds the same receipts as the
+publisher, because they travel with the claims.
+
 ## A topic
 
 ```yaml

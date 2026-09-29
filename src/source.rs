@@ -55,16 +55,28 @@ impl Source {
     // -- the run ------------------------------------------------------------------------------
 
     pub fn run(&self) -> Result<RunReport, String> {
+        self.run_with(false, false)
+    }
+
+    /// With `reread`, the source is read even where it says it has not changed. Once, to take the
+    /// receipts a store written before 0.2 does not have: a claim that did not change gains the
+    /// receipt of what the source handed over for it, and an unchanged source hands over nothing.
+    ///
+    /// With `from_start`, the stored mark is set aside as well and the whole of the declared
+    /// coverage is read, as on the first update. That update sweeps, so a claim held under a name
+    /// no update gives it any more is removed rather than kept beside its twin.
+    pub fn run_with(&self, reread: bool, from_start: bool) -> Result<RunReport, String> {
+        let reread = reread || from_start;
         // Where the source is one address and says it has not changed, there is nothing to read.
         // An hourly cadence against a file that changes twice a week is mostly this.
-        if let Some(short) = self.nothing_changed()? {
+        if let Some(short) = if reread { None } else { self.nothing_changed()? } {
             return Ok(short);
         }
         self.decl.source.prepare(&self.dir)?;
         // A run that started from a stored mark read a slice of the source, not the whole
         // of it. It may not remove: every claim it did not touch is one it never asked
         // for. Only a run that read from the beginning of the declared coverage sweeps.
-        let mark = self.store.meta("mark");
+        let mark = if from_start { None } else { self.store.meta("mark") };
         let whole = mark.is_none();
         let run = self.store.begin_run()?;
         let at = crate::iso_stamp(crate::now());
@@ -413,8 +425,21 @@ impl Source {
             .unwrap_or_default()
     }
 
-    pub fn fetch(&self, ids: &[String]) -> Vec<Claim> {
-        ids.iter().filter_map(|i| self.store.get(i)).collect()
+    /// The claims by id, and with `versions` every version each was at and its receipt.
+    pub fn fetch(&self, ids: &[String], versions: bool) -> Vec<Claim> {
+        ids.iter()
+            .filter_map(|i| self.store.get(i))
+            .map(|mut c| {
+                c.dataset = self.decl.name.clone();
+                c
+            })
+            .map(|mut c| {
+                if versions {
+                    c.versions = self.store.versions(&c.record_id);
+                }
+                c
+            })
+            .collect()
     }
 
     /// What was added, changed and removed since a mark, and for a change, which fields moved.
@@ -497,7 +522,7 @@ pub trait Interface {
     fn describe(&self) -> J;
     fn search(&self, q: &Query) -> Result<(u64, Vec<Hit>, Unanswered), String>;
     fn facet(&self, q: &Query, field: &str, limit: usize) -> Vec<(String, u64)>;
-    fn fetch(&self, ids: &[String]) -> Vec<Claim>;
+    fn fetch(&self, ids: &[String], versions: bool) -> Vec<Claim>;
     fn changes(&self, since: i64, limit: usize) -> J;
     fn mark(&self) -> i64;
 }
@@ -515,8 +540,8 @@ impl Interface for Source {
     fn facet(&self, q: &Query, field: &str, limit: usize) -> Vec<(String, u64)> {
         Source::facet(self, q, field, limit)
     }
-    fn fetch(&self, ids: &[String]) -> Vec<Claim> {
-        Source::fetch(self, ids)
+    fn fetch(&self, ids: &[String], versions: bool) -> Vec<Claim> {
+        Source::fetch(self, ids, versions)
     }
     fn changes(&self, since: i64, limit: usize) -> J {
         Source::changes(self, since, limit)

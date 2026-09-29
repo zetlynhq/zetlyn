@@ -1,6 +1,6 @@
 //! A tracker, opened. The same three surfaces a source has, over sources of unlike shape.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use maud::{html, Markup};
@@ -291,6 +291,23 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
 fn entry_page(scope: &Tracker, scheme: &str, value: &str) -> Option<String> {
     let entry = scope.entry(scheme, value)?;
     let d = &scope.decl;
+    // Each claim once, with its versions and its receipt. A thing has a handful of claims and
+    // this page is one thing, so it is a handful of fetches and never a scan.
+    let mut held: BTreeMap<(String, String), crate::claim::Claim> = BTreeMap::new();
+    for p in &entry.parts {
+        for c in scope.records_of(&p.member, std::slice::from_ref(&p.record_id), true) {
+            held.insert((p.member.clone(), p.record_id.clone()), c);
+        }
+    }
+    // The claim that says this value, of the ones this source holds about the thing.
+    let saying = |member: &str, name: &str, raw: &str| {
+        let parts: Vec<_> = entry.parts.iter().filter(|p| p.member == member).collect();
+        parts
+            .iter()
+            .find(|p| p.fields.get(name).map(String::as_str) == Some(raw))
+            .or_else(|| parts.iter().find(|p| p.fields.contains_key(name)))
+            .and_then(|p| held.get(&(p.member.clone(), p.record_id.clone())))
+    };
     let body = html! {
         p { a href=(at("/")) { "← " (d.title) } }
         h1 { (entry.title) }
@@ -313,6 +330,10 @@ fn entry_page(scope: &Tracker, scheme: &str, value: &str) -> Option<String> {
                                     td { (raw)
                                         @if let Some(means) = definition(scope, member, raw) {
                                             div.why { (means) }
+                                        }
+                                        @if let Some(c) = saying(member, name, raw) {
+                                            @let (source, answered) = said_by(scope, member);
+                                            (crate::serve::receipt(c, name, &source, answered.as_deref()))
                                         }
                                     }
                                     td {
@@ -349,6 +370,17 @@ fn entry_page(scope: &Tracker, scheme: &str, value: &str) -> Option<String> {
 }
 
 /// The source's own definition of its own word, which arrived with its `describe`.
+/// A source's own title and when it last answered, from what it said about itself. For a
+/// receipt, which names the source a value came from and how recently it was asked.
+fn said_by(scope: &Tracker, member: &str) -> (String, Option<String>) {
+    let Some(m) = scope.members.iter().find(|m| m.name() == member) else {
+        return (member.to_string(), None);
+    };
+    let title = m.described["title"].as_str().unwrap_or(member).to_string();
+    let answered = m.described["last_update"]["finished"].as_str().map(str::to_string);
+    (title, answered)
+}
+
 fn definition(scope: &Tracker, member: &str, code: &str) -> Option<String> {
     let m = scope.members.iter().find(|m| m.name() == member)?;
     let vocab = m.described["vocabulary"].as_object()?;
@@ -365,9 +397,10 @@ fn definition(scope: &Tracker, member: &str, code: &str) -> Option<String> {
 
 fn record_page(scope: &Tracker, member: &str, id: &str) -> Option<String> {
     let rec = scope
-        .records_of(member, &[id.to_string()])
+        .records_of(member, &[id.to_string()], true)
         .into_iter()
         .next()?;
+    let (source, answered) = said_by(scope, member);
     let body = html! {
         p { a href=(at("/")) { "← " (scope.decl.title) } }
         h1 { (rec.title) }
@@ -385,6 +418,7 @@ fn record_page(scope: &Tracker, member: &str, id: &str) -> Option<String> {
                             @if let Some(t) = definition(scope, member, &value.display()) {
                                 div.why { (t) }
                             }
+                            (crate::serve::receipt(&rec, name, &source, answered.as_deref()))
                         }
                     }
                 }

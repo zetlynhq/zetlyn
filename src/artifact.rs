@@ -20,7 +20,7 @@ use crate::place::{sha256, Place};
 use crate::claim::Claim;
 use crate::store::Store;
 
-pub const SPEC_VERSION: &str = "2.0";
+pub const SPEC_VERSION: &str = "2.1";
 
 /// Where a reference with no host is fetched from and published to.
 ///
@@ -196,6 +196,75 @@ fn differs(held: &[u8], built: &J) -> bool {
     old != new
 }
 
+/// Every version the source kept, one line each: the claim it belongs to, and the version as the
+/// source holds it. With `held`, only the versions a subscriber at the previous version does not
+/// have yet, which is what a delta carries.
+fn history_of(ds: &Source, held: Option<&std::collections::BTreeSet<String>>) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    ds.store.for_each_version(|id, v| {
+        if let Some(held) = held {
+            if held.contains(&version_key(id, v.update, &v.hash)) {
+                return Ok(());
+            }
+        }
+        let mut line = v.to_json();
+        line["claim_id"] = json!(id);
+        out.extend_from_slice(serde_json::to_string(&line).map_err(|e| e.to_string())?.as_bytes());
+        out.push(b'\n');
+        Ok(())
+    })?;
+    Ok(out)
+}
+
+fn version_key(id: &str, update: i64, hash: &str) -> String {
+    format!("{id}\t{update}\t{hash}")
+}
+
+/// Whether an artifact built against `spec` can be read here: the same major version, and a minor
+/// one this build knows. 2.1 added receipts and history and took nothing away, so a 2.0 artifact
+/// is a 2.1 one with neither.
+pub fn readable(spec: &str) -> bool {
+    let parse = |s: &str| {
+        let (a, b) = s.split_once('.')?;
+        Some((a.parse::<u32>().ok()?, b.parse::<u32>().ok()?))
+    };
+    match (parse(spec), parse(SPEC_VERSION)) {
+        (Some((ma, mi)), Some((oa, oi))) => ma == oa && mi <= oi,
+        _ => false,
+    }
+}
+
+/// A payload the manifest names, fetched and held against its hash.
+fn payload(place: &dyn Place, path: &str, declared: &J, name: &str) -> Result<Vec<u8>, String> {
+    let body = place.get(path)?;
+    let want = declared["sha256"].as_str().unwrap_or_default();
+    let got = sha256(&body);
+    if want != got {
+        return Err(format!("{name} is {got} and the manifest says {want}"));
+    }
+    Ok(body)
+}
+
+/// Versions as they arrived, claim by claim. `replace` for a whole version, which is the whole
+/// history; a delta's versions are added to what is held.
+fn take_history(store: &Store, body: &[u8], replace: bool) -> Result<u64, String> {
+    let mut by: BTreeMap<String, Vec<crate::claim::Version>> = BTreeMap::new();
+    for (n, line) in String::from_utf8_lossy(body).lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let j: J = serde_json::from_str(line).map_err(|e| format!("history line {}: {e}", n + 1))?;
+        let id = j["claim_id"].as_str().unwrap_or_default().to_string();
+        by.entry(id).or_default().push(crate::claim::Version::from_json(&j));
+    }
+    let mut n = 0u64;
+    for (id, versions) in &by {
+        store.put_versions(id, versions, replace)?;
+        n += versions.len() as u64;
+    }
+    Ok(n)
+}
+
 /// Write `claims.jsonl`, the manifest and the tag. Returns the version.
 pub fn publish(
     ds: &Source,
@@ -211,11 +280,21 @@ pub fn publish(
         Ok(())
     })?;
 
+    let history = history_of(ds, None)?;
+
     let mut payloads = BTreeMap::new();
     payloads.insert(
         "claims.jsonl".to_string(),
         (body.len() as u64, sha256(&body)),
     );
+    // The history travels, so a subscriber shows the same receipts the publisher does. A source
+    // that keeps none ships none, and the manifest does not name a payload that is not there.
+    if !history.is_empty() {
+        payloads.insert(
+            "history.jsonl".to_string(),
+            (history.len() as u64, sha256(&history)),
+        );
+    }
     let manifest = manifest_of(ds, &payloads);
     let version = manifest["version"].as_str().unwrap_or_default().to_string();
     let reference = Reference::parse(&format!("{}@{tag}", ds.decl.name))?;
@@ -234,6 +313,12 @@ pub fn publish(
             &reference.version_path("sources", &version, "claims.jsonl"),
             &body,
         )?;
+        if !history.is_empty() {
+            place.put(
+                &reference.version_path("sources", &version, "history.jsonl"),
+                &history,
+            )?;
+        }
     }
     if held.as_deref().map(|b| differs(b, &manifest)).unwrap_or(true) {
         place.put(&manifest_path, served.as_bytes())?;
@@ -284,7 +369,9 @@ fn write_delta(
     full: &J,
 ) -> Result<(), String> {
     let before = place.get(&reference.version_path("sources", previous, "claims.jsonl"))?;
-    let mut held: BTreeMap<String, String> = BTreeMap::new();
+    // The line as it was served, and not only its hash: a claim that did not change can still
+    // have gained its receipt, and the receipt is what a subscriber would otherwise never get.
+    let mut held: BTreeMap<String, (String, String)> = BTreeMap::new();
     for line in String::from_utf8_lossy(&before).lines() {
         if line.trim().is_empty() {
             continue;
@@ -293,8 +380,24 @@ fn write_delta(
         let (Some(id), Some(hash)) = (j["claim_id"].as_str(), j["hash"].as_str()) else {
             continue;
         };
-        held.insert(id.to_string(), hash.to_string());
+        held.insert(id.to_string(), (hash.to_string(), line.to_string()));
     }
+    // The versions a subscriber at the previous version already holds. A previous version with
+    // no history, which every 2.0 artifact is, holds none, and the delta carries all of it.
+    let mut had = std::collections::BTreeSet::new();
+    if let Ok(old) = place.get(&reference.version_path("sources", previous, "history.jsonl")) {
+        for line in String::from_utf8_lossy(&old).lines() {
+            let Ok(j) = serde_json::from_str::<J>(line) else {
+                continue;
+            };
+            had.insert(version_key(
+                j["claim_id"].as_str().unwrap_or_default(),
+                j["update"].as_i64().unwrap_or(0),
+                j["hash"].as_str().unwrap_or_default(),
+            ));
+        }
+    }
+    let history = history_of(ds, Some(&had))?;
 
     let mut body = Vec::new();
     let mut added = 0u64;
@@ -302,12 +405,13 @@ fn write_delta(
     let mut seen = std::collections::BTreeSet::new();
     ds.store.for_each_record(|r| {
         seen.insert(r.record_id.clone());
+        let line = serde_json::to_string(&r.to_json()).map_err(|e| e.to_string())?;
         match held.get(&r.record_id) {
-            Some(hash) if *hash == r.hash => return Ok(()),
-            Some(_) => changed += 1,
+            Some((_, was)) if *was == line => return Ok(()),
+            Some((hash, _)) if *hash != r.hash => changed += 1,
+            Some(_) => {}
             None => added += 1,
         }
-        let line = serde_json::to_string(&r.to_json()).map_err(|e| e.to_string())?;
         body.extend_from_slice(line.as_bytes());
         body.push(b'\n');
         Ok(())
@@ -322,10 +426,12 @@ fn write_delta(
     let removed_body = gone.concat().into_bytes();
 
     // A delta nobody gains from is not written. The whole is one fetch and the delta is two.
-    let cost = body.len() + removed_body.len();
+    let cost = body.len() + removed_body.len() + history.len();
     let whole = full["payloads"]["claims.jsonl"]["bytes"]
         .as_u64()
-        .unwrap_or(u64::MAX) as usize;
+        .unwrap_or(u64::MAX)
+        .saturating_add(full["payloads"]["history.jsonl"]["bytes"].as_u64().unwrap_or(0))
+        as usize;
     if cost >= whole {
         return Err(format!(
             "{cost} bytes against {whole} for the whole, so the whole is the cheaper fetch"
@@ -341,6 +447,12 @@ fn write_delta(
         "removed.jsonl".to_string(),
         (removed_body.len() as u64, sha256(&removed_body)),
     );
+    if !history.is_empty() {
+        payloads.insert(
+            "history.jsonl".to_string(),
+            (history.len() as u64, sha256(&history)),
+        );
+    }
     let manifest = serde_json::json!({
         "spec_version": SPEC_VERSION,
         "built_by": concat!("zetlyn ", env!("CARGO_PKG_VERSION")),
@@ -365,6 +477,12 @@ fn write_delta(
         &reference.delta_path("sources", version, previous, "removed.jsonl"),
         &removed_body,
     )?;
+    if !history.is_empty() {
+        place.put(
+            &reference.delta_path("sources", version, previous, "history.jsonl"),
+            &history,
+        )?;
+    }
     place.put(
         &reference.delta_path("sources", version, previous, "manifest.json"),
         serde_json::to_string_pretty(&manifest)
@@ -463,7 +581,7 @@ pub fn subscribe(
     let manifest = manifest_signed_by(place, reference, "sources", pinned)?;
     let version = manifest["version"].as_str().unwrap_or_default().to_string();
     let spec = manifest["spec_version"].as_str().unwrap_or_default();
-    if spec != SPEC_VERSION {
+    if !readable(spec) {
         return Err(format!(
             "{reference}: built against specification {spec}, and this is {SPEC_VERSION}"
         ));
@@ -523,6 +641,22 @@ pub fn subscribe(
             "changed" => changed += 1,
             _ => unchanged += 1,
         }
+        if let Some(e) = &record.excerpt {
+            store.set_excerpt(&record.record_id, e)?;
+        }
+    }
+    // The publisher's history, where the version carries one. It replaces what was held, because
+    // a whole version is the whole of the claim's past as its publisher kept it.
+    let declared_history = &manifest["payloads"]["history.jsonl"];
+    if !declared_history.is_null() {
+        let h = payload(
+            place,
+            &reference.version_path("sources", &version, "history.jsonl"),
+            declared_history,
+            "history.jsonl",
+        )
+        .map_err(|e| format!("{reference}: {e}"))?;
+        take_history(&store, &h, true)?;
     }
     // A subscription replaces the source. A claim the new version does not carry is a claim
     // the publisher removed, and the sweep is what says so.
@@ -680,7 +814,7 @@ pub fn subscribe_scope(
 ) -> Result<(String, Vec<String>), String> {
     let manifest = manifest_at(place, reference, "trackers")?;
     let spec = manifest["spec_version"].as_str().unwrap_or_default();
-    if spec != SPEC_VERSION {
+    if !readable(spec) {
         return Err(format!(
             "{reference}: built against specification {spec}, and this is {SPEC_VERSION}"
         ));
@@ -777,6 +911,9 @@ pub fn apply_delta(
             "added" => added += 1,
             _ => changed += 1,
         }
+        if let Some(e) = &record.excerpt {
+            store.set_excerpt(&record.record_id, e)?;
+        }
     }
     let mut removed = 0u64;
     for line in String::from_utf8_lossy(&fetched[1]).lines() {
@@ -789,6 +926,18 @@ pub fn apply_delta(
                 removed += 1;
             }
         }
+    }
+
+    // The versions the subscriber did not have, added to the ones it did.
+    let declared_history = &manifest["payloads"]["history.jsonl"];
+    if !declared_history.is_null() {
+        let h = payload(
+            place,
+            &reference.delta_path("sources", to, from, "history.jsonl"),
+            declared_history,
+            "history.jsonl",
+        )?;
+        take_history(&store, &h, false)?;
     }
 
     // No sweep. A delta says what left, and a claim it did not mention is a claim that stayed.

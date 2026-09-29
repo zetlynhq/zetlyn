@@ -1515,6 +1515,7 @@ dependencies = [
  "csv",
  "ed25519-dalek",
  "maud",
+ "miniz_oxide",
  "quick-xml",
  "regex",
  "rusqlite",

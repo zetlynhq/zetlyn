@@ -8,7 +8,7 @@ use serde_json::{json, Value as J};
 use crate::source::{Source, Query};
 use crate::sourcedecl::View;
 use crate::expr::{self, Lit, Op, Pred};
-use crate::claim::Value;
+use crate::claim::{Claim, Value};
 use crate::store::Hit;
 
 pub const STYLE: &str = r#"
@@ -79,6 +79,19 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .text { white-space: pre-wrap; max-width: 46rem; }
 footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--line);
          color: var(--dim); font-size: .82rem; }
+/* A receipt: where one value came from, opened in place. */
+details.receipt { margin-top: .25rem; font-size: .85rem; }
+details.receipt > summary { cursor: pointer; color: var(--dim); list-style: none; }
+details.receipt > summary::-webkit-details-marker { display: none; }
+details.receipt > summary::before { content: "↗ "; color: var(--accent); }
+details.receipt[open] { background: var(--panel); border-left: 3px solid var(--accent);
+                        padding: .5rem .8rem; margin: .4rem 0; }
+.receipt dl { display: grid; grid-template-columns: max-content 1fr; gap: .2rem .9rem; margin: .4rem 0; }
+.receipt dt { color: var(--dim); }
+.receipt dd { margin: 0; }
+.receipt pre { max-height: 18rem; overflow: auto; font-size: .78rem; background: var(--bg);
+               padding: .5rem; border: 1px solid var(--line); }
+.receipt table { font-size: .82rem; }
 @media (max-width: 40rem) { main { padding: 1.2rem .9rem 4rem; } }
 "#;
 
@@ -528,7 +541,11 @@ fn record_page(ds: &Source, id: &str, url: &str) -> Option<String> {
     // `as_of` shows a claim as it stood, from the revisions the source kept. It reads one
     // claim: the text index is current, so it does not make a whole query answer as of a date.
     let then = asked.as_deref().and_then(|at| ds.store.as_of(id, at));
-    let mut rec = ds.store.get(id)?;
+    let mut rec = ds.fetch(&[id.to_string()], true).into_iter().next()?;
+    let answered = ds
+        .store
+        .run_report(ds.store.last_run())
+        .and_then(|r| r.finished);
     let found = then.is_some();
     if let Some((title, fields)) = then {
         rec.title = title;
@@ -572,6 +589,7 @@ fn record_page(ds: &Source, id: &str, url: &str) -> Option<String> {
                                         }
                                     }
                                 }
+                                (receipt(&rec, name, &d.title, answered.as_deref()))
                             }
                         }
                     }
@@ -669,7 +687,8 @@ fn api(ds: &Source, path: &str, url: &str) -> (J, bool) {
                 .get("id")
                 .map(|s| s.split(',').map(str::to_string).collect())
                 .unwrap_or_default();
-            json!({ "claims": J::Array(ds.fetch(&ids).iter().map(|r| r.to_json()).collect()) })
+            let versions = p.get("versions").is_some_and(|v| v == "1" || v == "true");
+            json!({ "claims": J::Array(ds.fetch(&ids, versions).iter().map(|r| r.to_json()).collect()) })
         }
         "/api/search" => {
             let query = q();
@@ -766,3 +785,79 @@ pub fn serve(ds: Source, addr: &str) -> Result<(), String> {
 
 #[allow(dead_code)]
 fn unused(_: PreEscaped<String>) {}
+
+/// Where one value came from: the words its source used and the expression that read them, since
+/// when it has said so, when the source last answered, what the source handed over, and every
+/// value it said before. Every fact has a receipt, and this is it.
+pub fn receipt(claim: &Claim, property: &str, source: &str, answered: Option<&str>) -> Markup {
+    let said = &claim.excerpt.as_ref().map(|e| e["properties"][property].clone()).unwrap_or(J::Null);
+    let words: Vec<String> = said["raw"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    let now = claim.fields.get(property).map(|v| v.display()).unwrap_or_default();
+    // The value over time, one row per change rather than one per version: a version that moved
+    // another property did not move this one.
+    let mut changes: Vec<(String, String)> = Vec::new();
+    for v in &claim.versions {
+        let value = crate::claim::Value::from_json(&v.properties[property])
+            .map(|x| x.display())
+            .unwrap_or_else(|| "—".into());
+        if changes.last().map(|(_, last)| last != &value).unwrap_or(true) {
+            changes.push((v.at.clone(), value));
+        }
+    }
+    let since = changes.last().filter(|(_, v)| *v == now).map(|(at, _)| at.clone());
+    let original = claim.url.clone().or_else(|| claim.from.url.clone());
+    let row = claim.excerpt.as_ref().and_then(|e| e.get("row")).cloned();
+    let too_large = claim.excerpt.as_ref().and_then(|e| e["row_bytes"].as_u64());
+    html! {
+        details.receipt {
+            summary { "receipt" }
+            dl {
+                dt { "Source" } dd { (source) }
+                @if !words.is_empty() {
+                    dt { "Its words" } dd { code { (words.join(", ")) } }
+                }
+                @if let Some(from) = said["from"].as_str() {
+                    dt { "Read by" } dd { code { (from) } }
+                }
+                @if let Some(at) = &since {
+                    dt { "Said since" } dd { (stamp(at)) }
+                }
+                @if let Some(at) = answered {
+                    dt { "Last answered" } dd { (stamp(at)) }
+                }
+                @if let Some(u) = &original {
+                    dt { "Original" } dd { a href=(u) { "open at the source" } }
+                }
+            }
+            @if changes.len() > 1 {
+                table { tbody {
+                    @for (at, value) in changes.iter().rev() {
+                        tr { td.dim { (stamp(at)) } td { (value) } }
+                    }
+                } }
+            }
+            @if let Some(row) = &row {
+                details {
+                    summary { "What the source handed over" }
+                    pre { (serde_json::to_string_pretty(row).unwrap_or_default()) }
+                }
+            } @else if let Some(bytes) = too_large {
+                p.dim { "The source handed over " (bytes) " bytes for this, which is kept whole at the source and not here." }
+            }
+            @if claim.excerpt.is_none() {
+                p.dim { "This source has not kept a receipt for this claim yet. The next update that reads it will." }
+            }
+        }
+    }
+}
+
+/// `2026-09-28T18:42:10Z` as a person reads it.
+fn stamp(at: &str) -> String {
+    match (at.get(..10), at.get(11..16)) {
+        (Some(d), Some(t)) => format!("{d} {t} UTC"),
+        _ => at.to_string(),
+    }
+}

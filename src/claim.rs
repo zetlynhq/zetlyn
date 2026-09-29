@@ -167,6 +167,45 @@ impl Attachment {
     }
 }
 
+/// One version of a claim, as the source kept it: when an update first saw it, what it said, and
+/// what the source handed over when it said it.
+#[derive(Clone, Debug, Default)]
+pub struct Version {
+    pub update: i64,
+    pub at: String,
+    pub hash: String,
+    pub title: String,
+    pub known: String,
+    pub properties: J,
+    pub excerpt: Option<J>,
+}
+
+impl Version {
+    pub fn to_json(&self) -> J {
+        let mut j = json!({
+            "update": self.update, "at": self.at, "hash": self.hash, "title": self.title,
+            "known": self.known, "properties": self.properties,
+        });
+        if let Some(e) = &self.excerpt {
+            j["excerpt"] = e.clone();
+        }
+        j
+    }
+
+    pub fn from_json(j: &J) -> Version {
+        let s = |k: &str| j.get(k).and_then(J::as_str).unwrap_or("").to_string();
+        Version {
+            update: j.get("update").and_then(J::as_i64).unwrap_or(0),
+            at: s("at"),
+            hash: s("hash"),
+            title: s("title"),
+            known: s("known"),
+            properties: j.get("properties").cloned().unwrap_or(J::Null),
+            excerpt: j.get("excerpt").filter(|e| !e.is_null()).cloned(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Claim {
     pub record_id: String,
@@ -182,6 +221,12 @@ pub struct Claim {
     pub from: Origin,
     pub attachments: Vec<Attachment>,
     pub hash: String,
+    /// What the source handed over when it made this claim, and per property the expression
+    /// and the raw words. The receipt, and not part of what the claim says: the hash is over the
+    /// claim, so a source that reformats its answer without changing it changes nothing here.
+    pub excerpt: Option<J>,
+    /// Earlier versions, where they were asked for. Empty otherwise.
+    pub versions: Vec<Version>,
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -250,7 +295,7 @@ impl Claim {
     }
 
     pub fn to_json(&self) -> J {
-        json!({
+        let mut j = json!({
             "claim_id": self.record_id,
             "source": self.dataset,
             "kind": self.kind,
@@ -264,7 +309,14 @@ impl Claim {
             "from": self.from.to_json(),
             "attachments": J::Array(self.attachments.iter().map(Attachment::to_json).collect()),
             "hash": self.hash,
-        })
+        });
+        if let Some(e) = &self.excerpt {
+            j["excerpt"] = e.clone();
+        }
+        if !self.versions.is_empty() {
+            j["versions"] = J::Array(self.versions.iter().map(Version::to_json).collect());
+        }
+        j
     }
 }
 
@@ -332,6 +384,12 @@ impl Claim {
             },
             attachments: Vec::new(),
             hash: s("hash"),
+            excerpt: j.get("excerpt").filter(|e| !e.is_null()).cloned(),
+            versions: j
+                .get("versions")
+                .and_then(J::as_array)
+                .map(|a| a.iter().map(Version::from_json).collect())
+                .unwrap_or_default(),
         };
         if record.record_id.is_empty() {
             return Err("a claim with no id".into());

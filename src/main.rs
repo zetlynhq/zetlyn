@@ -77,11 +77,16 @@ zetlyn
       Reads a folder, a .csv or an .xlsx, guesses the identifier, the title, the text and the
       property types, writes <dir>/source.yaml, and prints the first three claims it would make.
 
-  zetlyn source update <dir>
-      Fills the store. Says what was added, changed, removed and unchanged.
+  zetlyn source update <dir> [--reread | --from-start]
+      Fills the store. Says what was added, changed, removed and unchanged. `--reread` reads the
+      source even where it says nothing changed, once, to take the receipts of claims held before.
+      `--from-start` also reads from the beginning of what it covers, as the first update did.
 
   zetlyn source describe <dir>
       What this source is, what it holds, what it can be asked. JSON.
+
+  zetlyn claim <dir> <identifier or claim id>
+      One claim, the words its source used for it, and every version it was at.
 
   zetlyn search <dir> <query> [--view <name>] [--limit <n>]
       Free text and comparisons mixed: `log4j severity=high known>2026-01-01`.
@@ -194,6 +199,35 @@ fn run(args: &[String]) -> Result<(), String> {
         },
         Some("dataset") => Err("`zetlyn dataset` is `zetlyn source` since 0.2, and `run` is `update`".into()),
         Some("scope") => Err("`zetlyn scope` is `zetlyn tracker` since 0.2".into()),
+        // One claim with its receipt and every version it was at. By identifier, or by claim id.
+        Some("claim") => {
+            let rest = positional(args, 1);
+            let dir = PathBuf::from(rest.first().ok_or("which source directory?")?.as_str());
+            let wanted = rest.get(1).ok_or("which claim? an identifier or a claim id")?;
+            let ds = Source::open(&dir)?;
+            let mut ids = vec![wanted.to_string()];
+            if ds.store.get(wanted).is_none() {
+                let q = source::Query {
+                    text: String::new(),
+                    pred: None,
+                    ids: vec![wanted.to_string()],
+                    seen_before: None,
+                    view: None,
+                    sort: None,
+                    limit: 50,
+                    offset: 0,
+                };
+                ids = ds.search(&q)?.1.into_iter().map(|h| h.record_id).collect();
+            }
+            let claims = ds.fetch(&ids, true);
+            if claims.is_empty() {
+                return Err(format!("{wanted}: no claim here says that"));
+            }
+            for c in claims {
+                println!("{}", serde_json::to_string_pretty(&c.to_json()).unwrap_or_default());
+            }
+            Ok(())
+        }
         Some("search") => search(args),
         Some("changes") => changes(args),
         Some("run") => schedule(args),
@@ -381,7 +415,10 @@ fn dataset_run(args: &[String]) -> Result<(), String> {
     let dir = dir_at(args, 2)?;
     let ds = Source::open(&dir)?;
     let started = std::time::Instant::now();
-    let r = ds.run()?;
+    let r = ds.run_with(
+        args.iter().any(|a| a == "--reread"),
+        args.iter().any(|a| a == "--from-start"),
+    )?;
     println!(
         "update {} {} in {:.1}s: +{} ~{} −{} ={}",
         r.id,

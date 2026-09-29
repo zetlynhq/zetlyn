@@ -484,11 +484,12 @@ pub struct Search {
     pub examples: Vec<String>,
 }
 
+/// Every version is kept unless a source says otherwise. A change can then say what moved and
+/// from what, and every value has a history behind its receipt.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-#[derive(Default)]
 pub struct Retention {
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub history: bool,
 }
 
@@ -509,7 +510,7 @@ impl Search {
 
 impl Retention {
     fn is_empty(&self) -> bool {
-        !self.history
+        self.history
     }
 }
 
@@ -672,4 +673,18 @@ impl Fetch {
             _ => None,
         }
     }
+}
+
+impl Default for Retention {
+    fn default() -> Self {
+        Retention { history: true }
+    }
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
 }

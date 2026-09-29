@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use serde_json::Value as J;
+use serde_json::{json, Value as J};
 
 use crate::sourcedecl::{SourceDecl, PropertyType, Spec};
 use crate::expr::{self, Row};
@@ -332,8 +332,14 @@ pub fn build(
     };
 
     let mut fields: BTreeMap<String, Value> = BTreeMap::new();
+    // The raw words behind each property, and the expression that read them, for the receipt.
+    let mut said = serde_json::Map::new();
     for (name, spec) in &decl.records.fields {
         let raws = values(&spec.spec(), &row);
+        said.insert(
+            name.clone(),
+            json!({ "from": spec.from, "raw": raws }),
+        );
         let mut vs = Vec::new();
         for raw in &raws {
             match typed(spec.kind, spec.vocabulary.as_deref(), raw) {
@@ -382,7 +388,27 @@ pub fn build(
         from: origin,
         attachments: Vec::new(),
         hash: String::new(),
+        excerpt: Some(excerpt(&row.value, said)),
+        versions: Vec::new(),
     };
     rec.hash = rec.compute_hash();
     Some(rec)
+}
+
+/// What the source handed over, as big as a receipt should be. Past this the row is left out and
+/// its size is said instead: an 11 MB container is not one claim's receipt, and the element `each`
+/// took from it is.
+const EXCERPT_MAX: usize = 256 * 1024;
+
+fn excerpt(row: &J, said: serde_json::Map<String, J>) -> J {
+    let mut out = json!({ "properties": J::Object(said) });
+    if !row.is_null() {
+        let size = serde_json::to_vec(row).map(|b| b.len()).unwrap_or(0);
+        if size <= EXCERPT_MAX {
+            out["row"] = row.clone();
+        } else {
+            out["row_bytes"] = json!(size);
+        }
+    }
+    out
 }

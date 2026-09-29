@@ -836,6 +836,16 @@ impl ThingStore {
             .unwrap_or_default()
     }
 
+
+    /// How many things each source speaks about.
+    pub fn things_per_source(&self) -> BTreeMap<String, u64> {
+        let Ok(mut stmt) = self.db.prepare("select source, count(*) from speaks group by source") else {
+            return BTreeMap::new();
+        };
+        stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64)))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    }
     /// The sources that speak about one thing.
     pub fn speakers(&self, key: &str) -> Vec<String> {
         let Ok(mut stmt) = self.db.prepare("select source from speaks where key = ?1 order by source") else {

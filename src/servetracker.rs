@@ -2134,6 +2134,7 @@ fn demo(scope: &Tracker) -> J {
     let title_of = |name: &str| -> String {
         scope.members.iter().find(|m| m.name() == name).map(|m| said_by(scope, m.name()).0).unwrap_or_else(|| name.to_string())
     };
+    let per_source = store.things_per_source();
     let day = crate::iso_date(crate::now());
     let mut today: BTreeMap<String, u64> = BTreeMap::new();
     for s in store.signals(None, 20_000) {
@@ -2165,7 +2166,10 @@ fn demo(scope: &Tracker) -> J {
         "tracker": { "name": scope.decl.name, "title": scope.decl.title, "page": at("/") },
         "taken": crate::iso_stamp(crate::now()),
         "counts": store.coverage(),
-        "sources": scope.members.iter().map(|m| json!({ "title": said_by(scope, m.name()).0, "why": m.decl.why })).collect::<Vec<_>>(),
+        "sources": scope.members.iter().map(|m| json!({
+            "name": m.name(), "title": said_by(scope, m.name()).0, "why": m.decl.why,
+            "claims": m.described["claims"], "things": per_source.get(m.name()).copied().unwrap_or(0),
+        })).collect::<Vec<_>>(),
         "today": today,
         "thing": thing,
     })

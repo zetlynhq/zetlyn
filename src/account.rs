@@ -415,6 +415,9 @@ impl Default for Price {
 pub struct Mail {
     #[serde(default)]
     pub run: Vec<String>,
+    /// SMTP, where Zetlyn sends mail itself: `smtp: { host, port, tls, user, password: ${SMTP_PASSWORD}, from }`.
+    #[serde(default)]
+    pub smtp: Option<crate::mail::Smtp>,
 }
 
 /// The workspace's own file: what it calls itself, its address, its mailer.
@@ -428,6 +431,10 @@ impl Site {
     /// Hands the mailer the message on its standard input. Where none is named, the link goes to
     /// the operator's own terminal and the page says where to look.
     pub fn send(&self, to: &str, subject: &str, body: &str) -> Result<bool, String> {
+        if let Some(smtp) = &self.mail.smtp {
+            crate::mail::send(smtp, to, subject, body)?;
+            return Ok(true);
+        }
         if self.mail.run.is_empty() {
             println!("--- {subject} → {to} ---\n{body}\n---");
             return Ok(false);

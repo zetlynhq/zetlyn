@@ -19,6 +19,7 @@ mod identity;
 mod key;
 mod place;
 mod platform;
+mod mail;
 mod matches;
 mod migrate;
 mod claim;

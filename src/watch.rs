@@ -35,10 +35,13 @@ pub struct WatchDecl {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Deliver {
-    /// `feed`, `webhook` or `command`.
+    /// `feed`, `webhook`, `mail` or `command`.
     pub to: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// For `mail`: where to, sent through the workspace's own `mail:`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
     /// Argv. Zetlyn holds no mail credentials: an operator names their own mailer here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub run: Vec<String>,
@@ -259,6 +262,24 @@ impl Watch {
                         return Err(format!("{program}: exited {status}"));
                     }
                     done.push(format!("command {program}"));
+                }
+                "mail" => {
+                    let to = d.address.as_deref().ok_or("mail needs an address")?;
+                    let to = crate::fetch::resolve(to)?.unwrap_or_default();
+                    let root = self.path.parent().and_then(|p| p.parent()).unwrap_or(std::path::Path::new("."));
+                    let site = crate::account::Site::load(root);
+                    let title = if self.decl.title.is_empty() { self.decl.name.clone() } else { self.decl.title.clone() };
+                    let lines: Vec<String> = entries
+                        .iter()
+                        .map(|e| if e["kind"].is_string() { crate::thingstore::say(e) } else { e["title"].as_str().unwrap_or("").to_string() })
+                        .collect();
+                    let subject = format!("{title}: {} new", entries.len());
+                    let body = format!("{}\n\n— the watch {}, in {}", lines.join("\n"), self.decl.name, root.display());
+                    // Not sent is not delivered: the mark stays, and the next check says it again.
+                    if !site.send(&to, &subject, &body)? {
+                        return Err("no mailer: workspace.yaml names no mail: smtp: or run:".into());
+                    }
+                    done.push(format!("mail {to}"));
                 }
                 other => return Err(format!("no delivery called {other}")),
             }

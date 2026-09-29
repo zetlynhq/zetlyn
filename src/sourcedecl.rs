@@ -727,12 +727,4 @@ impl Licence {
     pub fn is_empty(&self) -> bool {
         self.republish.is_empty() && self.terms.is_empty() && self.note.is_empty()
     }
-    /// May a page anyone can open show these claims at all?
-    pub fn public(&self) -> bool {
-        matches!(self.republish.as_str(), "yes" | "summary")
-    }
-    /// And their text, or only what they say of properties and where to read the rest?
-    pub fn whole(&self) -> bool {
-        self.republish == "yes"
-    }
 }

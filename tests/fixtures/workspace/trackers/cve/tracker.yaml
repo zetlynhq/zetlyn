@@ -16,6 +16,7 @@ sources:
 identified_by:
 - cve
 align:
+  cvss: {}
   exploited:
     scale:
     - "yes"

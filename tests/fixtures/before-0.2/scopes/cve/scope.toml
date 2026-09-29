@@ -32,3 +32,5 @@ scale = ["critical", "high", "medium", "low", "unknown"]
 
 [normalise.exploited]
 scale = ["yes", "no"]
+
+[normalise.cvss]

@@ -50,15 +50,6 @@ pub struct Snapshot {
     pub states: BTreeMap<String, String>,
 }
 
-/// Two or more sources, and their aligned values differ.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Conflict {
-    pub key: String,
-    pub property: String,
-    /// Source, what it means on the tracker's terms.
-    pub values: BTreeMap<String, Vec<String>>,
-}
-
 impl Snap {
     /// The things' properties said by two sources or more, and whether they conflict, differ only
     /// in wording, or agree.
@@ -74,6 +65,12 @@ impl Snap {
                 .iter()
                 .filter_map(|(s, props)| props.get(name).map(|p| (s, p)))
                 .collect();
+            // Compared only where the tracker says the property is one property across its
+            // sources. The same name is not the same meaning: a quantisation's downloads and its
+            // base model's are two counts of two things, and weighing them made 598 conflicts.
+            if decl.normalise_for(name).is_none() {
+                continue;
+            }
             if said.len() < 2 {
                 continue;
             }
@@ -135,7 +132,8 @@ fn verdict(decl: &TrackerDecl, name: &str, said: &[(&String, &Said)]) -> Verdict
             // is one it covers. Otherwise `linux` against `linux, unix` is two vocabularies, and
             // calling it a conflict would bury the real ones: 1,470 of 1,470 in the CVE tracker.
             let coded = kind == "code";
-            if coded && (align.is_none() || said.iter().any(|(_, s)| !s.understood)) {
+            // `align` is always there by now; a word it does not cover is still wording.
+            if coded && said.iter().any(|(_, s)| !s.understood) {
                 Verdict::Wording
             } else {
                 Verdict::Conflict

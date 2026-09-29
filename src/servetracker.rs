@@ -377,7 +377,8 @@ fn entry_page(scope: &Tracker, scheme: &str, value: &str) -> Option<String> {
                             @for (i, raw) in said.iter().enumerate() {
                                 tr {
                                     td { (name)
-                                        @if judged.as_ref().map(|j| j.contains(name)).unwrap_or(f.divergent && f.by.len() > 1) { " " span.chip.on { "conflict" } }
+                                        @if judged.as_ref().map(|j| j.contains(name)).unwrap_or(f.divergent && f.by.len() > 1 && d.normalise_for(name).is_some()) { " " span.chip.on { "conflict" } }
+                                        @else if f.divergent && f.by.len() > 1 && d.normalise_for(name).is_none() { " " span.chip { "not compared" } }
                                         @else if f.divergent && f.by.len() > 1 {
                                             @if f.means.values().flatten().all(|v| v.parse::<f64>().is_ok()) { " " span.chip { "within tolerance" } }
                                             @else { " " span.chip { "different words" } }

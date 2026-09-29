@@ -538,7 +538,7 @@ fn a_tolerance_and_a_word_nobody_mapped_are_not_conflicts() {
     let ws = Workspace::new("tolerance");
     let declared = ws.root.join("trackers/cve/tracker.yaml");
     let text = std::fs::read_to_string(&declared).unwrap();
-    std::fs::write(&declared, text.replacen("align:\n", "align:\n  cvss:\n    tolerance: \"2\"\n", 1))
+    std::fs::write(&declared, text.replacen("  cvss: {}\n", "  cvss:\n    tolerance: \"2\"\n", 1))
         .unwrap();
     // Vendor B calls 0002 something no map covers.
     let b = ws.root.join("sources/vendor-b/advisories.csv");

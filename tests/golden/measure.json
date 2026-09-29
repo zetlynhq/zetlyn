@@ -9,7 +9,7 @@
     "cvss": {
       "differ_after_the_map": 1,
       "differ_in_words": 1,
-      "normalised": false,
+      "normalised": true,
       "said_by_two_or_more": 2
     },
     "severity": {

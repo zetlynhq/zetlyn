@@ -1483,6 +1483,7 @@ impl Tracker {
         // Sources in priority order, so a thing's title is its highest-priority source's.
         for m in &self.members {
             snap.states.insert(m.name().to_string(), m.state().to_string());
+            snap.kinds.insert(m.name().to_string(), m.kind());
             let mut offset = 0usize;
             loop {
                 let q = Query {
@@ -1588,5 +1589,16 @@ impl Tracker {
         }
         drop(store);
         self.refresh(false).map(Some)
+    }
+}
+
+impl Tracker {
+    /// The context a question about this tracker's things is read and asked in.
+    pub fn context(&self) -> crate::thingquery::Context<'_> {
+        crate::thingquery::Context {
+            decl: &self.decl,
+            sources: self.members.iter().map(|m| m.name().to_string()).collect(),
+            now: crate::now(),
+        }
     }
 }

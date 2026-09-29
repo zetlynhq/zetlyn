@@ -356,7 +356,8 @@ fn entry_page(scope: &Tracker, scheme: &str, value: &str) -> Option<String> {
         p { a href=(at("/")) { "← " (d.title) } }
         h1 { (entry.title) }
         p.state { span.chip { (scheme) " " (value) } " "
-            span.dim { (entry.members().len()) " sources, " (entry.parts.len()) " claims" } }
+            span.dim { (entry.members().len()) " sources, " (entry.parts.len()) " claims · " }
+            a href={(at("/thing/")) (urlencode(scheme)) "/" (urlencode(value)) ".atom"} { "Watch" } }
         @if let Some((source, c)) = &summary {
             div.note {
                 span.dim { (source) " writes:" } br;
@@ -908,53 +909,7 @@ fn escape(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// Atom, for a reader. The same things a webhook receives, in the shape a feed reader expects.
-fn atom(title: &str, self_url: &str, entries: &[J], updated: &str) -> String {
-    let mut out = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
-    out.push_str("<feed xmlns=\"http://www.w3.org/2005/Atom\">\n");
-    out.push_str(&format!("  <title>{}</title>\n", escape(title)));
-    out.push_str(&format!("  <id>urn:zetlyn:{}</id>\n", escape(self_url)));
-    out.push_str(&format!("  <updated>{updated}</updated>\n"));
-    out.push_str(&format!(
-        "  <link rel=\"self\" href=\"{}\"/>\n",
-        escape(self_url)
-    ));
-    for e in entries.iter().rev() {
-        let title = e["title"].as_str().unwrap_or("");
-        let key = e["identifier"]["value"].as_str().unwrap_or("");
-        let empty = Vec::new();
-        let mut body = String::new();
-        for c in e["changes"].as_array().unwrap_or(&empty) {
-            let member = c["source"].as_str().unwrap_or("");
-            let how = c["how"].as_str().unwrap_or("");
-            body.push_str(&format!("{member}: {how}\n"));
-            for f in c["properties"].as_array().unwrap_or(&empty) {
-                body.push_str(&format!(
-                    "  {}: {} → {}\n",
-                    f["property"].as_str().unwrap_or(""),
-                    f["was"].as_str().unwrap_or("—"),
-                    f["is"].as_str().unwrap_or("—"),
-                ));
-            }
-        }
-        if body.is_empty() {
-            body.push_str(e["how"].as_str().unwrap_or("changed"));
-        }
-        out.push_str("  <entry>\n");
-        out.push_str(&format!("    <title>{}</title>\n", escape(title)));
-        out.push_str(&format!("    <id>urn:zetlyn:{}</id>\n", escape(key)));
-        out.push_str(&format!("    <updated>{updated}</updated>\n"));
-        out.push_str(&format!(
-            "    <content type=\"text\">{}</content>\n",
-            escape(&body)
-        ));
-        out.push_str("  </entry>\n");
-    }
-    out.push_str("</feed>\n");
-    out
-}
-
-fn changes_page(scope: &Tracker, url: &str) -> String {
+fn changes_page(scope: &Tracker, url: &str, v: &Viewer) -> String {
     let p = params(url);
     let before: Option<i64> = p.get("before").and_then(|s| s.parse().ok());
     let store = crate::thingstore::ThingStore::open(&scope.dir).ok();
@@ -964,6 +919,15 @@ fn changes_page(scope: &Tracker, url: &str) -> String {
         .filter(|s| before.map(|b| s["id"].as_i64().unwrap_or(0) < b).unwrap_or(true))
         .take(300)
         .collect();
+    // A signed-in reader sees what is new since they last opened this page. Only the first page
+    // moves the mark: paging back through older signals is not reading the new ones.
+    let latest = all.first().and_then(|s| s["id"].as_i64()).unwrap_or(0);
+    let last_visit = match (v.email(), &store, before) {
+        (Some(reader), Some(s), None) => s.visited(reader, latest),
+        _ => None,
+    };
+    let fresh = |s: &J| last_visit.map(|w| s["id"].as_i64().unwrap_or(0) > w).unwrap_or(false);
+    let new_count = signals.iter().filter(|s| fresh(s)).count();
     let today = crate::iso_date(crate::now());
     let yesterday = crate::iso_date(crate::now() - 86_400);
     // By day, newest first, as an inbox is read.
@@ -1023,6 +987,10 @@ fn changes_page(scope: &Tracker, url: &str) -> String {
         p.bar {
             a.chip href=(at("/conflicts")) { "Conflicts" }
             a.chip href=(at("/changes.atom")) { "Atom" }
+            a.chip href=(at("/things")) { "Ask about things" }
+        }
+        @if last_visit.is_some() {
+            p.state { (new_count) " new since your last visit" }
         }
         @if store.is_none() || all.is_empty() {
             p.dim { "Nothing has changed since this tracker first looked at its sources. What changes from now on is kept here." }
@@ -1038,7 +1006,10 @@ fn changes_page(scope: &Tracker, url: &str) -> String {
                     @let source = s["source"].as_str().unwrap_or("");
                     @let property = s["property"].as_str().unwrap_or("");
                     tr {
-                        td.dim style="width: 5rem" { (s["at"].as_str().unwrap_or("").get(11..16).unwrap_or("")) }
+                        td.dim style="width: 5rem" {
+                            (s["at"].as_str().unwrap_or("").get(11..16).unwrap_or(""))
+                            @if fresh(s) { " " span.chip.on { "new" } }
+                        }
                         td {
                             @match kind {
                                 "new_thing" => { "New: " (thing(s)) span.dim { " · first said by " (source) } }
@@ -1083,12 +1054,8 @@ fn watch_feed(scope: &Tracker, name: &str) -> Option<String> {
     } else {
         w.decl.title.clone()
     };
-    Some(atom(
-        &title,
-        &at(&format!("/watch/{name}.atom")),
-        &state.delivered,
-        &crate::iso_stamp(crate::now()),
-    ))
+    let newest_first: Vec<J> = state.delivered.iter().rev().cloned().collect();
+    Some(signal_atom(&title, &at(&format!("/watch/{name}.atom")), &newest_first))
 }
 
 /// How long a reading of the sources stands before it is taken again. The scheduler runs in
@@ -1351,26 +1318,40 @@ pub fn serve(mut scope: Tracker, dir: &Path, datasets: &Path, addr: &str) -> Res
                 "text/html; charset=utf-8",
                 None,
             ),
-            "/changes" => (changes_page(&scope, &url), "text/html; charset=utf-8", None),
+            "/changes" => (changes_page(&scope, &url, &v), "text/html; charset=utf-8", None),
             "/changes.atom" => {
-                let p = params(&url);
-                let since = p
-                    .get("since")
-                    .cloned()
-                    .unwrap_or_else(|| scope.mark_before());
-                let report = scope.changes(&since, 200);
-                let empty = Vec::new();
-                let entries = report["things"].as_array().unwrap_or(&empty);
+                let signals = crate::thingstore::ThingStore::open(&scope.dir)
+                    .map(|s| s.signals(None, 200))
+                    .unwrap_or_default();
                 (
-                    atom(
-                        &scope.decl.title,
-                        &at("/changes.atom"),
-                        entries,
-                        &crate::iso_stamp(crate::now()),
-                    ),
+                    signal_atom(&scope.decl.title, &at("/changes.atom"), &signals),
                     "application/atom+xml; charset=utf-8",
                     None,
                 )
+            }
+            "/things" | "/things.atom" if !v.entitled(&scope.decl.name) => (
+                pricing_page(&scope, &site, &v),
+                "text/html; charset=utf-8",
+                None,
+            ),
+            "/things" => (things_page(&scope, &url), "text/html; charset=utf-8", None),
+            "/things.atom" => {
+                let question = params(&url).get("q").cloned().unwrap_or_default();
+                match view_of(&scope, &question) {
+                    Ok((_, signals)) => (
+                        signal_atom(
+                            &format!("{} — {question}", scope.decl.title),
+                            &at(&format!("/things.atom?q={}", urlencode(&question))),
+                            &signals,
+                        ),
+                        "application/atom+xml; charset=utf-8",
+                        None,
+                    ),
+                    Err(e) => {
+                        status = 400;
+                        (e, "text/plain; charset=utf-8", None)
+                    }
+                }
             }
 
             _ if path.starts_with("/api/") => {
@@ -1419,6 +1400,27 @@ pub fn serve(mut scope: Tracker, dir: &Path, datasets: &Path, addr: &str) -> Res
                         }
                     }
                 }
+            }
+            // A thing's own feed: every signal about it, for a reader who watches one thing.
+            _ if parts.len() == 3 && parts[0] == "thing" && parts[2].ends_with(".atom") => {
+                let value = parts[2].trim_end_matches(".atom");
+                let key = format!("{}:{}", parts[1], value.to_lowercase());
+                let signals: Vec<J> = crate::thingstore::ThingStore::open(&scope.dir)
+                    .map(|s| s.signals(None, 20_000))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|s| s["key"].as_str() == Some(key.as_str()))
+                    .take(200)
+                    .collect();
+                (
+                    signal_atom(
+                        &format!("{} — {} {value}", scope.decl.title, parts[1]),
+                        &at(&format!("/thing/{}/{}.atom", parts[1], value)),
+                        &signals,
+                    ),
+                    "application/atom+xml; charset=utf-8",
+                    None,
+                )
             }
             _ if parts.len() == 3 && parts[0] == "thing" => {
                 match entry_page(&scope, &parts[1], &parts[2]) {
@@ -1476,6 +1478,7 @@ pub fn serve(mut scope: Tracker, dir: &Path, datasets: &Path, addr: &str) -> Res
             || path.starts_with("/export")
             || path.starts_with("/changes")
             || path.starts_with("/conflicts")
+            || path.starts_with("/things")
             || path.starts_with("/watch/");
         if gated && !v.entitled(&scope.decl.name) {
             status = 402;
@@ -1803,4 +1806,121 @@ fn conflicts_page(scope: &Tracker, url: &str, v: &Viewer, said: Option<&str>) ->
         }
     };
     shell("Conflicts", body)
+}
+/// Signals as Atom, newest first, for a feed reader. One entry per signal, named by its id, so
+/// a reader that has seen it does not show it twice.
+fn signal_atom(title: &str, self_url: &str, signals: &[J]) -> String {
+    let updated = signals
+        .first()
+        .and_then(|s| s["at"].as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::iso_stamp(crate::now()));
+    let mut out = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
+    out.push_str("<feed xmlns=\"http://www.w3.org/2005/Atom\">\n");
+    out.push_str(&format!("  <title>{}</title>\n", escape(title)));
+    out.push_str(&format!("  <id>urn:zetlyn:{}</id>\n", escape(self_url)));
+    out.push_str(&format!("  <updated>{updated}</updated>\n"));
+    out.push_str(&format!("  <link rel=\"self\" href=\"{}\"/>\n", escape(self_url)));
+    for s in signals {
+        let said = crate::thingstore::say(s);
+        let id = s["id"].as_i64().map(|i| i.to_string()).unwrap_or_else(|| {
+            format!("{}:{}", s["kind"].as_str().unwrap_or(""), s["key"].as_str().unwrap_or(""))
+        });
+        out.push_str("  <entry>\n");
+        out.push_str(&format!("    <title>{}</title>\n", escape(&said)));
+        out.push_str(&format!("    <id>urn:zetlyn:{}:signal:{}</id>\n", escape(self_url), escape(&id)));
+        out.push_str(&format!("    <updated>{}</updated>\n", s["at"].as_str().unwrap_or(&updated)));
+        if let (Some(scheme), Some(value)) = (s["scheme"].as_str(), s["value"].as_str()) {
+            out.push_str(&format!(
+                "    <link href=\"{}\"/>\n",
+                escape(&at(&format!("/thing/{}/{}", urlencode(scheme), urlencode(value))))
+            ));
+        }
+        out.push_str(&format!("    <content type=\"text\">{}</content>\n", escape(&said)));
+        out.push_str("  </entry>\n");
+    }
+    out.push_str("</feed>\n");
+    out
+}
+
+/// The things a question holds for, from the tracker's store, and the signals about them.
+fn view_of(scope: &Tracker, question: &str) -> Result<(Vec<String>, Vec<J>), String> {
+    let cx = scope.context();
+    let q = crate::thingquery::parse(question, &cx)?;
+    let store = crate::thingstore::ThingStore::open(&scope.dir)?;
+    let keys = store.matching(&q, &cx)?;
+    let set: BTreeSet<&String> = keys.iter().collect();
+    let signals = store
+        .signals(None, 20_000)
+        .into_iter()
+        .filter(|s| s["key"].as_str().is_some_and(|k| set.contains(&k.to_string())))
+        .take(200)
+        .collect();
+    Ok((keys, signals))
+}
+
+
+/// The things a question holds for, from the tracker's store: what a view is before it is saved,
+/// and what a watch on it would hear about.
+fn things_page(scope: &Tracker, url: &str) -> String {
+    let question = params(url).get("q").cloned().unwrap_or_default();
+    let store = crate::thingstore::ThingStore::open(&scope.dir).ok();
+    let answer = if question.trim().is_empty() { None } else { Some(view_of(scope, &question)) };
+    let examples = [
+        "conflict:severity",
+        "conflict:cvss and has:kev",
+        "only:kev",
+        "appeared:exploit<7d",
+        "changed:severity<24h",
+    ];
+    let body = html! {
+        p { a href=(at("/")) { "← " (scope.decl.title) } }
+        h1 { "Things" }
+        form.bar method="get" action=(at("/things")) {
+            input type="search" name="q" value=(question)
+                placeholder="conflict:severity and has:kev";
+            button type="submit" { "Ask" }
+        }
+        p.bar {
+            span.dim { "Try:" }
+            @for ex in examples {
+                " " a.chip href={(at("/things?q=")) (urlencode(ex))} { (ex) }
+            }
+        }
+        @match &answer {
+            None => {
+                p.dim { "A question about things, asked of what this tracker holds: "
+                    code { "conflict:" } " a property, " code { "has:" } " and " code { "only:" }
+                    " a source, " code { "source.property=value" } ", " code { "appeared:kind<7d" }
+                    ", " code { "changed:property<24h" } ", joined with and, or, not and parentheses." }
+            }
+            Some(Err(e)) => { div.note { (e) } }
+            Some(Ok((keys, _))) => {
+                p.state {
+                    (keys.len()) @if keys.len() == 1 { " thing. " } @else { " things. " }
+                    a href={(at("/things.atom?q=")) (urlencode(&question))} { "Watch it as a feed" }
+                    span.dim { ", or in a workspace as " code { "query: " (question) } " in a watch." }
+                }
+                table { tbody {
+                    @for key in keys.iter().take(500) {
+                        @if let Some((title, scheme, value)) = store.as_ref().and_then(|s| s.named(key)) {
+                            tr {
+                                td {
+                                    a href={(at("/thing/")) (urlencode(&scheme)) "/" (urlencode(&value))} { (title) }
+                                    div.why { (scheme) " " (value) }
+                                }
+                                td {
+                                    @for p in store.as_ref().map(|s| s.conflicts_of(key)).unwrap_or_default() {
+                                        span.chip.on { (p) } " "
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } }
+                @if keys.len() > 500 { p.dim { "The first 500 of " (keys.len()) "." } }
+            }
+        }
+    };
+    shell("Things", body)
 }

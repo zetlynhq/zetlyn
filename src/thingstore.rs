@@ -48,6 +48,8 @@ pub struct Snapshot {
     pub things: BTreeMap<String, Snap>,
     /// Source, its state as it described itself: `current`, `stale`, `failing`, `empty`.
     pub states: BTreeMap<String, String>,
+    /// Source, the kind of claim it makes.
+    pub kinds: BTreeMap<String, String>,
 }
 
 impl Snap {
@@ -191,7 +193,8 @@ create table if not exists said(
   raw text not null, means text not null, kind text not null, understood integer not null,
   primary key(key, source, property));
 create table if not exists speaks(
-  key text not null, source text not null, claims text not null, primary key(key, source));
+  key text not null, source text not null, claims text not null, first_seen text, kind text,
+  primary key(key, source));
 create table if not exists conflict(
   key text not null, property text not null, since text not null, sources text not null,
   primary key(key, property));
@@ -225,6 +228,13 @@ impl ThingStore {
         db.execute_batch("pragma journal_mode=wal; pragma synchronous=normal;")
             .map_err(|e| e.to_string())?;
         db.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
+        // Stores written before a source's first word about a thing was kept.
+        for statement in [
+            "alter table speaks add column first_seen text",
+            "alter table speaks add column kind text",
+        ] {
+            let _ = db.execute_batch(statement);
+        }
         Ok(ThingStore { db })
     }
 
@@ -421,10 +431,26 @@ impl ThingStore {
             }
         }
 
+        // When each source first spoke of each thing, which a refresh keeps: `appeared:` asks it.
+        let spoke: BTreeMap<(String, String), String> = self
+            .db
+            .prepare("select key, source, first_seen from speaks where first_seen is not null")
+            .and_then(|mut s| {
+                s.query_map([], |r| Ok(((r.get::<_, String>(0)?, r.get::<_, String>(1)?), r.get::<_, String>(2)?)))
+                    .map(|rows| rows.flatten().collect())
+            })
+            .unwrap_or_default();
         let tx = self.db.transaction().map_err(|e| e.to_string())?;
         tx.execute_batch("delete from said; delete from speaks; delete from conflict;")
             .map_err(|e| e.to_string())?;
         if rebuild {
+            // A rebuild starts the log again but not its numbering: a watch or a reader holds the
+            // last signal it saw by number, and one reused would hide what comes after it.
+            tx.execute(
+                &format!("insert or replace into meta(key, value) values('signals_before', ({NEXT}) - 1)"),
+                [],
+            )
+            .map_err(|e| e.to_string())?;
             tx.execute_batch("delete from thing; delete from signal;")
                 .map_err(|e| e.to_string())?;
         }
@@ -443,7 +469,7 @@ impl ThingStore {
                 )
                 .map_err(|e| e.to_string())?;
             let mut put_speaks = tx
-                .prepare("insert into speaks(key, source, claims) values(?1, ?2, ?3)")
+                .prepare("insert into speaks(key, source, claims, first_seen, kind) values(?1, ?2, ?3, ?4, ?5)")
                 .map_err(|e| e.to_string())?;
             for (key, snap) in &now.things {
                 put_thing
@@ -466,7 +492,13 @@ impl ThingStore {
                 }
                 for (source, claims) in &snap.claims {
                     put_speaks
-                        .execute(rusqlite::params![key, source, json!(claims).to_string()])
+                        .execute(rusqlite::params![
+                            key,
+                            source,
+                            json!(claims).to_string(),
+                            spoke.get(&(key.clone(), source.clone())).cloned().unwrap_or_else(|| at.clone()),
+                            now.kinds.get(source).cloned().unwrap_or_default(),
+                        ])
                         .map_err(|e| e.to_string())?;
                 }
             }
@@ -494,8 +526,8 @@ impl ThingStore {
             }
             let mut put_signal = tx
                 .prepare(
-                    "insert into signal(at, kind, key, property, source, was, is_now)
-                     values(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    &format!("insert into signal(id, at, kind, key, property, source, was, is_now)
+                     values(({NEXT}), ?1, ?2, ?3, ?4, ?5, ?6, ?7)"),
                 )
                 .map_err(|e| e.to_string())?;
             for s in &signals {
@@ -638,6 +670,28 @@ impl ThingStore {
             .map_err(|e| e.to_string())?;
         Ok(())
     }
+
+    /// Where a reader was on the changes page last time, and a note that they are at `latest`
+    /// now. Kept beside their marks on conflicts, as theirs and nobody else's.
+    pub fn visited(&self, reader: &str, latest: i64) -> Option<i64> {
+        let was: Option<i64> = self
+            .db
+            .query_row(
+                "select state from reader where reader = ?1 and key = '' and property = 'changes'",
+                [reader],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|s| s.parse().ok());
+        if was.map(|w| latest > w).unwrap_or(true) {
+            let _ = self.db.execute(
+                "insert or replace into reader(reader, key, property, state, at)
+                 values(?1, '', 'changes', ?2, ?3)",
+                rusqlite::params![reader, latest.to_string(), crate::iso_stamp(crate::now())],
+            );
+        }
+        was
+    }
 }
 
 impl ThingStore {
@@ -673,3 +727,154 @@ impl ThingStore {
             .unwrap_or_default()
     }
 }
+
+impl ThingStore {
+    /// Every thing, as a question about things is asked of it.
+    pub fn views(&self) -> Result<Vec<crate::thingquery::ThingView>, String> {
+        let held = self.held()?;
+        let mut speaks: BTreeMap<String, BTreeMap<String, (String, String)>> = BTreeMap::new();
+        let mut stmt = self
+            .db
+            .prepare("select key, source, coalesce(first_seen, ''), coalesce(kind, '') from speaks")
+            .map_err(|e| e.to_string())?;
+        for (key, source, first, kind) in stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .flatten()
+        {
+            speaks.entry(key).or_default().insert(source, (first, kind));
+        }
+        let mut conflicts: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut stmt = self
+            .db
+            .prepare("select key, property from conflict")
+            .map_err(|e| e.to_string())?;
+        for (key, property) in stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?
+            .flatten()
+        {
+            conflicts.entry(key).or_default().insert(property);
+        }
+        let mut changed: BTreeMap<String, BTreeMap<String, Vec<String>>> = BTreeMap::new();
+        let mut stmt = self
+            .db
+            .prepare("select key, property, at from signal where kind = 'changed' and key is not null")
+            .map_err(|e| e.to_string())?;
+        for (key, property, at) in stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    r.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .flatten()
+        {
+            changed.entry(key).or_default().entry(property).or_default().push(at);
+        }
+        Ok(held
+            .things
+            .into_iter()
+            .map(|(key, snap)| crate::thingquery::ThingView {
+                value: snap.value,
+                by: snap.by,
+                speaks: speaks.remove(&key).unwrap_or_default(),
+                conflicts: conflicts.remove(&key).unwrap_or_default(),
+                changed: changed.remove(&key).unwrap_or_default(),
+                key,
+            })
+            .collect())
+    }
+
+    /// The keys of every thing a question holds for, sorted.
+    pub fn matching(
+        &self,
+        q: &crate::thingquery::Q,
+        cx: &crate::thingquery::Context,
+    ) -> Result<Vec<String>, String> {
+        Ok(self
+            .views()?
+            .iter()
+            .filter(|t| crate::thingquery::holds(q, t, cx))
+            .map(|t| t.key.clone())
+            .collect())
+    }
+
+    /// Title, scheme and value of a thing, for a list that shows it.
+    pub fn named(&self, key: &str) -> Option<(String, String, String)> {
+        self.db
+            .query_row(
+                "select title, scheme, value from thing where key = ?1",
+                [key],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .ok()
+    }
+
+    /// The highest signal id there is, which is the mark a watch or a reader starts from.
+    pub fn last_signal(&self) -> i64 {
+        self.db
+            .query_row(&format!("select ({NEXT}) - 1"), [], |r| r.get(0))
+            .unwrap_or(0)
+    }
+}
+
+/// One signal as a sentence, for a feed, a mail or a terminal. The page draws its own.
+pub fn say(s: &J) -> String {
+    let thing = s["title"]
+        .as_str()
+        .filter(|t| !t.is_empty())
+        .or(s["value"].as_str())
+        .or(s["key"].as_str())
+        .unwrap_or("");
+    let source = s["source"].as_str().unwrap_or("");
+    let property = s["property"].as_str().unwrap_or("");
+    let words = |v: &J| -> String {
+        match v {
+            J::Array(a) => a.iter().filter_map(J::as_str).collect::<Vec<_>>().join(", "),
+            J::Object(o) => o
+                .iter()
+                .map(|(k, v)| {
+                    let w = v
+                        .as_array()
+                        .map(|a| a.iter().filter_map(J::as_str).collect::<Vec<_>>().join(", "))
+                        .unwrap_or_default();
+                    format!("{k} {w}")
+                })
+                .collect::<Vec<_>>()
+                .join("; "),
+            J::String(s) => s.clone(),
+            _ => "nothing".into(),
+        }
+    };
+    match s["kind"].as_str().unwrap_or("") {
+        "new_thing" => format!("New: {thing}, first said by {source}"),
+        "new_perspective" => format!("{source} now speaks about {thing}"),
+        "changed" => format!(
+            "{thing}: {property} at {source} was {} and is {}",
+            words(&s["was"]),
+            words(&s["is"])
+        ),
+        "conflict" => format!("{thing}: sources now disagree about {property}: {}", words(&s["is"])),
+        "resolved" => format!("{thing}: sources agree again about {property}"),
+        "withdrawn" if source.is_empty() => format!("{thing} is no longer said by any source"),
+        "withdrawn" => format!("{source} no longer says anything about {thing}"),
+        "health" => format!("{source} was {} and is {}", words(&s["was"]), words(&s["is"])),
+        "entered" => format!("{thing} is now in this view"),
+        "left" => format!("{thing} has left this view"),
+        other => format!("{thing}: {other}"),
+    }
+}
+
+/// The number the next signal takes: past every signal held, and past every one a rebuild let go.
+const NEXT: &str = "select max(coalesce((select max(id) from signal), 0),
+    coalesce((select cast(value as integer) from meta where key = 'signals_before'), 0)) + 1";

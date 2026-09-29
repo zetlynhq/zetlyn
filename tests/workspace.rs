@@ -182,40 +182,75 @@ fn changes() {
     );
 }
 
-/// The keys a watch would deliver, from `watch check`'s report.
+/// What a watch would tell, from `watch check`'s report: `kind key` for a tracker's watch, the
+/// identifier of each claim that moved for a source's.
 fn delivered(report: &str, watch: &str) -> Vec<String> {
     let start = report.find(&format!("{watch}: ")).expect("the watch reported");
     let body = &report[start..];
-    let json_at = body.find('{').expect("entries to report");
+    let Some(json_at) = body.find('{') else {
+        return Vec::new();
+    };
     let mut de = serde_json::Deserializer::from_str(&body[json_at..]).into_iter::<serde_json::Value>();
     let j = de.next().unwrap().unwrap();
-    let mut keys: Vec<String> = j["things"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|e| {
-            let key = if e["identifier"].is_object() { &e["identifier"] } else { &e["ids"][0] };
-            key["value"].as_str().unwrap_or("").to_string()
-        })
-        .collect();
-    keys.sort();
-    keys
+    let mut out: Vec<String> = match j["signals"].as_array() {
+        Some(signals) => signals
+            .iter()
+            .map(|s| {
+                format!(
+                    "{} {}{}",
+                    s["kind"].as_str().unwrap_or(""),
+                    s["value"].as_str().or(s["key"].as_str()).unwrap_or(""),
+                    s["property"].as_str().map(|p| format!(" {p}")).unwrap_or_default()
+                )
+            })
+            .collect(),
+        None => j["things"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["ids"][0]["value"].as_str().unwrap_or("").to_string())
+            .collect(),
+    };
+    out.sort();
+    out
 }
 
 #[test]
 fn watches() {
     let ws = Workspace::new("watches");
-    ws.update();
-    let report = ws.z(&["watch", "check", &ws.root.display().to_string()]);
+    let root = ws.root.display().to_string();
+    std::fs::write(
+        ws.root.join("watches/foo.yaml"),
+        "name: foo\ntracker: test/cve\nthing: CVE-2026-0001\ndeliver:\n- to: feed\n",
+    )
+    .unwrap();
+    // The tracker looks, and every watch takes its first look, which tells nothing and
+    // remembers what a view held.
+    ws.z(&["tracker", "refresh", &ws.scope()]);
+    ws.z(&["watch", "check", &root, "--deliver"]);
 
-    // On the scale, not as strings: `critical` is above `high`, and `urgent` is on no scale.
+    ws.update();
+    let report = ws.z(&["watch", "check", &root]);
+
+    // A view on the scale, not in words: 0004 became critical at vendor A and entered it;
+    // `urgent` is on no scale and 0005 never did. Its members' signals come with it.
     assert_eq!(
         delivered(&report, "severe"),
-        ["CVE-2026-0001", "CVE-2026-0002", "CVE-2026-0004"]
+        [
+            "changed CVE-2026-0001 cvss",
+            "changed CVE-2026-0004 cvss",
+            "changed CVE-2026-0004 severity",
+            "conflict CVE-2026-0001 cvss",
+            "entered CVE-2026-0004",
+        ]
     );
-    // A watch over a dataset reads its query.
+    // One thing, and everything about it.
+    assert_eq!(
+        delivered(&report, "foo"),
+        ["changed CVE-2026-0001 cvss", "conflict CVE-2026-0001 cvss"]
+    );
+    // A watch over a source reads its query.
     assert_eq!(delivered(&report, "vendor-a-critical"), ["CVE-2026-0004"]);
-    golden("watches.txt", &report);
 }
 
 #[test]
@@ -551,4 +586,59 @@ fn a_tolerance_and_a_word_nobody_mapped_are_not_conflicts() {
     // 9.8 against 7.5 is more than 2 apart, 8.1 against 9.8 is not; `severe` is wording.
     assert_eq!(open_conflicts(&ws), ["cve:cve-2026-0002 cvss"]);
     assert!(said.contains("1 that differ only in wording"), "{said}");
+}
+
+#[test]
+fn a_question_about_things_is_answered_or_refused_by_name() {
+    let ws = Workspace::new("questions");
+    ws.z(&["tracker", "refresh", &ws.scope()]);
+    let ask = |q: &str| -> Vec<String> {
+        ws.z(&["tracker", "things", &ws.scope(), q]).lines().map(str::to_string).collect()
+    };
+    assert_eq!(ask("conflict:severity"), ["cve:cve-2026-0002"]);
+    assert_eq!(ask("has:kev"), ["cve:cve-2026-0001", "cve:cve-2026-0004"]);
+    assert_eq!(ask("only:exploits"), ["cve:cve-2026-0003"]);
+    // A source by the end of its name, a number compared as a number.
+    assert_eq!(ask("a.cvss>9"), ["cve:cve-2026-0001", "cve:cve-2026-0002"]);
+    assert_eq!(ask("has:kev and not has:exploits"), ["cve:cve-2026-0004"]);
+
+    // What cannot be answered says why, rather than answering with nothing.
+    for (q, why) in [
+        ("nosuch.cvss>1", "no source here is called that"),
+        ("conflict:title", "only aligned properties are compared: cvss, exploited, severity"),
+        ("a.cvss>b.cvss", "compared with = or != only"),
+    ] {
+        let (ok, said) = run(&ws.root, &["tracker", "things", &ws.scope(), q]);
+        assert!(!ok && said.contains(why), "{q}: {said}");
+    }
+}
+
+#[test]
+fn a_rebuild_does_not_hide_what_a_watch_has_yet_to_hear() {
+    let ws = Workspace::new("rebuild-watch");
+    let root = ws.root.display().to_string();
+    std::fs::write(
+        ws.root.join("watches/foo.yaml"),
+        "name: foo\ntracker: test/cve\nthing: CVE-2026-0001\ndeliver:\n- to: feed\n",
+    )
+    .unwrap();
+    ws.z(&["tracker", "refresh", &ws.scope()]);
+    ws.z(&["watch", "check", &root, "--deliver"]);
+    // The watch hears the update and remembers the last signal it heard.
+    ws.update();
+    ws.z(&["watch", "check", &root, "--deliver"]);
+
+    // The log starts again; the next change must still be past where the watch stopped.
+    ws.z(&["tracker", "refresh", &ws.scope(), "--rebuild"]);
+    std::fs::copy(
+        fixtures().join("workspace/sources/vendor-a/advisories.csv"),
+        ws.root.join("sources/vendor-a/advisories.csv"),
+    )
+    .unwrap();
+    ws.z(&["source", "update", &ws.dataset("vendor-a")]);
+    let report = ws.z(&["watch", "check", &root]);
+    assert_eq!(
+        delivered(&report, "foo"),
+        ["changed CVE-2026-0001 cvss", "resolved CVE-2026-0001 cvss"]
+    );
 }

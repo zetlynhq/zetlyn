@@ -25,6 +25,7 @@ mod serve;
 mod servetracker;
 mod rows;
 mod store;
+mod thingquery;
 mod thingstore;
 mod watch;
 mod yaml;
@@ -96,6 +97,8 @@ zetlyn
   zetlyn tracker search <dir> <query> [--view <name>] [--kind <word>] [--limit <n>]
   zetlyn tracker measure <dir>
   zetlyn tracker refresh <dir> [--rebuild]
+  zetlyn tracker things <dir> <question>
+      conflict:severity and has:kev, nvd.severity=critical, only:nvd, appeared:exploit<7d
   zetlyn tracker conflicts <dir>
   zetlyn tracker signals <dir> [--since <id>]
       A tracker holds no index. It rewrites the query per source, fans out, merges ranked
@@ -278,6 +281,19 @@ fn run(args: &[String]) -> Result<(), String> {
                     if r.first { " (the first look, so none)" } else { "" },
                     started.elapsed().as_secs_f64()
                 );
+                Ok(())
+            }
+            // Which things a question holds for, asked of the tracker's store.
+            Some("things") => {
+                let (dir, sources) = scope_at(args, 2)?;
+                let t = tracker::Tracker::open(&dir, &sources)?;
+                let question = positional(args, 2).iter().skip(1).map(|s| s.as_str()).collect::<Vec<_>>().join(" ");
+                let cx = t.context();
+                let q = thingquery::parse(&question, &cx)?;
+                let store = thingstore::ThingStore::open(&dir)?;
+                for key in store.matching(&q, &cx)? {
+                    println!("{key}");
+                }
                 Ok(())
             }
             Some("conflicts") => {
@@ -676,16 +692,16 @@ fn schedule(args: &[String]) -> Result<(), String> {
         for w in watch::all(&root) {
             match w.check(&root) {
                 Ok((report, mark)) => {
-                    let n = report["things"].as_array().map(Vec::len).unwrap_or(0);
-                    if n == 0 {
-                        continue;
-                    }
+                    let n = report["signals"].as_array().or_else(|| report["things"].as_array()).map(Vec::len).unwrap_or(0);
                     if !deliver {
-                        println!("{}: {n} things, not delivered", w.decl.name);
+                        if n > 0 {
+                            println!("{}: {n} to tell, not delivered", w.decl.name);
+                        }
                         continue;
                     }
                     match w.deliver(&report, &mark) {
-                        Ok(to) => println!("{}: {n} things → {}", w.decl.name, to.join(", ")),
+                        Ok(to) if n > 0 => println!("{}: {n} told → {}", w.decl.name, to.join(", ")),
+                        Ok(_) => {}
                         Err(e) => eprintln!("{}: {e}", w.decl.name),
                     }
                 }
@@ -730,9 +746,11 @@ fn watch_cmd(args: &[String]) -> Result<(), String> {
             let deliver = args.iter().any(|a| a == "--deliver");
             for w in &watches {
                 let (report, mark) = w.check(&root)?;
-                let n = report["things"].as_array().map(Vec::len).unwrap_or(0);
-                println!("{}: {n} things since {}", w.decl.name, report["since"]);
-                if deliver && n > 0 {
+                let n = report["signals"].as_array().or_else(|| report["things"].as_array()).map(Vec::len).unwrap_or(0);
+                println!("{}: {n} to tell since {}", w.decl.name, report["since"]);
+                // Delivered, or at least remembered: a look that told nothing still moves the mark
+                // and keeps what a view held.
+                if deliver {
                     println!("  → {}", w.deliver(&report, &mark)?.join(", "));
                 } else if n > 0 {
                     println!(

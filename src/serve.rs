@@ -170,12 +170,14 @@ fn link(base: &str, q: &str, view: &str, sort: &str, page: usize) -> String {
 }
 
 
-/// Where this surface is mounted, so several of them can sit on one host. Empty at the root.
-///
-/// One process serves one thing, so this is set once before the loop starts and read from
-/// everywhere a link is written. The router strips it; every address a browser is given carries
-/// it.
-static MOUNT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+// Where this surface is mounted, so several of them can sit on one host. Empty at the root.
+//
+// Set before a request is answered and read from everywhere a link is written. Per thread,
+// because the local app answers for every tracker in a workspace, each under its own prefix,
+// one request at a time. The router strips it; every address a browser is given carries it.
+thread_local! {
+    static MOUNT: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
 
 /// A prefix with a leading slash and no trailing one, or nothing at all.
 pub fn mount(prefix: &str) {
@@ -187,11 +189,11 @@ pub fn mount(prefix: &str) {
     } else {
         format!("/{p}")
     };
-    let _ = MOUNT.set(p);
+    MOUNT.with(|m| *m.borrow_mut() = p);
 }
 
-pub fn mounted() -> &'static str {
-    MOUNT.get().map(String::as_str).unwrap_or("")
+pub fn mounted() -> String {
+    MOUNT.with(|m| m.borrow().clone())
 }
 
 /// An address on this surface, as a browser has to ask for it.
@@ -206,7 +208,7 @@ pub fn unmount(url: &str) -> String {
     if m.is_empty() {
         return url.to_string();
     }
-    match url.strip_prefix(m) {
+    match url.strip_prefix(m.as_str()) {
         Some("") => "/".to_string(),
         Some(rest) if rest.starts_with('/') || rest.starts_with('?') => {
             if rest.starts_with('?') {

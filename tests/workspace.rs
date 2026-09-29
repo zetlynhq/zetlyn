@@ -642,3 +642,27 @@ fn a_rebuild_does_not_hide_what_a_watch_has_yet_to_hear() {
         ["changed CVE-2026-0001 cvss", "resolved CVE-2026-0001 cvss"]
     );
 }
+
+#[test]
+fn a_claim_about_two_things_is_part_of_both() {
+    let ws = Workspace::new("two-at-once");
+    // One exploit for two vulnerabilities, as Exploit-DB writes it.
+    let csv = ws.root.join("sources/exploits/exploits.csv");
+    let mut rows = std::fs::read_to_string(&csv).unwrap();
+    rows.push_str("104,Foo and Bar at once,CVE-2026-0004;CVE-2026-0005,linux,2026-09-06\n");
+    std::fs::write(&csv, rows).unwrap();
+    ws.z(&["source", "update", &ws.dataset("exploits")]);
+    ws.z(&["tracker", "refresh", &ws.scope()]);
+    let with_code: Vec<String> = ws
+        .z(&["tracker", "things", &ws.scope(), "has:exploits"])
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        with_code,
+        ["cve:cve-2026-0001", "cve:cve-2026-0002", "cve:cve-2026-0003", "cve:cve-2026-0004", "cve:cve-2026-0005"]
+    );
+    // And the measurement agrees with the store: five things carry an exploit.
+    let m = json_of(&ws.z(&["tracker", "measure", &ws.scope()]));
+    assert_eq!(m["with_an_exploit"], 5, "{m}");
+}

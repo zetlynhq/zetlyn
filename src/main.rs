@@ -2,6 +2,7 @@
 //! one page; it is not what makes them usable.
 
 mod account;
+mod app;
 mod artifact;
 mod build;
 mod console;
@@ -24,6 +25,7 @@ mod trackerdecl;
 mod serve;
 mod servetracker;
 mod rows;
+mod schemes;
 mod store;
 mod thingquery;
 mod thingstore;
@@ -74,6 +76,10 @@ pub fn now() -> i64 {
 
 const USAGE: &str = "\
 zetlyn
+
+  zetlyn [<workspace>] [--port 4747] [--no-open]
+      The workspace in a browser, for the person at the machine: a tracker from a first source
+      and a second, with what they share shown before they are connected.
 
   zetlyn source new --from <path or URL> [--at <dir>] [--name owner/name] [--kind <word>]
       Reads a folder, a .csv or an .xlsx, guesses the identifier, the title, the text and the
@@ -385,6 +391,13 @@ fn run(args: &[String]) -> Result<(), String> {
             serve::serve(ds, &addr)
         }
         // A published artifact names the build that made it, so the build has to name itself.
+        // Nothing asked for: the workspace, in a browser.
+        None | Some("app") => app::run(args),
+        // `zetlyn ~/Zetlyn`: a directory on its own is a workspace to open.
+        Some(p) if !p.starts_with('-') && std::path::Path::new(p).is_dir() => {
+            let with: Vec<String> = std::iter::once("app".to_string()).chain(args.iter().cloned()).collect();
+            app::run(&with)
+        }
         Some("--version") | Some("-V") | Some("version") => {
             println!("zetlyn {}", env!("CARGO_PKG_VERSION"));
             Ok(())

@@ -308,9 +308,9 @@ pub fn all(root: &Path) -> Vec<Watch> {
 fn thing_key(named: &str, scheme: &str) -> String {
     match named.split_once(':') {
         Some((scheme, value)) if !scheme.is_empty() && !scheme.contains('-') => {
-            format!("{scheme}:{}", value.to_lowercase())
+            crate::schemes::key(scheme, value)
         }
-        _ => format!("{scheme}:{}", named.to_lowercase()),
+        _ => crate::schemes::key(scheme, named),
     }
 }
 

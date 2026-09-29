@@ -589,29 +589,26 @@ impl Tracker {
         let mut entries: Vec<Thing> = Vec::new();
         let mut seen: BTreeMap<String, usize> = BTreeMap::new();
         for (mi, hit) in order {
-            let key = hit
-                .ids
-                .iter()
-                .find(|id| keys.iter().any(|k| *k == id.scheme))
-                .cloned();
-            let slot = match &key {
-                Some(k) => {
-                    let token = format!("{}:{}", k.scheme, k.value.to_lowercase());
-                    match seen.get(&token) {
-                        Some(i) => *i,
-                        None => {
-                            seen.insert(token, entries.len());
-                            entries.push(self.new_entry(Some(k.clone()), &hit));
-                            entries.len() - 1
-                        }
+            let about = about(&keys, &hit.ids);
+            if about.is_empty() {
+                entries.push(self.new_entry(None, &hit));
+                let slot = entries.len() - 1;
+                self.add_part(&mut entries[slot], &self.members[mi], &hit);
+                continue;
+            }
+            // Into every thing it is about: an exploit for two CVEs is part of both.
+            for k in about {
+                let token = crate::schemes::key(&k.scheme, &k.value);
+                let slot = match seen.get(&token) {
+                    Some(i) => *i,
+                    None => {
+                        seen.insert(token, entries.len());
+                        entries.push(self.new_entry(Some(k.clone()), &hit));
+                        entries.len() - 1
                     }
-                }
-                None => {
-                    entries.push(self.new_entry(None, &hit));
-                    entries.len() - 1
-                }
-            };
-            self.add_part(&mut entries[slot], &self.members[mi], &hit);
+                };
+                self.add_part(&mut entries[slot], &self.members[mi], &hit);
+            }
         }
 
         // Completed and folded before anything is paged, because the predicate is applied over
@@ -975,21 +972,25 @@ impl Tracker {
             for list in ["changed", "removed"] {
                 for change in report[list].as_array().unwrap_or(&empty) {
                     let ids = crate::store::parse_ids(&change["ids"].to_string());
-                    let key = ids
-                        .into_iter()
-                        .find(|id| keys.iter().any(|k| *k == id.scheme));
                     let title = change["title"].as_str().unwrap_or("").to_string();
                     let mut one = change.clone();
                     one["source"] = json!(m.name());
-                    let token = match &key {
-                        Some(k) => format!("{}:{}", k.scheme, k.value.to_lowercase()),
-                        None => format!("{}#{}", m.name(), change["claim_id"]),
+                    // Under every thing the claim is about, or on its own where it is about none.
+                    let about: Vec<Option<crate::claim::Id>> = match about(&keys, &ids) {
+                        a if a.is_empty() => vec![None],
+                        a => a.into_iter().cloned().map(Some).collect(),
                     };
-                    match index.get(&token) {
-                        Some(i) => entries[*i].2.push(one),
-                        None => {
-                            index.insert(token, entries.len());
-                            entries.push((key, title, vec![one]));
+                    for key in about {
+                        let token = match &key {
+                            Some(k) => crate::schemes::key(&k.scheme, &k.value),
+                            None => format!("{}#{}", m.name(), change["claim_id"]),
+                        };
+                        match index.get(&token) {
+                            Some(i) => entries[*i].2.push(one.clone()),
+                            None => {
+                                index.insert(token, entries.len());
+                                entries.push((key, title.clone(), vec![one.clone()]));
+                            }
                         }
                     }
                 }
@@ -1126,19 +1127,13 @@ impl Tracker {
                 }
                 for hit in &hits {
                     seen += 1;
-                    let Some(key) = hit
-                        .ids
-                        .iter()
-                        .find(|id| keys.iter().any(|k| *k == id.scheme))
-                    else {
-                        continue;
-                    };
+                    for key in about(&keys, &hit.ids) {
                     // Every field, under the name this tracker shows it by. A measurement
                     // of one field is a measurement of the field somebody guessed.
                     // Compared with the case folded, as the thing is gathered: `cve-2021-44228`
                     // and `CVE-2021-44228` are one thing there and must be one here, and so is the scheme.
                     let said = subjects
-                        .entry(format!("{}:{}", key.scheme, key.value.to_lowercase()))
+                        .entry(crate::schemes::key(&key.scheme, &key.value))
                         .or_default()
                         .entry(m.name().to_string())
                         .or_default();
@@ -1153,6 +1148,7 @@ impl Tracker {
                         let words = said.1.entry(scope_name).or_default();
                         words.0.insert(raw);
                         words.1.insert(mapped);
+                    }
                     }
                 }
                 offset += hits.len();
@@ -1503,16 +1499,11 @@ impl Tracker {
                     break;
                 }
                 for hit in &hits {
-                    // One identifier makes a thing, the first scheme of the tracker's the claim
-                    // carries. Others it carries are shown on the thing and make no thing of
-                    // their own.
-                    let Some(id) = keys
-                        .iter()
-                        .find_map(|k| hit.ids.iter().find(|i| i.scheme == *k))
-                    else {
-                        continue;
-                    };
-                    let key = format!("{}:{}", id.scheme, id.value.to_lowercase());
+                    // A thing for every value of the first of the tracker's schemes the claim
+                    // carries: an exploit for two CVEs is about both. Other schemes it carries are
+                    // shown on the thing and make no thing of their own.
+                    for id in about(&keys, &hit.ids) {
+                    let key = crate::schemes::key(&id.scheme, &id.value);
                     let thing = snap.things.entry(key).or_insert_with(|| Snap {
                         scheme: id.scheme.clone(),
                         value: id.value.clone(),
@@ -1560,6 +1551,7 @@ impl Tracker {
                             said.means.insert(mapped);
                         }
                     }
+                    }
                 }
                 offset += hits.len();
                 if hits.len() < 5000 {
@@ -1601,4 +1593,19 @@ impl Tracker {
             now: crate::now(),
         }
     }
+}
+
+/// What a claim is about, as a tracker counts things: every value of the first of the tracker's
+/// schemes the claim carries. An exploit for two CVEs is a claim about both of them. A claim that
+/// carries a GHSA and a CVE is about the CVE where the tracker is identified by CVE, and the GHSA
+/// is shown on it rather than making a thing of its own (D14).
+pub fn about<'a, K: AsRef<str>>(keys: &[K], ids: &'a [Id]) -> Vec<&'a Id> {
+    let Some(scheme) = keys.iter().map(AsRef::as_ref).find(|k| ids.iter().any(|i| i.scheme == *k)) else {
+        return Vec::new();
+    };
+    let mut seen = BTreeSet::new();
+    ids.iter()
+        .filter(|i| i.scheme == *scheme)
+        .filter(|i| seen.insert(crate::schemes::key(&i.scheme, &i.value)))
+        .collect()
 }

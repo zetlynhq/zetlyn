@@ -494,3 +494,21 @@ impl Accounts {
             .ok_or_else(|| "the account did not stay".into())
     }
 }
+
+impl Viewer {
+    /// The person at the machine, in the local app. There are no accounts there: whoever runs
+    /// the program owns everything it holds, and sees every page of it.
+    pub fn operator() -> Viewer {
+        Viewer {
+            account: Some(Account {
+                id: 0,
+                email: "you".into(),
+                state: "active".into(),
+                paid_until: None,
+                scopes: Vec::new(),
+                curator: true,
+            }),
+            by_key: false,
+        }
+    }
+}

@@ -315,7 +315,7 @@ fn entry_page(scope: &Tracker, scheme: &str, value: &str) -> Option<String> {
     let entry = scope.entry(scheme, value)?;
     // What the tracker store judges, which is what the lists and the signals judge too. A thing
     // page that decided for itself could call a conflict what the conflicts page calls wording.
-    let key = format!("{scheme}:{}", value.to_lowercase());
+    let key = crate::schemes::key(scheme, value);
     // Where the store has not looked yet, the page judges as it always did, rather than calling
     // everything agreed.
     let judged = crate::thingstore::ThingStore::open(&scope.dir)
@@ -1063,27 +1063,73 @@ fn watch_feed(scope: &Tracker, name: &str) -> Option<String> {
 /// with for ever and say they were current.
 const REREAD: i64 = 60;
 
-pub fn serve(mut scope: Tracker, dir: &Path, datasets: &Path, addr: &str) -> Result<(), String> {
-    let accounts = Accounts::open(&scope.root)?;
-    let site = Site::load(&scope.root);
+pub fn serve(scope: Tracker, dir: &Path, datasets: &Path, addr: &str) -> Result<(), String> {
     let server = tiny_http::Server::http(addr).map_err(|e| e.to_string())?;
     println!("{} on http://{addr}", scope.decl.name);
-    if site.mail.run.is_empty() {
+    let mut site = TrackerSite::open(scope, dir, datasets, addr, false)?;
+    if site.site.mail.run.is_empty() {
         println!("no mailer named in workspace.yaml, so sign-in links are printed here");
     }
-    // A tracker whose store is behind its sources, or has none, refreshes before it answers.
-    if let Err(e) = scope.refresh_if_moved() {
-        eprintln!("{}: the tracker store was not refreshed: {e}", dir.display());
+    for request in server.incoming_requests() {
+        site.answer(request);
     }
-    let mut read_at = crate::now();
+    Ok(())
+}
 
-    for mut request in server.incoming_requests() {
+/// One tracker answering requests: what `zetlyn serve` runs, and what the local app runs for each
+/// tracker in a workspace under its own prefix.
+pub struct TrackerSite {
+    pub scope: Tracker,
+    dir: std::path::PathBuf,
+    datasets: std::path::PathBuf,
+    accounts: Accounts,
+    site: Site,
+    read_at: i64,
+    /// Where this is served, for a link written when the workspace names no address of its own.
+    addr: String,
+    /// The person at the machine. Locally there are no readers and nothing is paid for: the
+    /// operator sees every page, and the paywall is for what is published.
+    operator: bool,
+}
+
+impl TrackerSite {
+    pub fn open(scope: Tracker, dir: &Path, datasets: &Path, addr: &str, operator: bool) -> Result<TrackerSite, String> {
+        let accounts = Accounts::open(&scope.root)?;
+        let site = Site::load(&scope.root);
+        let scope = scope;
+        // A tracker whose store is behind its sources, or has none, refreshes before it answers.
+        if let Err(e) = scope.refresh_if_moved() {
+            eprintln!("{}: the tracker store was not refreshed: {e}", dir.display());
+        }
+        Ok(TrackerSite {
+            scope,
+            dir: dir.to_path_buf(),
+            datasets: datasets.to_path_buf(),
+            accounts,
+            site,
+            read_at: crate::now(),
+            addr: addr.to_string(),
+            operator,
+        })
+    }
+
+    /// One request. A failure is that request's, answered 500 as it is dropped, and never the
+    /// end of the server.
+    pub fn answer(&mut self, request: tiny_http::Request) {
+        if let Err(e) = self.answer_or_fail(request) {
+            eprintln!("{}: {e}", self.dir.display());
+        }
+    }
+
+    fn answer_or_fail(&mut self, mut request: tiny_http::Request) -> Result<(), String> {
+        let TrackerSite { scope, dir, datasets, accounts, site, read_at, addr: site_addr, operator } = self;
+        let (dir, datasets) = (dir.as_path(), datasets.as_path());
         // Before anything is read off it, and only between requests, so no page is drawn from
         // two readings.
-        if crate::now() - read_at >= REREAD {
+        if crate::now() - *read_at >= REREAD {
             match Tracker::open(dir, datasets) {
                 Ok(fresh) => {
-                    scope = fresh;
+                    *scope = fresh;
                     // What changed since the last look becomes signals, once per update.
                     if let Err(e) = scope.refresh_if_moved() {
                         eprintln!("{}: the tracker store was not refreshed: {e}", dir.display());
@@ -1091,7 +1137,7 @@ pub fn serve(mut scope: Tracker, dir: &Path, datasets: &Path, addr: &str) -> Res
                 }
                 Err(e) => eprintln!("{}: read again failed, serving the last one: {e}", dir.display()),
             }
-            read_at = crate::now();
+            *read_at = crate::now();
         }
         let url = unmount(request.url());
         let path = url.split('?').next().unwrap_or("/").to_string();
@@ -1109,7 +1155,11 @@ pub fn serve(mut scope: Tracker, dir: &Path, datasets: &Path, addr: &str) -> Res
         };
         let cookie = header("Cookie");
         let authorization = header("Authorization");
-        let v = account::viewer_of(&accounts, cookie.as_deref(), authorization.as_deref());
+        let v = if *operator {
+            Viewer::operator()
+        } else {
+            account::viewer_of(&accounts, cookie.as_deref(), authorization.as_deref())
+        };
         let post = request.method() == &tiny_http::Method::Post;
         let mut form = String::new();
         if post {
@@ -1173,11 +1223,10 @@ pub fn serve(mut scope: Tracker, dir: &Path, datasets: &Path, addr: &str) -> Res
 
             "/signin" if post => {
                 let email = form_field(&form, "email");
-                match accounts.ensure(&email) {
-                    Ok(a) => {
-                        let raw = accounts.new_link(a.id)?;
+                match accounts.ensure(&email).and_then(|a| accounts.new_link(a.id).map(|raw| (a, raw))) {
+                    Ok((a, raw)) => {
                         let base = if site.url.is_empty() {
-                            format!("http://{addr}")
+                            format!("http://{addr}", addr = site_addr)
                         } else {
                             site.url.clone()
                         };
@@ -1404,7 +1453,7 @@ pub fn serve(mut scope: Tracker, dir: &Path, datasets: &Path, addr: &str) -> Res
             // A thing's own feed: every signal about it, for a reader who watches one thing.
             _ if parts.len() == 3 && parts[0] == "thing" && parts[2].ends_with(".atom") => {
                 let value = parts[2].trim_end_matches(".atom");
-                let key = format!("{}:{}", parts[1], value.to_lowercase());
+                let key = crate::schemes::key(&parts[1], &value);
                 let signals: Vec<J> = crate::thingstore::ThingStore::open(&scope.dir)
                     .map(|s| s.signals(None, 20_000))
                     .unwrap_or_default()
@@ -1496,8 +1545,8 @@ pub fn serve(mut scope: Tracker, dir: &Path, datasets: &Path, addr: &str) -> Res
             }
         }
         let _ = request.respond(response);
+        Ok(())
     }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------------------------

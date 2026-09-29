@@ -366,7 +366,7 @@ pub fn build(
         .map(|s| s.names_record())
         .unwrap_or(false);
     let names_it = match ids.first() {
-        Some(id) if one_identifier => format!("{}:{}", id.scheme, id.value.to_lowercase()),
+        Some(id) if one_identifier => crate::schemes::key(&id.scheme, &id.value),
         _ => origin.address(),
     };
 

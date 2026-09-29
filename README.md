@@ -33,6 +33,24 @@ cargo build --release      # target/release/zetlyn
 Rust 1.80 or later. `git` on the machine, for a source that is a checkout. Nothing else: SQLite is
 compiled in.
 
+## No command at all
+
+```
+zetlyn
+```
+
+opens the workspace in a browser: the current directory if it is one, `~/Zetlyn` otherwise. The
+page asks what you want to track, then for a first source, an address or a file. It reads the
+whole of it, says what names a claim (a CVE, a DOI, an ISBN: fifteen schemes are known by pattern
+and check digit, with no model involved), and shows the first claims. A second source is read the same
+way, and before anything is connected you see how many things the two share, via which
+identifier. **Connect**, and the tracker is there, served as it would be published. Or start from
+the example: CISA's exploited vulnerabilities and Exploit-DB, two pastes, and 450 of CISA's 1,728
+turn out to have public code.
+
+Nothing here is a second way of doing things: every step is `source new`, `source update` and a
+`tracker.yaml`, written where you can read and edit them.
+
 ## Two commands to something browsable
 
 ```

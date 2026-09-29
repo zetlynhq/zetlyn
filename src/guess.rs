@@ -7,6 +7,7 @@ use std::path::Path;
 use serde_json::{json, Value as J};
 
 use crate::build::as_date;
+use crate::schemes::Scheme;
 use crate::sourcedecl::PropertyType;
 
 const SAMPLE: usize = 500;
@@ -26,9 +27,11 @@ impl Column {
     fn distinct(&self) -> usize {
         self.filled().into_iter().collect::<BTreeSet<_>>().len()
     }
+    /// Every row has one and nearly every one is different. Real files repeat a row now and then
+    /// (Exploit-DB's does), and a repeated row is the same claim said twice, not a second one.
     fn unique(&self) -> bool {
         let f = self.filled();
-        !f.is_empty() && f.len() == self.values.len() && self.distinct() == f.len()
+        !f.is_empty() && f.len() == self.values.len() && self.distinct() * 100 >= f.len() * 98
     }
     fn mean_len(&self) -> usize {
         let f = self.filled();
@@ -175,27 +178,91 @@ fn cell(d: &calamine::Data) -> J {
 
 struct Shape {
     id: Option<String>,
+    /// The scheme the id column is, where the library knows it.
+    id_scheme: Option<&'static Scheme>,
+    /// Every other column that carries a known identifier.
+    also: Vec<Found>,
     title: String,
     known: Option<String>,
     text: Vec<String>,
     fields: Vec<(String, PropertyType)>,
 }
 
+/// An identifier a column carries, by a scheme the library knows.
+pub struct Found {
+    pub column: String,
+    pub scheme: &'static Scheme,
+    pub separator: Option<&'static str>,
+    /// Some row carries more than one.
+    pub several: bool,
+    /// Of the rows with anything in this column, how many carry one.
+    pub share: f64,
+}
+
+const SEPARATORS: [Option<&str>; 5] = [None, Some(";"), Some(","), Some("|"), Some(" ")];
+
+/// Every known identifier in the sample, the best reading of each column first. A scheme that
+/// rests on a check digit needs most of a column: one number in ten passes a mod-10 check by
+/// chance, and a column of prices is not a column of ISBNs.
+fn identifiers(cols: &[Column]) -> Vec<Found> {
+    let mut out: Vec<Found> = Vec::new();
+    for c in cols {
+        let filled = c.filled();
+        if filled.len() < 3 {
+            continue;
+        }
+        let mut best: Option<Found> = None;
+        for scheme in crate::schemes::ALL {
+            for sep in SEPARATORS {
+                let (mut hit, mut several) = (0usize, false);
+                for v in &filled {
+                    let n = match sep {
+                        None => usize::from(scheme.is(v)),
+                        Some(s) => v.split(s).filter(|t| scheme.is(t)).count(),
+                    };
+                    hit += usize::from(n > 0);
+                    several |= n > 1;
+                }
+                let share = hit as f64 / filled.len() as f64;
+                let enough = if scheme.checked() { 0.5 } else { 0.02 };
+                if hit < 3 || share < enough {
+                    continue;
+                }
+                // A separator earns its place only by finding more.
+                if best.as_ref().is_none_or(|b| share > b.share + 1e-9) {
+                    best = Some(Found { column: c.name.clone(), scheme, separator: sep, several, share });
+                }
+            }
+        }
+        out.extend(best);
+    }
+    out.sort_by(|a, b| b.share.total_cmp(&a.share));
+    out
+}
+
+
 fn shape(cols: &[Column]) -> Shape {
+    let found = identifiers(cols);
+    // A column that is wholly one known scheme is the identifier before one merely called `id`:
+    // a CVE column is what a second source can meet this one on.
+    let whole = |c: &Column| {
+        found
+            .iter()
+            .find(|f| f.column == c.name && f.separator.is_none() && !f.several && f.share >= 0.9)
+            .map(|f| f.scheme)
+    };
     let id = cols
         .iter()
         .filter(|c| c.unique() && c.mean_len() <= 64)
         .min_by_key(|c| {
-            if hints(
+            let named = hints(
                 &c.name,
                 &["id", "key", "number", "code", "ref", "isbn", "sku"],
-            ) {
-                0
-            } else {
-                1
-            }
+            );
+            (whole(c).is_none(), !named)
         })
         .map(|c| c.name.clone());
+    let id_scheme = cols.iter().find(|c| Some(&c.name) == id.as_ref()).and_then(whole);
 
     let title = cols
         .iter()
@@ -239,18 +306,29 @@ fn shape(cols: &[Column]) -> Shape {
         }
     }
 
+    // Identifiers in prose are mentions, not what a row is about: "see also CVE-…" in a
+    // description does not make the row a claim about that CVE.
+    let also: Vec<Found> = found
+        .into_iter()
+        .filter(|f| Some(&f.column) != id.as_ref() && f.column != title && !text.contains(&f.column))
+        .filter(|f| !f.scheme.classifies())
+        .filter(|f| Some(f.scheme.name) != id_scheme.map(|s| s.name) || f.separator.is_some())
+        .collect();
     let fields = cols
         .iter()
         .filter(|c| {
             Some(&c.name) != id.as_ref() && c.name != title && Some(&c.name) != known.as_ref()
         })
         .filter(|c| !text.contains(&c.name))
+        .filter(|c| !also.iter().any(|f| f.column == c.name))
         .filter(|c| !c.filled().is_empty())
         .map(|c| (c.name.clone(), c.kind()))
         .collect();
 
     Shape {
         id,
+        id_scheme,
+        also,
         title,
         known,
         text,
@@ -313,11 +391,44 @@ fn finish(built: J, dir: &Path) -> Result<String, String> {
 fn write_blocks(name: &str, kind: &str, fetch: J, cols: &[Column], sh: &Shape) -> J {
     let about = format!("Read from {}.", source_name(&fetch));
     let mut claims = serde_json::Map::new();
+    let mut ids: Vec<J> = Vec::new();
     if let Some(id) = &sh.id {
-        claims.insert(
-            "id".into(),
-            json!({ "scheme": scheme_name(id), "from": format!("field:{id}") }),
-        );
+        // A column called `id` names this source's rows and nobody else's, and two sources that
+        // both said `id` would meet on numbers that mean nothing to each other.
+        let scheme = sh.id_scheme.map(|s| s.name.to_string()).unwrap_or_else(|| {
+            match scheme_name(id).as_str() {
+                "" | "id" | "key" | "number" | "no" | "code" | "ref" | "row" => {
+                    slug(name.rsplit('/').next().unwrap_or(name))
+                }
+                s => s.to_string(),
+            }
+        });
+        ids.push(json!({ "scheme": scheme, "from": format!("field:{id}") }));
+    }
+    // Each further identifier is a way a second source can meet this one, so each is declared,
+    // and only the values that are that scheme are taken from the column.
+    for f in &sh.also {
+        let mut one = json!({
+            "scheme": f.scheme.name,
+            "from": format!("field:{}", f.column),
+            "match": f.scheme.declared(),
+        });
+        if let Some(sep) = f.separator {
+            one["separator"] = json!(sep);
+        }
+        if f.several {
+            one["all"] = json!(true);
+        }
+        ids.push(one);
+    }
+    match ids.len() {
+        0 => {}
+        1 => {
+            claims.insert("id".into(), ids.remove(0));
+        }
+        _ => {
+            claims.insert("id".into(), J::Array(ids));
+        }
     }
     claims.insert("title".into(), json!(format!("field:{}", sh.title)));
     claims.insert(
@@ -593,7 +704,7 @@ pub fn propose_url(
 
     let built = match looks_like {
         // A feed knows its own shape, so the declaration is the same every time.
-        "feed" => feed_declaration(&name, kind.unwrap_or("article"), url),
+        "feed" => feed_declaration(&name, kind.unwrap_or("article"), url, &body),
         "json" => {
             return Err(format!(
                 "{url} answers JSON, and a JSON API needs a declaration somebody writes: which \
@@ -615,8 +726,8 @@ pub fn propose_url(
     finish(built, dir)
 }
 
-fn feed_declaration(name: &str, kind: &str, url: &str) -> J {
-    json!({
+fn feed_declaration(name: &str, kind: &str, url: &str, body: &str) -> J {
+    let mut d = json!({
         "name": name,
         "title": title_case(name),
         "kind": kind,
@@ -639,5 +750,35 @@ fn feed_declaration(name: &str, kind: &str, url: &str) -> J {
             "compare": ["known"],
             "suggest": ["author"],
         },
-    })
+    });
+    // A post about a vulnerability names it in its text, not in a field. Where enough items
+    // name something the library knows, every mention is an identifier, which is what lets a
+    // feed of write-ups meet a list of advisories.
+    if let Some(scheme) = mentioned(body) {
+        d["claims"]["id"] = json!({
+            "scheme": scheme.name,
+            "from": format!("text:/{}/", scheme.pattern),
+            "all": true,
+        });
+    }
+    d
+}
+
+/// The scheme a feed's items mention most, where at least two items and one in ten mention it.
+fn mentioned(body: &str) -> Option<&'static Scheme> {
+    let items: Vec<&str> = body
+        .split("<item")
+        .skip(1)
+        .chain(body.split("<entry").skip(1))
+        .collect();
+    if items.is_empty() {
+        return None;
+    }
+    crate::schemes::ALL
+        .iter()
+        .filter(|s| !s.classifies())
+        .map(|s| (s, items.iter().filter(|i| !s.find(i).is_empty()).count()))
+        .filter(|(_, n)| *n >= 2 && *n * 10 >= items.len())
+        .max_by_key(|(_, n)| *n)
+        .map(|(s, _)| s)
 }

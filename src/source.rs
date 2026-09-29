@@ -69,7 +69,8 @@ impl Source {
         let reread = reread || from_start;
         // Where the source is one address and says it has not changed, there is nothing to read.
         // An hourly cadence against a file that changes twice a week is mostly this.
-        if let Some(short) = if reread { None } else { self.nothing_changed()? } {
+        let (short, fresh) = if reread { (None, None) } else { self.nothing_changed()? };
+        if let Some(short) = short {
             return Ok(short);
         }
         self.decl.source.prepare(&self.dir)?;
@@ -170,6 +171,12 @@ impl Source {
         };
         // Only a complete run advances the mark.
         if complete {
+            // And only a complete run keeps what the source said its version is. Kept when it
+            // was asked, an update stopped half way would be told next time that nothing had
+            // changed, and the half would stand.
+            if let Some(v) = &fresh {
+                self.store.set_meta("validators", v)?;
+            }
             if let Some(h) = &high {
                 self.store.set_meta("mark", h)?;
             }
@@ -659,26 +666,25 @@ impl Source {
     ///
     /// The run is written down. A run that never happened and a run that found nothing look the
     /// same to a reader, and only one of them is true.
-    fn nothing_changed(&self) -> Result<Option<RunReport>, String> {
+    fn nothing_changed(&self) -> Result<(Option<RunReport>, Option<String>), String> {
         let Some(url) = self.decl.source.single_url() else {
-            return Ok(None);
+            return Ok((None, None));
         };
         let held = self.store.meta("validators");
         // Nothing held, or held and empty: the first says ask, the second says this source
         // cannot be asked.
         if held.as_deref() == Some("") {
-            return Ok(None);
+            return Ok((None, None));
         }
         let answer = match crate::fetch::unchanged(url, self.decl.source.agent(), held.as_deref()) {
             Ok(a) => a,
             // A source that will not answer this is a source to fetch the old way, and the run
             // that follows will say what went wrong with it properly.
-            Err(_) => return Ok(None),
+            Err(_) => return Ok((None, None)),
         };
         match answer {
             Some(fresh) => {
-                self.store.set_meta("validators", &fresh)?;
-                Ok(None)
+                Ok((None, Some(fresh)))
             }
             None => {
                 let held = self.store.count();
@@ -694,7 +700,7 @@ impl Source {
                     &Notes::default(),
                     None,
                 )?;
-                Ok(self.store.run_report(run))
+                Ok((self.store.run_report(run), None))
             }
         }
     }

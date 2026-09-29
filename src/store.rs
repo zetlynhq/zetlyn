@@ -1,6 +1,6 @@
 //! The store. Browsing, faceting, filtering and full text are one query over one file.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use rusqlite::types::Value as S;
@@ -1448,6 +1448,17 @@ impl Store {
     /// Per identifier scheme, how many distinct values this store holds, folded. A tracker joins
     /// on a scheme and on the folded value, so this is the count a curator reads to see whether
     /// it can. `schemes` counts claims instead, which is the number a reader wants on a page.
+    /// Every value of one scheme this source holds, as a tracker keys it. What two sources would
+    /// meet on, counted before either is joined to the other.
+    pub fn identifiers(&self, scheme: &str) -> BTreeSet<String> {
+        let Ok(mut stmt) = self.db.prepare("select distinct value from ident where scheme = ?1") else {
+            return BTreeSet::new();
+        };
+        stmt.query_map([scheme], |r| r.get::<_, String>(0))
+            .map(|rows| rows.flatten().map(|v| crate::schemes::key(scheme, &v)).collect())
+            .unwrap_or_default()
+    }
+
     pub fn distinct_identifiers(&self) -> BTreeMap<String, u64> {
         let mut out = BTreeMap::new();
         let Ok(mut stmt) = self

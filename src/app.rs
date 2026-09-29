@@ -1020,7 +1020,7 @@ pub fn host(args: &[String]) -> Result<(), String> {
     let name = crate::flag(args, "--name").ok_or("--name, the workspace's address")?.to_string();
     let billing = PathBuf::from(crate::flag(args, "--billing").ok_or("--billing, where plans.yaml and customers.db are")?);
     let addr = crate::flag(args, "--addr").unwrap_or("127.0.0.1:2300").to_string();
-    let owner = crate::billing::Book::open(&billing)?.get(&name).map(|c| c.email).ok_or_else(|| format!("{name}: no customer by that name"))?;
+    let owner = crate::billing::Book::read(&billing)?.get(&name).map(|c| c.email).ok_or_else(|| format!("{name}: no customer by that name"))?;
     let base = format!("/{}", name.trim_matches('/'));
     serve::mount(&base);
     let server = tiny_http::Server::http(&addr).map_err(|e| e.to_string())?;

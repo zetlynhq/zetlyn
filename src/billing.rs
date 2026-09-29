@@ -86,6 +86,13 @@ impl Book {
         Ok(Book { db })
     }
 
+    /// For a hosted workspace, which reads its plan and may not write it.
+    pub fn read(dir: &Path) -> Result<Book, String> {
+        let db = Connection::open_with_flags(dir.join("customers.db"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| format!("{}: {e}", dir.join("customers.db").display()))?;
+        Ok(Book { db })
+    }
+
     pub fn get(&self, name: &str) -> Option<Customer> {
         self.db
             .query_row(
@@ -139,7 +146,7 @@ impl Book {
 
 /// What a hosted workspace may do today, and whether it may do anything.
 pub fn limits(dir: &Path, name: &str) -> (bool, crate::Limits, u64) {
-    let Ok(book) = Book::open(dir) else { return (false, crate::Limits::default(), 0) };
+    let Ok(book) = Book::read(dir) else { return (false, crate::Limits::default(), 0) };
     let Some(c) = book.get(name) else { return (false, crate::Limits::default(), 0) };
     let plan = plans(dir).ok().and_then(|(_, p)| p.get(&c.plan).cloned()).unwrap_or_default();
     let limits = crate::Limits { sources: Some(plan.sources), every: crate::fetch::duration(&plan.every).unwrap_or(0) };

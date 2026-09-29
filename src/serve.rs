@@ -525,8 +525,8 @@ fn overview(ds: &Source, url: &str) -> String {
 
 fn record_page(ds: &Source, id: &str, url: &str) -> Option<String> {
     let asked = params(url).get("as_of").cloned();
-    // `as_of` shows a record as it stood, from the revisions the dataset kept. It reads one
-    // record: the text index is current, so it does not make a whole query answer as of a date.
+    // `as_of` shows a claim as it stood, from the revisions the source kept. It reads one
+    // claim: the text index is current, so it does not make a whole query answer as of a date.
     let then = asked.as_deref().and_then(|at| ds.store.as_of(id, at));
     let mut rec = ds.store.get(id)?;
     let found = then.is_some();
@@ -715,7 +715,7 @@ pub fn serve(ds: Source, addr: &str) -> Result<(), String> {
     for request in server.incoming_requests() {
         let url = unmount(request.url());
         let path = url.split('?').next().unwrap_or("/").to_string();
-        // The same rule as the scope surface: a miss is a 404, and only the front page is the
+        // The same rule as the tracker surface: a miss is a 404, and only the front page is the
         // front page. Every other address that matches nothing is nothing.
         let mut status = 200u16;
         let (body, content_type) = if path == "/style.css" {

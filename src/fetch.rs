@@ -1,6 +1,6 @@
 //! What reaches over the network: a JSON API, and RSS or Atom.
 //!
-//! A credential is never in `dataset.toml`. `${NAME}` is resolved from the deployment's
+//! A credential is never in `source.yaml`. `${NAME}` is resolved from the workspace's
 //! environment when the run starts, and a run whose variable is unset refuses to start rather than
 //! falling back to an unauthenticated fetch.
 
@@ -55,7 +55,7 @@ pub struct Fetcher {
     headers: BTreeMap<String, String>,
     /// What a declaration asked for, and what the source is currently tolerating. A
     /// throttle slows the whole run down rather than making one request fail: retrying the
-    /// same call at the same pace gives up at 455 subjects out of 2,684 and calls the run
+    /// same call at the same pace gives up at 455 things out of 2,684 and calls the run
     /// partial, when the source was only asking to be approached more slowly.
     declared: Duration,
     pause: std::cell::Cell<Duration>,
@@ -102,7 +102,7 @@ impl Fetcher {
     /// 1 sixty-one times.
     ///
     /// A 429 or a 503 slows the whole run down and then retries. Retrying at the old pace is what
-    /// gives up at 455 subjects out of 2,684 and calls a perfectly good source broken.
+    /// gives up at 455 things out of 2,684 and calls a perfectly good source broken.
     pub fn fetch(&self, url: &str) -> Result<(String, Option<String>), String> {
         for attempt in 0..6 {
             let pause = self.pause.get();
@@ -168,7 +168,7 @@ impl Fetcher {
             self.pause.set((now / 2).max(self.declared));
         }
     }
-    /// For one subject out of many. A source that will not answer for a gated model has not
+    /// For one thing out of many. A source that will not answer for a gated model has not
     /// failed; it has declined one of thousands, and a run that stopped there would report a
     /// broken source because somebody made one repository private.
     pub fn get_subject(&self, url: &str) -> Result<Option<String>, String> {
@@ -455,7 +455,7 @@ pub fn http_rows(
     }))
 }
 
-/// RSS and Atom. One item is one record, and `text_is` is the licence decision.
+/// RSS and Atom. One item is one claim, and `text_is` is the licence decision.
 pub fn feed_rows(
     f: &Fetcher,
     urls: &[String],
@@ -467,7 +467,7 @@ pub fn feed_rows(
         let body = f.get(url)?;
         for item in parse_feed(&body) {
             let text = match text_is {
-                // At `whole` the dataset fetches and stores the article, which is a separate act
+                // At `whole` the source fetches and stores the article, which is a separate act
                 // from linking to it and is only done where the source permits it.
                 "whole" => match item.get("link") {
                     Some(link) => f

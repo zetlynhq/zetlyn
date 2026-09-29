@@ -1,5 +1,5 @@
-//! What a scope declares. It holds no documents: it names members, says what makes two of their
-//! records the same thing, maps their words onto one scale, and states a promise.
+//! What a tracker declares. It holds no documents: it names sources, says what makes two of their
+//! claims the same thing, maps their words onto one scale, and states a promise.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -30,7 +30,7 @@ pub struct TrackerDecl {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceRef {
-    /// One of the two. A member is a dataset this deployment holds, or one somewhere else that
+    /// One of the two. A source is a source this workspace holds, or one somewhere else that
     /// answers the same six calls.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote: Option<String>,
@@ -41,8 +41,8 @@ pub struct SourceRef {
     pub dataset: String,
     #[serde(default, skip_serializing_if = "Priority::is_normal")]
     pub priority: Priority,
-    /// Required, one sentence, and not decoration. A member nobody can justify in a sentence is a
-    /// member somebody added and nobody removed.
+    /// Required, one sentence, and not decoration. A source nobody can justify in a sentence is a
+    /// source somebody added and nobody removed.
     pub why: String,
 }
 
@@ -56,7 +56,7 @@ pub enum Priority {
 }
 
 impl Priority {
-    /// Orders the answer between members. Not a weight, and it never multiplies a score.
+    /// Orders the answer between sources. Not a weight, and it never multiplies a score.
     pub fn rank(self) -> u8 {
         match self {
             Priority::Primary => 0,
@@ -81,10 +81,10 @@ pub struct Align {
     /// Best first. What makes `severity>=high` answerable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scale: Vec<String>,
-    /// A member's field name onto the scope's, where they differ.
+    /// A source's field name onto the tracker's, where they differ.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub from: BTreeMap<String, String>,
-    /// Per member, what its words mean on the scale above.
+    /// Per source, what its words mean on the scale above.
     #[serde(flatten)]
     pub members: BTreeMap<String, BTreeMap<String, String>>,
 }
@@ -96,7 +96,7 @@ impl Align {
             .cloned()
             .unwrap_or_else(|| scope_field.to_string())
     }
-    /// What the member said, and what this scope makes of it. A value with no entry passes through
+    /// What the source said, and what this tracker makes of it. A value with no thing passes through
     /// unchanged rather than becoming `unknown`.
     pub fn means(&self, member: &str, raw: &str) -> String {
         self.members
@@ -120,7 +120,7 @@ pub struct Views {
     pub facets: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sort: Option<String>,
-    /// Views the curator wrote, across every member.
+    /// Views the curator wrote, across every source.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub named: Vec<NamedView>,
     /// One per kind. Everything else in this table is a kind.
@@ -137,7 +137,7 @@ pub struct KindView {
     pub facets: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sort: Option<String>,
-    /// A view the member already declared about itself, as `dataset:view`.
+    /// A view the source already declared about itself, as `source:view`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub adopt: Option<String>,
 }

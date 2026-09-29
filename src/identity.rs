@@ -2,11 +2,11 @@
 //!
 //! There are two populations here and only one of them needs this.
 //!
-//! A **reader** browses a scope, subscribes to it and gets a feed. They are an email address in
-//! one deployment's `accounts.db`, and that is right: a reader of one operator's scope has no
+//! A **reader** browses a tracker, subscribes to it and gets a feed. They are an email address in
+//! one workspace's `accounts.db`, and that is right: a reader of one operator's tracker has no
 //! business being the same account as a reader of somebody else's. Nothing below touches them.
 //!
-//! An **actor** publishes a dataset, operates a deployment, or drives a console. Every one of
+//! An **actor** publishes a source, operates a workspace, or drives a console. Every one of
 //! those is already a signature, and a person doing all three from three directories with three
 //! keys is three people for no reason. This is the one key they use everywhere, kept where it
 //! belongs to them rather than to a project: `~/.zetlyn`, or `$ZETLYN_HOME`.
@@ -74,7 +74,7 @@ pub fn sign(message: &[u8]) -> Result<Option<String>, String> {
 }
 
 /// The identity, or a key kept somewhere else because it belongs to a thing rather than a
-/// person. A dataset that carries its own `publishing.key` keeps signing with it: subscribers
+/// person. A source that carries its own `publishing.key` keeps signing with it: subscribers
 /// pinned that one, and a key that changes under them is a publisher they stop trusting.
 pub fn or_local(dir: &std::path::Path, file: &str) -> Option<String> {
     crate::key::public(dir, file).or_else(key)

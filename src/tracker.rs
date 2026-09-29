@@ -1,5 +1,5 @@
-//! A scope. It holds no index and searches nothing: it rewrites a query per member, fans out,
-//! merges ranked lists, gathers the hits into entries, and renders.
+//! A tracker. It holds no index and searches nothing: it rewrites a query per source, fans out,
+//! merges ranked lists, gathers the hits into things, and renders.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -39,7 +39,7 @@ impl Resolved {
             .as_array()
             .is_some_and(|a| a.iter().any(|c| c == what))
     }
-    /// How many of this member's records carry a field, for the coverage beside a facet.
+    /// How many of this source's claims carry a field, for the coverage beside a facet.
     pub fn field_records(&self, field: &str) -> Option<u64> {
         self.described["properties"]
             .as_array()?
@@ -56,7 +56,7 @@ impl Resolved {
 }
 
 pub struct Tracker {
-    /// The deployment this scope was opened in, where its watches live.
+    /// The workspace this tracker was opened in, where its watches live.
     pub root: PathBuf,
     pub decl: TrackerDecl,
     pub members: Vec<Resolved>,
@@ -72,11 +72,11 @@ pub struct TrackerQuery {
     pub sort: Option<String>,
     pub limit: usize,
     pub offset: usize,
-    /// The paywall, applied to every member alike.
+    /// The paywall, applied to every source alike.
     pub seen_before: Option<String>,
 }
 
-/// One member's record inside an entry.
+/// One source's claim inside a thing.
 pub struct ClaimRef {
     pub member: String,
     pub priority: u8,
@@ -88,10 +88,10 @@ pub struct ClaimRef {
     pub fields: BTreeMap<String, String>,
 }
 
-/// Per field, every value with the member that said it, and what this scope makes of it.
+/// Per field, every value with the source that said it, and what this tracker makes of it.
 pub struct PropertyView {
-    /// Per member, every distinct value that member said, sorted. A member can say a field
-    /// several times for one subject: four quantisations of one model carry four licences, and
+    /// Per source, every distinct value that source said, sorted. A source can say a field
+    /// several times for one thing: four quantisations of one model carry four licences, and
     /// keeping one of them would mean keeping whichever arrived last.
     pub by: BTreeMap<String, Vec<String>>,
     pub means: BTreeMap<String, Vec<String>>,
@@ -109,7 +109,7 @@ pub struct Thing {
 }
 
 impl Thing {
-    /// Grouped by kind, and ordered by the scope's priority inside each group.
+    /// Grouped by kind, and ordered by the tracker's priority inside each group.
     pub fn by_kind(&self) -> Vec<(String, Vec<&ClaimRef>)> {
         let mut kinds: Vec<String> = Vec::new();
         for p in &self.parts {
@@ -142,31 +142,31 @@ pub struct Answer {
     pub entries: Vec<Thing>,
     pub answered: Vec<String>,
     pub unanswered: Vec<(String, Vec<String>)>,
-    /// The total is a floor: a member had more candidates than were read, and the second pass
+    /// The total is a floor: a source had more candidates than were read, and the second pass
     /// could only count what it saw.
     pub truncated: bool,
-    /// What the total counts. Without a predicate it is records, summed from what each member
-    /// says it holds. With one it is subjects, counted after the pass over assembled entries,
+    /// What the total counts. Without a predicate it is claims, summed from what each source
+    /// says it holds. With one it is things, counted after the pass over assembled things,
     /// because that pass is the only place the question can be answered.
     pub subjects: bool,
 }
 
-/// How deep each member is read when the query carries a predicate. The second pass runs over
-/// assembled entries, so a candidate that is never read is a candidate that never counts. Seven
-/// members at this depth is the CVE scope answering a filtered query in a tenth of a second.
+/// How deep each source is read when the query carries a predicate. The second pass runs over
+/// assembled things, so a candidate that is never read is a candidate that never counts. Seven
+/// sources at this depth is the CVE tracker answering a filtered query in a tenth of a second.
 const CANDIDATES: usize = 20_000;
 
 impl Tracker {
-    /// Members are named, not pathed. A deployment holds its datasets in one place and a scope
-    /// finds them there, because a dataset belongs to no scope and several may name it.
+    /// Sources are named, not pathed. A workspace holds its sources in one place and a tracker
+    /// finds them there, because a source belongs to no tracker and several may name it.
     pub fn open(dir: &Path, datasets: &Path) -> Result<Tracker, String> {
         let decl = TrackerDecl::load(dir)?;
         let registry = registry(datasets);
         let mut members = Vec::new();
         let mut missing = Vec::new();
         for m in &decl.members {
-            // A member this deployment holds, or one somewhere else that answers the same six
-            // calls. A scope cannot tell the difference except by where it was named.
+            // A source this workspace holds, or one somewhere else that answers the same six
+            // calls. A tracker cannot tell the difference except by where it was named.
             if let Some(url) = &m.remote {
                 match crate::remote::Remote::open(url, m.key.clone()) {
                     Ok(r) => {
@@ -203,7 +203,7 @@ impl Tracker {
                         described,
                     });
                 }
-                // A scope that refused to open because one of five members was missing would be
+                // A tracker that refused to open because one of five sources was missing would be
                 // less useful than one that says which four it has.
                 None => missing.push(m.dataset.clone()),
             }
@@ -229,7 +229,7 @@ impl Tracker {
         out.into_iter().collect()
     }
 
-    /// A member's field name for one of this scope's. Red Hat calls it `threat_severity`.
+    /// A source's field name for one of this tracker's. Red Hat calls it `threat_severity`.
     fn field_in(&self, member: &str, scope_field: &str) -> String {
         match self.decl.normalise_for(scope_field) {
             Some(n) => n.field_in(member, scope_field),
@@ -237,7 +237,7 @@ impl Tracker {
         }
     }
 
-    /// And back, so a member's answer can be shown under the name this scope uses.
+    /// And back, so a source's answer can be shown under the name this tracker uses.
     fn field_out(&self, member: &str, member_field: &str) -> String {
         for (scope_field, n) in &self.decl.normalise {
             if n.from.get(member).map(String::as_str) == Some(member_field) {
@@ -261,11 +261,11 @@ impl Tracker {
         }
     }
 
-    /// A comparison is made against the value an answer shows: the mapped one where the scope
-    /// states a map. So the literal is translated back into the member's own words before it is
+    /// A comparison is made against the value an answer shows: the mapped one where the tracker
+    /// states a map. So the literal is translated back into the source's own words before it is
     /// asked, and `severity>=high` becomes the set of raw words that sit at or above `high` on the
-    /// scale this scope declared. A filter and an answer that disagreed about what a record says
-    /// would be two readings of one dataset.
+    /// scale this tracker declared. A filter and an answer that disagreed about what a claim says
+    /// would be two readings of one source.
     fn rewrite_cmp(&self, member: &str, left: &str, op: Op, right: &Lit) -> Pred {
         let their = self.field_in(member, left);
         let plain = || Pred::Cmp {
@@ -310,7 +310,7 @@ impl Tracker {
                 .collect(),
             None => Vec::new(),
         };
-        // A value with no entry passes through unchanged, so an unmapped word is still asked for.
+        // A value with no thing passes through unchanged, so an unmapped word is still asked for.
         let asked = if raws.is_empty() { wanted } else { raws };
         let Some(first) = asked.first() else {
             return plain();
@@ -352,7 +352,7 @@ impl Tracker {
         if !self.decl.view.columns.is_empty() {
             return self.decl.view.columns.clone();
         }
-        // Derived: what more than one member carries, and what every record has.
+        // Derived: what more than one source carries, and what every claim has.
         let mut tally: BTreeMap<String, usize> = BTreeMap::new();
         for m in &self.members {
             if let Some(fields) = m.described["properties"].as_array() {
@@ -371,7 +371,7 @@ impl Tracker {
         cols
     }
 
-    /// `adopt` resolves through the interface: the member already declared what its interesting
+    /// `adopt` resolves through the interface: the source already declared what its interesting
     /// subset is, and a curator who repeats it maintains the same statement twice.
     pub fn kind_view(&self, kind: &str) -> Option<KindView> {
         let declared = self.decl.view.kinds.get(kind)?;
@@ -429,8 +429,8 @@ impl Tracker {
         vec!["kind".into(), "source".into()]
     }
 
-    /// Whether this member can select anything for this query at all. Free text goes to every
-    /// member that has an index; a filter goes only to the members carrying a field it names.
+    /// Whether this source can select anything for this query at all. Free text goes to every
+    /// source that has an index; a filter goes only to the sources carrying a field it names.
     fn narrows(&self, q: &TrackerQuery, m: &Resolved) -> bool {
         if !q.text.trim().is_empty() {
             return true;
@@ -443,8 +443,8 @@ impl Tracker {
             .and_then(expr::parse_pred);
         let by_field = q.pred.as_ref().and_then(|p| self.prune(p, m)).is_some()
             || named.as_ref().and_then(|p| self.prune(p, m)).is_some();
-        // `dataset` is the scope's own word and no member carries it, so the prune drops it and
-        // the member would never be read. The member it names is the one that narrows.
+        // `source` is the tracker's own word and no source carries it, so the prune drops it and
+        // the source would never be read. The source it names is the one that narrows.
         by_field
             || q.pred.as_ref().is_some_and(|p| names_member(p, m.name()))
             || named.is_some_and(|p| names_member(&p, m.name()))
@@ -504,7 +504,7 @@ impl Tracker {
         let want = limit + q.offset;
         let keys: Vec<&str> = self.decl.keys();
 
-        // The whole predicate, known before anybody is asked, because how deep each member has to
+        // The whole predicate, known before anybody is asked, because how deep each source has to
         // be read depends on whether there is one.
         let full: Vec<Pred> = q
             .pred
@@ -519,9 +519,9 @@ impl Tracker {
             )
             .collect();
 
-        // With no predicate, a page is a page and each member's own total is the truth. With one,
-        // the count is what survives the second pass over the assembled entry, so every candidate
-        // that could survive has to be read: a member asked for fifty and filtered afterwards
+        // With no predicate, a page is a page and each source's own total is the truth. With one,
+        // the count is what survives the second pass over the assembled thing, so every candidate
+        // that could survive has to be read: a source asked for fifty and filtered afterwards
         // reports the size of the page it was given, not the size of the answer.
         let depth = if full.is_empty() {
             want.max(50)
@@ -529,9 +529,9 @@ impl Tracker {
             want.max(CANDIDATES)
         };
 
-        // One pass to select, member by member, each answering the query in its own words. Only
-        // the members that can narrow this query are read: a member carrying no field the query
-        // names selects nothing, and the records it holds for the subjects the others selected are
+        // One pass to select, source by source, each answering the query in its own words. Only
+        // the sources that can narrow this query are read: a source carrying no field the query
+        // names selects nothing, and the claims it holds for the things the others selected are
         // fetched by identifier afterwards, by `complete`. Reading it here instead would be tens
         // of thousands of candidates read to be discarded.
         let mut per_member: Vec<Vec<Hit>> = Vec::new();
@@ -570,7 +570,7 @@ impl Tracker {
             }
         }
 
-        // The best remaining hit from each member in turn. Two members' scores are not on one
+        // The best remaining hit from each source in turn. Two sources' scores are not on one
         // scale, so ranks are merged rather than scores, and `priority` breaks the tie.
         let mut order: Vec<(usize, Hit)> = Vec::new();
         let deepest = per_member.iter().map(Vec::len).max().unwrap_or(0);
@@ -582,7 +582,7 @@ impl Tracker {
             }
         }
 
-        // Gathered into entries on the joined key, whatever kind of record each one is.
+        // Gathered into things on the joined key, whatever kind of claim each one is.
         let mut entries: Vec<Thing> = Vec::new();
         let mut seen: BTreeMap<String, usize> = BTreeMap::new();
         for (mi, hit) in order {
@@ -612,13 +612,13 @@ impl Tracker {
         }
 
         // Completed and folded before anything is paged, because the predicate is applied over
-        // the entry and an entry that fails it must not take a slot on the page first.
+        // the thing and a thing that fails it must not take a slot on the page first.
         self.complete(&mut entries, &keys);
         for e in entries.iter_mut() {
             self.fold_fields(e);
         }
-        // The whole predicate again, now that every member's words are in one place. A question
-        // that spans sources is answered here or nowhere: no member holds both `exploited` and
+        // The whole predicate again, now that every source's words are in one place. A question
+        // that spans sources is answered here or nowhere: no source holds both `exploited` and
         // `severity`, and asking each of them separately selects nothing.
         for p in &full {
             entries.retain(|e| self.entry_holds(e, p));
@@ -634,7 +634,7 @@ impl Tracker {
             entries: page,
             answered,
             unanswered,
-            // A filtered count read from a member that had more to give is a floor, not a total,
+            // A filtered count read from a source that had more to give is a floor, not a total,
             // and the page says which of the two it is showing.
             truncated: truncated && !full.is_empty(),
             subjects: !full.is_empty(),
@@ -675,15 +675,15 @@ impl Tracker {
             known: hit.known.clone(),
             fields,
         });
-        // The title a reader sees is the one the scope calls primary.
+        // The title a reader sees is the one the tracker calls primary.
         entry.parts.sort_by_key(|p| p.priority);
         if let Some(first) = entry.parts.first() {
             entry.title = first.title.clone();
         }
     }
 
-    /// A member that did not answer the filter still has something to say about an entry the
-    /// others selected. One round of identifier lookups completes every entry on the page.
+    /// A source that did not answer the filter still has something to say about a thing the
+    /// others selected. One round of identifier lookups completes every thing on the page.
     fn complete(&self, page: &mut [Thing], keys: &[&str]) {
         if keys.is_empty() || page.is_empty() {
             return;
@@ -729,7 +729,7 @@ impl Tracker {
         }
     }
 
-    /// Per field, every value with the member that said it, its raw word beside the mapped one,
+    /// Per field, every value with the source that said it, its raw word beside the mapped one,
     /// and `divergent` computed after the map.
     fn fold_fields(&self, entry: &mut Thing) {
         let mut names: BTreeSet<String> = BTreeSet::new();
@@ -754,9 +754,9 @@ impl Tracker {
             if by.is_empty() {
                 continue;
             }
-            // Collected into sets and read out in order, so an entry is the same whatever order
-            // its records arrived in. Keeping one value per member kept whichever arrived last,
-            // and two stores holding the same records answered differently.
+            // Collected into sets and read out in order, so a thing is the same whatever order
+            // its claims arrived in. Keeping one value per source kept whichever arrived last,
+            // and two stores holding the same claims answered differently.
             let divergent = disagree(means.values());
             entry.fields.insert(
                 name,
@@ -773,7 +773,7 @@ impl Tracker {
         }
     }
 
-    /// Counted per value across every member, on the scale this scope declares where it has one.
+    /// Counted per value across every source, on the scale this tracker declares where it has one.
     pub fn facet(&self, q: &TrackerQuery, field: &str, limit: usize) -> (Vec<(String, u64)>, u64) {
         let mut tally: BTreeMap<String, u64> = BTreeMap::new();
         let mut coverage = 0u64;
@@ -803,7 +803,7 @@ impl Tracker {
             }
         }
         let mut out: Vec<(String, u64)> = tally.into_iter().collect();
-        // On the scale where the scope declares one, by count where it does not.
+        // On the scale where the tracker declares one, by count where it does not.
         match self.decl.normalise_for(field) {
             Some(n) if !n.scale.is_empty() => {
                 out.sort_by_key(|(v, _)| n.position(v).unwrap_or(usize::MAX));
@@ -814,7 +814,7 @@ impl Tracker {
         (out, coverage)
     }
 
-    /// One subject, and everything any member says about it.
+    /// One thing, and everything any source says about it.
     pub fn entry(&self, scheme: &str, value: &str) -> Option<Thing> {
         let key = Id {
             scheme: scheme.to_string(),
@@ -908,7 +908,7 @@ impl Tracker {
     }
 }
 
-/// Every dataset a deployment holds, by the name it calls itself.
+/// Every source a workspace holds, by the name it calls itself.
 pub fn registry(datasets: &Path) -> BTreeMap<String, PathBuf> {
     let mut out = BTreeMap::new();
     let Ok(entries) = std::fs::read_dir(datasets) else {
@@ -926,7 +926,7 @@ pub fn registry(datasets: &Path) -> BTreeMap<String, PathBuf> {
     out
 }
 
-/// A scope counts in its members' marks, because each of them runs on its own cadence.
+/// A tracker counts in its sources' marks, because each of them runs on its own cadence.
 fn parse_marks(raw: &str) -> BTreeMap<String, i64> {
     raw.split(',')
         .filter_map(|p| p.split_once('='))
@@ -935,7 +935,7 @@ fn parse_marks(raw: &str) -> BTreeMap<String, i64> {
 }
 
 impl Tracker {
-    /// One mark per member, so a reader hands back exactly what they were last told.
+    /// One mark per source, so a reader hands back exactly what they were last told.
     pub fn mark(&self) -> String {
         self.members
             .iter()
@@ -944,7 +944,7 @@ impl Tracker {
             .join(",")
     }
 
-    /// The mark as it stood before each member's last run, which is what "since I last looked"
+    /// The mark as it stood before each source's last run, which is what "since I last looked"
     /// means when nobody has looked yet.
     pub fn mark_before(&self) -> String {
         self.members
@@ -954,7 +954,7 @@ impl Tracker {
             .join(",")
     }
 
-    /// What entered, what left, and what changed inside an entry, field by field.
+    /// What entered, what left, and what changed inside a thing, field by field.
     pub fn changes(&self, since: &str, limit: usize) -> J {
         let marks = parse_marks(since);
         let keys = self.decl.keys();
@@ -1009,7 +1009,7 @@ impl Tracker {
     }
 }
 
-/// Every scope a deployment holds, by the name it calls itself. A watch names a scope, not a path.
+/// Every tracker a workspace holds, by the name it calls itself. A watch names a tracker, not a path.
 pub fn scope_registry(scopes: &Path) -> BTreeMap<String, PathBuf> {
     let mut out = BTreeMap::new();
     let Ok(entries) = std::fs::read_dir(scopes) else {
@@ -1028,9 +1028,9 @@ pub fn scope_registry(scopes: &Path) -> BTreeMap<String, PathBuf> {
 }
 
 impl Tracker {
-    /// Checked against when each member last finished a run, complete or not: this is a claim
+    /// Checked against when each source last finished a run, complete or not: this is a claim
     /// about freshness, not about coverage. What a run reached is a separate fact and the
-    /// member's state carries it. A scope that is stale says so on its own front page, rather
+    /// source's state carries it. A tracker that is stale says so on its own front page, rather
     /// than answering with less in it and saying nothing.
     pub fn promise(&self) -> (bool, Vec<String>) {
         let Some(within) = self.decl.promise.fresh_within.as_deref() else {
@@ -1058,8 +1058,8 @@ impl Tracker {
         (late.is_empty(), late)
     }
 
-    /// How long ago the member that finished least recently finished, in seconds. `None` where
-    /// any member has never completed a run, because then there is no oldest to name.
+    /// How long ago the source that finished least recently finished, in seconds. `None` where
+    /// any source has never completed a run, because then there is no oldest to name.
     pub fn oldest_finish(&self) -> Option<i64> {
         let now = crate::now();
         let mut oldest: Option<i64> = None;
@@ -1086,15 +1086,15 @@ pub fn human(seconds: i64) -> String {
 }
 
 impl Tracker {
-    /// What this scope actually holds, counted rather than claimed.
+    /// What this tracker actually holds, counted rather than claimed.
     ///
-    /// Every member is paged through the same `search` a reader uses, so the numbers are the ones
+    /// Every source is paged through the same `search` a reader uses, so the numbers are the ones
     /// an answer would give. A measurement taken from the store behind the interface would be a
     /// measurement of something nobody can ask for.
     pub fn measure(&self) -> J {
         let keys = self.decl.keys();
-        // key value -> member -> (kinds, field -> (what it said, what this scope makes of it)).
-        // Every record a member holds for the subject, as the entry page shows them: keeping the
+        // key value -> source -> (kinds, field -> (what it said, what this tracker makes of it)).
+        // Every claim a source holds for the thing, as the thing page shows them: keeping the
         // last one measured a different thing from the one a reader sees.
         type Words = (BTreeSet<String>, BTreeSet<String>);
         type Said = BTreeMap<String, (BTreeSet<String>, BTreeMap<String, Words>)>;
@@ -1130,10 +1130,10 @@ impl Tracker {
                     else {
                         continue;
                     };
-                    // Every field, under the name this scope shows it by. A measurement
+                    // Every field, under the name this tracker shows it by. A measurement
                     // of one field is a measurement of the field somebody guessed.
-                    // Compared with the case folded, as the entry is gathered: `cve-2021-44228`
-                    // and `CVE-2021-44228` are one subject there and must be one here, and so is the scheme.
+                    // Compared with the case folded, as the thing is gathered: `cve-2021-44228`
+                    // and `CVE-2021-44228` are one thing there and must be one here, and so is the scheme.
                     let said = subjects
                         .entry(format!("{}:{}", key.scheme, key.value.to_lowercase()))
                         .or_default()
@@ -1213,12 +1213,12 @@ impl Tracker {
 }
 
 impl Tracker {
-    /// What this member can be asked of a predicate, and nothing more.
+    /// What this source can be asked of a predicate, and nothing more.
     ///
-    /// A filter is pushed down so a member does the narrowing it can do, and a conjunct it cannot
-    /// answer is dropped rather than sent: a member that holds the exploit for an entry another
-    /// member selected still has to be reachable. What is dropped here is applied again over the
-    /// assembled entry, where every member's words are in one place.
+    /// A filter is pushed down so a source does the narrowing it can do, and a conjunct it cannot
+    /// answer is dropped rather than sent: a source that holds the exploit for a thing another
+    /// source selected still has to be reachable. What is dropped here is applied again over the
+    /// assembled thing, where every source's words are in one place.
     fn prune(&self, pred: &Pred, m: &Resolved) -> Option<Pred> {
         match pred {
             Pred::And(a, b) => match (self.prune(a, m), self.prune(b, m)) {
@@ -1242,15 +1242,15 @@ impl Tracker {
         }
     }
 
-    /// The whole predicate again, over the values the entry shows. A question that spans sources is
-    /// answered here or nowhere: no member holds both `exploited` and `severity`.
+    /// The whole predicate again, over the values the thing shows. A question that spans sources is
+    /// answered here or nowhere: no source holds both `exploited` and `severity`.
     pub fn entry_holds(&self, entry: &Thing, pred: &Pred) -> bool {
         match pred {
             Pred::And(a, b) => self.entry_holds(entry, a) && self.entry_holds(entry, b),
             Pred::Or(a, b) => self.entry_holds(entry, a) || self.entry_holds(entry, b),
             Pred::Cmp { left, op, right } => {
-                // What an entry is, as against what its members say about it. These four are the
-                // same names a member answers them under, and they pass the prune, so a query on
+                // What a thing is, as against what its sources say about it. These four are the
+                // same names a source answers them under, and they pass the prune, so a query on
                 // one of them reaches here and has to be answered rather than dropped.
                 let want = right.display();
                 match left.as_str() {
@@ -1318,7 +1318,7 @@ impl Tracker {
 }
 
 impl Tracker {
-    /// How many records a viewer under this bound can reach. The paywall is a bound on a query,
+    /// How many claims a viewer under this bound can reach. The paywall is a bound on a query,
     /// so what it hides is the difference between two counts rather than a rule somewhere else.
     pub fn reachable(&self, bound: Option<&str>) -> u64 {
         let q = TrackerQuery {
@@ -1335,7 +1335,7 @@ impl Tracker {
 }
 
 impl Tracker {
-    /// What a scope claims, held against what its members actually answer.
+    /// What a tracker claims, held against what its sources actually answer.
     pub fn check(&self) -> Vec<String> {
         let mut wrong = Vec::new();
         for name in &self.missing {
@@ -1346,8 +1346,8 @@ impl Tracker {
             return wrong;
         }
 
-        // A join key only one member carries joins nothing. The scope still answers, and every
-        // entry is one record, which looks like a working scope and is not one.
+        // A join key only one source carries joins nothing. The tracker still answers, and every
+        // thing is one claim, which looks like a working tracker and is not one.
         for key in self.decl.keys() {
             let carrying: Vec<&str> = self
                 .members
@@ -1431,10 +1431,10 @@ impl Tracker {
     }
 }
 
-/// One comparison between two strings, case folded, for the four things an entry is rather than
+/// One comparison between two strings, case folded, for the four things a thing is rather than
 /// says. A date and a title order the same way here: lexically, which is what an ISO date wants.
-/// Whether members disagree: two of them, each with everything it said, and not the same. One
-/// member saying two things is not a disagreement with itself: two exploits for one CVE on two
+/// Whether sources disagree: two of them, each with everything it said, and not the same. One
+/// source saying two things is not a disagreement with itself: two exploits for one CVE on two
 /// platforms are two statements by one publisher, and counting them as a conflict made one.
 fn disagree<'a, S: PartialEq + 'a>(mut said: impl Iterator<Item = &'a S>) -> bool {
     match said.next() {
@@ -1455,8 +1455,8 @@ fn cmp_str(have: &str, op: &Op, want: &str) -> bool {
     }
 }
 
-/// Whether a predicate has a `dataset` clause this member satisfies. A member the query excludes
-/// is not read; a member it may include is.
+/// Whether a predicate has a `source` clause this source satisfies. A source the query excludes
+/// is not read; a source it may include is.
 fn names_member(pred: &Pred, member: &str) -> bool {
     match pred {
         Pred::And(a, b) | Pred::Or(a, b) => names_member(a, member) || names_member(b, member),

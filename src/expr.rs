@@ -15,7 +15,7 @@ pub struct FileInfo {
     pub media_type: String,
 }
 
-/// What an expression is evaluated against: the structured record, what the container says, the
+/// What an expression is evaluated against: the structured claim, what the container says, the
 /// file it came from, and the text already extracted for it.
 pub struct Row<'a> {
     pub value: J,
@@ -29,7 +29,7 @@ pub struct Row<'a> {
 fn walk(value: &J, path: &str) -> Vec<J> {
     let mut here = vec![value.clone()];
     if path == "*" {
-        // Every value of an object, which is how a file keyed by name hands over its records.
+        // Every value of an object, which is how a file keyed by name hands over its claims.
         return match value {
             J::Object(o) => o.values().cloned().collect(),
             J::Array(a) => a.clone(),
@@ -198,7 +198,7 @@ pub fn eval(expr: &str, row: &Row) -> Vec<J> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The predicate. One parser, three uses: `records.where`, a view's `where`, and a typed query.
+// The predicate. One parser, three uses: `claims.where`, a view's `where`, and a typed query.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Op {
@@ -435,7 +435,7 @@ pub fn parse_query(s: &str) -> (String, Option<Pred>) {
     (terms.join(" "), pred)
 }
 
-/// For `records.where`, which runs over a row before the record exists.
+/// For `claims.where`, which runs over a row before the claim exists.
 pub fn holds(pred: &Pred, row: &Row) -> bool {
     match pred {
         Pred::And(a, b) => holds(a, row) && holds(b, row),
@@ -465,7 +465,7 @@ fn compare(v: &J, op: Op, lit: &Lit) -> bool {
     }
 }
 
-/// Every field a predicate names, so the scope can say which of them a member could not answer.
+/// Every field a predicate names, so the tracker can say which of them a source could not answer.
 pub fn fields_named(pred: &Pred, out: &mut Vec<String>) {
     match pred {
         Pred::And(a, b) | Pred::Or(a, b) => {

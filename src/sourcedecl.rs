@@ -1,4 +1,4 @@
-//! The declaration. Eight blocks, and the whole of what a dataset creator writes.
+//! The declaration. Eight blocks, and the whole of what a source creator writes.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -73,9 +73,9 @@ pub enum Fetch {
     Http {
         #[serde(default, skip_serializing_if = "String::is_empty")]
         list: String,
-        /// Where the identifiers come from, when they come from another dataset rather
+        /// Where the identifiers come from, when they come from another source rather
         /// than from a list call. A GGUF repository names the model it quantised, and
-        /// nothing but that dataset knows which models those are.
+        /// nothing but that source knows which models those are.
         #[serde(skip_serializing_if = "Option::is_none")]
         for_each: Option<ForEach>,
         /// One call per item. The row is that answer, with the list item under `_list`.
@@ -106,7 +106,7 @@ pub enum Fetch {
         #[serde(default, skip_serializing_if = "is_zero")]
         top: usize,
     },
-    /// RSS and Atom. Several feeds of the same shape are one dataset.
+    /// RSS and Atom. Several feeds of the same shape are one source.
     Feed {
         urls: Vec<String>,
         /// The licence decision, made once and visible in one line.
@@ -117,7 +117,7 @@ pub enum Fetch {
         #[serde(default = "thousand", skip_serializing_if = "is_thousand")]
         pause_ms: u64,
     },
-    /// Subscribed rather than fetched. The records arrived built, so there is nothing here to
+    /// Subscribed rather than fetched. The claims arrived built, so there is nothing here to
     /// extract and nothing to re-run: a run against this asks the hub for a newer version.
     Hub {
         /// Where the hub is: a folder, a mount, `s3://bucket/prefix`, or an address.
@@ -125,7 +125,7 @@ pub enum Fetch {
         /// `[host/]owner/name[@tag]`.
         #[serde(rename = "ref")]
         reference: String,
-        /// What the publisher declared. The licence fact travels with the records, because a
+        /// What the publisher declared. The licence fact travels with the claims, because a
         /// subscriber holding them has to answer for them too.
         #[serde(default = "summary", skip_serializing_if = "is_summary")]
         text_is: String,
@@ -205,7 +205,7 @@ impl Fetch {
         }
     }
 
-    /// Where these records came from, in one line, for a reader deciding whether they may hold
+    /// Where these claims came from, in one line, for a reader deciding whether they may hold
     /// them. A folder is the operator's own machine and says so rather than naming a path.
     pub fn address(&self) -> String {
         match self {
@@ -225,7 +225,7 @@ impl Fetch {
         }
     }
 
-    /// Whether the text in these records is what the source published about itself or the thing
+    /// Whether the text in these claims is what the source published about itself or the thing
     /// itself. Fetching, indexing and republishing are three acts, and this is the third one
     /// stated in one word. A source that carries no text of its own says `none`.
     pub fn text_is(&self) -> &str {
@@ -323,13 +323,13 @@ pub struct Schedule {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClaimsDecl {
-    /// Names the list where one fetched thing holds many records.
+    /// Names the list where one fetched thing holds many claims.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub each: Option<String>,
     #[serde(rename = "where", skip_serializing_if = "Option::is_none")]
     pub filter: Option<String>,
     /// One, or several. A GitHub advisory issues a GHSA and names the CVE it is about,
-    /// and that cross-reference is what lets two datasets meet.
+    /// and that cross-reference is what lets two sources meet.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<Ids>,
     pub title: String,
@@ -408,7 +408,7 @@ impl PropertyType {
         }
     }
     /// `number` and `date` compare by their own order. `text`, `bool` and `code` compare for
-    /// equality: ordering a code needs a scale, and a scale is a scope's declaration.
+    /// equality: ordering a code needs a scale, and a scale is a tracker's declaration.
     pub fn ordered(self) -> bool {
         matches!(
             self,
@@ -471,7 +471,7 @@ pub struct View {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Search {
-    /// Which parts of a record the full-text index covers.
+    /// Which parts of a claim the full-text index covers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub text: Vec<String>,
     /// Which fields answer a comparison.
@@ -523,7 +523,7 @@ impl SourceDecl {
         if d.title.is_empty() {
             d.title = d.name.clone();
         }
-        // A subscribed dataset has nothing to extract from, so its specs carry a name and a type
+        // A subscribed source has nothing to extract from, so its specs carry a name and a type
         // and no expression. Everywhere else an absent `from` is a field that would silently
         // produce nothing, and saying so here costs one pass over the declaration.
         if !matches!(d.source, Fetch::Hub { .. }) {
@@ -581,7 +581,7 @@ pub struct Page {
     /// Where the answer says how many there are in total.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<String>,
-    /// `offset` counts records, `page` counts pages from one. Sources do both.
+    /// `offset` counts claims, `page` counts pages from one. Sources do both.
     #[serde(default = "offset_word", skip_serializing_if = "is_offset_word")]
     pub by: String,
     #[serde(default = "hundred", skip_serializing_if = "is_hundred")]
@@ -619,14 +619,14 @@ impl Ids {
             Ids::Many(many) => many.iter().collect(),
         }
     }
-    /// What names the record, where the first scheme carries one identifier rather than several.
+    /// What names the claim, where the first scheme carries one identifier rather than several.
     pub fn names_record(&self) -> bool {
         self.each().first().map(|s| !s.all).unwrap_or(false)
     }
 }
 
-/// A dataset that takes its subjects from another one. The named dataset has to be installed in
-/// the same deployment, and a run without it refuses rather than reading nothing.
+/// A source that takes its things from another one. The named source has to be installed in
+/// the same workspace, and a run without it refuses rather than reading nothing.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ForEach {
@@ -661,7 +661,7 @@ impl Fetch {
 }
 
 impl Fetch {
-    /// The dataset this one takes its subjects from, where it takes them from one. `models/hf`
+    /// The source this one takes its things from, where it takes them from one. `models/hf`
     /// asks Hugging Face about the models `models/gguf` names, so it has nothing to do until
     /// that one has found something new.
     pub fn after(&self) -> Option<&str> {

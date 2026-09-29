@@ -1,14 +1,14 @@
-//! A dataset, when it travels.
+//! A source, when it travels.
 //!
-//! What a publisher ships is the records, not the instructions for producing them. A subscriber
-//! therefore needs none of the publisher's credentials, is not subject to the source's rate
-//! limits, and cannot re-run the source at all: `zetlyn dataset run` on a subscribed dataset
+//! What a publisher ships is the claims, not the instructions for producing them. A subscriber
+//! therefore needs none of the publisher's credentials, is not thing to the source's rate
+//! limits, and cannot re-run the source at all: `zetlyn source run` on a subscribed source
 //! checks the hub for a newer version.
 //!
 //! What does not travel is the publisher's operating history. The revisions, the runs and the
 //! watermarks stay with them; the full-text, identifier and field indexes are derived from the
-//! records and are rebuilt on arrival. Over the eleven datasets this was measured on, the stores
-//! were 398 MB and the records in them 61 MB.
+//! claims and are rebuilt on arrival. Over the eleven sources this was measured on, the stores
+//! were 398 MB and the claims in them 61 MB.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -96,7 +96,7 @@ impl std::fmt::Display for Reference {
 }
 
 /// The content hash of a version: sha256 over the payload names and their hashes, sorted, so two
-/// builds of the same records are one version whatever order the files were written in.
+/// builds of the same claims are one version whatever order the files were written in.
 pub fn version_of(payloads: &BTreeMap<String, (u64, String)>) -> String {
     let mut listing = String::new();
     for (name, (_, hash)) in payloads {
@@ -108,7 +108,7 @@ pub fn version_of(payloads: &BTreeMap<String, (u64, String)>) -> String {
     sha256(listing.as_bytes())[..24].to_string()
 }
 
-/// What a published dataset says about itself, without fetching its records.
+/// What a published source says about itself, without fetching its claims.
 pub fn manifest_of(ds: &Source, payloads: &BTreeMap<String, (u64, String)>) -> J {
     let d = &ds.decl;
     let last = ds.store.run_report(ds.store.last_run());
@@ -151,8 +151,8 @@ pub fn manifest_of(ds: &Source, payloads: &BTreeMap<String, (u64, String)>) -> J
         "properties": fields,
         "known": { "first": first_known, "last": last_known },
 
-        // What the subscriber inherits. A run that reached 578 of 2,684 subjects ships those 578,
-        // and a scope naming this dataset is partial for the same reason its publisher's is.
+        // What the subscriber inherits. A run that reached 578 of 2,684 things ships those 578,
+        // and a tracker naming this source is partial for the same reason its publisher's is.
         "complete": last.as_ref().map(|r| r.complete).unwrap_or(false),
         "reached": last.as_ref().and_then(|r| r.error.clone()),
         "finished": last.as_ref().and_then(|r| r.finished.clone()),
@@ -164,7 +164,7 @@ pub fn manifest_of(ds: &Source, payloads: &BTreeMap<String, (u64, String)>) -> J
         "text_is": d.source.text_is(),
         "terms": d.terms,
 
-        // The dataset says how it wants to be read, and a subscriber who lost that would hold a
+        // The source says how it wants to be read, and a subscriber who lost that would hold a
         // worse thing than the publisher does.
         "read": {
             "views": views,
@@ -222,7 +222,7 @@ pub fn publish(
 
     // A version's payloads are written once and never changed: the version is their hash, so
     // anything that would change them is a different version. The manifest describing them can be
-    // corrected — a title the publisher fixed is not a different set of records, and the payload
+    // corrected — a title the publisher fixed is not a different set of claims, and the payload
     // hashes inside it are the same either way.
     let manifest_path = reference.version_path("sources", &version, "manifest.json");
     // The signature is over the manifest exactly as it is served, so the bytes are made once and
@@ -237,9 +237,9 @@ pub fn publish(
     }
     if held.as_deref().map(|b| differs(b, &manifest)).unwrap_or(true) {
         place.put(&manifest_path, served.as_bytes())?;
-        // The dataset's own key where it has one, because subscribers pinned that and a key that
+        // The source's own key where it has one, because subscribers pinned that and a key that
         // changes under them is a publisher they stop trusting. Your identity otherwise, which is
-        // what a dataset made today signs with.
+        // what a source made today signs with.
         let signature = match crate::key::sign(&ds.dir, KEY_FILE, served.as_bytes())? {
             Some(s) => Some(s),
             None => crate::identity::sign(served.as_bytes())?,
@@ -254,7 +254,7 @@ pub fn publish(
 
     // What the tag pointed at before is what most subscribers hold, so that is the one delta
     // worth writing. Where it is missing or unreadable the publication still stands: a delta is
-    // a saving and never the only way to the records.
+    // a saving and never the only way to the claims.
     let held = place
         .get(&reference.tag_path("sources"))
         .ok()
@@ -374,9 +374,9 @@ fn write_delta(
     Ok(())
 }
 
-/// Moving a tag says which version it expects to replace. Two publishers of one dataset pull a
+/// Moving a tag says which version it expects to replace. Two publishers of one source pull a
 /// tag against each other otherwise, which is not a hypothetical: the second tree did it to
-/// itself on the day its hub was set up, a local deployment publishing a newer version and a
+/// itself on the day its hub was set up, a local workspace publishing a newer version and a
 /// tenant then writing its older one over the top.
 ///
 /// Where a place cannot compare and write in one step, this is a read and then a write, and the
@@ -452,7 +452,7 @@ pub fn manifest_signed_by(
     Ok(manifest)
 }
 
-/// Fetch, verify, and build a dataset directory from what arrived.
+/// Fetch, verify, and build a source directory from what arrived.
 pub fn subscribe(
     place: &dyn Place,
     reference: &Reference,
@@ -524,7 +524,7 @@ pub fn subscribe(
             _ => unchanged += 1,
         }
     }
-    // A subscription replaces the dataset. A record the new version does not carry is a record
+    // A subscription replaces the source. A claim the new version does not carry is a claim
     // the publisher removed, and the sweep is what says so.
     let removed = store.sweep(run)?;
     let held = added + changed + unchanged;
@@ -539,7 +539,7 @@ pub fn subscribe(
         &crate::build::Notes::default(),
         manifest["reached"].as_str(),
     )?;
-    // What a reader is told about freshness is the age of the records, so this run carries the
+    // What a reader is told about freshness is the age of the claims, so this run carries the
     // time the publisher's run finished and not the time it was fetched. A publisher whose
     // manifest names none leaves the fetch time, which is the only thing there is.
     if let Some(theirs) = manifest["finished"].as_str() {
@@ -549,8 +549,8 @@ pub fn subscribe(
     Ok((held, version))
 }
 
-/// The declaration a subscribed dataset carries. It holds no source expressions, because nothing
-/// is extracted here: the records arrived built. What it does carry is what the dataset says
+/// The declaration a subscribed source carries. It holds no source expressions, because nothing
+/// is extracted here: the claims arrived built. What it does carry is what the source says
 /// about how to read it, which is the publisher's and travels with them.
 fn declaration(
     manifest: &J,
@@ -594,9 +594,9 @@ fn declaration(
 }
 
 // ---------------------------------------------------------------------------------------------
-// A scope, which has no payload.
+// A tracker, which has no payload.
 
-/// A scope holds no index and has no records, so what it publishes is the statement and the
+/// A tracker holds no index and has no claims, so what it publishes is the statement and the
 /// statement is the whole of it. Its version is the content hash of that statement, which makes
 /// two publications of the same composition one version.
 pub fn publish_scope(
@@ -611,8 +611,8 @@ pub fn publish_scope(
     let decl = crate::trackerdecl::TrackerDecl::load(dir)?;
     let version = sha256(text.as_bytes())[..24].to_string();
 
-    // Which version of each member the curator last checked this against. Information and not a
-    // pin: a subscriber assembling it from newer members gets newer members, which is what
+    // Which version of each source the curator last checked this against. Information and not a
+    // pin: a subscriber assembling it from newer sources gets newer sources, which is what
     // following a tag is for.
     let mut checked = BTreeMap::new();
     for m in &decl.members {
@@ -656,8 +656,8 @@ pub fn publish_scope(
     if !place.exists(&manifest_path) {
         let served = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
         place.put(&manifest_path, served.as_bytes())?;
-        // A scope is signed for the same reason a dataset is, and rather more: the manifest
-        // carries the composition whole, so whoever can change it can change which datasets a
+        // A tracker is signed for the same reason a source is, and rather more: the manifest
+        // carries the composition whole, so whoever can change it can change which sources a
         // subscriber assembles and what their words are taken to mean.
         if let Some(signature) = crate::identity::sign(served.as_bytes())? {
             place.put(
@@ -670,7 +670,7 @@ pub fn publish_scope(
     Ok(version)
 }
 
-/// The statement, and then each member it names that is not held already.
+/// The statement, and then each source it names that is not held already.
 pub fn subscribe_scope(
     place: &dyn Place,
     reference: &Reference,
@@ -791,7 +791,7 @@ pub fn apply_delta(
         }
     }
 
-    // No sweep. A delta says what left, and a record it did not mention is a record that stayed.
+    // No sweep. A delta says what left, and a claim it did not mention is a claim that stayed.
     let unchanged = store.count().saturating_sub(added + changed);
     store.finish_run(
         run,
@@ -804,13 +804,13 @@ pub fn apply_delta(
         &crate::build::Notes::default(),
         full["reached"].as_str(),
     )?;
-    // The same reason as a full subscribe: freshness is the age of the records.
+    // The same reason as a full subscribe: freshness is the age of the claims.
     if let Some(theirs) = full["finished"].as_str() {
         store.set_finished(run, theirs)?;
     }
-    // The declaration too, and not only the records. A publisher may have added a field, changed
+    // The declaration too, and not only the claims. A publisher may have added a field, changed
     // a view or replaced a search example between the two versions, and a subscriber who took the
-    // records and kept the old declaration would hold a dataset that fails its own check.
+    // claims and kept the old declaration would hold a source that fails its own check.
     let (location, pinned) = match &crate::sourcedecl::SourceDecl::load(into)?.source {
         crate::sourcedecl::Fetch::Hub { at, key, .. } => (at.clone(), key.clone()),
         _ => (String::new(), String::new()),

@@ -1,4 +1,4 @@
-//! A dataset: one source, one lifecycle, one directory. And the six calls it answers.
+//! A source: one source, one lifecycle, one directory. And the six calls it answers.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -24,7 +24,7 @@ pub struct Query {
     pub view: Option<String>,
     /// Identifier values. Exact, and the cheapest way in.
     pub ids: Vec<String>,
-    /// Only records this deployment first held at or before this stamp. The paywall, and one
+    /// Only claims this workspace first held at or before this stamp. The paywall, and one
     /// condition in one query.
     pub seen_before: Option<String>,
     pub sort: Option<String>,
@@ -62,7 +62,7 @@ impl Source {
         }
         self.decl.source.prepare(&self.dir)?;
         // A run that started from a stored mark read a slice of the source, not the whole
-        // of it. It may not remove: every record it did not touch is one it never asked
+        // of it. It may not remove: every claim it did not touch is one it never asked
         // for. Only a run that read from the beginning of the declared coverage sweeps.
         let mark = self.store.meta("mark");
         let whole = mark.is_none();
@@ -92,7 +92,7 @@ impl Source {
                     let Some(rec) = build::build(&self.decl, sub, origin, &mut notes) else {
                         continue;
                     };
-                    // A record id seen twice in one run is the source repeating itself
+                    // A claim id seen twice in one run is the source repeating itself
                     // under one key, not a change. Written through, each pair would
                     // report a change on every run for ever.
                     if !written.insert(rec.record_id.clone()) {
@@ -115,7 +115,7 @@ impl Source {
             Err(e) => failure = Some(e),
         }
 
-        // A partial run never removes a record. A run that read the whole source and saw
+        // A partial run never removes a claim. A run that read the whole source and saw
         // nothing is not a source that emptied itself, so it is partial too — but a run
         // that read a slice and saw nothing is the normal answer to `what changed since
         // yesterday`, and saying otherwise would make a quiet day look like a fault.
@@ -261,7 +261,7 @@ impl Source {
                 .map(|(s, n)| json!({ "scheme": s, "claims": n })).collect()),
             "properties": J::Array(fields),
             "vocabulary": json!(d.vocabulary),
-            // The whole shape, because a scope that adopts one reaches it only through here.
+            // The whole shape, because a tracker that adopts one reaches it only through here.
             "views": J::Array(d.view.iter().map(|v| json!({
                 "name": v.name,
                 "title": if v.title.is_empty() { v.name.clone() } else { v.title.clone() },
@@ -327,8 +327,8 @@ impl Source {
         let sort = q.sort.clone().or_else(|| view.and_then(|v| v.sort.clone()));
         let limit = if q.limit == 0 { 50 } else { q.limit };
 
-        // An identifier is the cheapest way in, so it is tried before the index. A scope asks by
-        // identifier to complete an entry its other members selected.
+        // An identifier is the cheapest way in, so it is tried before the index. A tracker asks by
+        // identifier to complete a thing its other sources selected.
         let named: Vec<String> = if !q.ids.is_empty() {
             q.ids.clone()
         } else if q.pred.is_none() && !q.text.trim().is_empty() {
@@ -337,9 +337,9 @@ impl Source {
             Vec::new()
         };
         if !named.is_empty() {
-            // A scope completing a page hands over every key on it, which is thousands. Keeping
+            // A tracker completing a page hands over every key on it, which is thousands. Keeping
             // the order but checking membership against a set: the same list, without asking
-            // whether each new record is already in it by reading the whole list again.
+            // whether each new claim is already in it by reading the whole list again.
             let mut ids = Vec::new();
             let mut held = BTreeSet::new();
             for value in &named {
@@ -419,8 +419,8 @@ impl Source {
 
     /// What was added, changed and removed since a mark, and for a change, which fields moved.
     ///
-    /// The previous value comes from the revisions the dataset kept. Without `retention.history`
-    /// a change says that a record changed and cannot say what in it did.
+    /// The previous value comes from the revisions the source kept. Without `retention.history`
+    /// a change says that a claim changed and cannot say what in it did.
     pub fn changes(&self, since: i64, limit: usize) -> J {
         let history = self.decl.retention.history;
         let mut out = Vec::new();
@@ -472,24 +472,24 @@ impl Source {
             })).collect()),
         })
     }
-    /// Whether a record this dataset holds satisfies a query, read the way a search reads it.
+    /// Whether a claim this source holds satisfies a query, read the way a search reads it.
     pub fn holds(&self, record_id: &str, pred: &Pred) -> bool {
         let filter = self.store.filter(pred, &self.types());
         self.store.satisfies(record_id, &filter)
     }
 
     /// The current mark, to be handed back to `changes` later. A run number, because that is what
-    /// this dataset counts in.
+    /// this source counts in.
     pub fn mark(&self) -> i64 {
         self.store.last_run()
     }
 }
 
-/// The six calls. In process here; the same shapes over HTTP for a dataset somewhere else.
+/// The six calls. In process here; the same shapes over HTTP for a source somewhere else.
 ///
-/// A scope reaches its members through this and nothing else. A scope that read a member's store
-/// would have to be taken apart to reach the first dataset that is not ours.
-// The interface is six calls. A scope uses four of them today and reaches for `changes` and
+/// A tracker reaches its sources through this and nothing else. A tracker that read a source's store
+/// would have to be taken apart to reach the first source that is not ours.
+// The interface is six calls. A tracker uses four of them today and reaches for `changes` and
 // `mark` at M3, so the two are defined and not yet called.
 #[allow(dead_code)]
 pub trait Interface {
@@ -529,7 +529,7 @@ impl Interface for Source {
 /// What a declaration claims about itself, held against what the store actually holds.
 ///
 /// Every one of these is a sentence a reader is shown. An example that returns nothing is a
-/// suggestion to type something that does not work; a column naming a field no record carries is
+/// suggestion to type something that does not work; a column naming a field no claim carries is
 /// an empty cell in every row. None of it is caught by the run, because none of it is wrong until
 /// somebody reads it.
 impl Source {
@@ -625,7 +625,7 @@ impl Source {
 }
 
 impl Source {
-    /// A run that does not have to happen, and the record of it.
+    /// A run that does not have to happen, and the claim of it.
     ///
     /// Only where the source is one address and answers `304`. A source that pages, crawls or
     /// reads a directory has no single thing to ask about; a source that offers neither an

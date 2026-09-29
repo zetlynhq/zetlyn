@@ -1,15 +1,15 @@
 //! Zetlyn run for somebody instead of by them.
 //!
-//! The rule the whole file is written against: **this holds no dataset and no account.** What it
-//! holds is a grant per deployment, and a grant is a statement somebody else signed. Every fact
+//! The rule the whole file is written against: **this holds no source and no account.** What it
+//! holds is a grant per workspace, and a grant is a statement somebody else signed. Every fact
 //! it shows came from a console call it made a moment ago, and nothing it shows is stored.
 //!
-//! That is what keeps a managed deployment from contradicting local first. A customer's records
+//! That is what keeps a managed workspace from contradicting local first. A customer's claims
 //! live on their machine and leave with it. Take this program away and they still have their
-//! deployment; take their deployment away and this has an address that stops answering.
+//! workspace; take their workspace away and this has an address that stops answering.
 //!
 //! There are no accounts here because there is nothing to have an account for. Whoever holds the
-//! private half of the key a grant names can drive that deployment, and whoever does not, cannot.
+//! private half of the key a grant names can drive that workspace, and whoever does not, cannot.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -143,7 +143,7 @@ fn page(title: &str, body: Markup) -> String {
 }
 
 fn overview(p: &Platform) -> String {
-    // Every number here is asked for now. Nothing about a deployment is kept between requests,
+    // Every number here is asked for now. Nothing about a workspace is kept between requests,
     // which is the same rule said in the shape of the code.
     let asked: Vec<(String, String, Result<J, String>)> = p
         .held
@@ -193,7 +193,7 @@ fn overview(p: &Platform) -> String {
     )
 }
 
-/// What is wrong with a deployment, in as few words as a table cell holds.
+/// What is wrong with a workspace, in as few words as a table cell holds.
 fn summary(j: &J) -> Markup {
     let empty = Vec::new();
     let datasets = j["sources"].as_array().unwrap_or(&empty);
@@ -399,7 +399,7 @@ fn run(p: &Platform, name: &str, at: &str) -> (u16, String) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Changing what a dataset is.
+// Changing what a source is.
 
 /// What the platform may ask to draft a declaration, where an operator names one.
 ///

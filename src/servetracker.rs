@@ -1,4 +1,4 @@
-//! A scope, opened. The same three surfaces a dataset has, over members of unlike shape.
+//! A tracker, opened. The same three surfaces a source has, over sources of unlike shape.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -348,7 +348,7 @@ fn entry_page(scope: &Tracker, scheme: &str, value: &str) -> Option<String> {
     Some(shell(&entry.title, body))
 }
 
-/// The member's own definition of its own word, which arrived with its `describe`.
+/// The source's own definition of its own word, which arrived with its `describe`.
 fn definition(scope: &Tracker, member: &str, code: &str) -> Option<String> {
     let m = scope.members.iter().find(|m| m.name() == member)?;
     let vocab = m.described["vocabulary"].as_object()?;
@@ -397,12 +397,12 @@ fn record_page(scope: &Tracker, member: &str, id: &str) -> Option<String> {
 }
 
 /// The second value is true when there is nothing at the address: no such call, or no such
-/// subject. A call that does not exist, answered as a search of everything, is a caller who thinks
+/// thing. A call that does not exist, answered as a search of everything, is a caller who thinks
 /// they asked something and gets the answer to another question.
 fn api(scope: &Tracker, path: &str, url: &str, v: &Viewer) -> (J, bool) {
     let bound = account::bound(v, &scope.decl.name);
     // No API without a subscription. The overview and its counts stay current for everyone; the
-    // records behind them do not.
+    // claims behind them do not.
     if bound.is_some() {
         return (
             json!({ "error": "this needs a subscription", "see": at("/pricing") }),
@@ -441,7 +441,7 @@ fn api(scope: &Tracker, path: &str, url: &str, v: &Viewer) -> (J, bool) {
                     "values": J::Array(counts.iter()
                         .map(|(v, n)| json!({ "value": v, "claims": n })).collect()) })
         }
-        // One subject, which is the page a reader opens and had no call of its own.
+        // One thing, which is the page a reader opens and had no call of its own.
         _ if path.starts_with("/api/thing/") => {
             let rest: Vec<&str> = path["/api/thing/".len()..].splitn(2, '/').collect();
             match rest.as_slice() {
@@ -492,7 +492,7 @@ fn api(scope: &Tracker, path: &str, url: &str, v: &Viewer) -> (J, bool) {
     (answer, false)
 }
 
-/// One assembled subject, the same shape whether it arrives alone or inside a search.
+/// One assembled thing, the same shape whether it arrives alone or inside a search.
 fn entry_json(e: &crate::tracker::Thing) -> J {
     json!({
         "rank": e.rank,
@@ -817,7 +817,7 @@ fn escape(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// Atom, for a reader. The same entries a webhook receives, in the shape a feed reader expects.
+/// Atom, for a reader. The same things a webhook receives, in the shape a feed reader expects.
 fn atom(title: &str, self_url: &str, entries: &[J], updated: &str) -> String {
     let mut out = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
     out.push_str("<feed xmlns=\"http://www.w3.org/2005/Atom\">\n");
@@ -952,8 +952,8 @@ fn watch_feed(scope: &Tracker, name: &str) -> Option<String> {
     ))
 }
 
-/// How long a reading of the members stands before it is taken again. The scheduler runs in
-/// another process, so a surface that read its members once would serve the counts it started
+/// How long a reading of the sources stands before it is taken again. The scheduler runs in
+/// another process, so a surface that read its sources once would serve the counts it started
 /// with for ever and say they were current.
 const REREAD: i64 = 60;
 
@@ -1001,7 +1001,7 @@ pub fn serve(mut scope: Tracker, dir: &Path, datasets: &Path, addr: &str) -> Res
         }
 
         // (body, content type, extra header)
-        // A page that says "no such record" under a 200 is telling a person one thing and
+        // A page that says "no such claim" under a 200 is telling a person one thing and
         // every machine another. 402 is the paywall, 404 is nothing there.
         let mut status = 200u16;
         let mut missing = false;
@@ -1331,7 +1331,7 @@ pub fn serve(mut scope: Tracker, dir: &Path, datasets: &Path, addr: &str) -> Res
 }
 
 // ---------------------------------------------------------------------------------------------
-// The catalogue: what this deployment holds, and what somebody may add to it.
+// The catalogue: what this workspace holds, and what somebody may add to it.
 
 fn form_fields(body: &str, name: &str) -> Vec<String> {
     body.split('&')
@@ -1355,7 +1355,7 @@ fn catalogue(scope: &Tracker, v: &Viewer, message: Option<&str>) -> String {
         .iter()
         .filter_map(|(name, dir)| {
             // Four values, not a description. A full describe() walks every field of every
-            // dataset, and this page shows none of that.
+            // source, and this page shows none of that.
             let ds = crate::source::Source::open(dir).ok()?;
             Some((
                 name.clone(),
@@ -1479,7 +1479,7 @@ fn add_dataset(scope: &Tracker, form: &str) -> Result<String, String> {
     ))
 }
 
-/// Members, a key, and a sentence each. The sentence is required here because it is required in
+/// Sources, a key, and a sentence each. The sentence is required here because it is required in
 /// the format, and a form that let somebody skip it would be a way around the rule.
 fn add_scope(scope: &Tracker, form: &str) -> Result<String, String> {
     let name = form_field(form, "name");

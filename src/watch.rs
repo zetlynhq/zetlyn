@@ -1,5 +1,5 @@
-//! A saved query is a subscription. The scope replays it at each run and says what entered, what
-//! left, and what changed inside an entry.
+//! A saved query is a subscription. The tracker replays it at each run and says what entered, what
+//! left, and what changed inside a thing.
 
 use std::path::{Path, PathBuf};
 
@@ -133,7 +133,7 @@ impl Watch {
                     let Some(full) = scope.entry(scheme, value) else {
                         continue;
                     };
-                    // The scope's own reading of the query, on its scale. A watch that compared
+                    // The tracker's own reading of the query, on its scale. A watch that compared
                     // the words as strings put `critical` below `high` and `urgent` above it.
                     if !scope.entry_holds(&full, p) {
                         continue;
@@ -156,7 +156,7 @@ impl Watch {
         let ds = Source::open(&dir)?;
         let since: i64 = state.mark.parse().unwrap_or((ds.mark() - 1).max(0));
         let report = Interface::changes(&ds, since, 500);
-        // Narrowed by the query as a scope's watch is. Without this a watch over a dataset
+        // Narrowed by the query as a tracker's watch is. Without this a watch over a source
         // delivered every change and its query was decoration.
         let pred = self.pred();
         let empty = Vec::new();

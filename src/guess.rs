@@ -1,4 +1,4 @@
-//! `zetlyn dataset new`. The declaration is proposed rather than demanded: a CSV of forty columns
+//! `zetlyn source new`. The declaration is proposed rather than demanded: a CSV of forty columns
 //! should not need forty lines of configuration before it shows anything.
 
 use std::collections::{BTreeMap, BTreeSet};

@@ -57,7 +57,11 @@ pub fn write<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
 }
 
 pub fn to_string<T: Serialize>(value: &T) -> Result<String, String> {
-    serde_saphyr::to_string(value).map_err(|e| e.to_string())
+    // A long value on one line: a path or an address folded across two is one somebody copies
+    // and gets wrong.
+    let mut options = serde_saphyr::SerializerOptions::default();
+    options.prefer_block_scalars = false;
+    serde_saphyr::to_string_with_options(value, options).map_err(|e| e.to_string())
 }
 
 /// The file this one was called before 0.2, where it is still there under that name.

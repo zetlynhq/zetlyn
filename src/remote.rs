@@ -1,7 +1,7 @@
-//! A dataset that lives somewhere else.
+//! A source that lives somewhere else.
 //!
-//! The same six calls, over HTTP, against the surface a dataset already serves. One interface and
-//! not two: nothing here is a second protocol, and a scope cannot tell which of its members is
+//! The same six calls, over HTTP, against the surface a source already serves. One interface and
+//! not two: nothing here is a second protocol, and a tracker cannot tell which of its sources is
 //! local except by looking at where it was named.
 
 use serde_json::{json, Value as J};
@@ -15,7 +15,7 @@ pub struct Remote {
     name: String,
     agent: ureq::Agent,
     key: Option<String>,
-    /// Asked once and kept. A scope builds its whole overview from this.
+    /// Asked once and kept. A tracker builds its whole overview from this.
     described: J,
 }
 
@@ -61,7 +61,7 @@ impl Remote {
         serde_json::from_str(&body).map_err(|e| format!("{url}: not JSON: {e}"))
     }
 
-    /// The query as the surface takes it. A remote member is asked in the same words a person
+    /// The query as the surface takes it. A remote source is asked in the same words a person
     /// types, because that is the only query language this program has.
     fn as_params(q: &Query) -> Vec<(&'static str, String)> {
         let mut out = vec![("q", spell(q))];
@@ -84,7 +84,7 @@ impl Remote {
 }
 
 /// A predicate back into the words it was typed in. The wire carries the query, not a parse tree:
-/// a member on the other side has its own parser and its own fields, and handing it an AST would
+/// a source on the other side has its own parser and its own fields, and handing it an AST would
 /// be handing it this program's idea of what it holds.
 fn spell(q: &Query) -> String {
     let mut out = q.text.clone();
@@ -149,8 +149,8 @@ impl Interface for Remote {
     fn search(&self, q: &Query) -> Result<(u64, Vec<Hit>, Unanswered), String> {
         let answer = self.ask("/api/search", &Remote::as_params(q))?;
         if let Some(why) = answer["error"].as_str() {
-            // A remote member that will not answer says so, and the scope shows it beside the
-            // members that did rather than pretending the answer is whole.
+            // A remote source that will not answer says so, and the tracker shows it beside the
+            // sources that did rather than pretending the answer is whole.
             return Ok((0, Vec::new(), Unanswered(vec![why.to_string()])));
         }
         let empty = Vec::new();

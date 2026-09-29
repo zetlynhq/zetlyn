@@ -5,7 +5,7 @@
 //! namespace is shared, which is a hub several people publish to.
 //!
 //! An owner name is taken first come, first served, and it is taken for good. What it allows is
-//! writing under `datasets/{owner}/` and `scopes/{owner}/` and nothing else.
+//! writing under `sources/{owner}/` and `trackers/{owner}/` and nothing else.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -91,7 +91,7 @@ pub struct Owner {
     ///
     /// This used to be the hash of a bearer token, and it was the same mistake a token always
     /// is. Whoever held it could publish, so it had to live wherever publishing happened, and a
-    /// publisher was a different person from the same human operating a deployment. One key,
+    /// publisher was a different person from the same human operating a workspace. One key,
     /// everywhere somebody acts.
     pub key: String,
 }
@@ -236,7 +236,7 @@ impl Owners {
 // ---------------------------------------------------------------------------------------------
 // What this hub carries.
 //
-// A list of what is here, not an index of what is in it. The hub reads no records and answers no
+// A list of what is here, not an index of what is in it. The hub reads no claims and answers no
 // query: it walks its own directory, reads the tag and the manifest each tag names, and prints
 // what those say. A subscriber that wants more fetches the manifest itself.
 
@@ -273,7 +273,7 @@ fn read_dir_names(dir: &Path) -> Vec<String> {
     out
 }
 
-/// Everything under `datasets/` and `scopes/`, one row per tag.
+/// Everything under `sources/` and `trackers/`, one row per tag.
 fn carried(dir: &Path) -> Vec<Carried> {
     let mut out = Vec::new();
     for tree in ["sources", "trackers"] {

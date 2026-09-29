@@ -1,4 +1,4 @@
-//! The record: one dataset's statement about one thing.
+//! The claim: one source's statement about one thing.
 //!
 //! Six value types and the list is closed. Nothing nests, nothing is conditional, and no field
 //! refers to another. Anything the form cannot hold stays in the text.
@@ -189,15 +189,15 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 impl Claim {
-    /// SHA-256 of the dataset name, the kind, and what names this record.
+    /// SHA-256 of the source name, the kind, and what names this claim.
     ///
-    /// What names it is the identifier where the declaration says a record carries one, and the
+    /// What names it is the identifier where the declaration says a claim carries one, and the
     /// address otherwise. A declaration with `all = true` says its identifiers are references
     /// rather than names: 2,698 Metasploit modules name 2,408 CVEs, and several modules exploit
-    /// one vulnerability, so the CVE names the subject and not the record.
+    /// one vulnerability, so the CVE names the thing and not the claim.
     ///
-    /// The dataset name is in it because a record is one dataset's statement. Two datasets
-    /// describing one thing hold two records, which is what makes the join a derivation rather
+    /// The source name is in it because a claim is one source's statement. Two sources
+    /// describing one thing hold two claims, which is what makes the join a derivation rather
     /// than a collision.
     pub fn compute_id(dataset: &str, kind: &str, names_it: &str) -> String {
         let mut h = Sha256::new();
@@ -270,16 +270,16 @@ impl Claim {
 
 impl Id {
     /// Two identifiers denote one thing when they differ only in case. `CVE-2021-44228` and
-    /// `cve-2021-44228` are one; the value each dataset shows is the one its source wrote.
+    /// `cve-2021-44228` are one; the value each source shows is the one its source wrote.
     pub fn same(&self, other: &Id) -> bool {
         self.scheme == other.scheme && self.value.eq_ignore_ascii_case(&other.value)
     }
 }
 
 impl Claim {
-    /// The inverse of `to_json`, for a record that arrives in a published artifact rather than
+    /// The inverse of `to_json`, for a claim that arrives in a published artifact rather than
     /// out of a source. The hash travels with it and is checked against a recomputation, because
-    /// a record whose hash does not describe it would be a record this store cannot compare.
+    /// a claim whose hash does not describe it would be a claim this store cannot compare.
     pub fn from_json(dataset: &str, j: &J) -> Result<Claim, String> {
         let s = |k: &str| j.get(k).and_then(J::as_str).unwrap_or("").to_string();
         let opt = |k: &str| j.get(k).and_then(J::as_str).map(str::to_string);

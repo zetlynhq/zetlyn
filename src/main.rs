@@ -1,4 +1,4 @@
-//! zetlyn — a dataset is served, browsed and searched on its own. A scope puts several of them on
+//! zetlyn — a source is served, browsed and searched on its own. A tracker puts several of them on
 //! one page; it is not what makes them usable.
 
 mod account;
@@ -257,10 +257,10 @@ fn run(args: &[String]) -> Result<(), String> {
         Some("platform") => platform_command(args),
         Some("serve") => {
             let port = flag(args, "--port").unwrap_or("8080");
-            // Several scopes can sit on one host, one process each, so a surface is told where
+            // Several trackers can sit on one host, one process each, so a surface is told where
             // it hangs and writes every address it gives out under that.
             serve::mount(flag(args, "--base").unwrap_or(""));
-            // Loopback unless asked otherwise: a scope reachable from the network is a decision
+            // Loopback unless asked otherwise: a tracker reachable from the network is a decision
             // an operator makes, not a default they discover.
             let addr = flag(args, "--addr")
                 .map(str::to_string)
@@ -326,9 +326,9 @@ fn dataset_new(args: &[String]) -> Result<(), String> {
                 .map(str::to_string)
                 .unwrap_or(format!("./{stem}")),
         );
-        let toml = guess::propose_url(from, &dir, flag(args, "--name"), flag(args, "--kind"))?;
+        let proposed = guess::propose_url(from, &dir, flag(args, "--name"), flag(args, "--kind"))?;
         println!("{}\n", dir.join(crate::sourcedecl::FILE).display());
-        print!("{toml}");
+        print!("{proposed}");
         return Ok(());
     }
     let from = Path::new(from);
@@ -341,14 +341,14 @@ fn dataset_new(args: &[String]) -> Result<(), String> {
             .map(str::to_string)
             .unwrap_or(format!("./{stem}")),
     );
-    let toml = guess::propose(from, &dir, flag(args, "--name"), flag(args, "--kind"))?;
+    let proposed = guess::propose(from, &dir, flag(args, "--name"), flag(args, "--kind"))?;
 
     println!("{}", dir.join(crate::sourcedecl::FILE).display());
     println!();
-    print!("{toml}");
+    print!("{proposed}");
     println!();
 
-    // Three records, because a creator who agrees changes nothing and a creator who does not needs
+    // Three claims, because a creator who agrees changes nothing and a creator who does not needs
     // to see why before a run writes anything.
     let ds = Source::open(&dir)?;
     let root = ds.decl.source.root(&dir);
@@ -456,7 +456,7 @@ fn changes(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// When this dataset is next due, from its declared cadence and when it last finished.
+/// When this source is next due, from its declared cadence and when it last finished.
 fn due_at(ds: &Source) -> Option<i64> {
     let every = ds
         .decl
@@ -496,7 +496,7 @@ fn schedule(args: &[String]) -> Result<(), String> {
         let mut soonest: Option<i64> = None;
         let mut moved: Vec<String> = Vec::new();
         // The runs happen one after another in one process, so the order matters: a source
-        // that is being throttled can take twenty minutes, and an hourly dataset behind it
+        // that is being throttled can take twenty minutes, and an hourly source behind it
         // would wait that out. Shortest cadence first, so what is asked for most often is
         // asked for first.
         let mut due: Vec<(i64, String, PathBuf)> = tracker::registry(&root.join("sources"))
@@ -555,7 +555,7 @@ fn schedule(args: &[String]) -> Result<(), String> {
             }
         }
 
-        // A dataset that takes its subjects from another has nothing to ask about until that one
+        // A source that takes its things from another has nothing to ask about until that one
         // has found something new. `models/hf` asks Hugging Face about the models `models/gguf`
         // names: 2,684 calls to be told what it already holds, or none.
         for (name, dir) in follows(&root, &moved) {
@@ -764,7 +764,7 @@ fn scope_at(args: &[String], from: usize) -> Result<(PathBuf, PathBuf), String> 
     if !p.join(crate::trackerdecl::FILE).exists() {
         return Err(missing(&p.join(crate::trackerdecl::FILE)));
     }
-    // A deployment holds `datasets/` beside `scopes/`, and a member is found there by its name.
+    // A workspace holds `sources/` beside `trackers/`, and a source is found there by its name.
     let datasets = match flag(args, "--sources") {
         Some(d) => PathBuf::from(d),
         None => p.join("..").join("..").join("sources"),
@@ -900,13 +900,13 @@ fn search(args: &[String]) -> Result<(), String> {
 // ---------------------------------------------------------------------------------------------
 // Publishing, and taking what somebody else published.
 
-/// `zetlyn dataset publish <dir> [--to <hub>] [--tag latest] [--expect <version>|-]`
+/// `zetlyn source publish <dir> [--to <hub>] [--tag latest] [--expect <version>|-]`
 fn dataset_publish(args: &[String]) -> Result<(), String> {
     let dir = dir_at(args, 2)?;
     let to = flag(args, "--to").unwrap_or(artifact::DEFAULT_HUB);
     let tag = flag(args, "--tag").unwrap_or("latest");
     let ds = Source::open(&dir)?;
-    // Nothing is published that the dataset itself says is untrue.
+    // Nothing is published that the source itself says is untrue.
     let wrong = ds.check();
     if !wrong.is_empty() {
         for w in &wrong {
@@ -925,7 +925,7 @@ fn dataset_publish(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// `zetlyn dataset subscribe <reference> --from <hub> [--at <dir>]`
+/// `zetlyn source subscribe <reference> --from <hub> [--at <dir>]`
 fn dataset_subscribe(args: &[String]) -> Result<(), String> {
     let raw = positional(args, 2)
         .first()
@@ -955,7 +955,7 @@ fn dataset_subscribe(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// `zetlyn dataset update <dir>`: ask the hub this one came from whether there is a newer version.
+/// `zetlyn source update <dir>`: ask the hub this one came from whether there is a newer version.
 fn dataset_update(args: &[String]) -> Result<(), String> {
     let dir = dir_at(args, 2)?;
     let decl = sourcedecl::SourceDecl::load(&dir)?;
@@ -994,12 +994,12 @@ fn dataset_update(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// `zetlyn scope publish <dir> [--to <hub>] [--tag latest] [--expect <version>]`
+/// `zetlyn tracker publish <dir> [--to <hub>] [--tag latest] [--expect <version>]`
 fn scope_publish(args: &[String]) -> Result<(), String> {
     let (dir, datasets) = scope_at(args, 2)?;
     let to = flag(args, "--to").unwrap_or(artifact::DEFAULT_HUB);
     let tag = flag(args, "--tag").unwrap_or("latest");
-    // A scope that does not hold together is not published, for the same reason a dataset is not.
+    // A tracker that does not hold together is not published, for the same reason a source is not.
     let scope = tracker::Tracker::open(&dir, &datasets)?;
     let wrong = scope.check();
     if !wrong.is_empty() {
@@ -1020,7 +1020,7 @@ fn scope_publish(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// `zetlyn scope subscribe <reference> [--from <hub>] [--at <deployment>]`
+/// `zetlyn tracker subscribe <reference> [--from <hub>] [--at <workspace>]`
 fn scope_subscribe(args: &[String]) -> Result<(), String> {
     let raw = positional(args, 2)
         .first()
@@ -1072,8 +1072,8 @@ fn hub_command(args: &[String]) -> Result<(), String> {
             println!("under sources/{name}/ and trackers/{name}/ and nowhere else.");
             Ok(())
         }
-        // The key a publisher signs with. It lives in the dataset directory and is read by
-        // `dataset publish`; there is nothing to turn on.
+        // The key a publisher signs with. It lives in the source directory and is read by
+        // `source publish`; there is nothing to turn on.
         Some("key") => {
             let dir = PathBuf::from(flag(args, "--at").unwrap_or("."));
             if let Some(held) = identity::or_local(&dir, artifact::KEY_FILE) {
@@ -1120,7 +1120,7 @@ fn hub_command(args: &[String]) -> Result<(), String> {
                 (None, Some(p)) => format!("127.0.0.1:{p}"),
                 _ => "127.0.0.1:8090".to_string(),
             };
-            // Which of the scopes this hub carries are also served on this host, so the front
+            // Which of the trackers this hub carries are also served on this host, so the front
             // page can link them. The hub itself still answers nothing about them.
             let serving: Vec<String> = flag(args, "--serving")
                 .unwrap_or("")
@@ -1153,7 +1153,7 @@ const HUB_USAGE: &str = "\
 ";
 
 // ---------------------------------------------------------------------------------------------
-// A deployment answering for itself, and whoever is allowed to ask.
+// A workspace answering for itself, and whoever is allowed to ask.
 
 fn console_command(args: &[String]) -> Result<(), String> {
     match args.get(1).map(String::as_str) {
@@ -1222,7 +1222,7 @@ fn console_command(args: &[String]) -> Result<(), String> {
     }
 }
 
-/// A deployment is its directory, so it is called what the directory is called.
+/// A workspace is its directory, so it is called what the directory is called.
 fn deployment_name(root: &Path) -> String {
     root.canonicalize()
         .ok()
@@ -1448,10 +1448,10 @@ const PLATFORM_USAGE: &str = "\
       page shows was asked for when the page was asked for.
 ";
 
-/// Which datasets take their subjects from one of these, and are therefore worth running now.
+/// Which sources take their things from one of these, and are therefore worth running now.
 ///
 /// Read from the declarations rather than from a file somebody keeps in step with them. A
-/// dataset already says what it follows, in the `for_each` that makes it follow.
+/// source already says what it follows, in the `for_each` that makes it follow.
 fn follows(root: &Path, moved: &[String]) -> Vec<(String, PathBuf)> {
     if moved.is_empty() {
         return Vec::new();

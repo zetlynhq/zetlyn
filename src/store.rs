@@ -90,7 +90,7 @@ create table if not exists run(
 create virtual table if not exists fts using fts5(record_id unindexed, title, text);
 ";
 
-/// What a member could not answer, which is shown rather than swallowed.
+/// What a source could not answer, which is shown rather than swallowed.
 #[derive(Debug, Default, Clone)]
 pub struct Unanswered(pub Vec<String>);
 
@@ -127,11 +127,11 @@ pub struct FieldSummary {
     pub max: Option<String>,
 }
 
-/// A dataset is a directory somebody moves, so a store written by an earlier build has to
+/// A source is a directory somebody moves, so a store written by an earlier build has to
 /// open under a later one. Each of these is a column that arrived after the first release;
 /// SQLite refuses a duplicate and that refusal is the whole of the check.
 fn migrate(db: &Connection) {
-    // Existing full-text rows carry arbitrary rowids. Rebuilt once, aligned to the record
+    // Existing full-text rows carry arbitrary rowids. Rebuilt once, aligned to the claim
     // they belong to, so a replacement is a lookup ever after.
     let aligned: Option<String> = db
         .query_row("select value from meta where key = 'fts_rowid'", [], |r| {
@@ -147,9 +147,9 @@ fn migrate(db: &Connection) {
              insert or replace into meta(key, value) values('fts_rowid', '1');",
         );
     }
-    // A changed record used to be given a new rowid, and its old full-text row stayed behind
-    // matching searches under a record that no longer said that. `cve/kev` carried 3,453 index
-    // rows for 1,726 records, and a search for one word answered eleven where five was the truth.
+    // A changed claim used to be given a new rowid, and its old full-text row stayed behind
+    // matching searches under a claim that no longer said that. `cve/kev` carried 3,453 index
+    // rows for 1,726 claims, and a search for one word answered eleven where five was the truth.
     let swept: Option<String> = db
         .query_row(
             "select value from meta where key = 'fts_orphans'",
@@ -188,7 +188,7 @@ impl Store {
     }
 
     /// The high-water mark of the last complete run. A partial run does not advance it, so
-    /// the records it failed to reach are fetched again rather than skipped forever.
+    /// the claims it failed to reach are fetched again rather than skipped forever.
     pub fn meta(&self, key: &str) -> Option<String> {
         self.db
             .query_row(
@@ -246,7 +246,7 @@ impl Store {
         Ok(id)
     }
 
-    /// Added, changed or unchanged. A record whose hash matches the one held is not rewritten.
+    /// Added, changed or unchanged. A claim whose hash matches the one held is not rewritten.
     pub fn put(
         &self,
         rec: &Claim,
@@ -274,8 +274,8 @@ impl Store {
         let verdict = if held.is_some() { "changed" } else { "added" };
         // The row keeps the rowid it already had. `insert or replace` deletes the old row and
         // assigns a new one otherwise, and the full-text row is keyed on this rowid: a changed
-        // record would leave its old index entry behind, matching a search forever under a
-        // record that no longer says that. One generation of that doubled a store's index.
+        // claim would leave its old index thing behind, matching a search forever under a
+        // claim that no longer says that. One generation of that doubled a store's index.
         let kept_rowid: Option<i64> = held.as_ref().and_then(|_| {
             self.db
                 .query_row(
@@ -285,8 +285,8 @@ impl Store {
                 )
                 .ok()
         });
-        // Every version, where the dataset asked for history. Nothing is written for a
-        // record whose hash matched, so an unchanged source costs nothing.
+        // Every version, where the source asked for history. Nothing is written for a
+        // claim whose hash matched, so an unchanged source costs nothing.
         if history {
             self.db
                 .execute(
@@ -399,9 +399,9 @@ impl Store {
             }
         }
 
-        // The full-text row carries the record's own rowid, so replacing it is a lookup rather
+        // The full-text row carries the claim's own rowid, so replacing it is a lookup rather
         // than a scan. `record_id` cannot be indexed inside an FTS table, and deleting by it is
-        // linear: the day an upstream change rewrites 46,000 records, a scan per record turns a
+        // linear: the day an upstream change rewrites 46,000 claims, a scan per claim turns a
         // twenty-five second run into two hours.
         let rowid: i64 = self
             .db
@@ -425,8 +425,8 @@ impl Store {
         Ok(verdict)
     }
 
-    /// A partial run never removes a record: a source that answered half its pages looks exactly
-    /// like a source that deleted half its records.
+    /// A partial run never removes a claim: a source that answered half its pages looks exactly
+    /// like a source that deleted half its claims.
     pub fn sweep(&self, run: i64) -> Result<u64, String> {
         let at = crate::iso_stamp(crate::now());
         let n = self
@@ -502,7 +502,7 @@ impl Store {
     ///
     /// A subscriber's run is a fetch, and stamping it with the moment of the fetch would make a
     /// year-old version look as fresh as the minute it arrived. What a reader is told about
-    /// freshness has to be the age of the records, so a subscribed run carries the time the
+    /// freshness has to be the age of the claims, so a subscribed run carries the time the
     /// publisher's run finished.
     pub fn set_finished(&self, run: i64, stamp: &str) -> Result<(), String> {
         self.db
@@ -516,8 +516,8 @@ impl Store {
 
     // -- reading ------------------------------------------------------------------------------
 
-    /// A predicate becomes SQL. What it names and this dataset cannot answer is returned rather
-    /// than dropped, because a filter applied to some records and not others is a wrong count.
+    /// A predicate becomes SQL. What it names and this source cannot answer is returned rather
+    /// than dropped, because a filter applied to some claims and not others is a wrong count.
     pub fn filter(&self, pred: &Pred, types: &BTreeMap<String, PropertyType>) -> Filter {
         let mut params = Vec::new();
         let mut unanswered = Vec::new();
@@ -607,9 +607,9 @@ impl Store {
                         format!("lower(f.s) {} {p}", op.sql())
                     }
                 };
-                // `in`, not a correlated `exists`. An `exists` makes SQLite walk the record table
+                // `in`, not a correlated `exists`. An `exists` makes SQLite walk the claim table
                 // and probe the field index once per row, and a count walks all of it; this way
-                // the index on (name, value) picks the few matching records first and the record
+                // the index on (name, value) picks the few matching claims first and the claim
                 // table is reached by its own key.
                 format!(
                     "r.record_id in (select f.record_id from field f \
@@ -657,8 +657,8 @@ impl Store {
         };
         params.extend(filter_params);
         if let Some(edge) = seen_before {
-            // Free where this deployment has held it a month, or where the publisher said
-            // it a month ago. A deployment that started yesterday learned everything
+            // Free where this workspace has held it a month, or where the publisher said
+            // it a month ago. A workspace that started yesterday learned everything
             // yesterday, and the second half is what keeps its free page from being empty
             // while still holding back what is new in the world.
             params.push(S::Text(edge.to_string()));
@@ -727,8 +727,8 @@ impl Store {
         Ok((total, out))
     }
 
-    /// Whether one record satisfies a filter, by the same SQL a search runs, so that a watch and
-    /// a search cannot disagree about what a record says.
+    /// Whether one claim satisfies a filter, by the same SQL a search runs, so that a watch and
+    /// a search cannot disagree about what a claim says.
     pub fn satisfies(&self, record_id: &str, filter: &Filter) -> bool {
         let mut params = filter.params.clone();
         params.push(S::Text(record_id.to_string()));
@@ -774,7 +774,7 @@ impl Store {
             .map_err(|e| e.to_string())
     }
 
-    /// Per field: how many records carry it, every value with its count for a code or a bool, the
+    /// Per field: how many claims carry it, every value with its count for a code or a bool, the
     /// range for a number or a date. A faceted browse before a query has been asked.
     pub fn fields(&self, decl: &SourceDecl) -> Vec<FieldSummary> {
         let mut out = Vec::new();
@@ -899,7 +899,7 @@ impl Store {
     }
 
     /// What moved and what went, as ids and titles. The field-level difference is the
-    /// dataset's to work out, because only it knows which revisions to hold against each
+    /// source's to work out, because only it knows which revisions to hold against each
     /// other.
     pub fn changes(&self, since: i64, limit: usize) -> (Vec<Moved>, Vec<Gone>) {
         let mut changed = Vec::new();
@@ -1051,7 +1051,7 @@ impl Store {
     /// What the run saw, so the next one can be held against it.
     /// The store as the last complete run left it, and the fields it carried. A run is held
     /// against the store rather than against another run: one that reads a slice adds
-    /// twenty records to twenty thousand, and comparing the two counts compares nothing.
+    /// twenty claims to twenty thousand, and comparing the two counts compares nothing.
     pub fn last_shape(&self, before: i64) -> Option<(u64, Vec<String>)> {
         self.db
             .query_row(
@@ -1074,7 +1074,7 @@ impl Store {
             .ok()
     }
 
-    /// A run producing forty per cent fewer records than the last complete one, or missing a field
+    /// A run producing forty per cent fewer claims than the last complete one, or missing a field
     /// that every previous run carried, does not replace the store. It alerts.
     ///
     /// A schema that changed, a crawler that half broke, a feed that answered short: each of those
@@ -1124,7 +1124,7 @@ impl Store {
             .map_err(|e| e.to_string())
     }
 
-    /// What a record looked like at a date, from the revisions it kept.
+    /// What a claim looked like at a date, from the revisions it kept.
     pub fn as_of(&self, record_id: &str, at: &str) -> Option<(String, BTreeMap<String, Value>)> {
         self.db
             .query_row(
@@ -1171,14 +1171,14 @@ impl Store {
     }
 }
 
-/// A record that was added or changed: its id, its title, and which of the two.
+/// A claim that was added or changed: its id, its title, and which of the two.
 pub type Moved = (String, String, String);
-/// A record that was removed: its id and the title it had.
+/// A claim that was removed: its id and the title it had.
 pub type Gone = (String, String);
 
 impl Store {
-    /// Every record, in one pass, handed over one at a time. A published artifact is written
-    /// while the store is read, so a dataset larger than memory publishes the same way a small
+    /// Every claim, in one pass, handed over one at a time. A published artifact is written
+    /// while the store is read, so a source larger than memory publishes the same way a small
     /// one does.
     pub fn for_each_record(
         &self,
@@ -1230,9 +1230,9 @@ impl Store {
         Ok(n)
     }
 
-    /// Per identifier scheme, how many distinct values this store holds, folded. A scope joins
+    /// Per identifier scheme, how many distinct values this store holds, folded. A tracker joins
     /// on a scheme and on the folded value, so this is the count a curator reads to see whether
-    /// it can. `schemes` counts records instead, which is the number a reader wants on a page.
+    /// it can. `schemes` counts claims instead, which is the number a reader wants on a page.
     pub fn distinct_identifiers(&self) -> BTreeMap<String, u64> {
         let mut out = BTreeMap::new();
         let Ok(mut stmt) = self
@@ -1265,7 +1265,7 @@ impl Store {
 }
 
 impl Store {
-    /// One record, gone, named rather than swept. A delta says which identifiers left, so there
+    /// One claim, gone, named rather than swept. A delta says which identifiers left, so there
     /// is nothing to infer from a run that did not mention them.
     pub fn remove(&self, record_id: &str, run: i64, at: &str) -> Result<bool, String> {
         let title: Option<String> = self
@@ -1304,7 +1304,7 @@ impl Store {
 }
 
 impl Store {
-    /// Every field name any record carries. The shape check holds a run's fields against the
+    /// Every field name any claim carries. The shape check holds a run's fields against the
     /// last one's, so a run that read nothing has to say what is there rather than nothing.
     pub fn field_names(&self) -> std::collections::BTreeSet<String> {
         let Ok(mut stmt) = self.db.prepare("select distinct name from field") else {

@@ -1,4 +1,4 @@
-//! Rows to records, per the declaration. `each` first and `where` second.
+//! Rows to claims, per the declaration. `each` first and `where` second.
 
 use std::collections::BTreeMap;
 
@@ -143,7 +143,7 @@ fn typed(kind: PropertyType, vocabulary: Option<&str>, raw: &str) -> Option<Valu
     })
 }
 
-/// Where one fetched thing holds many records, the list it holds. Absent, the thing is the record.
+/// Where one fetched thing holds many claims, the list it holds. Absent, the thing is the claim.
 ///
 /// Each sub-row gets an address of its own. Without one, 2,698 Metasploit modules would share the
 /// address of the single file they came out of.
@@ -204,8 +204,8 @@ pub fn expand<'a>(
                     value,
                     meta,
                     file: None,
-                    // Not the container's text: one file holding 7,180 records would be copied
-                    // 7,180 times. A record's text is what `records.text` builds from it.
+                    // Not the container's text: one file holding 7,180 claims would be copied
+                    // 7,180 times. A claim's text is what `claims.text` builds from it.
                     text: String::new(),
                     root: row.root,
                 },
@@ -352,7 +352,7 @@ pub fn build(
         }
     }
 
-    // An identifier names the record only where the declaration says there is one of them.
+    // An identifier names the claim only where the declaration says there is one of them.
     let one_identifier = decl
         .records
         .id

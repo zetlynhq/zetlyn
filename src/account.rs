@@ -87,7 +87,7 @@ pub struct Account {
     pub email: String,
     pub state: String,
     pub paid_until: Option<String>,
-    /// Which scopes this subscription covers. Empty means all of them.
+    /// Which trackers this subscription covers. Empty means all of them.
     pub scopes: Vec<String>,
     pub curator: bool,
 }
@@ -365,14 +365,14 @@ impl Accounts {
     }
 }
 
-/// What a deployment says about itself. Absent, everything still runs and the sign-in link is
-/// printed where the operator can see it, which is what a deployment on a laptop wants.
+/// What a workspace says about itself. Absent, everything still runs and the sign-in link is
+/// printed where the operator can see it, which is what a workspace on a laptop wants.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Site {
     #[serde(default)]
     pub title: String,
-    /// The address this deployment answers on, for the link in a sign-in mail.
+    /// The address this workspace answers on, for the link in a sign-in mail.
     #[serde(default)]
     pub url: String,
     #[serde(default)]
@@ -480,7 +480,7 @@ pub fn viewer_of(accounts: &Accounts, cookie: Option<&str>, authorization: Optio
 }
 
 impl Accounts {
-    /// Who may add a dataset or compose a scope. Granted from the terminal, because a catalogue
+    /// Who may add a source or compose a tracker. Granted from the terminal, because a catalogue
     /// anybody can write to is a catalogue nobody can promise anything about.
     pub fn set_curator(&self, email: &str, yes: bool) -> Result<Account, String> {
         let account = self.ensure(email)?;

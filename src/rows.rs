@@ -76,7 +76,7 @@ pub fn walk_dir(
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
-        // A checkout carries its own history, and none of it is the dataset's content.
+        // A checkout carries its own history, and none of it is the source's content.
         if name.starts_with('.') {
             continue;
         }
@@ -248,7 +248,7 @@ pub fn each_row(
             walk_dir(&dir, &dir, &exc, &mut files, 2_000_000);
             for f in files {
                 let rel = f.strip_prefix(&dir).unwrap_or(&f).display().to_string();
-                // A dataset pointed at its own directory would otherwise read its own store.
+                // A source pointed at its own directory would otherwise read its own store.
                 if matches!(rel.as_str(), "source.yaml" | "updates.jsonl")
                     || rel.starts_with("claims.db")
                     || rel.starts_with("blobs/")
@@ -291,7 +291,7 @@ pub fn each_row(
             delimiter,
             skip,
         } => {
-            // `local or at a URL`. A URL is fetched once into the dataset directory, so the
+            // `local or at a URL`. A URL is fetched once into the source directory, so the
             // extraction reads a file either way.
             let file = if path.starts_with("http://") || path.starts_with("https://") {
                 let f = crate::fetch::Fetcher::new(crate::sourcedecl::AGENT, &BTreeMap::new(), 0)?;
@@ -433,7 +433,7 @@ pub fn each_row(
             top,
         } => {
             let f = crate::fetch::Fetcher::new(user_agent, headers, *pause_ms)?;
-            // Subjects from another dataset, one detail call each. The list loop never
+            // Subjects from another source, one detail call each. The list loop never
             // runs: there is no list, only names somebody else already holds.
             if let Some(each) = for_each {
                 let mut declined = 0u64;
@@ -502,7 +502,7 @@ pub fn each_row(
             crate::fetch::feed_rows(&f, urls, text_is, root, &mut on_row)?;
             Ok(None)
         }
-        // Nothing to read here. A subscribed dataset holds records somebody else produced, and
+        // Nothing to read here. A subscribed source holds claims somebody else produced, and
         // asking its hub for newer ones is a different command.
         Fetch::Hub { reference, .. } => Err(format!(
             "{reference} is subscribed. `zetlyn source pull` asks its hub for a newer version"
@@ -510,7 +510,7 @@ pub fn each_row(
     }
 }
 
-/// Every identifier of a scheme another dataset holds, through the same `search` a reader uses.
+/// Every identifier of a scheme another source holds, through the same `search` a reader uses.
 pub fn subjects_of(root: &Path, dataset: &str, scheme: &str) -> Result<Vec<String>, String> {
     let dir = crate::tracker::registry(&root.join("sources"))
         .get(dataset)

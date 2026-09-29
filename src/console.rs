@@ -1,4 +1,4 @@
-//! A deployment answering for itself.
+//! A workspace answering for itself.
 //!
 //! This is what a platform drives. It is not a second way of doing what the runtime does: every
 //! call here is the runtime answering the same question a person asks it at a terminal, so a
@@ -208,7 +208,7 @@ fn datasets(root: &Path) -> PathBuf {
     root.join("sources")
 }
 
-/// A name in a call is one segment, and a call cannot reach outside the deployment it is against.
+/// A name in a call is one segment, and a call cannot reach outside the workspace it is against.
 fn at(root: &Path, kind: &str, named: &str) -> Result<PathBuf, String> {
     if named.is_empty() || named.contains('/') || named.contains("..") {
         return Err(format!("{named}: a name, not a path"));
@@ -314,8 +314,8 @@ fn run_now(root: &Path, named: &str) -> (u16, J) {
 
 /// The dangerous one, and the reason a grant separates it from `update`.
 ///
-/// What arrives is held against three things before it is kept: it parses, the dataset opens
-/// under it, and the dataset still answers for itself. The declaration that was there is written
+/// What arrives is held against three things before it is kept: it parses, the source opens
+/// under it, and the source still answers for itself. The declaration that was there is written
 /// beside it first, so an apply that passes all three and is still wrong is one file move away
 /// from undone.
 fn apply(root: &Path, named: &str, body: &[u8]) -> (u16, J) {
@@ -377,7 +377,7 @@ fn apply(root: &Path, named: &str, body: &[u8]) -> (u16, J) {
 // Driving one.
 
 /// One signed call to a console somewhere else. This is the whole of what a platform does to a
-/// deployment, so it lives beside the console it talks to rather than in whatever calls it.
+/// workspace, so it lives beside the console it talks to rather than in whatever calls it.
 pub struct Driver {
     pub at: String,
     /// The grant, as the operator signed it, carried on every call.

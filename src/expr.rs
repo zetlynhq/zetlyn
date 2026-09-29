@@ -74,7 +74,7 @@ fn walk(value: &J, path: &str) -> Vec<J> {
 /// What a file says, through the same extractor a folder run uses. A `.db` is not text because it
 /// decodes as one: `file:self` over a SQLite store would otherwise read eight megabytes of it.
 fn read_text(path: &Path) -> Option<String> {
-    crate::source::extract(path)
+    crate::rows::extract(path)
 }
 
 /// Substitutes `{…}` from the other prefixes.

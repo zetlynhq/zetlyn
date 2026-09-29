@@ -107,9 +107,9 @@ fn source(dir: &Path) -> Result<String, String> {
             rewrite_view(v);
         }
     }
-    let decl: crate::decl::Declaration = serde_json::from_value(j)
+    let decl: crate::sourcedecl::SourceDecl = serde_json::from_value(j)
         .map_err(|e| format!("{}: does not make a source: {e}", path.display()))?;
-    crate::yaml::write(&dir.join(crate::decl::FILE), &decl)?;
+    crate::yaml::write(&dir.join(crate::sourcedecl::FILE), &decl)?;
     std::fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let _ = std::fs::remove_file(dir.join("dataset.toml.before"));
     for tail in ["", "-wal", "-shm"] {
@@ -119,7 +119,7 @@ fn source(dir: &Path) -> Result<String, String> {
             std::fs::rename(&old, &new).map_err(|e| format!("{}: {e}", old.display()))?;
         }
     }
-    Ok(said(dir.join(crate::decl::FILE), comments))
+    Ok(said(dir.join(crate::sourcedecl::FILE), comments))
 }
 
 fn tracker(dir: &Path) -> Result<String, String> {
@@ -156,11 +156,11 @@ fn tracker(dir: &Path) -> Result<String, String> {
             }
         }
     }
-    let decl: crate::scopedecl::ScopeDecl = serde_json::from_value(j)
+    let decl: crate::trackerdecl::TrackerDecl = serde_json::from_value(j)
         .map_err(|e| format!("{}: does not make a tracker: {e}", path.display()))?;
-    crate::yaml::write(&dir.join(crate::scopedecl::FILE), &decl)?;
+    crate::yaml::write(&dir.join(crate::trackerdecl::FILE), &decl)?;
     std::fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(said(dir.join(crate::scopedecl::FILE), comments))
+    Ok(said(dir.join(crate::trackerdecl::FILE), comments))
 }
 
 fn watch(path: &Path) -> Result<String, String> {

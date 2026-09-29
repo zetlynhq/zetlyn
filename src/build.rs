@@ -4,9 +4,9 @@ use std::collections::BTreeMap;
 
 use serde_json::Value as J;
 
-use crate::decl::{Declaration, FieldType, Spec};
+use crate::sourcedecl::{SourceDecl, PropertyType, Spec};
 use crate::expr::{self, Row};
-use crate::record::{Id, Origin, Record, Value};
+use crate::claim::{Id, Origin, Claim, Value};
 
 #[derive(Default)]
 pub struct Notes {
@@ -19,7 +19,7 @@ pub struct Notes {
 }
 
 impl Notes {
-    fn unparsed(&mut self, field: &str, raw: &str, want: FieldType) {
+    fn unparsed(&mut self, field: &str, raw: &str, want: PropertyType) {
         self.unparsed += 1;
         if self.examples.len() < 3 {
             self.examples
@@ -119,17 +119,17 @@ fn as_bool(raw: &str) -> Option<bool> {
     }
 }
 
-fn typed(kind: FieldType, vocabulary: Option<&str>, raw: &str) -> Option<Value> {
+fn typed(kind: PropertyType, vocabulary: Option<&str>, raw: &str) -> Option<Value> {
     Some(match kind {
-        FieldType::Text => Value::Text(raw.to_string()),
-        FieldType::Code => Value::Code {
+        PropertyType::Text => Value::Text(raw.to_string()),
+        PropertyType::Code => Value::Code {
             code: raw.to_string(),
             vocabulary: vocabulary.map(str::to_string),
         },
-        FieldType::Number => Value::Number(raw.trim().replace(',', ".").parse::<f64>().ok()?),
-        FieldType::Bool => Value::Bool(as_bool(raw)?),
-        FieldType::Date => Value::Date(as_date(raw)?),
-        FieldType::Interval => {
+        PropertyType::Number => Value::Number(raw.trim().replace(',', ".").parse::<f64>().ok()?),
+        PropertyType::Bool => Value::Bool(as_bool(raw)?),
+        PropertyType::Date => Value::Date(as_date(raw)?),
+        PropertyType::Interval => {
             let (a, b) = raw.split_once("..")?;
             Value::Interval {
                 from: as_date(a),
@@ -148,7 +148,7 @@ fn typed(kind: FieldType, vocabulary: Option<&str>, raw: &str) -> Option<Value> 
 /// Each sub-row gets an address of its own. Without one, 2,698 Metasploit modules would share the
 /// address of the single file they came out of.
 pub fn expand<'a>(
-    decl: &Declaration,
+    decl: &SourceDecl,
     row: Row<'a>,
     origin: Origin,
     already: bool,
@@ -251,11 +251,11 @@ fn each_csv<'a>(row: &Row<'a>, rel: &str, origin: &Origin) -> Vec<(Row<'a>, Orig
 }
 
 pub fn build(
-    decl: &Declaration,
+    decl: &SourceDecl,
     mut row: Row,
     origin: Origin,
     notes: &mut Notes,
-) -> Option<Record> {
+) -> Option<Claim> {
     if let Some(filter) = &decl.records.filter {
         let pred = expr::parse_pred(filter)?;
         if !expr::holds(&pred, &row) {
@@ -368,8 +368,8 @@ pub fn build(
         notes.no_text += 1;
     }
 
-    let mut rec = Record {
-        record_id: Record::compute_id(&decl.name, &decl.kind, &names_it),
+    let mut rec = Claim {
+        record_id: Claim::compute_id(&decl.name, &decl.kind, &names_it),
         dataset: decl.name.clone(),
         kind: decl.kind.clone(),
         ids,

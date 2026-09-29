@@ -6,8 +6,8 @@
 
 use serde_json::{json, Value as J};
 
-use crate::dataset::{Member, Query};
-use crate::record::{Id, Origin, Record};
+use crate::source::{Interface, Query};
+use crate::claim::{Id, Origin, Claim};
 use crate::store::{parse_fields, parse_ids, Hit, Unanswered};
 
 pub struct Remote {
@@ -23,7 +23,7 @@ impl Remote {
     pub fn open(base: &str, key: Option<String>) -> Result<Remote, String> {
         let base = base.trim_end_matches('/').to_string();
         let agent = ureq::Agent::config_builder()
-            .user_agent(crate::decl::AGENT)
+            .user_agent(crate::sourcedecl::AGENT)
             .timeout_global(Some(std::time::Duration::from_secs(30)))
             .build()
             .new_agent();
@@ -137,7 +137,7 @@ fn hit_of(v: &J, rank: usize) -> Hit {
     }
 }
 
-impl Member for Remote {
+impl Interface for Remote {
     fn name(&self) -> &str {
         &self.name
     }
@@ -195,7 +195,7 @@ impl Member for Remote {
             .collect()
     }
 
-    fn fetch(&self, ids: &[String]) -> Vec<Record> {
+    fn fetch(&self, ids: &[String]) -> Vec<Claim> {
         let Ok(answer) = self.ask("/api/fetch", &[("id", ids.join(","))]) else {
             return Vec::new();
         };
@@ -204,7 +204,7 @@ impl Member for Remote {
             .as_array()
             .unwrap_or(&empty)
             .iter()
-            .map(|v| Record {
+            .map(|v| Claim {
                 record_id: v["claim_id"].as_str().unwrap_or("").to_string(),
                 dataset: self.name.clone(),
                 kind: v["kind"].as_str().unwrap_or("claim").to_string(),

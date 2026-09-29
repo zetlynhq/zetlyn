@@ -5,10 +5,10 @@ use std::collections::BTreeMap;
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 use serde_json::{json, Value as J};
 
-use crate::dataset::{Dataset, Query};
-use crate::decl::View;
+use crate::source::{Source, Query};
+use crate::sourcedecl::View;
 use crate::expr::{self, Lit, Op, Pred};
-use crate::record::Value;
+use crate::claim::Value;
 use crate::store::Hit;
 
 pub const STYLE: &str = r#"
@@ -238,16 +238,16 @@ fn column_of(hit: &Hit, name: &str) -> Markup {
     }
 }
 
-fn numeric(ds: &Dataset, name: &str) -> bool {
+fn numeric(ds: &Source, name: &str) -> bool {
     ds.decl
         .records
         .fields
         .get(name)
-        .map(|f| matches!(f.kind, crate::decl::FieldType::Number))
+        .map(|f| matches!(f.kind, crate::sourcedecl::PropertyType::Number))
         .unwrap_or(false)
 }
 
-fn table(ds: &Dataset, hits: &[Hit], view: Option<&View>, q: &str, sort: &str) -> Markup {
+fn table(ds: &Source, hits: &[Hit], view: Option<&View>, q: &str, sort: &str) -> Markup {
     let mut cols: Vec<String> = view.map(|v| v.columns.clone()).unwrap_or_default();
     if cols.is_empty() {
         cols = vec!["known".into()];
@@ -292,7 +292,7 @@ fn table(ds: &Dataset, hits: &[Hit], view: Option<&View>, q: &str, sort: &str) -
     }
 }
 
-fn overview(ds: &Dataset, url: &str) -> String {
+fn overview(ds: &Source, url: &str) -> String {
     let p = params(url);
     let q = p.get("q").cloned().unwrap_or_default();
     let sort = p.get("sort").cloned().unwrap_or_default();
@@ -483,7 +483,7 @@ fn overview(ds: &Dataset, url: &str) -> String {
                 h4 { "Identifiers" }
                 @let schemes = ds.store.schemes();
                 @if schemes.is_empty() {
-                    p.dim { "None. Records are addressed by where they came from." }
+                    p.dim { "None. Claims are addressed by where they came from." }
                 } @else {
                     @for (s, n) in &schemes {
                         div.facet { span { (s) } span.n { (n) } }
@@ -491,7 +491,7 @@ fn overview(ds: &Dataset, url: &str) -> String {
                 }
             }
             div.card {
-                h4 { "Fields" }
+                h4 { "Properties" }
                 @for f in &summaries {
                     div.facet {
                         span { (f.name) " " span.dim { (f.kind) } }
@@ -523,7 +523,7 @@ fn overview(ds: &Dataset, url: &str) -> String {
     shell(&d.title, body)
 }
 
-fn record_page(ds: &Dataset, id: &str, url: &str) -> Option<String> {
+fn record_page(ds: &Source, id: &str, url: &str) -> Option<String> {
     let asked = params(url).get("as_of").cloned();
     // `as_of` shows a record as it stood, from the revisions the dataset kept. It reads one
     // record: the text index is current, so it does not make a whole query answer as of a date.
@@ -556,7 +556,7 @@ fn record_page(ds: &Dataset, id: &str, url: &str) -> Option<String> {
             p { a href=(u) { (u) } }
         }
         @if !rec.fields.is_empty() {
-            h2 { "Fields" }
+            h2 { "Properties" }
             table {
                 tbody {
                     @for (name, value) in &rec.fields {
@@ -591,7 +591,7 @@ fn record_page(ds: &Dataset, id: &str, url: &str) -> Option<String> {
     Some(shell(&rec.title, body))
 }
 
-fn changes_page(ds: &Dataset, url: &str) -> String {
+fn changes_page(ds: &Source, url: &str) -> String {
     let p = params(url);
     let since: i64 = p
         .get("since")
@@ -629,7 +629,7 @@ fn changes_page(ds: &Dataset, url: &str) -> String {
 
 /// The same six calls, over HTTP. One interface and not two. The second value is true when the
 /// path names no call, because a caller who mistypes one should hear that and not a search.
-fn api(ds: &Dataset, path: &str, url: &str) -> (J, bool) {
+fn api(ds: &Source, path: &str, url: &str) -> (J, bool) {
     let p = params(url);
     let q = || {
         let (text, pred) = expr::parse_query(p.get("q").map(String::as_str).unwrap_or(""));
@@ -709,7 +709,7 @@ fn api(ds: &Dataset, path: &str, url: &str) -> (J, bool) {
     (answer, false)
 }
 
-pub fn serve(ds: Dataset, addr: &str) -> Result<(), String> {
+pub fn serve(ds: Source, addr: &str) -> Result<(), String> {
     let server = tiny_http::Server::http(addr).map_err(|e| e.to_string())?;
     println!("{} on http://{addr}", ds.decl.name);
     for request in server.incoming_requests() {

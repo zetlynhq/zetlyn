@@ -1,544 +1,676 @@
-//! Three source kinds, each handing rows to the same builder.
-//!
-//! A row is the structured value, what the container says about it, the file it came from, and
-//! whatever text was extracted. What a declaration makes of that is not the source's business.
+//! A dataset: one source, one lifecycle, one directory. And the six calls it answers.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use serde_json::{Map, Value as J};
+use serde_json::{json, Value as J};
 
-use crate::decl::{Declaration, Source};
-use crate::expr::{FileInfo, Row};
-use crate::record::Origin;
+use crate::build::{self, Notes};
+use crate::sourcedecl::{SourceDecl, PropertyType, View};
+use crate::expr::Pred;
+use crate::claim::Claim;
+use crate::store::{Filter, Hit, RunReport, Store, Unanswered};
 
-pub struct Produced<'a> {
-    /// The source already split this row, so the builder does not split it again.
-    pub expanded: bool,
-    pub row: Row<'a>,
-    pub origin: Origin,
+pub struct Source {
+    pub dir: PathBuf,
+    pub decl: SourceDecl,
+    pub store: Store,
 }
 
-/// A glob, as much of one as a declaration needs: `*` inside a segment, `**` across them.
-/// `**/target/**` matches a `target` at any depth, which is where build output actually sits.
-pub fn glob_to_regex(pattern: &str) -> regex::Regex {
-    let mut re = String::from("^");
-    let chars: Vec<char> = pattern.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        match chars[i] {
-            '*' if i + 1 < chars.len() && chars[i + 1] == '*' => {
-                i += 2;
-                if i < chars.len() && chars[i] == '/' {
-                    // `**/` is any number of leading segments, including none.
-                    re.push_str("(?:.*/)?");
-                    i += 1;
-                } else {
-                    re.push_str(".*");
-                }
-            }
-            '*' => {
-                re.push_str("[^/]*");
-                i += 1;
-            }
-            '?' => {
-                re.push_str("[^/]");
-                i += 1;
-            }
-            c => {
-                re.push_str(&regex::escape(&c.to_string()));
-                i += 1;
-            }
+#[derive(Default)]
+pub struct Query {
+    pub text: String,
+    pub pred: Option<Pred>,
+    pub view: Option<String>,
+    /// Identifier values. Exact, and the cheapest way in.
+    pub ids: Vec<String>,
+    /// Only records this deployment first held at or before this stamp. The paywall, and one
+    /// condition in one query.
+    pub seen_before: Option<String>,
+    pub sort: Option<String>,
+    pub limit: usize,
+    pub offset: usize,
+}
+
+impl Source {
+    pub fn open(dir: &Path) -> Result<Source, String> {
+        let decl = SourceDecl::load(dir)?;
+        let store = Store::open(dir)?;
+        Ok(Source {
+            dir: dir.to_path_buf(),
+            decl,
+            store,
+        })
+    }
+
+    pub fn types(&self) -> BTreeMap<String, PropertyType> {
+        self.decl
+            .records
+            .fields
+            .iter()
+            .map(|(k, v)| (k.clone(), v.kind))
+            .collect()
+    }
+
+    // -- the run ------------------------------------------------------------------------------
+
+    pub fn run(&self) -> Result<RunReport, String> {
+        // Where the source is one address and says it has not changed, there is nothing to read.
+        // An hourly cadence against a file that changes twice a week is mostly this.
+        if let Some(short) = self.nothing_changed()? {
+            return Ok(short);
         }
-    }
-    re.push('$');
-    regex::Regex::new(&re).unwrap_or_else(|_| regex::Regex::new("^$").unwrap())
-}
+        self.decl.source.prepare(&self.dir)?;
+        // A run that started from a stored mark read a slice of the source, not the whole
+        // of it. It may not remove: every record it did not touch is one it never asked
+        // for. Only a run that read from the beginning of the declared coverage sweeps.
+        let mark = self.store.meta("mark");
+        let whole = mark.is_none();
+        let run = self.store.begin_run()?;
+        let at = crate::iso_stamp(crate::now());
+        let history = self.decl.retention.history;
+        let root = self.decl.source.root(&self.dir);
+        let mut notes = Notes::default();
+        let mut seen_fields: std::collections::BTreeSet<String> = Default::default();
+        let mut written: std::collections::BTreeSet<String> = Default::default();
+        let (mut added, mut changed, mut unchanged) = (0u64, 0u64, 0u64);
+        let mut failure: Option<String> = None;
 
-/// A tree with a `target/` in it is otherwise a quarter of a million files nobody asked for.
-pub fn walk_dir(
-    dir: &Path,
-    base: &Path,
-    exclude: &[regex::Regex],
-    out: &mut Vec<PathBuf>,
-    cap: usize,
-) {
-    if out.len() >= cap {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut items: Vec<_> = entries.flatten().map(|e| e.path()).collect();
-    items.sort();
-    for p in items {
-        let name = p
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        // A checkout carries its own history, and none of it is the dataset's content.
-        if name.starts_with('.') {
-            continue;
-        }
-        let rel = p.strip_prefix(base).unwrap_or(&p).display().to_string();
-        if p.is_dir() {
-            if exclude.iter().any(|r| r.is_match(&format!("{rel}/x"))) {
-                continue;
-            }
-            walk_dir(&p, base, exclude, out, cap);
-        } else {
-            if exclude.iter().any(|r| r.is_match(&rel)) {
-                continue;
-            }
-            out.push(p);
-        }
-        if out.len() >= cap {
-            return;
-        }
-    }
-}
-
-const TEXTUAL: [&str; 24] = [
-    "md", "markdown", "txt", "text", "rst", "adoc", "org", "csv", "tsv", "json", "toml", "yaml",
-    "yml", "rs", "py", "rb", "go", "js", "ts", "c", "h", "sh", "sql", "log",
-];
-
-/// Strips tags, keeping the words between them, and drops what a reader never sees.
-pub fn html_to_text(html: &str) -> String {
-    let mut out = String::new();
-    let mut depth_skip = 0usize;
-    let bytes: Vec<char> = html.chars().collect();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == '<' {
-            let start = i;
-            while i < bytes.len() && bytes[i] != '>' {
-                i += 1;
-            }
-            let tag: String = bytes[start + 1..i.min(bytes.len())].iter().collect();
-            let lower = tag.trim_start_matches('/').to_ascii_lowercase();
-            let name: &str = lower.split_whitespace().next().unwrap_or("");
-            if matches!(name, "script" | "style") {
-                if tag.starts_with('/') {
-                    depth_skip = depth_skip.saturating_sub(1);
-                } else {
-                    depth_skip += 1;
-                }
-            }
-            if matches!(
-                name,
-                "p" | "br" | "div" | "li" | "tr" | "h1" | "h2" | "h3" | "h4"
-            ) {
-                out.push('\n');
-            }
-            i += 1;
-            continue;
-        }
-        if depth_skip == 0 {
-            out.push(bytes[i]);
-        }
-        i += 1;
-    }
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// What a file says. `None` where nothing here can read it, which the run counts and reports.
-pub fn extract(path: &Path) -> Option<String> {
-    let ext = path
-        .extension()
-        .map(|s| s.to_string_lossy().to_ascii_lowercase())
-        .unwrap_or_default();
-    let bytes = std::fs::read(path).ok()?;
-    if matches!(ext.as_str(), "html" | "htm" | "xhtml") {
-        return Some(html_to_text(&String::from_utf8_lossy(&bytes)));
-    }
-    if TEXTUAL.contains(&ext.as_str()) {
-        return Some(String::from_utf8_lossy(&bytes).into_owned());
-    }
-    // A file with no extension is text when it reads as text.
-    if ext.is_empty() && std::str::from_utf8(&bytes).is_ok() {
-        return Some(String::from_utf8_lossy(&bytes).into_owned());
-    }
-    None
-}
-
-fn media_type(path: &Path) -> String {
-    let ext = path
-        .extension()
-        .map(|s| s.to_string_lossy().to_ascii_lowercase())
-        .unwrap_or_default();
-    match ext.as_str() {
-        "md" | "markdown" => "text/markdown",
-        "txt" | "text" | "log" => "text/plain",
-        "html" | "htm" | "xhtml" => "text/html",
-        "csv" => "text/csv",
-        "tsv" => "text/tab-separated-values",
-        "json" => "application/json",
-        "toml" => "application/toml",
-        "yaml" | "yml" => "application/yaml",
-        "pdf" => "application/pdf",
-        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "" => "application/octet-stream",
-        other => return format!("application/{other}"),
-    }
-    .to_string()
-}
-
-fn modified(path: &Path) -> String {
-    let stamp = std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    crate::iso_date(stamp as i64)
-}
-
-fn file_info(path: &Path, root: &Path) -> FileInfo {
-    FileInfo {
-        rel: path
-            .strip_prefix(root)
-            .unwrap_or(path)
-            .display()
-            .to_string(),
-        modified: modified(path),
-        size: std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
-        media_type: media_type(path),
-        path: path.to_path_buf(),
-    }
-}
-
-fn cell_to_json(d: &calamine::Data) -> J {
-    use calamine::Data;
-    match d {
-        Data::Empty => J::Null,
-        Data::String(s) => J::String(s.clone()),
-        Data::Float(f) => serde_json::Number::from_f64(*f)
-            .map(J::Number)
-            .unwrap_or(J::Null),
-        Data::Int(i) => J::Number((*i).into()),
-        Data::Bool(b) => J::Bool(*b),
-        Data::DateTime(dt) => J::String(dt.to_string()),
-        Data::DateTimeIso(s) => J::String(s.clone()),
-        Data::DurationIso(s) => J::String(s.clone()),
-        Data::Error(e) => J::String(format!("{e:?}")),
-    }
-}
-
-/// Every row the source hands over, in order. The callback keeps the build streaming: a 200 MB
-/// export is read without being held.
-pub fn each_row(
-    decl: &Declaration,
-    base: &Path,
-    root: &Path,
-    mark: Option<String>,
-    mut on_row: impl FnMut(Produced) -> Result<(), String>,
-) -> Result<Option<String>, String> {
-    match &decl.source {
-        Source::Folder {
-            include, exclude, ..
-        } => {
-            let dir = decl.source.root(base);
-            let inc: Vec<_> = include.iter().map(|p| glob_to_regex(p)).collect();
-            let exc: Vec<_> = exclude.iter().map(|p| glob_to_regex(p)).collect();
-            let mut files = Vec::new();
-            walk_dir(&dir, &dir, &exc, &mut files, 2_000_000);
-            for f in files {
-                let rel = f.strip_prefix(&dir).unwrap_or(&f).display().to_string();
-                // A dataset pointed at its own directory would otherwise read its own store.
-                if matches!(rel.as_str(), "source.yaml" | "updates.jsonl")
-                    || rel.starts_with("claims.db")
-                    || rel.starts_with("blobs/")
+        self.store
+            .db
+            .execute_batch("begin")
+            .map_err(|e| e.to_string())?;
+        let outcome = crate::rows::each_row(
+            &self.decl,
+            &self.dir,
+            &root,
+            mark.clone(),
+            |produced: crate::rows::Produced| {
+                for (sub, origin) in
+                    build::expand(&self.decl, produced.row, produced.origin, produced.expanded)
                 {
-                    continue;
+                    let Some(rec) = build::build(&self.decl, sub, origin, &mut notes) else {
+                        continue;
+                    };
+                    // A record id seen twice in one run is the source repeating itself
+                    // under one key, not a change. Written through, each pair would
+                    // report a change on every run for ever.
+                    if !written.insert(rec.record_id.clone()) {
+                        notes.duplicates += 1;
+                        continue;
+                    }
+                    seen_fields.extend(rec.fields.keys().cloned());
+                    match self.store.put(&rec, run, &at, history)? {
+                        "added" => added += 1,
+                        "changed" => changed += 1,
+                        _ => unchanged += 1,
+                    }
                 }
-                if !inc.is_empty() && !inc.iter().any(|r| r.is_match(&rel)) {
-                    continue;
-                }
-                let info = file_info(&f, &dir);
-                let text = extract(&f).unwrap_or_default();
-                // A .json file is structured, and its contents are reachable by `field:`.
-                let value = if f.extension().map(|e| e == "json").unwrap_or(false) {
-                    serde_json::from_str(&text).unwrap_or(J::Null)
-                } else {
-                    J::Null
-                };
-                let mut meta = BTreeMap::new();
-                meta.insert("file".into(), info.rel.clone());
-                let origin = Origin {
-                    file: Some(info.rel.clone()),
-                    ..Origin::default()
-                };
-                on_row(Produced {
-                    expanded: false,
-                    row: Row {
-                        value,
-                        meta,
-                        file: Some(info),
-                        text,
-                        root,
-                    },
-                    origin,
-                })?;
-            }
-            Ok(None)
+                Ok(())
+            },
+        );
+        let mut high: Option<String> = None;
+        match outcome {
+            Ok(mark) => high = mark,
+            Err(e) => failure = Some(e),
         }
-        Source::Csv {
-            path,
-            delimiter,
-            skip,
-        } => {
-            // `local or at a URL`. A URL is fetched once into the dataset directory, so the
-            // extraction reads a file either way.
-            let file = if path.starts_with("http://") || path.starts_with("https://") {
-                let f = crate::fetch::Fetcher::new(crate::decl::AGENT, &BTreeMap::new(), 0)?;
-                let body = f.get(path)?;
-                let cached = base.join("source.csv");
-                std::fs::write(&cached, body).map_err(|e| format!("{}: {e}", cached.display()))?;
-                cached
-            } else {
-                base.join(path)
-            };
-            let info = file_info(&file, root);
-            let delim = delimiter.as_bytes().first().copied().unwrap_or(b',');
-            let mut rdr = csv::ReaderBuilder::new()
-                .delimiter(delim)
-                .flexible(true)
-                .from_path(&file)
-                .map_err(|e| format!("{}: {e}", file.display()))?;
-            let headers = rdr
-                .headers()
-                .map_err(|e| format!("{}: {e}", file.display()))?
-                .clone();
-            for (n, result) in rdr.records().enumerate().skip(*skip) {
-                let rec = result.map_err(|e| format!("{}: row {}: {e}", file.display(), n + 2))?;
-                let mut o = Map::new();
-                for (i, h) in headers.iter().enumerate() {
-                    o.insert(
-                        h.to_string(),
-                        J::String(rec.get(i).unwrap_or("").to_string()),
+
+        // A partial run never removes a record. A run that read the whole source and saw
+        // nothing is not a source that emptied itself, so it is partial too — but a run
+        // that read a slice and saw nothing is the normal answer to `what changed since
+        // yesterday`, and saying otherwise would make a quiet day look like a fault.
+        let complete = failure.is_none()
+            && !self.decl.source.truncating()
+            && (!whole || added + changed + unchanged > 0);
+
+        // The shape check, before anything is kept. A run whose shape moved too far does not
+        // replace the store: it is rolled back and it says why.
+        //
+        // Held against what the store will hold after this run. A run over the whole source
+        // sweeps what it did not see, so that is what it saw; the store's count here is from
+        // before the sweep and never falls, which let a source that lost half its rows empty
+        // half the store. A run over a slice keeps the rest, so there it is the store's count.
+        let read = added + changed + unchanged;
+        let after = if whole { read } else { self.store.count() };
+        let refusal = if complete {
+            self.store.shape_refusal(run, after, read, &seen_fields)
+        } else {
+            None
+        };
+        if let Some(why) = refusal {
+            self.store
+                .db
+                .execute_batch("rollback")
+                .map_err(|e| e.to_string())?;
+            self.store.begin_run_at(run, &at)?;
+            self.store
+                .refuse_run(run, &why, added + changed + unchanged)?;
+            return self
+                .store
+                .run_report(run)
+                .ok_or_else(|| "the update left no report".to_string());
+        }
+
+        let removed = if complete && whole {
+            self.store.sweep(run)?
+        } else {
+            0
+        };
+        // Only a complete run advances the mark.
+        if complete {
+            if let Some(h) = &high {
+                self.store.set_meta("mark", h)?;
+            }
+        }
+        self.store
+            .db
+            .execute_batch("commit")
+            .map_err(|e| e.to_string())?;
+
+        self.store.finish_run(
+            run,
+            complete,
+            added,
+            changed,
+            removed,
+            unchanged,
+            &seen_fields,
+            &notes,
+            failure.as_deref(),
+        )?;
+        self.store
+            .run_report(run)
+            .ok_or_else(|| "the update left no report".to_string())
+    }
+
+    // -- describe -----------------------------------------------------------------------------
+
+    /// When it will look again, from its declared cadence and when it last finished.
+    pub fn next_run(&self) -> Option<String> {
+        let every = self
+            .decl
+            .schedule
+            .every
+            .as_deref()
+            .and_then(crate::fetch::duration)?;
+        let last = self
+            .store
+            .run_report(self.store.last_run())
+            .and_then(|r| r.finished)
+            .map(|f| crate::fetch::seconds_of(&f))?;
+        Some(crate::iso_stamp(last + every))
+    }
+
+    pub fn state(&self) -> &'static str {
+        match self.store.run_report(self.store.last_run()) {
+            None => "empty",
+            Some(r) if r.refused.is_some() => "refused",
+            Some(r) if r.error.is_some() => "failing",
+            Some(r) if !r.complete => "partial",
+            Some(_) => "current",
+        }
+    }
+
+    /// What I am, what I hold, what I can be asked.
+    pub fn describe(&self) -> J {
+        let d = &self.decl;
+        let last = self.store.run_report(self.store.last_run());
+        let fields: Vec<J> = self
+            .store
+            .fields(d)
+            .into_iter()
+            .map(|f| {
+                let mut o = json!({
+                    "name": f.name, "type": f.kind, "claims": f.records,
+                });
+                if let Some(v) = f.vocabulary {
+                    o["vocabulary"] = json!(v);
+                }
+                if !f.values.is_empty() {
+                    o["values"] = J::Array(
+                        f.values
+                            .iter()
+                            .map(|(v, c)| json!({ "value": v, "claims": c }))
+                            .collect(),
                     );
                 }
-                let text = rec.iter().collect::<Vec<_>>().join(" ");
-                let mut meta = BTreeMap::new();
-                meta.insert("file".into(), info.rel.clone());
-                meta.insert("row".into(), (n + 2).to_string());
-                let origin = Origin {
-                    file: Some(info.rel.clone()),
-                    row: Some(n as u64 + 2),
-                    ..Origin::default()
-                };
-                on_row(Produced {
-                    expanded: false,
-                    row: Row {
-                        value: J::Object(o),
-                        meta,
-                        file: Some(file_info(&file, root)),
-                        text,
-                        root,
-                    },
-                    origin,
-                })?;
-            }
-            Ok(None)
+                if f.min.is_some() || f.max.is_some() {
+                    o["min"] = json!(f.min);
+                    o["max"] = json!(f.max);
+                }
+                o
+            })
+            .collect();
+        json!({
+            "source": d.name,
+            "kind": d.kind,
+            "title": d.title,
+            "about": d.about,
+            "claims": self.store.count(),
+            "state": self.state(),
+            "last_update": last.as_ref().map(|r| json!({
+                "id": r.id, "at": r.started, "finished": r.finished, "complete": r.complete,
+                "added": r.added, "changed": r.changed, "removed": r.removed,
+                "unchanged": r.unchanged,
+            })),
+            "next_update": self.next_run(),
+            "cadence": d.schedule.every,
+
+            "history": d.retention.history,
+            "schemes": J::Array(self.store.schemes().iter()
+                .map(|(s, n)| json!({ "scheme": s, "claims": n })).collect()),
+            "properties": J::Array(fields),
+            "vocabulary": json!(d.vocabulary),
+            // The whole shape, because a scope that adopts one reaches it only through here.
+            "views": J::Array(d.view.iter().map(|v| json!({
+                "name": v.name,
+                "title": if v.title.is_empty() { v.name.clone() } else { v.title.clone() },
+                "default": v.default,
+                "group": v.group,
+                "where": v.filter,
+                "columns": v.columns,
+                "facets": v.facets,
+                "sort": v.sort,
+            })).collect()),
+            "search": json!({
+                "text": d.search.text,
+                "compare": d.search.compare,
+                "suggest": d.search.suggest,
+                "examples": d.search.examples,
+            }),
+            "can": self.can(),
+        })
+    }
+
+    pub fn can(&self) -> Vec<&'static str> {
+        let mut can = vec!["text", "changes"];
+        if !self.decl.records.fields.is_empty() {
+            can.push("property");
+            can.push("facet");
         }
-        Source::Xlsx {
-            path,
-            sheets,
-            header_row,
-        } => {
-            use calamine::Reader;
-            let file = base.join(path);
-            let info = file_info(&file, root);
-            let mut wb = calamine::open_workbook_auto(&file)
-                .map_err(|e| format!("{}: {e}", file.display()))?;
-            let names: Vec<String> = if sheets.is_empty() {
-                wb.sheet_names().to_vec()
-            } else {
-                sheets.clone()
-            };
-            for sheet in names {
-                let range = wb
-                    .worksheet_range(&sheet)
-                    .map_err(|e| format!("{}: sheet {sheet}: {e}", file.display()))?;
-                let rows: Vec<_> = range.rows().collect();
-                let head_at = header_row.saturating_sub(1);
-                let Some(head) = rows.get(head_at) else {
-                    continue;
-                };
-                let headers: Vec<String> = head
-                    .iter()
-                    .enumerate()
-                    .map(|(i, c)| {
-                        let n = crate::expr::as_string(&cell_to_json(c));
-                        if n.trim().is_empty() {
-                            format!("column{}", i + 1)
-                        } else {
-                            n
-                        }
-                    })
-                    .collect();
-                for (n, row) in rows.iter().enumerate().skip(head_at + 1) {
-                    if row.iter().all(|c| matches!(c, calamine::Data::Empty)) {
-                        continue;
+        if self.decl.records.id.is_some() {
+            can.push("ids");
+        }
+        if self.decl.retention.history {
+            can.push("as_of");
+        }
+        can
+    }
+
+    // -- search -------------------------------------------------------------------------------
+
+    fn view_of(&self, q: &Query) -> Option<&View> {
+        match &q.view {
+            Some(name) => self.decl.view(name),
+            None => None,
+        }
+    }
+
+    fn combined(&self, q: &Query) -> (Option<Pred>, Option<&View>) {
+        let view = self.view_of(q);
+        let view_pred = view
+            .and_then(|v| v.filter.as_deref())
+            .and_then(crate::expr::parse_pred);
+        let pred = match (q.pred.clone(), view_pred) {
+            (Some(a), Some(b)) => Some(Pred::And(Box::new(a), Box::new(b))),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+        (pred, view)
+    }
+
+    pub fn search(&self, q: &Query) -> Result<(u64, Vec<Hit>, Unanswered), String> {
+        let types = self.types();
+        let (pred, view) = self.combined(q);
+        let filter: Option<Filter> = pred.as_ref().map(|p| self.store.filter(p, &types));
+        let sort = q.sort.clone().or_else(|| view.and_then(|v| v.sort.clone()));
+        let limit = if q.limit == 0 { 50 } else { q.limit };
+
+        // An identifier is the cheapest way in, so it is tried before the index. A scope asks by
+        // identifier to complete an entry its other members selected.
+        let named: Vec<String> = if !q.ids.is_empty() {
+            q.ids.clone()
+        } else if q.pred.is_none() && !q.text.trim().is_empty() {
+            vec![q.text.trim().to_string()]
+        } else {
+            Vec::new()
+        };
+        if !named.is_empty() {
+            // A scope completing a page hands over every key on it, which is thousands. Keeping
+            // the order but checking membership against a set: the same list, without asking
+            // whether each new record is already in it by reading the whole list again.
+            let mut ids = Vec::new();
+            let mut held = BTreeSet::new();
+            for value in &named {
+                for record_id in self.store.by_identifier(value) {
+                    if held.insert(record_id.clone()) {
+                        ids.push(record_id);
                     }
-                    let mut o = Map::new();
-                    for (i, h) in headers.iter().enumerate() {
-                        o.insert(h.clone(), row.get(i).map(cell_to_json).unwrap_or(J::Null));
-                    }
-                    let text = row
-                        .iter()
-                        .map(|c| crate::expr::as_string(&cell_to_json(c)))
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    let mut meta = BTreeMap::new();
-                    meta.insert("sheet".into(), sheet.clone());
-                    meta.insert("file".into(), info.rel.clone());
-                    meta.insert("row".into(), (n + 1).to_string());
-                    let origin = Origin {
-                        file: Some(format!("{}#{sheet}", info.rel)),
-                        row: Some(n as u64 + 1),
-                        ..Origin::default()
-                    };
-                    on_row(Produced {
-                        expanded: false,
-                        row: Row {
-                            value: J::Object(o),
-                            meta,
-                            file: Some(file_info(&file, root)),
-                            text,
-                            root,
-                        },
-                        origin,
-                    })?;
                 }
             }
-            Ok(None)
+            if !ids.is_empty() {
+                let mut hits = Vec::new();
+                for (i, id) in ids.iter().take(limit.max(1)).enumerate() {
+                    if let Some(r) = self.store.get(id) {
+                        hits.push(Hit {
+                            record_id: r.record_id,
+                            rank: i + 1,
+                            title: r.title,
+                            url: r.url,
+                            kind: r.kind,
+                            known: r.known,
+                            why_id: r.ids.first().cloned(),
+                            ids: r.ids,
+                            fields: r.fields,
+                            why_text: Vec::new(),
+                            why_field: Vec::new(),
+                            snippet: String::new(),
+                        });
+                    }
+                }
+                let n = hits.len() as u64;
+                return Ok((n, hits, Unanswered::default()));
+            }
+            if !q.ids.is_empty() {
+                return Ok((0, Vec::new(), Unanswered::default()));
+            }
         }
-        Source::Http {
-            list,
-            for_each,
-            detail,
-            page,
-            window,
-            headers,
-            user_agent,
-            pause_ms,
-            since,
-            since_default,
+
+        let (total, mut hits) = self.store.search(
+            &q.text,
+            filter.as_ref(),
+            sort.as_deref(),
+            &types,
+            q.seen_before.as_deref(),
             limit,
-            top,
-        } => {
-            let f = crate::fetch::Fetcher::new(user_agent, headers, *pause_ms)?;
-            // Subjects from another dataset, one detail call each. The list loop never
-            // runs: there is no list, only names somebody else already holds.
-            if let Some(each) = for_each {
-                let mut declined = 0u64;
-                let template = detail
-                    .as_deref()
-                    .ok_or("a source that follows another needs a detail call")?;
-                let root = base
-                    .parent()
-                    .and_then(|p| p.parent())
-                    .ok_or("this source is not inside a workspace")?;
-                let values = crate::source::subjects_of(root, &each.dataset, &each.scheme)?;
-                for value in values {
-                    let url = template.replace("{value}", &value);
-                    let Some(body) = f.get_subject(&url)? else {
-                        declined += 1;
-                        continue;
-                    };
-                    let mut item: J =
-                        serde_json::from_str(&body).map_err(|e| format!("{url}: not JSON: {e}"))?;
-                    if let Some(o) = item.as_object_mut() {
-                        o.insert("_asked".into(), J::String(value.clone()));
-                    }
-                    let mut meta = BTreeMap::new();
-                    meta.insert("url".into(), url.clone());
-                    meta.insert("asked".into(), value);
-                    on_row(Produced {
-                        expanded: true,
-                        row: Row {
-                            value: item,
-                            meta,
-                            file: None,
-                            text: String::new(),
-                            root,
-                        },
-                        origin: Origin {
-                            url: Some(url),
-                            ..Origin::default()
-                        },
-                    })?;
-                }
-                if declined > 0 {
-                    println!("  {declined} things the source would not answer for");
-                }
-                return Ok(None);
+            q.offset,
+        )?;
+        if let Some(p) = &pred {
+            let mut named = Vec::new();
+            crate::expr::fields_named(p, &mut named);
+            for h in &mut hits {
+                h.why_field = named
+                    .iter()
+                    .filter(|n| h.fields.contains_key(*n))
+                    .cloned()
+                    .collect();
             }
-            let spec = crate::fetch::Http {
-                list: &crate::fetch::resolve(list)?.unwrap_or_default(),
-                detail: detail.as_deref(),
-                page: page.as_ref(),
-                window: window.as_deref(),
-                since: since.as_deref(),
-                since_default,
-                limit: if *limit > 0 { *limit } else { *top },
-                each: decl.records.each.as_deref(),
+        }
+        Ok((
+            total,
+            hits,
+            filter.map(|f| f.unanswered).unwrap_or_default(),
+        ))
+    }
+
+    pub fn facet(&self, q: &Query, field: &str, limit: usize) -> Vec<(String, u64)> {
+        let types = self.types();
+        let (pred, _) = self.combined(q);
+        let filter = pred.as_ref().map(|p| self.store.filter(p, &types));
+        self.store
+            .facet(field, filter.as_ref(), limit)
+            .unwrap_or_default()
+    }
+
+    pub fn fetch(&self, ids: &[String]) -> Vec<Claim> {
+        ids.iter().filter_map(|i| self.store.get(i)).collect()
+    }
+
+    /// What was added, changed and removed since a mark, and for a change, which fields moved.
+    ///
+    /// The previous value comes from the revisions the dataset kept. Without `retention.history`
+    /// a change says that a record changed and cannot say what in it did.
+    pub fn changes(&self, since: i64, limit: usize) -> J {
+        let history = self.decl.retention.history;
+        let mut out = Vec::new();
+        for (record_id, run, is_new) in self.store.changed_since(since, limit) {
+            let Some(now) = self.store.get(&record_id) else {
+                continue;
             };
-            let high = crate::fetch::http_rows(&f, &spec, mark, root, &mut on_row)?;
-            Ok(high)
+            let before = if history && !is_new {
+                self.store.previous(&record_id, run)
+            } else {
+                None
+            };
+            let mut moved = Vec::new();
+            if let Some((old_title, old_fields)) = &before {
+                if old_title != &now.title {
+                    moved.push(json!({ "property": "title", "was": old_title, "is": now.title }));
+                }
+                let mut names: std::collections::BTreeSet<&String> = old_fields.keys().collect();
+                names.extend(now.fields.keys());
+                for name in names {
+                    let was = old_fields.get(name).map(|v| v.display());
+                    let is = now.fields.get(name).map(|v| v.display());
+                    if was != is {
+                        moved.push(json!({ "property": name, "was": was, "is": is }));
+                    }
+                }
+            }
+            out.push(json!({
+                "claim_id": record_id,
+                "title": now.title,
+                "url": now.url,
+                "kind": now.kind,
+                "known": now.known,
+                "ids": now.ids_json(),
+                "how": if is_new { "added" } else { "changed" },
+                "update": run,
+                "properties": if moved.is_empty() { J::Null } else { J::Array(moved) },
+            }));
         }
-        Source::Feed {
-            urls,
-            text_is,
-            user_agent,
-            pause_ms,
-        } => {
-            let f = crate::fetch::Fetcher::new(user_agent, &BTreeMap::new(), *pause_ms)?;
-            crate::fetch::feed_rows(&f, urls, text_is, root, &mut on_row)?;
-            Ok(None)
-        }
-        // Nothing to read here. A subscribed dataset holds records somebody else produced, and
-        // asking its hub for newer ones is a different command.
-        Source::Hub { reference, .. } => Err(format!(
-            "{reference} is subscribed. `zetlyn source pull` asks its hub for a newer version"
-        )),
+        let (_, gone) = self.store.changes(since, limit);
+        json!({
+            "source": self.decl.name,
+            "since": since,
+            "mark": self.mark(),
+            "history": history,
+            "changed": J::Array(out),
+            "removed": J::Array(gone.iter().map(|(id, title)| json!({
+                "claim_id": id, "title": title, "how": "removed",
+            })).collect()),
+        })
+    }
+    /// Whether a record this dataset holds satisfies a query, read the way a search reads it.
+    pub fn holds(&self, record_id: &str, pred: &Pred) -> bool {
+        let filter = self.store.filter(pred, &self.types());
+        self.store.satisfies(record_id, &filter)
+    }
+
+    /// The current mark, to be handed back to `changes` later. A run number, because that is what
+    /// this dataset counts in.
+    pub fn mark(&self) -> i64 {
+        self.store.last_run()
     }
 }
 
-/// Every identifier of a scheme another dataset holds, through the same `search` a reader uses.
-pub fn subjects_of(root: &Path, dataset: &str, scheme: &str) -> Result<Vec<String>, String> {
-    let dir = crate::scope::registry(&root.join("sources"))
-        .get(dataset)
-        .cloned()
-        .ok_or_else(|| format!("{dataset} is not installed here"))?;
-    let ds = crate::dataset::Dataset::open(&dir)?;
-    let mut seen: BTreeMap<String, String> = BTreeMap::new();
-    let mut offset = 0usize;
-    loop {
-        let q = crate::dataset::Query {
-            limit: 5000,
-            offset,
-            ..Default::default()
+/// The six calls. In process here; the same shapes over HTTP for a dataset somewhere else.
+///
+/// A scope reaches its members through this and nothing else. A scope that read a member's store
+/// would have to be taken apart to reach the first dataset that is not ours.
+// The interface is six calls. A scope uses four of them today and reaches for `changes` and
+// `mark` at M3, so the two are defined and not yet called.
+#[allow(dead_code)]
+pub trait Interface {
+    fn name(&self) -> &str;
+    fn describe(&self) -> J;
+    fn search(&self, q: &Query) -> Result<(u64, Vec<Hit>, Unanswered), String>;
+    fn facet(&self, q: &Query, field: &str, limit: usize) -> Vec<(String, u64)>;
+    fn fetch(&self, ids: &[String]) -> Vec<Claim>;
+    fn changes(&self, since: i64, limit: usize) -> J;
+    fn mark(&self) -> i64;
+}
+
+impl Interface for Source {
+    fn name(&self) -> &str {
+        &self.decl.name
+    }
+    fn describe(&self) -> J {
+        Source::describe(self)
+    }
+    fn search(&self, q: &Query) -> Result<(u64, Vec<Hit>, Unanswered), String> {
+        Source::search(self, q)
+    }
+    fn facet(&self, q: &Query, field: &str, limit: usize) -> Vec<(String, u64)> {
+        Source::facet(self, q, field, limit)
+    }
+    fn fetch(&self, ids: &[String]) -> Vec<Claim> {
+        Source::fetch(self, ids)
+    }
+    fn changes(&self, since: i64, limit: usize) -> J {
+        Source::changes(self, since, limit)
+    }
+    fn mark(&self) -> i64 {
+        Source::mark(self)
+    }
+}
+
+/// What a declaration claims about itself, held against what the store actually holds.
+///
+/// Every one of these is a sentence a reader is shown. An example that returns nothing is a
+/// suggestion to type something that does not work; a column naming a field no record carries is
+/// an empty cell in every row. None of it is caught by the run, because none of it is wrong until
+/// somebody reads it.
+impl Source {
+    pub fn check(&self) -> Vec<String> {
+        let mut wrong = Vec::new();
+        let d = &self.decl;
+        let fields: Vec<String> = d.records.fields.keys().cloned().collect();
+        let known = |name: &str| {
+            matches!(name, "known" | "title" | "kind" | "url" | "id" | "text")
+                || fields.iter().any(|f| f == name)
         };
-        let (_, hits, _) = crate::dataset::Member::search(&ds, &q)?;
-        if hits.is_empty() {
-            break;
+
+        if self.store.count() == 0 {
+            wrong.push("holds no claims, so nothing below could be checked".into());
+            return wrong;
         }
-        for hit in &hits {
-            for id in hit.ids.iter().filter(|i| i.scheme == scheme) {
-                seen.entry(id.value.to_lowercase())
-                    .or_insert_with(|| id.value.clone());
+
+        for example in &d.search.examples {
+            let (text, pred) = crate::expr::parse_query(example);
+            let q = Query {
+                text,
+                pred,
+                limit: 1,
+                ..Default::default()
+            };
+            match self.search(&q) {
+                Ok((0, _, un)) if un.0.is_empty() => {
+                    wrong.push(format!("the example {example:?} returns nothing"))
+                }
+                Ok((_, _, un)) if !un.0.is_empty() => wrong.push(format!(
+                    "the example {example:?} cannot be answered: {}",
+                    un.0.join("; ")
+                )),
+                Err(e) => wrong.push(format!("the example {example:?} fails: {e}")),
+                _ => {}
             }
         }
-        offset += hits.len();
-        if hits.len() < 5000 {
-            break;
+
+        for name in d.search.compare.iter().chain(&d.search.suggest) {
+            if !known(name) {
+                wrong.push(format!("`search` names {name}, which no claim carries"));
+            }
+        }
+        for v in &d.view {
+            for name in v.columns.iter().chain(&v.facets) {
+                if !known(name) {
+                    wrong.push(format!(
+                        "the view {:?} names {name}, which no claim carries",
+                        v.name
+                    ));
+                }
+            }
+            if let Some(group) = &v.group {
+                if !known(group) {
+                    wrong.push(format!(
+                        "the view {:?} groups by {group}, which no claim carries",
+                        v.name
+                    ));
+                }
+            }
+            if let Some(filter) = &v.filter {
+                match crate::expr::parse_pred(filter) {
+                    None => wrong.push(format!(
+                        "the view {:?} has a `where` nothing can parse",
+                        v.name
+                    )),
+                    Some(p) => {
+                        let mut named = Vec::new();
+                        crate::expr::fields_named(&p, &mut named);
+                        for n in named.iter().filter(|n| !known(n)) {
+                            wrong.push(format!(
+                                "the view {:?} filters on {n}, which no claim carries",
+                                v.name
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // A field declared and never filled is a column of dashes, and the declaration is the only
+        // place that says it should not be.
+        for f in self.store.fields(d) {
+            if f.records == 0 {
+                wrong.push(format!(
+                    "the property {} is declared and no claim carries it",
+                    f.name
+                ));
+            }
+        }
+        wrong
+    }
+}
+
+impl Source {
+    /// A run that does not have to happen, and the record of it.
+    ///
+    /// Only where the source is one address and answers `304`. A source that pages, crawls or
+    /// reads a directory has no single thing to ask about; a source that offers neither an
+    /// `ETag` nor a `Last-Modified` is asked once and then never again, because asking it every
+    /// hour and learning nothing is the cost this is meant to avoid.
+    ///
+    /// The run is written down. A run that never happened and a run that found nothing look the
+    /// same to a reader, and only one of them is true.
+    fn nothing_changed(&self) -> Result<Option<RunReport>, String> {
+        let Some(url) = self.decl.source.single_url() else {
+            return Ok(None);
+        };
+        let held = self.store.meta("validators");
+        // Nothing held, or held and empty: the first says ask, the second says this source
+        // cannot be asked.
+        if held.as_deref() == Some("") {
+            return Ok(None);
+        }
+        let answer = match crate::fetch::unchanged(url, self.decl.source.agent(), held.as_deref()) {
+            Ok(a) => a,
+            // A source that will not answer this is a source to fetch the old way, and the run
+            // that follows will say what went wrong with it properly.
+            Err(_) => return Ok(None),
+        };
+        match answer {
+            Some(fresh) => {
+                self.store.set_meta("validators", &fresh)?;
+                Ok(None)
+            }
+            None => {
+                let held = self.store.count();
+                let run = self.store.begin_run()?;
+                self.store.finish_run(
+                    run,
+                    true,
+                    0,
+                    0,
+                    0,
+                    held,
+                    &self.store.field_names(),
+                    &Notes::default(),
+                    None,
+                )?;
+                Ok(self.store.run_report(run))
+            }
         }
     }
-    Ok(seen.into_values().collect())
 }

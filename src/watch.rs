@@ -6,9 +6,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as J};
 
-use crate::dataset::{Dataset, Member};
+use crate::source::{Source, Interface};
 use crate::expr::{self, Pred};
-use crate::scope::Scope;
+use crate::tracker::Tracker;
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -106,11 +106,11 @@ impl Watch {
     pub fn check(&self, root: &Path) -> Result<(J, String), String> {
         let state = self.state();
         if let Some(name) = &self.decl.scope {
-            let dir = crate::scope::scope_registry(&root.join("trackers"))
+            let dir = crate::tracker::scope_registry(&root.join("trackers"))
                 .get(name)
                 .cloned()
                 .ok_or_else(|| format!("{name} is not installed here"))?;
-            let scope = Scope::open(&dir, &root.join("sources"))?;
+            let scope = Tracker::open(&dir, &root.join("sources"))?;
             let since = if state.mark.is_empty() {
                 scope.mark_before()
             } else {
@@ -149,13 +149,13 @@ impl Watch {
         }
 
         let name = self.decl.dataset.clone().unwrap_or_default();
-        let dir = crate::scope::registry(&root.join("sources"))
+        let dir = crate::tracker::registry(&root.join("sources"))
             .get(&name)
             .cloned()
             .ok_or_else(|| format!("{name} is not installed here"))?;
-        let ds = Dataset::open(&dir)?;
+        let ds = Source::open(&dir)?;
         let since: i64 = state.mark.parse().unwrap_or((ds.mark() - 1).max(0));
-        let report = Member::changes(&ds, since, 500);
+        let report = Interface::changes(&ds, since, 500);
         // Narrowed by the query as a scope's watch is. Without this a watch over a dataset
         // delivered every change and its query was decoration.
         let pred = self.pred();
@@ -193,7 +193,7 @@ impl Watch {
                     let url = d.url.as_deref().ok_or("a webhook needs a url")?;
                     let url = crate::fetch::resolve(url)?.unwrap_or_default();
                     let agent = ureq::Agent::config_builder()
-                        .user_agent(crate::decl::AGENT)
+                        .user_agent(crate::sourcedecl::AGENT)
                         .timeout_global(Some(std::time::Duration::from_secs(20)))
                         .build()
                         .new_agent();

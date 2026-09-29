@@ -8,7 +8,7 @@ use serde_json::{json, Value as J};
 
 use crate::account::{self, Accounts, Site, Viewer};
 use crate::expr;
-use crate::scope::{Entry, Scope, ScopeQuery};
+use crate::tracker::{Thing, Tracker, TrackerQuery};
 use crate::serve::{at, flatten, mounted, params, shell, unmount, urlencode};
 
 fn link(q: &str, view: &str, kind: &str, page: usize) -> String {
@@ -25,7 +25,7 @@ fn link(q: &str, view: &str, kind: &str, page: usize) -> String {
     url
 }
 
-fn entry_link(e: &Entry) -> Option<String> {
+fn entry_link(e: &Thing) -> Option<String> {
     let k = e.key.as_ref()?;
     Some(format!(
         "{}/thing/{}/{}",
@@ -35,7 +35,7 @@ fn entry_link(e: &Entry) -> Option<String> {
     ))
 }
 
-fn cell(e: &Entry, name: &str) -> Markup {
+fn cell(e: &Thing, name: &str) -> Markup {
     match name {
         "kind" => html! {
             @for (kind, parts) in e.by_kind() {
@@ -66,7 +66,7 @@ fn cell(e: &Entry, name: &str) -> Markup {
     }
 }
 
-fn overview(scope: &Scope, url: &str, v: &Viewer, site: &Site) -> String {
+fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
     let bound = account::bound(v, &scope.decl.name);
     let p = params(url);
     let q = p.get("q").cloned().unwrap_or_default();
@@ -80,7 +80,7 @@ fn overview(scope: &Scope, url: &str, v: &Viewer, site: &Site) -> String {
     let limit = 25;
 
     let (text, pred) = expr::parse_query(&q);
-    let sq = ScopeQuery {
+    let sq = TrackerQuery {
         text,
         pred: pred.clone(),
         named: (!view.is_empty()).then(|| view.clone()),
@@ -128,7 +128,7 @@ fn overview(scope: &Scope, url: &str, v: &Viewer, site: &Site) -> String {
                 @if holds {
                     "fresh within " (f)
                     @if let Some(age) = scope.oldest_finish() {
-                        ", the source updated longest ago " (crate::scope::human(age)) " ago"
+                        ", the source updated longest ago " (crate::tracker::human(age)) " ago"
                     }
                 }
                 @else { "the promise of " (f) " does not hold" }
@@ -288,7 +288,7 @@ fn overview(scope: &Scope, url: &str, v: &Viewer, site: &Site) -> String {
     shell(&d.title, body)
 }
 
-fn entry_page(scope: &Scope, scheme: &str, value: &str) -> Option<String> {
+fn entry_page(scope: &Tracker, scheme: &str, value: &str) -> Option<String> {
     let entry = scope.entry(scheme, value)?;
     let d = &scope.decl;
     let body = html! {
@@ -349,7 +349,7 @@ fn entry_page(scope: &Scope, scheme: &str, value: &str) -> Option<String> {
 }
 
 /// The member's own definition of its own word, which arrived with its `describe`.
-fn definition(scope: &Scope, member: &str, code: &str) -> Option<String> {
+fn definition(scope: &Tracker, member: &str, code: &str) -> Option<String> {
     let m = scope.members.iter().find(|m| m.name() == member)?;
     let vocab = m.described["vocabulary"].as_object()?;
     for (_, words) in vocab {
@@ -363,7 +363,7 @@ fn definition(scope: &Scope, member: &str, code: &str) -> Option<String> {
     None
 }
 
-fn record_page(scope: &Scope, member: &str, id: &str) -> Option<String> {
+fn record_page(scope: &Tracker, member: &str, id: &str) -> Option<String> {
     let rec = scope
         .records_of(member, &[id.to_string()])
         .into_iter()
@@ -399,7 +399,7 @@ fn record_page(scope: &Scope, member: &str, id: &str) -> Option<String> {
 /// The second value is true when there is nothing at the address: no such call, or no such
 /// subject. A call that does not exist, answered as a search of everything, is a caller who thinks
 /// they asked something and gets the answer to another question.
-fn api(scope: &Scope, path: &str, url: &str, v: &Viewer) -> (J, bool) {
+fn api(scope: &Tracker, path: &str, url: &str, v: &Viewer) -> (J, bool) {
     let bound = account::bound(v, &scope.decl.name);
     // No API without a subscription. The overview and its counts stay current for everyone; the
     // records behind them do not.
@@ -411,7 +411,7 @@ fn api(scope: &Scope, path: &str, url: &str, v: &Viewer) -> (J, bool) {
     }
     let p = params(url);
     let (text, pred) = expr::parse_query(p.get("q").map(String::as_str).unwrap_or(""));
-    let sq = ScopeQuery {
+    let sq = TrackerQuery {
         text,
         pred,
         named: p.get("view").cloned(),
@@ -493,7 +493,7 @@ fn api(scope: &Scope, path: &str, url: &str, v: &Viewer) -> (J, bool) {
 }
 
 /// One assembled subject, the same shape whether it arrives alone or inside a search.
-fn entry_json(e: &crate::scope::Entry) -> J {
+fn entry_json(e: &crate::tracker::Thing) -> J {
     json!({
         "rank": e.rank,
         "identifier": e.key.as_ref().map(|k| json!({ "scheme": k.scheme, "value": k.value })),
@@ -512,7 +512,7 @@ fn entry_json(e: &crate::scope::Entry) -> J {
 // ---------------------------------------------------------------------------------------------
 // Who is asking, and what they are paying for.
 
-fn banner(v: &Viewer, scope: &Scope, hidden: u64) -> Markup {
+fn banner(v: &Viewer, scope: &Tracker, hidden: u64) -> Markup {
     html! {
         p.bar {
             @match v.email() {
@@ -558,7 +558,7 @@ fn signin_page(site: &Site, message: Option<&str>) -> String {
     shell("Sign in", body)
 }
 
-fn account_page(scope: &Scope, accounts: &Accounts, site: &Site, v: &Viewer) -> String {
+fn account_page(scope: &Tracker, accounts: &Accounts, site: &Site, v: &Viewer) -> String {
     let Some(a) = v.account.clone() else {
         return signin_page(site, None);
     };
@@ -635,7 +635,7 @@ fn key_made(key: &str) -> String {
     shell("Your key", body)
 }
 
-fn pricing_page(scope: &Scope, site: &Site, v: &Viewer) -> String {
+fn pricing_page(scope: &Tracker, site: &Site, v: &Viewer) -> String {
     let p = &site.price;
     let body = html! {
         p { a href=(at("/")) { "← " (scope.decl.title) } }
@@ -687,7 +687,7 @@ fn pricing_page(scope: &Scope, site: &Site, v: &Viewer) -> String {
     shell("Pricing", body)
 }
 
-fn terms_page(scope: &Scope, site: &Site) -> String {
+fn terms_page(scope: &Tracker, site: &Site) -> String {
     let who = if site.contact.is_empty() {
         "the operator of this workspace"
     } else {
@@ -730,13 +730,13 @@ fn terms_page(scope: &Scope, site: &Site) -> String {
 }
 
 /// Paid, because an export is the whole of what a subscriber holds.
-fn export(scope: &Scope, url: &str, v: &Viewer, as_csv: bool) -> Option<(String, &'static str)> {
+fn export(scope: &Tracker, url: &str, v: &Viewer, as_csv: bool) -> Option<(String, &'static str)> {
     if !v.entitled(&scope.decl.name) {
         return None;
     }
     let p = params(url);
     let (text, pred) = expr::parse_query(p.get("q").map(String::as_str).unwrap_or(""));
-    let sq = ScopeQuery {
+    let sq = TrackerQuery {
         text,
         pred,
         named: p.get("view").cloned(),
@@ -863,7 +863,7 @@ fn atom(title: &str, self_url: &str, entries: &[J], updated: &str) -> String {
     out
 }
 
-fn changes_page(scope: &Scope, url: &str) -> String {
+fn changes_page(scope: &Tracker, url: &str) -> String {
     let p = params(url);
     let since = p
         .get("since")
@@ -934,7 +934,7 @@ fn changes_page(scope: &Scope, url: &str) -> String {
     shell("Changes", body)
 }
 
-fn watch_feed(scope: &Scope, name: &str) -> Option<String> {
+fn watch_feed(scope: &Tracker, name: &str) -> Option<String> {
     let w = crate::watch::all(&scope.root)
         .into_iter()
         .find(|w| w.decl.name == name)?;
@@ -957,7 +957,7 @@ fn watch_feed(scope: &Scope, name: &str) -> Option<String> {
 /// with for ever and say they were current.
 const REREAD: i64 = 60;
 
-pub fn serve(mut scope: Scope, dir: &Path, datasets: &Path, addr: &str) -> Result<(), String> {
+pub fn serve(mut scope: Tracker, dir: &Path, datasets: &Path, addr: &str) -> Result<(), String> {
     let accounts = Accounts::open(&scope.root)?;
     let site = Site::load(&scope.root);
     let server = tiny_http::Server::http(addr).map_err(|e| e.to_string())?;
@@ -971,7 +971,7 @@ pub fn serve(mut scope: Scope, dir: &Path, datasets: &Path, addr: &str) -> Resul
         // Before anything is read off it, and only between requests, so no page is drawn from
         // two readings.
         if crate::now() - read_at >= REREAD {
-            match Scope::open(dir, datasets) {
+            match Tracker::open(dir, datasets) {
                 Ok(fresh) => scope = fresh,
                 Err(e) => eprintln!("{}: read again failed, serving the last one: {e}", dir.display()),
             }
@@ -1345,10 +1345,10 @@ fn slug(s: &str) -> String {
     crate::guess::slug(s.rsplit('/').next().unwrap_or(s))
 }
 
-fn catalogue(scope: &Scope, v: &Viewer, message: Option<&str>) -> String {
+fn catalogue(scope: &Tracker, v: &Viewer, message: Option<&str>) -> String {
     let root = &scope.root;
-    let datasets = crate::scope::registry(&root.join("sources"));
-    let scopes = crate::scope::scope_registry(&root.join("trackers"));
+    let datasets = crate::tracker::registry(&root.join("sources"));
+    let scopes = crate::tracker::scope_registry(&root.join("trackers"));
     let may = v.account.as_ref().is_some_and(|a| a.curator);
 
     let held: Vec<(String, String, u64, String)> = datasets
@@ -1356,7 +1356,7 @@ fn catalogue(scope: &Scope, v: &Viewer, message: Option<&str>) -> String {
         .filter_map(|(name, dir)| {
             // Four values, not a description. A full describe() walks every field of every
             // dataset, and this page shows none of that.
-            let ds = crate::dataset::Dataset::open(dir).ok()?;
+            let ds = crate::source::Source::open(dir).ok()?;
             Some((
                 name.clone(),
                 ds.decl.kind.clone(),
@@ -1452,7 +1452,7 @@ fn catalogue(scope: &Scope, v: &Viewer, message: Option<&str>) -> String {
 }
 
 /// A link, a name, and the declaration is proposed from what is behind it.
-fn add_dataset(scope: &Scope, form: &str) -> Result<String, String> {
+fn add_dataset(scope: &Tracker, form: &str) -> Result<String, String> {
     let url = form_field(form, "url");
     if url.trim().is_empty() {
         return Err("a link is needed".into());
@@ -1463,7 +1463,7 @@ fn add_dataset(scope: &Scope, form: &str) -> Result<String, String> {
         .root
         .join("sources")
         .join(slug(if name.trim().is_empty() { &url } else { &name }));
-    if dir.join(crate::decl::FILE).exists() {
+    if dir.join(crate::sourcedecl::FILE).exists() {
         return Err(format!("{} already holds a source", dir.display()));
     }
     crate::guess::propose_url(
@@ -1481,7 +1481,7 @@ fn add_dataset(scope: &Scope, form: &str) -> Result<String, String> {
 
 /// Members, a key, and a sentence each. The sentence is required here because it is required in
 /// the format, and a form that let somebody skip it would be a way around the rule.
-fn add_scope(scope: &Scope, form: &str) -> Result<String, String> {
+fn add_scope(scope: &Tracker, form: &str) -> Result<String, String> {
     let name = form_field(form, "name");
     if !name.contains('/') {
         return Err("a tracker is named owner/name".into());
@@ -1521,15 +1521,15 @@ fn add_scope(scope: &Scope, form: &str) -> Result<String, String> {
         "promise": { "fresh_within": "24h" },
     });
     // Read back as a declaration before it is written, as every declaration this program writes.
-    let decl: crate::scopedecl::ScopeDecl = serde_json::from_value(built)
+    let decl: crate::trackerdecl::TrackerDecl = serde_json::from_value(built)
         .map_err(|e| format!("that does not make a tracker: {e}"))?;
 
     let dir = scope.root.join("trackers").join(slug(name.trim()));
-    if dir.join(crate::scopedecl::FILE).exists() {
+    if dir.join(crate::trackerdecl::FILE).exists() {
         return Err(format!("{} already holds a tracker", dir.display()));
     }
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let path = dir.join(crate::scopedecl::FILE);
+    let path = dir.join(crate::trackerdecl::FILE);
     crate::yaml::write(&path, &decl)?;
     Ok(format!(
         "{} is composed. Its promise says nothing yet, which is the one thing a curator has to \

@@ -157,13 +157,13 @@ fn overview(p: &Platform) -> String {
     page(
         "Deployments",
         html! {
-            h1 { "Deployments" }
+            h1 { "Workspaces" }
             p.about {
                 "Every one this platform holds a grant for. It holds no claims and no accounts: "
                 "what is below was asked for just now, and nothing of it is kept."
             }
             table {
-                thead { tr { th { "Deployment" } th { "Datasets" } th { "Scopes" } th { "State" } } }
+                thead { tr { th { "Workspace" } th { "Sources" } th { "Trackers" } th { "State" } } }
                 tbody {
                     @for (name, title, answer) in &asked {
                         tr {
@@ -244,9 +244,9 @@ fn deployment(p: &Platform, name: &str) -> (u16, String) {
                 h1 { (held["workspace"].as_str().unwrap_or(name)) }
                 p.state { "zetlyn " (held["zetlyn"].as_str().unwrap_or("?")) " · " (p.held[name].at) }
 
-                h2 { "Datasets" }
+                h2 { "Sources" }
                 table {
-                    thead { tr { th { "Dataset" } th { "Kind" } th { "Records" } th { "State" } th { "Due" } } }
+                    thead { tr { th { "Source" } th { "Kind" } th { "Claims" } th { "State" } th { "Due" } } }
                     tbody {
                         @for d in held["sources"].as_array().unwrap_or(&empty) {
                             @let at = d["at"].as_str().unwrap_or("");
@@ -262,9 +262,9 @@ fn deployment(p: &Platform, name: &str) -> (u16, String) {
                     }
                 }
 
-                h2 { "Scopes" }
+                h2 { "Trackers" }
                 table {
-                    thead { tr { th { "Scope" } th { "Members" } th { "Records" } th { "Promise" } } }
+                    thead { tr { th { "Tracker" } th { "Sources" } th { "Claims" } th { "Promise" } } }
                     tbody {
                         @for s in held["trackers"].as_array().unwrap_or(&empty) {
                             tr {
@@ -333,9 +333,9 @@ fn dataset(p: &Platform, name: &str, at: &str) -> (u16, String) {
                     button type="submit" { "Fill it now" }
                 }
 
-                h2 { "Runs" }
+                h2 { "Updates" }
                 table {
-                    thead { tr { th { "Run" } th { "Started" } th { "Added" } th { "Changed" } th { "Removed" } th { "Complete" } } }
+                    thead { tr { th { "Update" } th { "Started" } th { "Added" } th { "Changed" } th { "Removed" } th { "Complete" } } }
                     tbody {
                         @for r in runs["updates"].as_array().unwrap_or(&empty) {
                             tr {
@@ -593,7 +593,7 @@ fn ask_for_draft(p: &Platform, name: &str, at: &str) -> (u16, String) {
 }
 
 fn apply(p: &Platform, name: &str, at: &str, body: &str) -> (u16, String) {
-    let text = crate::servescope::form_field(body, "declaration");
+    let text = crate::servetracker::form_field(body, "declaration");
     if text.trim().is_empty() {
         return declaration(p, name, at, None, Some("Nothing was sent."));
     }

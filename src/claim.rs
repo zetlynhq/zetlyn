@@ -168,7 +168,7 @@ impl Attachment {
 }
 
 #[derive(Clone, Debug)]
-pub struct Record {
+pub struct Claim {
     pub record_id: String,
     pub dataset: String,
     pub kind: String,
@@ -188,7 +188,7 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-impl Record {
+impl Claim {
     /// SHA-256 of the dataset name, the kind, and what names this record.
     ///
     /// What names it is the identifier where the declaration says a record carries one, and the
@@ -276,11 +276,11 @@ impl Id {
     }
 }
 
-impl Record {
+impl Claim {
     /// The inverse of `to_json`, for a record that arrives in a published artifact rather than
     /// out of a source. The hash travels with it and is checked against a recomputation, because
     /// a record whose hash does not describe it would be a record this store cannot compare.
-    pub fn from_json(dataset: &str, j: &J) -> Result<Record, String> {
+    pub fn from_json(dataset: &str, j: &J) -> Result<Claim, String> {
         let s = |k: &str| j.get(k).and_then(J::as_str).unwrap_or("").to_string();
         let opt = |k: &str| j.get(k).and_then(J::as_str).map(str::to_string);
         let ids = j
@@ -313,7 +313,7 @@ impl Record {
                 v.get("to").and_then(J::as_str).map(str::to_string),
             )
         });
-        let record = Record {
+        let record = Claim {
             record_id: s("claim_id"),
             dataset: dataset.to_string(),
             kind: s("kind"),

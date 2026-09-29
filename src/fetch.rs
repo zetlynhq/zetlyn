@@ -10,8 +10,8 @@ use std::time::Duration;
 use serde_json::{Map, Value as J};
 
 use crate::expr::{FileInfo, Row};
-use crate::record::Origin;
-use crate::source::Produced;
+use crate::claim::Origin;
+use crate::rows::Produced;
 
 /// `${NAME}` from the environment, and nothing else from it.
 ///
@@ -251,7 +251,7 @@ pub fn seconds_of(stamp: &str) -> i64 {
 pub struct Http<'a> {
     pub list: &'a str,
     pub detail: Option<&'a str>,
-    pub page: Option<&'a crate::decl::Page>,
+    pub page: Option<&'a crate::sourcedecl::Page>,
     pub window: Option<&'a str>,
     pub since: Option<&'a str>,
     pub since_default: &'a str,
@@ -472,7 +472,7 @@ pub fn feed_rows(
                 "whole" => match item.get("link") {
                     Some(link) => f
                         .get(link)
-                        .map(|html| crate::source::html_to_text(&html))
+                        .map(|html| crate::rows::html_to_text(&html))
                         .unwrap_or_else(|_| item.get("summary").cloned().unwrap_or_default()),
                     None => item.get("summary").cloned().unwrap_or_default(),
                 },
@@ -558,7 +558,7 @@ fn parse_feed(xml: &str) -> Vec<BTreeMap<String, String>> {
                 if matches!(name.as_str(), "item" | "entry") {
                     if let Some(mut item) = current.take() {
                         if let Some(s) = item.get("summary").cloned() {
-                            item.insert("summary".into(), crate::source::html_to_text(&s));
+                            item.insert("summary".into(), crate::rows::html_to_text(&s));
                         }
                         if let Some(p) = item.get("published").cloned() {
                             if let Some(d) = feed_date(&p) {

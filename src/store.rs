@@ -7,9 +7,9 @@ use rusqlite::types::Value as S;
 use rusqlite::{params_from_iter, Connection};
 use serde_json::Value as J;
 
-use crate::decl::{Declaration, FieldType};
+use crate::sourcedecl::{SourceDecl, PropertyType};
 use crate::expr::{Lit, Op, Pred};
-use crate::record::{Attachment, Id, Origin, Record, Value};
+use crate::claim::{Attachment, Id, Origin, Claim, Value};
 
 pub struct Store {
     pub db: Connection,
@@ -169,7 +169,7 @@ fn migrate(db: &Connection) {
         "alter table run add column records integer",
         "alter table run add column duplicates integer default 0",
         "alter table record add column first_seen text not null default ''",
-        // Records held before the column existed take the stamp of the run that first saw them.
+        // Claims held before the column existed take the stamp of the update that first saw them.
         "update record set first_seen = coalesce((select started from run where id = first_run), '')
          where first_seen = ''",
     ] {
@@ -249,7 +249,7 @@ impl Store {
     /// Added, changed or unchanged. A record whose hash matches the one held is not rewritten.
     pub fn put(
         &self,
-        rec: &Record,
+        rec: &Claim,
         run: i64,
         at: &str,
         history: bool,
@@ -518,7 +518,7 @@ impl Store {
 
     /// A predicate becomes SQL. What it names and this dataset cannot answer is returned rather
     /// than dropped, because a filter applied to some records and not others is a wrong count.
-    pub fn filter(&self, pred: &Pred, types: &BTreeMap<String, FieldType>) -> Filter {
+    pub fn filter(&self, pred: &Pred, types: &BTreeMap<String, PropertyType>) -> Filter {
         let mut params = Vec::new();
         let mut unanswered = Vec::new();
         let sql = self.filter_part(pred, types, &mut params, &mut unanswered);
@@ -532,7 +532,7 @@ impl Store {
     fn filter_part(
         &self,
         pred: &Pred,
-        types: &BTreeMap<String, FieldType>,
+        types: &BTreeMap<String, PropertyType>,
         params: &mut Vec<S>,
         unanswered: &mut Vec<String>,
     ) -> String {
@@ -584,7 +584,7 @@ impl Store {
                 }
                 let name = lit(params, S::Text(left.clone()));
                 let cmp = match kind {
-                    FieldType::Number => {
+                    PropertyType::Number => {
                         let n = match right {
                             Lit::Num(n) => *n,
                             other => other.display().parse().unwrap_or(f64::NAN),
@@ -592,11 +592,11 @@ impl Store {
                         let p = lit(params, S::Real(n));
                         format!("f.n {} {p}", op.sql())
                     }
-                    FieldType::Date | FieldType::Interval => {
+                    PropertyType::Date | PropertyType::Interval => {
                         let p = lit(params, S::Text(right.display()));
                         format!("f.d {} {p}", op.sql())
                     }
-                    FieldType::Bool => {
+                    PropertyType::Bool => {
                         let b = matches!(right, Lit::Bool(true))
                             || right.display().eq_ignore_ascii_case("true");
                         let p = lit(params, S::Integer(b as i64));
@@ -639,7 +639,7 @@ impl Store {
         terms: &str,
         filter: Option<&Filter>,
         sort: Option<&str>,
-        types: &BTreeMap<String, FieldType>,
+        types: &BTreeMap<String, PropertyType>,
         seen_before: Option<&str>,
         limit: usize,
         offset: usize,
@@ -776,7 +776,7 @@ impl Store {
 
     /// Per field: how many records carry it, every value with its count for a code or a bool, the
     /// range for a number or a date. A faceted browse before a query has been asked.
-    pub fn fields(&self, decl: &Declaration) -> Vec<FieldSummary> {
+    pub fn fields(&self, decl: &SourceDecl) -> Vec<FieldSummary> {
         let mut out = Vec::new();
         for (name, spec) in &decl.records.fields {
             let records: u64 = self
@@ -790,10 +790,10 @@ impl Store {
             let mut values = Vec::new();
             let (mut min, mut max) = (None, None);
             match spec.kind {
-                FieldType::Code | FieldType::Bool | FieldType::Text => {
+                PropertyType::Code | PropertyType::Bool | PropertyType::Text => {
                     values = self.facet(name, None, 24).unwrap_or_default();
                 }
-                FieldType::Number => {
+                PropertyType::Number => {
                     if let Ok((lo, hi)) = self.db.query_row(
                         "select min(n), max(n) from field where name = ?1",
                         rusqlite::params![name],
@@ -803,7 +803,7 @@ impl Store {
                         max = hi.map(|v| Value::Number(v).display());
                     }
                 }
-                FieldType::Date | FieldType::Interval => {
+                PropertyType::Date | PropertyType::Interval => {
                     if let Ok((lo, hi)) = self.db.query_row(
                         "select min(d), max(d) from field where name = ?1",
                         rusqlite::params![name],
@@ -843,7 +843,7 @@ impl Store {
             .unwrap_or_default()
     }
 
-    pub fn get(&self, record_id: &str) -> Option<Record> {
+    pub fn get(&self, record_id: &str) -> Option<Claim> {
         self.db
             .query_row(
                 "select record_id, kind, title, url, text, known, valid_from, valid_to,
@@ -857,7 +857,7 @@ impl Store {
                     let valid_from: Option<String> = r.get(6)?;
                     let valid_to: Option<String> = r.get(7)?;
                     let o: J = serde_json::from_str(&origin).unwrap_or(J::Null);
-                    Ok(Record {
+                    Ok(Claim {
                         record_id: r.get(0)?,
                         dataset: String::new(),
                         kind: r.get(1)?,
@@ -979,7 +979,7 @@ pub struct RunReport {
 
 fn order_by(
     sort: Option<&str>,
-    types: &BTreeMap<String, FieldType>,
+    types: &BTreeMap<String, PropertyType>,
     params: &mut Vec<S>,
 ) -> (String, String) {
     let Some(sort) = sort else {
@@ -1182,7 +1182,7 @@ impl Store {
     /// one does.
     pub fn for_each_record(
         &self,
-        mut each: impl FnMut(Record) -> Result<(), String>,
+        mut each: impl FnMut(Claim) -> Result<(), String>,
     ) -> Result<u64, String> {
         let mut stmt = self
             .db
@@ -1201,7 +1201,7 @@ impl Store {
             let o: J = serde_json::from_str(&origin).unwrap_or(J::Null);
             let valid_from: Option<String> = r.get(6).map_err(|e| e.to_string())?;
             let valid_to: Option<String> = r.get(7).map_err(|e| e.to_string())?;
-            each(Record {
+            each(Claim {
                 record_id: r.get(0).map_err(|e| e.to_string())?,
                 dataset: String::new(),
                 kind: r.get(1).map_err(|e| e.to_string())?,

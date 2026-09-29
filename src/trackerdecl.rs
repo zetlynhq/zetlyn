@@ -8,19 +8,19 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ScopeDecl {
+pub struct TrackerDecl {
     pub name: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub title: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub about: String,
     #[serde(default, rename = "sources", skip_serializing_if = "Vec::is_empty")]
-    pub members: Vec<MemberDecl>,
+    pub members: Vec<SourceRef>,
     /// The identifier schemes that say two claims are about one thing. A scheme, and nothing else.
     #[serde(default, rename = "identified_by", skip_serializing_if = "Vec::is_empty")]
     pub join: Vec<String>,
     #[serde(default, rename = "align", skip_serializing_if = "BTreeMap::is_empty")]
-    pub normalise: BTreeMap<String, Normalise>,
+    pub normalise: BTreeMap<String, Align>,
     #[serde(default, skip_serializing_if = "Views::is_empty")]
     pub view: Views,
     #[serde(default, skip_serializing_if = "Promise::is_empty")]
@@ -29,7 +29,7 @@ pub struct ScopeDecl {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct MemberDecl {
+pub struct SourceRef {
     /// One of the two. A member is a dataset this deployment holds, or one somewhere else that
     /// answers the same six calls.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -77,7 +77,7 @@ impl Priority {
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
-pub struct Normalise {
+pub struct Align {
     /// Best first. What makes `severity>=high` answerable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scale: Vec<String>,
@@ -89,7 +89,7 @@ pub struct Normalise {
     pub members: BTreeMap<String, BTreeMap<String, String>>,
 }
 
-impl Normalise {
+impl Align {
     pub fn field_in(&self, member: &str, scope_field: &str) -> String {
         self.from
             .get(member)
@@ -189,9 +189,9 @@ impl Promise {
 /// The file a tracker is, inside its directory.
 pub const FILE: &str = "tracker.yaml";
 
-impl ScopeDecl {
-    pub fn load(dir: &Path) -> Result<ScopeDecl, String> {
-        let mut d: ScopeDecl = crate::yaml::read(&dir.join(FILE))?;
+impl TrackerDecl {
+    pub fn load(dir: &Path) -> Result<TrackerDecl, String> {
+        let mut d: TrackerDecl = crate::yaml::read(&dir.join(FILE))?;
         if d.title.is_empty() {
             d.title = d.name.clone();
         }
@@ -202,7 +202,7 @@ impl ScopeDecl {
         self.join.iter().map(String::as_str).collect()
     }
 
-    pub fn normalise_for(&self, field: &str) -> Option<&Normalise> {
+    pub fn normalise_for(&self, field: &str) -> Option<&Align> {
         self.normalise.get(field)
     }
 }

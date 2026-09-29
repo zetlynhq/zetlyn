@@ -5,8 +5,8 @@ mod account;
 mod artifact;
 mod build;
 mod console;
-mod dataset;
-mod decl;
+mod source;
+mod sourcedecl;
 mod expr;
 mod fetch;
 mod grant;
@@ -17,20 +17,20 @@ mod key;
 mod place;
 mod platform;
 mod migrate;
-mod record;
+mod claim;
 mod remote;
-mod scope;
-mod scopedecl;
+mod tracker;
+mod trackerdecl;
 mod serve;
-mod servescope;
-mod source;
+mod servetracker;
+mod rows;
 mod store;
 mod watch;
 mod yaml;
 
 use std::path::{Path, PathBuf};
 
-use dataset::Dataset;
+use source::Source;
 
 /// Days to a civil date. No calendar crate: a run stamp and a file date are the whole of what this
 /// program does with time.
@@ -168,7 +168,7 @@ fn run(args: &[String]) -> Result<(), String> {
             Some("subscribe") => dataset_subscribe(args),
             Some("pull") => dataset_update(args),
             Some("check") => {
-                let ds = Dataset::open(&dir_at(args, 2)?)?;
+                let ds = Source::open(&dir_at(args, 2)?)?;
                 let wrong = ds.check();
                 for w in &wrong {
                     println!("{}: {w}", ds.decl.name);
@@ -180,7 +180,7 @@ fn run(args: &[String]) -> Result<(), String> {
             }
             Some("describe") => {
                 let dir = dir_at(args, 2)?;
-                let ds = Dataset::open(&dir)?;
+                let ds = Source::open(&dir)?;
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&ds.describe()).unwrap_or_default()
@@ -204,7 +204,7 @@ fn run(args: &[String]) -> Result<(), String> {
             Some("subscribe") => scope_subscribe(args),
             Some("describe") => {
                 let (dir, datasets) = scope_at(args, 2)?;
-                let scope = scope::Scope::open(&dir, &datasets)?;
+                let scope = tracker::Tracker::open(&dir, &datasets)?;
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&scope.describe()).unwrap_or_default()
@@ -214,7 +214,7 @@ fn run(args: &[String]) -> Result<(), String> {
             Some("search") => scope_search(args),
             Some("check") => {
                 let (dir, datasets) = scope_at(args, 2)?;
-                let scope = scope::Scope::open(&dir, &datasets)?;
+                let scope = tracker::Tracker::open(&dir, &datasets)?;
                 let wrong = scope.check();
                 for w in &wrong {
                     println!("{}: {w}", scope.decl.name);
@@ -226,7 +226,7 @@ fn run(args: &[String]) -> Result<(), String> {
             }
             Some("measure") => {
                 let (dir, datasets) = scope_at(args, 2)?;
-                let scope = scope::Scope::open(&dir, &datasets)?;
+                let scope = tracker::Tracker::open(&dir, &datasets)?;
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&scope.measure()).unwrap_or_default()
@@ -269,18 +269,18 @@ fn run(args: &[String]) -> Result<(), String> {
                 .first()
                 .map(|s| PathBuf::from(s.as_str()))
                 .ok_or("which directory?")?;
-            if named.join(crate::scopedecl::FILE).exists() {
+            if named.join(crate::trackerdecl::FILE).exists() {
                 let (dir, datasets) = scope_at(args, 1)?;
-                let scope = scope::Scope::open(&dir, &datasets)?;
+                let scope = tracker::Tracker::open(&dir, &datasets)?;
                 for name in &scope.missing {
                     eprintln!(
                         "zetlyn: {name} is not installed here, and the tracker opens without it"
                     );
                 }
-                return servescope::serve(scope, &dir, &datasets, &addr);
+                return servetracker::serve(scope, &dir, &datasets, &addr);
             }
             let dir = dir_at(args, 1)?;
-            let ds = Dataset::open(&dir)?;
+            let ds = Source::open(&dir)?;
             if ds.store.count() == 0 {
                 eprintln!(
                     "zetlyn: the store is empty. `zetlyn source update {}` first.",
@@ -306,8 +306,8 @@ fn dir_at(args: &[String], from: usize) -> Result<PathBuf, String> {
         .first()
         .map(|s| PathBuf::from(s.as_str()))
         .ok_or("which source directory?")?;
-    if !p.join(crate::decl::FILE).exists() {
-        return Err(missing(&p.join(crate::decl::FILE)));
+    if !p.join(crate::sourcedecl::FILE).exists() {
+        return Err(missing(&p.join(crate::sourcedecl::FILE)));
     }
     Ok(p)
 }
@@ -327,7 +327,7 @@ fn dataset_new(args: &[String]) -> Result<(), String> {
                 .unwrap_or(format!("./{stem}")),
         );
         let toml = guess::propose_url(from, &dir, flag(args, "--name"), flag(args, "--kind"))?;
-        println!("{}\n", dir.join(crate::decl::FILE).display());
+        println!("{}\n", dir.join(crate::sourcedecl::FILE).display());
         print!("{toml}");
         return Ok(());
     }
@@ -343,18 +343,18 @@ fn dataset_new(args: &[String]) -> Result<(), String> {
     );
     let toml = guess::propose(from, &dir, flag(args, "--name"), flag(args, "--kind"))?;
 
-    println!("{}", dir.join(crate::decl::FILE).display());
+    println!("{}", dir.join(crate::sourcedecl::FILE).display());
     println!();
     print!("{toml}");
     println!();
 
     // Three records, because a creator who agrees changes nothing and a creator who does not needs
     // to see why before a run writes anything.
-    let ds = Dataset::open(&dir)?;
+    let ds = Source::open(&dir)?;
     let root = ds.decl.source.root(&dir);
     let mut notes = build::Notes::default();
     let mut shown = 0usize;
-    let _ = source::each_row(&ds.decl, &dir, &root, None, |produced: source::Produced| {
+    let _ = rows::each_row(&ds.decl, &dir, &root, None, |produced: rows::Produced| {
         for (sub, origin) in
             build::expand(&ds.decl, produced.row, produced.origin, produced.expanded)
         {
@@ -379,7 +379,7 @@ fn dataset_new(args: &[String]) -> Result<(), String> {
 
 fn dataset_run(args: &[String]) -> Result<(), String> {
     let dir = dir_at(args, 2)?;
-    let ds = Dataset::open(&dir)?;
+    let ds = Source::open(&dir)?;
     let started = std::time::Instant::now();
     let r = ds.run()?;
     println!(
@@ -435,19 +435,19 @@ fn changes(args: &[String]) -> Result<(), String> {
     let limit = flag(args, "--limit")
         .and_then(|s| s.parse().ok())
         .unwrap_or(50);
-    let report = if dir.join(crate::scopedecl::FILE).exists() {
+    let report = if dir.join(crate::trackerdecl::FILE).exists() {
         let (dir, datasets) = scope_at(args, 1)?;
-        let scope = scope::Scope::open(&dir, &datasets)?;
+        let scope = tracker::Tracker::open(&dir, &datasets)?;
         let since = flag(args, "--since")
             .map(str::to_string)
             .unwrap_or_else(|| scope.mark_before().to_string());
         scope.changes(&since, limit)
     } else {
-        let ds = Dataset::open(&dir_at(args, 1)?)?;
+        let ds = Source::open(&dir_at(args, 1)?)?;
         let since = flag(args, "--since")
             .and_then(|s| s.parse().ok())
             .unwrap_or_else(|| (ds.mark() - 1).max(0));
-        dataset::Member::changes(&ds, since, limit)
+        source::Interface::changes(&ds, since, limit)
     };
     println!(
         "{}",
@@ -457,7 +457,7 @@ fn changes(args: &[String]) -> Result<(), String> {
 }
 
 /// When this dataset is next due, from its declared cadence and when it last finished.
-fn due_at(ds: &Dataset) -> Option<i64> {
+fn due_at(ds: &Source) -> Option<i64> {
     let every = ds
         .decl
         .schedule
@@ -499,10 +499,10 @@ fn schedule(args: &[String]) -> Result<(), String> {
         // that is being throttled can take twenty minutes, and an hourly dataset behind it
         // would wait that out. Shortest cadence first, so what is asked for most often is
         // asked for first.
-        let mut due: Vec<(i64, String, PathBuf)> = scope::registry(&root.join("sources"))
+        let mut due: Vec<(i64, String, PathBuf)> = tracker::registry(&root.join("sources"))
             .into_iter()
             .filter_map(|(name, dir)| {
-                let every = Dataset::open(&dir)
+                let every = Source::open(&dir)
                     .ok()?
                     .decl
                     .schedule
@@ -514,7 +514,7 @@ fn schedule(args: &[String]) -> Result<(), String> {
             .collect();
         due.sort();
         for (_, name, dir) in due {
-            let ds = match Dataset::open(&dir) {
+            let ds = match Source::open(&dir) {
                 Ok(ds) => ds,
                 Err(e) => {
                     eprintln!("{name}: {e}");
@@ -548,7 +548,7 @@ fn schedule(args: &[String]) -> Result<(), String> {
                 }
                 Err(e) => eprintln!("{name}: {e}"),
             }
-            if let Ok(ds) = Dataset::open(&dir) {
+            if let Ok(ds) = Source::open(&dir) {
                 if let Some(next) = due_at(&ds) {
                     soonest = Some(soonest.map_or(next, |s: i64| s.min(next)));
                 }
@@ -559,7 +559,7 @@ fn schedule(args: &[String]) -> Result<(), String> {
         // has found something new. `models/hf` asks Hugging Face about the models `models/gguf`
         // names: 2,684 calls to be told what it already holds, or none.
         for (name, dir) in follows(&root, &moved) {
-            let ds = match Dataset::open(&dir) {
+            let ds = match Source::open(&dir) {
                 Ok(ds) => ds,
                 Err(e) => {
                     eprintln!("{name}: {e}");
@@ -761,8 +761,8 @@ fn scope_at(args: &[String], from: usize) -> Result<(PathBuf, PathBuf), String> 
         .first()
         .map(|s| PathBuf::from(s.as_str()))
         .ok_or("which tracker directory?")?;
-    if !p.join(crate::scopedecl::FILE).exists() {
-        return Err(missing(&p.join(crate::scopedecl::FILE)));
+    if !p.join(crate::trackerdecl::FILE).exists() {
+        return Err(missing(&p.join(crate::trackerdecl::FILE)));
     }
     // A deployment holds `datasets/` beside `scopes/`, and a member is found there by its name.
     let datasets = match flag(args, "--sources") {
@@ -780,11 +780,11 @@ fn scope_at(args: &[String], from: usize) -> Result<(PathBuf, PathBuf), String> 
 
 fn scope_search(args: &[String]) -> Result<(), String> {
     let (dir, datasets) = scope_at(args, 2)?;
-    let scope = scope::Scope::open(&dir, &datasets)?;
+    let scope = tracker::Tracker::open(&dir, &datasets)?;
     let rest = positional(args, 2);
     let terms: Vec<String> = rest.iter().skip(1).map(|s| s.to_string()).collect();
     let (text, pred) = expr::parse_query(&terms.join(" "));
-    let q = scope::ScopeQuery {
+    let q = tracker::TrackerQuery {
         text,
         pred,
         named: flag(args, "--view").map(str::to_string),
@@ -855,9 +855,9 @@ fn search(args: &[String]) -> Result<(), String> {
     let rest = positional(args, 1);
     let dir = PathBuf::from(rest.first().ok_or("which source directory?")?.as_str());
     let terms: Vec<String> = rest.iter().skip(1).map(|s| s.to_string()).collect();
-    let ds = Dataset::open(&dir)?;
+    let ds = Source::open(&dir)?;
     let (text, pred) = expr::parse_query(&terms.join(" "));
-    let q = dataset::Query {
+    let q = source::Query {
         text,
         pred,
         ids: Vec::new(),
@@ -905,7 +905,7 @@ fn dataset_publish(args: &[String]) -> Result<(), String> {
     let dir = dir_at(args, 2)?;
     let to = flag(args, "--to").unwrap_or(artifact::DEFAULT_HUB);
     let tag = flag(args, "--tag").unwrap_or("latest");
-    let ds = Dataset::open(&dir)?;
+    let ds = Source::open(&dir)?;
     // Nothing is published that the dataset itself says is untrue.
     let wrong = ds.check();
     if !wrong.is_empty() {
@@ -958,8 +958,8 @@ fn dataset_subscribe(args: &[String]) -> Result<(), String> {
 /// `zetlyn dataset update <dir>`: ask the hub this one came from whether there is a newer version.
 fn dataset_update(args: &[String]) -> Result<(), String> {
     let dir = dir_at(args, 2)?;
-    let decl = decl::Declaration::load(&dir)?;
-    let decl::Source::Hub {
+    let decl = sourcedecl::SourceDecl::load(&dir)?;
+    let sourcedecl::Fetch::Hub {
         at, reference, key, ..
     } = &decl.source
     else {
@@ -1000,7 +1000,7 @@ fn scope_publish(args: &[String]) -> Result<(), String> {
     let to = flag(args, "--to").unwrap_or(artifact::DEFAULT_HUB);
     let tag = flag(args, "--tag").unwrap_or("latest");
     // A scope that does not hold together is not published, for the same reason a dataset is not.
-    let scope = scope::Scope::open(&dir, &datasets)?;
+    let scope = tracker::Tracker::open(&dir, &datasets)?;
     let wrong = scope.check();
     if !wrong.is_empty() {
         for w in &wrong {
@@ -1456,10 +1456,10 @@ fn follows(root: &Path, moved: &[String]) -> Vec<(String, PathBuf)> {
     if moved.is_empty() {
         return Vec::new();
     }
-    scope::registry(&root.join("sources"))
+    tracker::registry(&root.join("sources"))
         .into_iter()
         .filter(|(_, dir)| {
-            decl::Declaration::load(dir)
+            sourcedecl::SourceDecl::load(dir)
                 .ok()
                 .and_then(|d| d.source.after().map(str::to_string))
                 .is_some_and(|after| moved.contains(&after))

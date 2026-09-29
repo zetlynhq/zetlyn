@@ -395,8 +395,8 @@ fn index_page(dir: &Path, serving: &[String]) -> Vec<u8> {
                         span { "Zetlyn" }
                     }
                     nav {
-                        a href="https://zetlyn.com/trackers" { "Scopes" }
-                        a href="https://zetlyn.com/sources" { "Datasets" }
+                        a href="https://zetlyn.com/trackers" { "Trackers" }
+                        a href="https://zetlyn.com/sources" { "Sources" }
                         a href="https://zetlyn.com/hub" { "Hub" }
                     }
                 }
@@ -454,11 +454,11 @@ fn index_page(dir: &Path, serving: &[String]) -> Vec<u8> {
 
                     section.page.shell {
                         article.prose {
-                            h2 { "Datasets" }
+                            h2 { "Sources" }
                             @if datasets.is_empty() { p { "None yet." } }
                             table {
                                 thead { tr {
-                                    th { "Dataset" } th { "Records" } th { "Bytes" } th { "Version" }
+                                    th { "Source" } th { "Claims" } th { "Bytes" } th { "Version" }
                                 } }
                                 tbody {
                                     @for c in &datasets {

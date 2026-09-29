@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct Declaration {
+pub struct SourceDecl {
     pub name: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub title: String,
@@ -17,11 +17,11 @@ pub struct Declaration {
     pub about: String,
     /// Where the bytes are. `source` is the whole of this file, so this part is `fetch`.
     #[serde(rename = "fetch")]
-    pub source: Source,
+    pub source: Fetch,
     #[serde(default, skip_serializing_if = "Schedule::is_empty")]
     pub schedule: Schedule,
     #[serde(rename = "claims")]
-    pub records: Records,
+    pub records: ClaimsDecl,
     /// Each publisher's own words, defined in each publisher's own sentence.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub vocabulary: BTreeMap<String, BTreeMap<String, String>>,
@@ -43,7 +43,7 @@ pub struct Declaration {
 // of them to even that out would put an indirection in the hot path of every row for the
 // sake of a declaration that is read once.
 #[allow(clippy::large_enum_variant)]
-pub enum Source {
+pub enum Fetch {
     /// A directory of files, recursively. May name a git repository, pulled before each run.
     Folder {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -187,21 +187,21 @@ fn one() -> usize {
     1
 }
 
-impl Source {
+impl Fetch {
     /// A run that stopped at a declared `limit` has not seen the source, so it never
     /// licenses a removal and never advances the mark. `limit` is for trying a shape.
     pub fn truncating(&self) -> bool {
-        matches!(self, Source::Http { limit, .. } if *limit > 0)
+        matches!(self, Fetch::Http { limit, .. } if *limit > 0)
     }
 
     pub fn kind_name(&self) -> &'static str {
         match self {
-            Source::Folder { .. } => "folder",
-            Source::Csv { .. } => "csv",
-            Source::Xlsx { .. } => "xlsx",
-            Source::Http { .. } => "http",
-            Source::Feed { .. } => "feed",
-            Source::Hub { .. } => "hub",
+            Fetch::Folder { .. } => "folder",
+            Fetch::Csv { .. } => "csv",
+            Fetch::Xlsx { .. } => "xlsx",
+            Fetch::Http { .. } => "http",
+            Fetch::Feed { .. } => "feed",
+            Fetch::Hub { .. } => "hub",
         }
     }
 
@@ -209,10 +209,10 @@ impl Source {
     /// them. A folder is the operator's own machine and says so rather than naming a path.
     pub fn address(&self) -> String {
         match self {
-            Source::Folder { git: Some(url), .. } => url.clone(),
-            Source::Folder { .. } => "a directory on the publisher's machine".into(),
-            Source::Csv { path, .. } | Source::Xlsx { path, .. } => path.clone(),
-            Source::Http { list, detail, .. } => {
+            Fetch::Folder { git: Some(url), .. } => url.clone(),
+            Fetch::Folder { .. } => "a directory on the publisher's machine".into(),
+            Fetch::Csv { path, .. } | Fetch::Xlsx { path, .. } => path.clone(),
+            Fetch::Http { list, detail, .. } => {
                 let named = if list.is_empty() {
                     detail.clone().unwrap_or_default()
                 } else {
@@ -220,8 +220,8 @@ impl Source {
                 };
                 named.split(['?', '{']).next().unwrap_or("").to_string()
             }
-            Source::Feed { urls, .. } => urls.join(", "),
-            Source::Hub { at, reference, .. } => format!("{at} {reference}"),
+            Fetch::Feed { urls, .. } => urls.join(", "),
+            Fetch::Hub { at, reference, .. } => format!("{at} {reference}"),
         }
     }
 
@@ -230,16 +230,16 @@ impl Source {
     /// stated in one word. A source that carries no text of its own says `none`.
     pub fn text_is(&self) -> &str {
         match self {
-            Source::Feed { text_is, .. } => text_is,
-            Source::Folder { .. } | Source::Csv { .. } | Source::Xlsx { .. } => "whole",
-            Source::Http { .. } => "whole",
-            Source::Hub { text_is, .. } => text_is,
+            Fetch::Feed { text_is, .. } => text_is,
+            Fetch::Folder { .. } | Fetch::Csv { .. } | Fetch::Xlsx { .. } => "whole",
+            Fetch::Http { .. } => "whole",
+            Fetch::Hub { text_is, .. } => text_is,
         }
     }
     /// What `file:` paths resolve against, and what a run reads.
     pub fn root(&self, base: &Path) -> std::path::PathBuf {
         let p = match self {
-            Source::Folder { path, git, .. } => {
+            Fetch::Folder { path, git, .. } => {
                 let named = path.clone().unwrap_or_else(|| {
                     if git.is_some() {
                         "checkout".into()
@@ -249,9 +249,9 @@ impl Source {
                 });
                 return base.join(named);
             }
-            Source::Csv { path, .. } => path,
-            Source::Xlsx { path, .. } => path,
-            Source::Http { .. } | Source::Feed { .. } | Source::Hub { .. } => {
+            Fetch::Csv { path, .. } => path,
+            Fetch::Xlsx { path, .. } => path,
+            Fetch::Http { .. } | Fetch::Feed { .. } | Fetch::Hub { .. } => {
                 return base.to_path_buf()
             }
         };
@@ -265,7 +265,7 @@ impl Source {
 
     /// A checkout is fetched before it is read, and `git` is the whole of what that needs.
     pub fn prepare(&self, base: &Path) -> Result<(), String> {
-        let Source::Folder { git: Some(url), .. } = self else {
+        let Fetch::Folder { git: Some(url), .. } = self else {
             return Ok(());
         };
         let dir = self.root(base);
@@ -322,7 +322,7 @@ pub struct Schedule {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct Records {
+pub struct ClaimsDecl {
     /// Names the list where one fetched thing holds many records.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub each: Option<String>,
@@ -340,7 +340,7 @@ pub struct Records {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub known: Option<String>,
     #[serde(default, rename = "properties", skip_serializing_if = "BTreeMap::is_empty")]
-    pub fields: BTreeMap<String, FieldSpec>,
+    pub fields: BTreeMap<String, PropertySpec>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -387,7 +387,7 @@ impl IdSpec {
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum FieldType {
+pub enum PropertyType {
     Text,
     Code,
     Number,
@@ -396,15 +396,15 @@ pub enum FieldType {
     Interval,
 }
 
-impl FieldType {
+impl PropertyType {
     pub fn name(self) -> &'static str {
         match self {
-            FieldType::Text => "text",
-            FieldType::Code => "code",
-            FieldType::Number => "number",
-            FieldType::Bool => "bool",
-            FieldType::Date => "date",
-            FieldType::Interval => "interval",
+            PropertyType::Text => "text",
+            PropertyType::Code => "code",
+            PropertyType::Number => "number",
+            PropertyType::Bool => "bool",
+            PropertyType::Date => "date",
+            PropertyType::Interval => "interval",
         }
     }
     /// `number` and `date` compare by their own order. `text`, `bool` and `code` compare for
@@ -412,16 +412,16 @@ impl FieldType {
     pub fn ordered(self) -> bool {
         matches!(
             self,
-            FieldType::Number | FieldType::Date | FieldType::Interval
+            PropertyType::Number | PropertyType::Date | PropertyType::Interval
         )
     }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct FieldSpec {
+pub struct PropertySpec {
     #[serde(rename = "type")]
-    pub kind: FieldType,
+    pub kind: PropertyType,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vocabulary: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -436,7 +436,7 @@ pub struct FieldSpec {
     pub default: Option<String>,
 }
 
-impl FieldSpec {
+impl PropertySpec {
     pub fn spec(&self) -> Spec {
         Spec {
             from: self.from.clone(),
@@ -516,17 +516,17 @@ impl Retention {
 /// The file a source is, inside its directory.
 pub const FILE: &str = "source.yaml";
 
-impl Declaration {
-    pub fn load(dir: &Path) -> Result<Declaration, String> {
+impl SourceDecl {
+    pub fn load(dir: &Path) -> Result<SourceDecl, String> {
         let path = dir.join(FILE);
-        let mut d: Declaration = crate::yaml::read(&path)?;
+        let mut d: SourceDecl = crate::yaml::read(&path)?;
         if d.title.is_empty() {
             d.title = d.name.clone();
         }
         // A subscribed dataset has nothing to extract from, so its specs carry a name and a type
         // and no expression. Everywhere else an absent `from` is a field that would silently
         // produce nothing, and saying so here costs one pass over the declaration.
-        if !matches!(d.source, Source::Hub { .. }) {
+        if !matches!(d.source, Fetch::Hub { .. }) {
             let mut missing: Vec<String> = Vec::new();
             if d.records.title.trim().is_empty() {
                 missing.push("title".into());
@@ -635,14 +635,14 @@ pub struct ForEach {
     pub scheme: String,
 }
 
-impl Source {
+impl Fetch {
     /// The one address this source reads, where there is exactly one. A source that pages, or
     /// crawls, or reads a directory has no single thing to ask about, so the answer is `None`
     /// and it is fetched the way it always was.
     pub fn single_url(&self) -> Option<&str> {
         let named = match self {
-            Source::Csv { path, .. } | Source::Xlsx { path, .. } => path.as_str(),
-            Source::Feed { urls, .. } if urls.len() == 1 => urls[0].as_str(),
+            Fetch::Csv { path, .. } | Fetch::Xlsx { path, .. } => path.as_str(),
+            Fetch::Feed { urls, .. } if urls.len() == 1 => urls[0].as_str(),
             _ => return None,
         };
         named
@@ -654,19 +654,19 @@ impl Source {
     /// What to call itself when asking. A source that declares one is asked under it.
     pub fn agent(&self) -> &str {
         match self {
-            Source::Http { user_agent, .. } | Source::Feed { user_agent, .. } => user_agent,
+            Fetch::Http { user_agent, .. } | Fetch::Feed { user_agent, .. } => user_agent,
             _ => AGENT,
         }
     }
 }
 
-impl Source {
+impl Fetch {
     /// The dataset this one takes its subjects from, where it takes them from one. `models/hf`
     /// asks Hugging Face about the models `models/gguf` names, so it has nothing to do until
     /// that one has found something new.
     pub fn after(&self) -> Option<&str> {
         match self {
-            Source::Http {
+            Fetch::Http {
                 for_each: Some(f), ..
             } if !f.dataset.is_empty() => Some(&f.dataset),
             _ => None,

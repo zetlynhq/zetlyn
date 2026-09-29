@@ -67,7 +67,7 @@ pub fn digest(raw: &str) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Records first held at or before this, or published before it, are free to read.
+/// Claims first held at or before this, or published before it, are free to read.
 pub fn free_edge() -> String {
     crate::iso_stamp(crate::now() - FREE_DELAY_DAYS * 86_400)
 }

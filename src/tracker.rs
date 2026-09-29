@@ -6,15 +6,15 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value as J};
 
-use crate::dataset::{Dataset, Member, Query};
+use crate::source::{Source, Interface, Query};
 use crate::expr::{self, Lit, Op, Pred};
-use crate::record::{Id, Record};
-use crate::scopedecl::{KindView, MemberDecl, ScopeDecl};
+use crate::claim::{Id, Claim};
+use crate::trackerdecl::{KindView, SourceRef, TrackerDecl};
 use crate::store::Hit;
 
 pub struct Resolved {
-    pub decl: MemberDecl,
-    pub member: Box<dyn Member>,
+    pub decl: SourceRef,
+    pub member: Box<dyn Interface>,
     pub described: J,
 }
 
@@ -55,16 +55,16 @@ impl Resolved {
     }
 }
 
-pub struct Scope {
+pub struct Tracker {
     /// The deployment this scope was opened in, where its watches live.
     pub root: PathBuf,
-    pub decl: ScopeDecl,
+    pub decl: TrackerDecl,
     pub members: Vec<Resolved>,
     pub missing: Vec<String>,
 }
 
 #[derive(Default)]
-pub struct ScopeQuery {
+pub struct TrackerQuery {
     pub text: String,
     pub pred: Option<Pred>,
     pub named: Option<String>,
@@ -77,7 +77,7 @@ pub struct ScopeQuery {
 }
 
 /// One member's record inside an entry.
-pub struct Part {
+pub struct ClaimRef {
     pub member: String,
     pub priority: u8,
     pub kind: String,
@@ -89,7 +89,7 @@ pub struct Part {
 }
 
 /// Per field, every value with the member that said it, and what this scope makes of it.
-pub struct FieldView {
+pub struct PropertyView {
     /// Per member, every distinct value that member said, sorted. A member can say a field
     /// several times for one subject: four quantisations of one model carry four licences, and
     /// keeping one of them would mean keeping whichever arrived last.
@@ -99,18 +99,18 @@ pub struct FieldView {
     pub mapped: bool,
 }
 
-pub struct Entry {
+pub struct Thing {
     pub key: Option<Id>,
     pub rank: usize,
     pub title: String,
-    pub parts: Vec<Part>,
-    pub fields: BTreeMap<String, FieldView>,
+    pub parts: Vec<ClaimRef>,
+    pub fields: BTreeMap<String, PropertyView>,
     pub why: Vec<String>,
 }
 
-impl Entry {
+impl Thing {
     /// Grouped by kind, and ordered by the scope's priority inside each group.
-    pub fn by_kind(&self) -> Vec<(String, Vec<&Part>)> {
+    pub fn by_kind(&self) -> Vec<(String, Vec<&ClaimRef>)> {
         let mut kinds: Vec<String> = Vec::new();
         for p in &self.parts {
             if !kinds.contains(&p.kind) {
@@ -120,7 +120,7 @@ impl Entry {
         kinds
             .into_iter()
             .map(|k| {
-                let mut ps: Vec<&Part> = self.parts.iter().filter(|p| p.kind == k).collect();
+                let mut ps: Vec<&ClaimRef> = self.parts.iter().filter(|p| p.kind == k).collect();
                 ps.sort_by_key(|p| p.priority);
                 (k, ps)
             })
@@ -139,7 +139,7 @@ impl Entry {
 
 pub struct Answer {
     pub total: u64,
-    pub entries: Vec<Entry>,
+    pub entries: Vec<Thing>,
     pub answered: Vec<String>,
     pub unanswered: Vec<(String, Vec<String>)>,
     /// The total is a floor: a member had more candidates than were read, and the second pass
@@ -156,11 +156,11 @@ pub struct Answer {
 /// members at this depth is the CVE scope answering a filtered query in a tenth of a second.
 const CANDIDATES: usize = 20_000;
 
-impl Scope {
+impl Tracker {
     /// Members are named, not pathed. A deployment holds its datasets in one place and a scope
     /// finds them there, because a dataset belongs to no scope and several may name it.
-    pub fn open(dir: &Path, datasets: &Path) -> Result<Scope, String> {
-        let decl = ScopeDecl::load(dir)?;
+    pub fn open(dir: &Path, datasets: &Path) -> Result<Tracker, String> {
+        let decl = TrackerDecl::load(dir)?;
         let registry = registry(datasets);
         let mut members = Vec::new();
         let mut missing = Vec::new();
@@ -170,12 +170,12 @@ impl Scope {
             if let Some(url) = &m.remote {
                 match crate::remote::Remote::open(url, m.key.clone()) {
                     Ok(r) => {
-                        let described = Member::describe(&r);
+                        let described = Interface::describe(&r);
                         members.push(Resolved {
-                            decl: MemberDecl {
+                            decl: SourceRef {
                                 remote: Some(url.clone()),
                                 key: m.key.clone(),
-                                dataset: Member::name(&r).to_string(),
+                                dataset: Interface::name(&r).to_string(),
                                 priority: m.priority,
                                 why: m.why.clone(),
                             },
@@ -189,10 +189,10 @@ impl Scope {
             }
             match registry.get(&m.dataset) {
                 Some(path) => {
-                    let ds = Dataset::open(path)?;
-                    let described = Member::describe(&ds);
+                    let ds = Source::open(path)?;
+                    let described = Interface::describe(&ds);
                     members.push(Resolved {
-                        decl: MemberDecl {
+                        decl: SourceRef {
                             remote: None,
                             key: None,
                             dataset: m.dataset.clone(),
@@ -209,7 +209,7 @@ impl Scope {
             }
         }
         members.sort_by_key(|m| m.decl.priority.rank());
-        Ok(Scope {
+        Ok(Tracker {
             root: datasets.parent().unwrap_or(datasets).to_path_buf(),
             decl,
             members,
@@ -331,12 +331,12 @@ impl Scope {
         }
     }
 
-    fn named_view(&self, name: &str) -> Option<&crate::scopedecl::NamedView> {
+    fn named_view(&self, name: &str) -> Option<&crate::trackerdecl::NamedView> {
         self.decl.view.named.iter().find(|v| v.name == name)
     }
 
     /// Five layers, each falling back to the one below it.
-    pub fn columns(&self, q: &ScopeQuery) -> Vec<String> {
+    pub fn columns(&self, q: &TrackerQuery) -> Vec<String> {
         if let Some(n) = q.named.as_deref().and_then(|n| self.named_view(n)) {
             if !n.columns.is_empty() {
                 return n.columns.clone();
@@ -410,7 +410,7 @@ impl Scope {
         })
     }
 
-    pub fn facets(&self, q: &ScopeQuery) -> Vec<String> {
+    pub fn facets(&self, q: &TrackerQuery) -> Vec<String> {
         if let Some(n) = q.named.as_deref().and_then(|n| self.named_view(n)) {
             if !n.facets.is_empty() {
                 return n.facets.clone();
@@ -431,7 +431,7 @@ impl Scope {
 
     /// Whether this member can select anything for this query at all. Free text goes to every
     /// member that has an index; a filter goes only to the members carrying a field it names.
-    fn narrows(&self, q: &ScopeQuery, m: &Resolved) -> bool {
+    fn narrows(&self, q: &TrackerQuery, m: &Resolved) -> bool {
         if !q.text.trim().is_empty() {
             return true;
         }
@@ -450,7 +450,7 @@ impl Scope {
             || named.is_some_and(|p| names_member(&p, m.name()))
     }
 
-    fn member_query(&self, q: &ScopeQuery, m: &Resolved, limit: usize) -> Query {
+    fn member_query(&self, q: &TrackerQuery, m: &Resolved, limit: usize) -> Query {
         let member = m.name();
         // The sort falls through the same chain the columns do.
         let sort = q.sort.clone().or_else(|| {
@@ -499,7 +499,7 @@ impl Scope {
         }
     }
 
-    pub fn search(&self, q: &ScopeQuery) -> Answer {
+    pub fn search(&self, q: &TrackerQuery) -> Answer {
         let limit = if q.limit == 0 { 25 } else { q.limit };
         let want = limit + q.offset;
         let keys: Vec<&str> = self.decl.keys();
@@ -583,7 +583,7 @@ impl Scope {
         }
 
         // Gathered into entries on the joined key, whatever kind of record each one is.
-        let mut entries: Vec<Entry> = Vec::new();
+        let mut entries: Vec<Thing> = Vec::new();
         let mut seen: BTreeMap<String, usize> = BTreeMap::new();
         for (mi, hit) in order {
             let key = hit
@@ -625,7 +625,7 @@ impl Scope {
         }
         let matched = entries.len() as u64;
 
-        let mut page: Vec<Entry> = entries.into_iter().skip(q.offset).take(limit).collect();
+        let mut page: Vec<Thing> = entries.into_iter().skip(q.offset).take(limit).collect();
         for (i, e) in page.iter_mut().enumerate() {
             e.rank = q.offset + i + 1;
         }
@@ -641,12 +641,12 @@ impl Scope {
         }
     }
 
-    fn new_entry(&self, key: Option<Id>, hit: &Hit) -> Entry {
+    fn new_entry(&self, key: Option<Id>, hit: &Hit) -> Thing {
         let mut why = hit.why_text.clone();
         if let Some(id) = &hit.why_id {
             why.push(format!("identifier {}", id.value));
         }
-        Entry {
+        Thing {
             key,
             rank: 0,
             title: hit.title.clone(),
@@ -656,7 +656,7 @@ impl Scope {
         }
     }
 
-    fn add_part(&self, entry: &mut Entry, m: &Resolved, hit: &Hit) {
+    fn add_part(&self, entry: &mut Thing, m: &Resolved, hit: &Hit) {
         if entry.parts.iter().any(|p| p.record_id == hit.record_id) {
             return;
         }
@@ -665,7 +665,7 @@ impl Scope {
             .iter()
             .map(|(k, v)| (self.field_out(m.name(), k), v.display()))
             .collect();
-        entry.parts.push(Part {
+        entry.parts.push(ClaimRef {
             member: m.name().to_string(),
             priority: m.decl.priority.rank(),
             kind: hit.kind.clone(),
@@ -684,7 +684,7 @@ impl Scope {
 
     /// A member that did not answer the filter still has something to say about an entry the
     /// others selected. One round of identifier lookups completes every entry on the page.
-    fn complete(&self, page: &mut [Entry], keys: &[&str]) {
+    fn complete(&self, page: &mut [Thing], keys: &[&str]) {
         if keys.is_empty() || page.is_empty() {
             return;
         }
@@ -731,7 +731,7 @@ impl Scope {
 
     /// Per field, every value with the member that said it, its raw word beside the mapped one,
     /// and `divergent` computed after the map.
-    fn fold_fields(&self, entry: &mut Entry) {
+    fn fold_fields(&self, entry: &mut Thing) {
         let mut names: BTreeSet<String> = BTreeSet::new();
         for p in &entry.parts {
             names.extend(p.fields.keys().cloned());
@@ -760,7 +760,7 @@ impl Scope {
             let divergent = disagree(means.values());
             entry.fields.insert(
                 name,
-                FieldView {
+                PropertyView {
                     divergent,
                     mapped: n.is_some(),
                     by: by.into_iter().map(|(m, v)| (m, into_sorted(v))).collect(),
@@ -774,7 +774,7 @@ impl Scope {
     }
 
     /// Counted per value across every member, on the scale this scope declares where it has one.
-    pub fn facet(&self, q: &ScopeQuery, field: &str, limit: usize) -> (Vec<(String, u64)>, u64) {
+    pub fn facet(&self, q: &TrackerQuery, field: &str, limit: usize) -> (Vec<(String, u64)>, u64) {
         let mut tally: BTreeMap<String, u64> = BTreeMap::new();
         let mut coverage = 0u64;
         for m in &self.members {
@@ -815,13 +815,13 @@ impl Scope {
     }
 
     /// One subject, and everything any member says about it.
-    pub fn entry(&self, scheme: &str, value: &str) -> Option<Entry> {
+    pub fn entry(&self, scheme: &str, value: &str) -> Option<Thing> {
         let key = Id {
             scheme: scheme.to_string(),
             // As asked for. The lookup folds case; the key a page shows does not.
             value: value.to_string(),
         };
-        let mut entry = Entry {
+        let mut entry = Thing {
             key: Some(key.clone()),
             rank: 1,
             title: value.to_string(),
@@ -854,7 +854,7 @@ impl Scope {
         Some(entry)
     }
 
-    pub fn records_of(&self, member: &str, ids: &[String]) -> Vec<Record> {
+    pub fn records_of(&self, member: &str, ids: &[String]) -> Vec<Claim> {
         self.members
             .iter()
             .find(|m| m.name() == member)
@@ -916,10 +916,10 @@ pub fn registry(datasets: &Path) -> BTreeMap<String, PathBuf> {
     };
     for e in entries.flatten() {
         let dir = e.path();
-        if !dir.join(crate::decl::FILE).exists() {
+        if !dir.join(crate::sourcedecl::FILE).exists() {
             continue;
         }
-        if let Ok(d) = crate::decl::Declaration::load(&dir) {
+        if let Ok(d) = crate::sourcedecl::SourceDecl::load(&dir) {
             out.insert(d.name, dir);
         }
     }
@@ -934,7 +934,7 @@ fn parse_marks(raw: &str) -> BTreeMap<String, i64> {
         .collect()
 }
 
-impl Scope {
+impl Tracker {
     /// One mark per member, so a reader hands back exactly what they were last told.
     pub fn mark(&self) -> String {
         self.members
@@ -1017,17 +1017,17 @@ pub fn scope_registry(scopes: &Path) -> BTreeMap<String, PathBuf> {
     };
     for e in entries.flatten() {
         let dir = e.path();
-        if !dir.join(crate::scopedecl::FILE).exists() {
+        if !dir.join(crate::trackerdecl::FILE).exists() {
             continue;
         }
-        if let Ok(d) = ScopeDecl::load(&dir) {
+        if let Ok(d) = TrackerDecl::load(&dir) {
             out.insert(d.name, dir);
         }
     }
     out
 }
 
-impl Scope {
+impl Tracker {
     /// Checked against when each member last finished a run, complete or not: this is a claim
     /// about freshness, not about coverage. What a run reached is a separate fact and the
     /// member's state carries it. A scope that is stale says so on its own front page, rather
@@ -1085,7 +1085,7 @@ pub fn human(seconds: i64) -> String {
     }
 }
 
-impl Scope {
+impl Tracker {
     /// What this scope actually holds, counted rather than claimed.
     ///
     /// Every member is paged through the same `search` a reader uses, so the numbers are the ones
@@ -1212,7 +1212,7 @@ impl Scope {
     }
 }
 
-impl Scope {
+impl Tracker {
     /// What this member can be asked of a predicate, and nothing more.
     ///
     /// A filter is pushed down so a member does the narrowing it can do, and a conjunct it cannot
@@ -1244,7 +1244,7 @@ impl Scope {
 
     /// The whole predicate again, over the values the entry shows. A question that spans sources is
     /// answered here or nowhere: no member holds both `exploited` and `severity`.
-    pub fn entry_holds(&self, entry: &Entry, pred: &Pred) -> bool {
+    pub fn entry_holds(&self, entry: &Thing, pred: &Pred) -> bool {
         match pred {
             Pred::And(a, b) => self.entry_holds(entry, a) && self.entry_holds(entry, b),
             Pred::Or(a, b) => self.entry_holds(entry, a) || self.entry_holds(entry, b),
@@ -1317,11 +1317,11 @@ impl Scope {
     }
 }
 
-impl Scope {
+impl Tracker {
     /// How many records a viewer under this bound can reach. The paywall is a bound on a query,
     /// so what it hides is the difference between two counts rather than a rule somewhere else.
     pub fn reachable(&self, bound: Option<&str>) -> u64 {
-        let q = ScopeQuery {
+        let q = TrackerQuery {
             limit: 1,
             seen_before: bound.map(str::to_string),
             ..Default::default()
@@ -1334,7 +1334,7 @@ impl Scope {
     }
 }
 
-impl Scope {
+impl Tracker {
     /// What a scope claims, held against what its members actually answer.
     pub fn check(&self) -> Vec<String> {
         let mut wrong = Vec::new();
@@ -1398,7 +1398,7 @@ impl Scope {
                         v.name
                     )),
                     Some(p) => {
-                        let q = ScopeQuery {
+                        let q = TrackerQuery {
                             named: Some(v.name.clone()),
                             limit: 1,
                             ..Default::default()

@@ -7,7 +7,7 @@ use std::path::Path;
 use serde_json::{json, Value as J};
 
 use crate::build::as_date;
-use crate::decl::FieldType;
+use crate::sourcedecl::PropertyType;
 
 const SAMPLE: usize = 500;
 
@@ -37,30 +37,30 @@ impl Column {
         }
         f.iter().map(|v| v.chars().count()).sum::<usize>() / f.len()
     }
-    fn kind(&self) -> FieldType {
+    fn kind(&self) -> PropertyType {
         let f = self.filled();
         if f.is_empty() {
-            return FieldType::Text;
+            return PropertyType::Text;
         }
         let bools = ["true", "false", "yes", "no", "y", "n"];
         if f.iter()
             .all(|v| bools.contains(&v.trim().to_ascii_lowercase().as_str()))
         {
-            return FieldType::Bool;
+            return PropertyType::Bool;
         }
         if f.iter()
             .all(|v| v.trim().replace(',', ".").parse::<f64>().is_ok())
         {
-            return FieldType::Number;
+            return PropertyType::Number;
         }
         if f.iter().all(|v| as_date(v).is_some()) {
-            return FieldType::Date;
+            return PropertyType::Date;
         }
         let d = self.distinct();
         if d <= 24 && d * 5 <= f.len().max(5) {
-            return FieldType::Code;
+            return PropertyType::Code;
         }
-        FieldType::Text
+        PropertyType::Text
     }
 }
 
@@ -178,7 +178,7 @@ struct Shape {
     title: String,
     known: Option<String>,
     text: Vec<String>,
-    fields: Vec<(String, FieldType)>,
+    fields: Vec<(String, PropertyType)>,
 }
 
 fn shape(cols: &[Column]) -> Shape {
@@ -199,7 +199,7 @@ fn shape(cols: &[Column]) -> Shape {
 
     let title = cols
         .iter()
-        .filter(|c| matches!(c.kind(), FieldType::Text) && c.mean_len() >= 4)
+        .filter(|c| matches!(c.kind(), PropertyType::Text) && c.mean_len() >= 4)
         .min_by_key(|c| {
             let named = hints(
                 &c.name,
@@ -221,7 +221,7 @@ fn shape(cols: &[Column]) -> Shape {
 
     let known = cols
         .iter()
-        .filter(|c| c.kind() == FieldType::Date)
+        .filter(|c| c.kind() == PropertyType::Date)
         .min_by_key(|c| {
             if hints(&c.name, &["publish", "date", "created", "known", "issued"]) {
                 0
@@ -272,7 +272,7 @@ fn examples(cols: &[Column], sh: &Shape) -> Vec<String> {
         }
     }
     for (name, kind) in &sh.fields {
-        if *kind != FieldType::Code {
+        if *kind != PropertyType::Code {
             continue;
         }
         if let Some(c) = cols.iter().find(|c| &c.name == name) {
@@ -301,11 +301,11 @@ fn examples(cols: &[Column], sh: &Shape) -> Vec<String> {
 /// What a proposal becomes: read back as a declaration before it is written, so a proposal is a
 /// file this program opens, and written by the same code as every other declaration.
 fn finish(built: J, dir: &Path) -> Result<String, String> {
-    let decl: crate::decl::Declaration = serde_json::from_value(built)
+    let decl: crate::sourcedecl::SourceDecl = serde_json::from_value(built)
         .map_err(|e| format!("the proposal does not make a declaration: {e}"))?;
     let text = crate::yaml::to_string(&decl)?;
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let path = dir.join(crate::decl::FILE);
+    let path = dir.join(crate::sourcedecl::FILE);
     std::fs::write(&path, &text).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(text)
 }
@@ -345,7 +345,7 @@ fn write_blocks(name: &str, kind: &str, fetch: J, cols: &[Column], sh: &Shape) -
     for (n, k) in &sh.fields {
         if matches!(
             k,
-            FieldType::Code | FieldType::Number | FieldType::Bool | FieldType::Date
+            PropertyType::Code | PropertyType::Number | PropertyType::Bool | PropertyType::Date
         ) && columns.len() < 4
         {
             columns.push(slug(n));
@@ -357,7 +357,7 @@ fn write_blocks(name: &str, kind: &str, fetch: J, cols: &[Column], sh: &Shape) -
     let facets: Vec<String> = sh
         .fields
         .iter()
-        .filter(|(_, k)| matches!(k, FieldType::Code | FieldType::Bool))
+        .filter(|(_, k)| matches!(k, PropertyType::Code | PropertyType::Bool))
         .map(|(n, _)| slug(n))
         .take(4)
         .collect();
@@ -365,7 +365,7 @@ fn write_blocks(name: &str, kind: &str, fetch: J, cols: &[Column], sh: &Shape) -
         "name": "recent", "title": "Newest first", "default": true,
         "columns": columns, "facets": facets, "sort": "known desc",
     })];
-    if let Some((n, _)) = sh.fields.iter().find(|(_, k)| *k == FieldType::Code) {
+    if let Some((n, _)) = sh.fields.iter().find(|(_, k)| *k == PropertyType::Code) {
         views.push(json!({
             "name": format!("by-{}", slug(n)), "title": format!("By {}", slug(n)),
             "group": slug(n), "columns": ["title", "known"],
@@ -382,7 +382,7 @@ fn write_blocks(name: &str, kind: &str, fetch: J, cols: &[Column], sh: &Shape) -
     let suggest: Vec<String> = sh
         .fields
         .iter()
-        .filter(|(_, k)| *k == FieldType::Code)
+        .filter(|(_, k)| *k == PropertyType::Code)
         .map(|(n, _)| slug(n))
         .take(3)
         .collect();
@@ -490,9 +490,9 @@ pub fn propose(
         let mut files = Vec::new();
         let exc: Vec<_> = BUILD_OUTPUT
             .iter()
-            .map(|p| crate::source::glob_to_regex(p))
+            .map(|p| crate::rows::glob_to_regex(p))
             .collect();
-        crate::source::walk_dir(&from, &from, &exc, &mut files, 200_000);
+        crate::rows::walk_dir(&from, &from, &exc, &mut files, 200_000);
         folder_declaration(&name, kind.unwrap_or("document"), &shown, files.len())
     } else if ext == "csv" || ext == "tsv" {
         let (headers, rows) = read_csv(&from)?;
@@ -568,7 +568,7 @@ pub fn propose_url(
     name: Option<&str>,
     kind: Option<&str>,
 ) -> Result<String, String> {
-    let f = crate::fetch::Fetcher::new(crate::decl::AGENT, &BTreeMap::new(), 0)?;
+    let f = crate::fetch::Fetcher::new(crate::sourcedecl::AGENT, &BTreeMap::new(), 0)?;
     let body = f.get(url)?;
 
     // The directory is made once the shape is known. Refusing a JSON API after making it

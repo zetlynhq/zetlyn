@@ -15,9 +15,9 @@ use std::path::Path;
 
 use serde_json::{json, Value as J};
 
-use crate::dataset::Dataset;
+use crate::source::Source;
 use crate::place::{sha256, Place};
-use crate::record::Record;
+use crate::claim::Claim;
 use crate::store::Store;
 
 pub const SPEC_VERSION: &str = "2.0";
@@ -109,7 +109,7 @@ pub fn version_of(payloads: &BTreeMap<String, (u64, String)>) -> String {
 }
 
 /// What a published dataset says about itself, without fetching its records.
-pub fn manifest_of(ds: &Dataset, payloads: &BTreeMap<String, (u64, String)>) -> J {
+pub fn manifest_of(ds: &Source, payloads: &BTreeMap<String, (u64, String)>) -> J {
     let d = &ds.decl;
     let last = ds.store.run_report(ds.store.last_run());
     let (first_known, last_known) = ds.store.known_span();
@@ -198,7 +198,7 @@ fn differs(held: &[u8], built: &J) -> bool {
 
 /// Write `claims.jsonl`, the manifest and the tag. Returns the version.
 pub fn publish(
-    ds: &Dataset,
+    ds: &Source,
     place: &dyn Place,
     tag: &str,
     expect: Option<&str>,
@@ -276,7 +276,7 @@ pub fn publish(
 /// The publisher reads their own last publication back rather than keeping a copy: the hub is
 /// what subscribers hold, so it is the thing to compute against.
 fn write_delta(
-    ds: &Dataset,
+    ds: &Source,
     place: &dyn Place,
     reference: &Reference,
     previous: &str,
@@ -481,7 +481,7 @@ pub fn subscribe(
 
     std::fs::create_dir_all(into).map_err(|e| format!("{}: {e}", into.display()))?;
     std::fs::write(
-        into.join(crate::decl::FILE),
+        into.join(crate::sourcedecl::FILE),
         // The key it was pinned to, or the one that actually signed what arrived. Written down
         // either way, so the next fetch is held against this one.
         declaration(
@@ -514,7 +514,7 @@ pub fn subscribe(
             continue;
         }
         let j: J = serde_json::from_str(line).map_err(|e| format!("line {}: {e}", n + 1))?;
-        let record = Record::from_json(name, &j).map_err(|e| format!("line {}: {e}", n + 1))?;
+        let record = Claim::from_json(name, &j).map_err(|e| format!("line {}: {e}", n + 1))?;
         for f in record.fields.keys() {
             fields.insert(f.clone());
         }
@@ -584,7 +584,7 @@ fn declaration(
     });
     // Read back as a declaration before it is written, so what lands on disk is one this program
     // opens: a hand-assembled file was a file that could say something no declaration says.
-    let decl: crate::decl::Declaration = serde_json::from_value(built)
+    let decl: crate::sourcedecl::SourceDecl = serde_json::from_value(built)
         .map_err(|e| format!("{reference}: the manifest does not make a declaration: {e}"))?;
     Ok(format!(
         "# Subscribed, not fetched. `zetlyn source update` on this asks the hub whether there is a\n\
@@ -606,9 +606,9 @@ pub fn publish_scope(
     tag: &str,
     expect: Option<&str>,
 ) -> Result<String, String> {
-    let path = dir.join(crate::scopedecl::FILE);
+    let path = dir.join(crate::trackerdecl::FILE);
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let decl = crate::scopedecl::ScopeDecl::load(dir)?;
+    let decl = crate::trackerdecl::TrackerDecl::load(dir)?;
     let version = sha256(text.as_bytes())[..24].to_string();
 
     // Which version of each member the curator last checked this against. Information and not a
@@ -689,7 +689,7 @@ pub fn subscribe_scope(
         .as_str()
         .ok_or_else(|| format!("{reference}: the manifest carries no declaration"))?;
     std::fs::create_dir_all(into).map_err(|e| format!("{}: {e}", into.display()))?;
-    std::fs::write(into.join(crate::scopedecl::FILE), text)
+    std::fs::write(into.join(crate::trackerdecl::FILE), text)
         .map_err(|e| format!("{}: {e}", into.display()))?;
     std::fs::write(
         into.join("manifest.json"),
@@ -703,7 +703,7 @@ pub fn subscribe_scope(
             continue;
         };
         let here = datasets.join(name.rsplit('/').next().unwrap_or(name));
-        if here.join(crate::decl::FILE).exists() {
+        if here.join(crate::sourcedecl::FILE).exists() {
             continue;
         }
         let member_ref = Reference::parse(name)?;
@@ -769,7 +769,7 @@ pub fn apply_delta(
             continue;
         }
         let j: J = serde_json::from_str(line).map_err(|e| format!("line {}: {e}", n + 1))?;
-        let record = Record::from_json(name, &j).map_err(|e| format!("line {}: {e}", n + 1))?;
+        let record = Claim::from_json(name, &j).map_err(|e| format!("line {}: {e}", n + 1))?;
         for f in record.fields.keys() {
             fields.insert(f.clone());
         }
@@ -811,12 +811,12 @@ pub fn apply_delta(
     // The declaration too, and not only the records. A publisher may have added a field, changed
     // a view or replaced a search example between the two versions, and a subscriber who took the
     // records and kept the old declaration would hold a dataset that fails its own check.
-    let (location, pinned) = match &crate::decl::Declaration::load(into)?.source {
-        crate::decl::Source::Hub { at, key, .. } => (at.clone(), key.clone()),
+    let (location, pinned) = match &crate::sourcedecl::SourceDecl::load(into)?.source {
+        crate::sourcedecl::Fetch::Hub { at, key, .. } => (at.clone(), key.clone()),
         _ => (String::new(), String::new()),
     };
     std::fs::write(
-        into.join(crate::decl::FILE),
+        into.join(crate::sourcedecl::FILE),
         declaration(full, &location, reference, &pinned)?,
     )
     .map_err(|e| format!("{}: {e}", into.display()))?;

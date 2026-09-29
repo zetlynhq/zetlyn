@@ -13,9 +13,9 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value as J};
 
-use crate::dataset::Dataset;
+use crate::source::Source;
 use crate::grant::{self, Signed};
-use crate::scope::{self, Scope};
+use crate::tracker::{self, Tracker};
 
 pub fn serve(root: &Path, addr: &str) -> Result<(), String> {
     let operator = crate::key::public(root, grant::OPERATOR_KEY).ok_or_else(|| {
@@ -220,24 +220,24 @@ fn at(root: &Path, kind: &str, named: &str) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-fn open(root: &Path, named: &str) -> Result<Dataset, String> {
-    Dataset::open(&at(root, "sources", named)?)
+fn open(root: &Path, named: &str) -> Result<Source, String> {
+    Source::open(&at(root, "sources", named)?)
 }
 
-fn open_scope(root: &Path, named: &str) -> Result<Scope, String> {
-    Scope::open(&at(root, "trackers", named)?, &datasets(root))
+fn open_scope(root: &Path, named: &str) -> Result<Tracker, String> {
+    Tracker::open(&at(root, "trackers", named)?, &datasets(root))
 }
 
 fn declaration_of(root: &Path, named: &str) -> Result<String, String> {
-    let path = at(root, "sources", named)?.join(crate::decl::FILE);
+    let path = at(root, "sources", named)?.join(crate::sourcedecl::FILE);
     std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 fn holdings(root: &Path, name: &str) -> J {
-    let held: Vec<J> = scope::registry(&datasets(root))
+    let held: Vec<J> = tracker::registry(&datasets(root))
         .iter()
         .filter_map(|(named, dir)| {
-            let ds = Dataset::open(dir).ok()?;
+            let ds = Source::open(dir).ok()?;
             Some(json!({
                 "source": named,
                 "kind": ds.decl.kind,
@@ -248,10 +248,10 @@ fn holdings(root: &Path, name: &str) -> J {
             }))
         })
         .collect();
-    let scopes: Vec<J> = scope::scope_registry(&root.join("trackers"))
+    let scopes: Vec<J> = tracker::scope_registry(&root.join("trackers"))
         .iter()
         .filter_map(|(named, dir)| {
-            let s = Scope::open(dir, &datasets(root)).ok()?;
+            let s = Tracker::open(dir, &datasets(root)).ok()?;
             let (holds, late) = s.promise();
             Some(json!({
                 "tracker": named,
@@ -271,7 +271,7 @@ fn holdings(root: &Path, name: &str) -> J {
     })
 }
 
-fn runs(ds: &Dataset) -> J {
+fn runs(ds: &Source) -> J {
     let last = ds.store.last_run();
     let reports: Vec<J> = (0..20)
         .filter_map(|back| {
@@ -297,7 +297,7 @@ fn run_now(root: &Path, named: &str) -> (u16, J) {
         Ok(d) => d,
         Err(e) => return (404, json!({ "refused": e })),
     };
-    let ds = match Dataset::open(&dir) {
+    let ds = match Source::open(&dir) {
         Ok(d) => d,
         Err(e) => return (404, json!({ "refused": e })),
     };
@@ -326,7 +326,7 @@ fn apply(root: &Path, named: &str, body: &[u8]) -> (u16, J) {
     let Ok(text) = String::from_utf8(body.to_vec()) else {
         return (400, json!({ "refused": "a declaration is text" }));
     };
-    let path = dir.join(crate::decl::FILE);
+    let path = dir.join(crate::sourcedecl::FILE);
     let before = match std::fs::read_to_string(&path) {
         Ok(t) => t,
         Err(e) => return (500, json!({ "failed": format!("{}: {e}", path.display()) })),
@@ -353,7 +353,7 @@ fn apply(root: &Path, named: &str, body: &[u8]) -> (u16, J) {
         let _ = std::fs::remove_file(dir.join("source.yaml.before"));
         (400, json!({ "refused": why, "applied": false }))
     };
-    let ds = match Dataset::open(&dir) {
+    let ds = match Source::open(&dir) {
         Ok(d) => d,
         Err(e) => return put_back(e),
     };

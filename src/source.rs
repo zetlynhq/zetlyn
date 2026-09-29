@@ -274,6 +274,7 @@ impl Source {
             })),
             "next_update": self.next_run(),
             "cadence": d.schedule.every,
+            "licence": d.licence,
 
             "history": d.retention.history,
             "schemes": J::Array(self.store.schemes().iter()

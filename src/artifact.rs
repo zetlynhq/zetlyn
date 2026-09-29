@@ -170,6 +170,7 @@ pub fn manifest_of(
         "fetched_from": d.source.address(),
         "text_is": d.source.text_is(),
         "terms": d.terms,
+        "licence": d.licence,
 
         // The source says how it wants to be read, and a subscriber who lost that would hold a
         // worse thing than the publisher does.
@@ -739,9 +740,15 @@ fn declaration(
         "claims": { "title": "field:title", "properties": properties },
         "views": manifest["read"]["views"].as_array().cloned().unwrap_or_default(),
         "search": manifest["read"]["search"].clone(),
+        "terms": s("terms"),
     });
     // Read back as a declaration before it is written, so what lands on disk is one this program
     // opens: a hand-assembled file was a file that could say something no declaration says.
+    // The licence travels with the claims: the subscriber republishes on the same terms or not at all.
+    let mut built = built;
+    if manifest["licence"].is_object() {
+        built["licence"] = manifest["licence"].clone();
+    }
     let decl: crate::sourcedecl::SourceDecl = serde_json::from_value(built)
         .map_err(|e| format!("{reference}: the manifest does not make a declaration: {e}"))?;
     Ok(format!(
@@ -768,6 +775,19 @@ pub fn publish_scope(
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let decl = crate::trackerdecl::TrackerDecl::load(dir)?;
     let version = sha256(text.as_bytes())[..24].to_string();
+    // The licence gate. A public tracker puts every source it names on a page anyone can open,
+    // so each of them has to have said that it may be; a private one is read by its accounts only.
+    let opened = crate::tracker::Tracker::open(dir, datasets)?;
+    if !opened.private() {
+        let wrong = opened.not_public();
+        if !wrong.is_empty() {
+            return Err(format!(
+                "{} is public, and {}. Declare `licence: {{ republish: yes | summary | no, terms: <url> }}` on each, or make the tracker `visibility: private`",
+                decl.name,
+                wrong.join("; ")
+            ));
+        }
+    }
 
     // Which version of each source the curator last checked this against. Information and not a
     // pin: a subscriber assembling it from newer sources gets newer sources, which is what

@@ -35,6 +35,11 @@ pub struct SourceDecl {
     /// it. It is the claim a person makes and answers for, and it travels in the manifest.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub terms: String,
+    /// What these claims may be used for once fetched: whether a page anyone can open may show
+    /// them. Checked, unlike `terms`: a public tracker is refused while any source it names says
+    /// `no` or says nothing.
+    #[serde(default, skip_serializing_if = "Licence::is_empty")]
+    pub licence: Licence,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -701,4 +706,33 @@ fn yes() -> bool {
 
 fn is_true(b: &bool) -> bool {
     *b
+}
+
+/// A source's licence, as its publisher states it and the person who declared the source read it.
+#[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Licence {
+    /// `yes`: its claims may be shown in full on a public page. `summary`: their titles, values
+    /// and a link, not their text. `no`: on no public page at all. Unset is `no`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub republish: String,
+    /// Where the publisher says so.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub terms: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+}
+
+impl Licence {
+    pub fn is_empty(&self) -> bool {
+        self.republish.is_empty() && self.terms.is_empty() && self.note.is_empty()
+    }
+    /// May a page anyone can open show these claims at all?
+    pub fn public(&self) -> bool {
+        matches!(self.republish.as_str(), "yes" | "summary")
+    }
+    /// And their text, or only what they say of properties and where to read the rest?
+    pub fn whole(&self) -> bool {
+        self.republish == "yes"
+    }
 }

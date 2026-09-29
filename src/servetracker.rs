@@ -127,6 +127,9 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
         h1 { (d.title) }
         (banner(v, scope, hidden))
         @if !d.about.is_empty() { p.about { (d.about) } }
+        // Public, and a source that never said it may be: said on the page rather than hidden.
+        @let undeclared = if scope.private() { Vec::new() } else { scope.not_public() };
+        @if !undeclared.is_empty() { div.note { "Not every source here has said it may be shown in public: " (undeclared.join("; ")) "." } }
         p.state.(if stale { "partial" } else { "current" }) {
             (scope.records()) " claims · " (scope.members.len()) " sources · "
             @for (k, n) in scope.kinds() { (k) " " (n) " · " }
@@ -334,7 +337,8 @@ fn entry_page(scope: &Tracker, scheme: &str, value: &str, operator: bool, said: 
     // The summary is a source's own text, the highest-priority source that has any, and says
     // whose it is. Nothing here is written by this program: a generated sentence would be a fact
     // with no receipt.
-    let summary = scope.members.iter().find_map(|m| {
+    // Never from a source whose terms allow a summary only: its text is not this page's to show.
+    let summary = scope.members.iter().filter(|m| operator || scope.text_shown(m.name())).find_map(|m| {
         entry
             .parts
             .iter()
@@ -454,7 +458,7 @@ fn definition(scope: &Tracker, member: &str, code: &str) -> Option<String> {
     None
 }
 
-fn record_page(scope: &Tracker, member: &str, id: &str) -> Option<String> {
+fn record_page(scope: &Tracker, member: &str, id: &str, operator: bool) -> Option<String> {
     let rec = scope
         .records_of(member, &[id.to_string()], true)
         .into_iter()
@@ -483,7 +487,15 @@ fn record_page(scope: &Tracker, member: &str, id: &str) -> Option<String> {
                 }
             } }
         }
-        @if !rec.text.trim().is_empty() { h2 { "Text" } div.text { (rec.text) } }
+        @if !rec.text.trim().is_empty() {
+            h2 { "Text" }
+            @if operator || scope.text_shown(member) {
+                div.text { (rec.text) }
+            } @else {
+                p.dim { "This source's terms allow its title, its values and a link here, not its text."
+                    @if let Some(u) = &rec.url { " It is at " a href=(u) { (u) } "." } }
+            }
+        }
         footer { "from " (rec.from.address()) " · " (rec.hash) }
     };
     Some(shell(&rec.title, body))
@@ -1161,6 +1173,12 @@ impl TrackerSite {
         } else {
             account::viewer_of(&accounts, cookie.as_deref(), authorization.as_deref())
         };
+        // A private tracker, or one a source forbids showing in public, is its accounts' alone:
+        // everything but signing in and what it costs is a page saying so.
+        let closed = !*operator && (scope.private() || scope.licences().iter().any(|(_, r)| r == "no"));
+        let open_anyway = matches!(path.as_str(), "/style.css" | "/signin" | "/signout" | "/pricing" | "/terms" | "/account")
+            || path.starts_with("/signin/");
+        let path = if closed && !open_anyway && !v.entitled(&scope.decl.name) { "/private".to_string() } else { path };
         let post = request.method() == &tiny_http::Method::Post;
         let mut form = String::new();
         if post {
@@ -1178,6 +1196,10 @@ impl TrackerSite {
                 "text/css; charset=utf-8",
                 None,
             ),
+            "/private" => {
+                status = 401;
+                (private_page(&scope), "text/html; charset=utf-8", None)
+            }
             // For the website's front page: what the overview and a thing page already show to
             // anyone, as one answer another site may fetch. Nothing gated is in it, so it is open
             // to every origin and carries no cookie.
@@ -1543,7 +1565,7 @@ impl TrackerSite {
                 }
             }
             _ if parts.len() == 3 && parts[0] == "claim" => {
-                match record_page(&scope, &parts[1], &parts[2]) {
+                match record_page(&scope, &parts[1], &parts[2], *operator) {
                     Some(html) => (html, "text/html; charset=utf-8", None),
                     None => {
                         missing = true;
@@ -2304,4 +2326,19 @@ fn relations_section(scope: &Tracker, key: &str, scheme: &str, value: &str, oper
             } }
         }
     }
+}
+
+/// What a private tracker says to somebody without an account on it: that it exists, whose it is,
+/// and how to sign in. Nothing it holds.
+fn private_page(scope: &Tracker) -> String {
+    let forbidden: Vec<String> = scope.licences().into_iter().filter(|(_, r)| r == "no").map(|(s, _)| s).collect();
+    shell(&scope.decl.title, html! {
+        h1 { (scope.decl.title) }
+        @if forbidden.is_empty() {
+            p.about { "A private tracker. Its pages are for the accounts it has given access to." }
+        } @else {
+            p.about { "Not public: " (forbidden.join(", ")) " may not be republished, so its pages are for the accounts it has given access to." }
+        }
+        p.bar { a.chip.on href=(at("/signin")) { "Sign in" } a.chip href=(at("/pricing")) { "What it costs" } }
+    })
 }

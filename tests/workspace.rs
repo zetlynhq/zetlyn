@@ -801,3 +801,41 @@ fn a_relation_is_what_a_claim_states_or_a_person_signs() {
     let (ok, said) = run(&ws.root, &["tracker", "match", &scope, "CVE-2026-0004", "fixes", "x", "--by", "a"]);
     assert!(!ok && said.contains("this tracker's relations are listed_as"), "{said}");
 }
+
+#[test]
+fn a_public_tracker_needs_every_source_to_say_it_may_be() {
+    let ws = Workspace::new("licence");
+    // Published at all, a tracker says what it covers; that check is not this test's.
+    let promised = ws.root.join("trackers/cve/tracker.yaml");
+    let t = std::fs::read_to_string(&promised).unwrap();
+    std::fs::write(&promised, format!("{t}promise:\n  fresh_within: 24h\n  covers: Four advisories.\n  excludes: Everything else.\n")).unwrap();
+    let hub = ws.root.join("hub");
+    let hub = hub.display().to_string();
+    let scope = ws.scope();
+    let publish = || run(&ws.root, &["tracker", "publish", &scope, "--to", &hub]);
+    let (ok, said) = publish();
+    assert!(!ok && said.contains("test/kev has not said whether it may be republished"), "{said}");
+
+    // Private, it is its accounts' alone, and needs nobody's permission to be shown to them.
+    let file = ws.root.join("trackers/cve/tracker.yaml");
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, format!("{text}visibility: private\n")).unwrap();
+    let (ok, said) = publish();
+    assert!(ok, "{said}");
+    std::fs::write(&file, &text).unwrap();
+
+    let declare = |source: &str, republish: &str| {
+        let f = ws.root.join(format!("sources/{source}/source.yaml"));
+        let t = std::fs::read_to_string(&f).unwrap();
+        let t = t.split("\nlicence:").next().unwrap().to_string();
+        std::fs::write(&f, format!("{t}\nlicence:\n  republish: {republish}\n")).unwrap();
+    };
+    for s in ["kev", "vendor-a", "vendor-b", "exploits"] {
+        declare(s, "yes");
+    }
+    let (ok, said) = publish();
+    assert!(ok, "{said}");
+    declare("exploits", "no");
+    let (ok, said) = publish();
+    assert!(!ok && said.contains("test/exploits may not be republished"), "{said}");
+}

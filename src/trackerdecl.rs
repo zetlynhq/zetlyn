@@ -24,6 +24,10 @@ pub struct TrackerDecl {
     /// What a thing is to something else, where one claim states both identifiers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub relations: Vec<Relation>,
+    /// `public`, the default: its overview and thing pages are open to anyone, its claims to
+    /// subscribers. `private`: every page for its accounts only, and no free edge.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub visibility: String,
     #[serde(default, skip_serializing_if = "Views::is_empty")]
     pub view: Views,
     #[serde(default, skip_serializing_if = "Promise::is_empty")]

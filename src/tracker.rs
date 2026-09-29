@@ -1656,3 +1656,34 @@ pub fn about<'a, K: AsRef<str>>(keys: &[K], ids: &'a [Id]) -> Vec<&'a Id> {
         .filter(|i| seen.insert(crate::schemes::key(&i.scheme, &i.value)))
         .collect()
 }
+
+impl Tracker {
+    pub fn private(&self) -> bool {
+        self.decl.visibility == "private"
+    }
+
+    /// Each source's word on being shown in public: `yes`, `summary`, `no`, or empty where it
+    /// has said nothing.
+    pub fn licences(&self) -> Vec<(String, String)> {
+        self.members
+            .iter()
+            .map(|m| (m.name().to_string(), m.described["licence"]["republish"].as_str().unwrap_or("").to_string()))
+            .collect()
+    }
+
+    /// Why this tracker may not be on a page anyone can open: every source that says no, or
+    /// says nothing. Empty where it may.
+    pub fn not_public(&self) -> Vec<String> {
+        self.licences()
+            .into_iter()
+            .filter(|(_, r)| !matches!(r.as_str(), "yes" | "summary"))
+            .map(|(s, r)| if r.is_empty() { format!("{s} has not said whether it may be republished") } else { format!("{s} may not be republished") })
+            .collect()
+    }
+
+    /// Whether the text of this source's claims may be shown, or only their titles, values and
+    /// where to read them.
+    pub fn text_shown(&self, source: &str) -> bool {
+        self.licences().iter().find(|(s, _)| s == source).is_none_or(|(_, r)| r != "summary")
+    }
+}

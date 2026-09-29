@@ -313,3 +313,47 @@ fn a_half_migration_is_refused() {
     assert!(ws.join("datasets/kev/dataset.toml").exists(), "nothing is touched");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A source published to a hub, subscribed to, changed and published again: the subscriber pulls
+/// the delta and holds what the publisher holds.
+#[test]
+fn a_hub_carries_a_source_and_what_changed() {
+    let ws = Workspace::new("hub");
+    let hub = ws.root.join("hub");
+    let hub_s = hub.display().to_string();
+    let subscriber = ws.root.join("elsewhere");
+    let run = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_zetlyn"))
+            .args(args)
+            .env("ZETLYN_HOME", ws.root.join("home"))
+            .output()
+            .unwrap();
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "zetlyn {}\n{said}", args.join(" "));
+        said
+    };
+    run(&["source", "publish", &ws.dataset("vendor-a"), "--to", &hub_s]);
+    assert!(hub.join("sources/test/vendor-a").is_dir(), "published under sources/");
+    run(&[
+        "source", "subscribe", "test/vendor-a", "--from", &hub_s,
+        "--at", &subscriber.display().to_string(),
+    ]);
+    let held = subscriber.display().to_string();
+    assert!(run(&["search", &held]).starts_with("3 claims"));
+
+    ws.update();
+    run(&["source", "publish", &ws.dataset("vendor-a"), "--to", &hub_s]);
+    let pulled = run(&["source", "pull", &held]);
+    // Two claims changed, and only they travel.
+    assert!(pulled.contains("by delta: +0 ~2 −0"), "{pulled}");
+
+    // What the subscriber holds now is what the publisher holds.
+    let theirs = ws.z(&["search", &ws.dataset("vendor-a"), "severity=critical"]);
+    let ours = run(&["search", &held, "severity=critical"]);
+    assert_eq!(theirs.lines().next(), ours.lines().next(), "{ours}");
+    assert!(ours.starts_with("2 claims"), "{ours}");
+}

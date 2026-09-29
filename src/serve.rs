@@ -230,7 +230,7 @@ fn column_of(hit: &Hit, name: &str) -> Markup {
     match name {
         "known" => html! { (hit.known) },
         "kind" => html! { (hit.kind) },
-        "title" => html! { a href={(at("/record/")) (hit.record_id)} { (hit.title) } },
+        "title" => html! { a href={(at("/claim/")) (hit.record_id)} { (hit.title) } },
         other => match hit.fields.get(other) {
             Some(v) => value_cell(v),
             None => html! { span.dim { "—" } },
@@ -267,7 +267,7 @@ fn table(ds: &Dataset, hits: &[Hit], view: Option<&View>, q: &str, sort: &str) -
                 @for hit in hits {
                     tr {
                         td {
-                            a href={(at("/record/")) (hit.record_id)} { (hit.title) }
+                            a href={(at("/claim/")) (hit.record_id)} { (hit.title) }
                             @if !hit.why_text.is_empty() || hit.why_id.is_some() {
                                 div.why {
                                     @if let Some(id) = &hit.why_id {
@@ -353,7 +353,7 @@ fn overview(ds: &Dataset, url: &str) -> String {
         h1 { (d.title) }
         @if !d.about.is_empty() { p.about { (d.about) } }
         p.state.(state) {
-            (state) " · " (total_records) " records"
+            (state) " · " (total_records) " claims"
             @if let Some(r) = &report {
                 " · run " (r.id) " " (r.started)
                 @if r.added + r.changed + r.removed > 0 {
@@ -371,7 +371,7 @@ fn overview(ds: &Dataset, url: &str) -> String {
             }
             @if r.no_text > 0 || r.unparsed > 0 || r.no_known > 0 {
                 div.note {
-                    @if r.no_text > 0 { (r.no_text) " records came out with no text. " }
+                    @if r.no_text > 0 { (r.no_text) " claims came out with no text. " }
                     @if r.no_known > 0 { (r.no_known) " took their date from the file. " }
                     @if r.unparsed > 0 {
                         (r.unparsed) " values did not parse as their type"
@@ -477,7 +477,7 @@ fn overview(ds: &Dataset, url: &str) -> String {
             }
         }
 
-        h2 { "What this dataset holds" }
+        h2 { "What this source holds" }
         div.grid {
             div.card {
                 h4 { "Identifiers" }
@@ -541,9 +541,9 @@ fn record_page(ds: &Dataset, id: &str, url: &str) -> Option<String> {
         @if let Some(when) = &asked {
             @if found {
                 div.note { "As it stood on " (when) ". "
-                    a href={(at("/record/")) (rec.record_id)} { "Now" } }
+                    a href={(at("/claim/")) (rec.record_id)} { "Now" } }
             } @else {
-                div.note { "No version of this record from on or before " (when)
+                div.note { "No version of this claim from on or before " (when)
                     " is kept, so these are today's values." }
             }
         }
@@ -612,7 +612,7 @@ fn changes_page(ds: &Dataset, url: &str) -> String {
             @for c in changed {
                 tr {
                     td style="width: 6rem" { span.chip { (c["how"].as_str().unwrap_or("")) } }
-                    td { a href={(at("/record/")) (c["record_id"].as_str().unwrap_or(""))} {
+                    td { a href={(at("/claim/")) (c["claim_id"].as_str().unwrap_or(""))} {
                         (c["title"].as_str().unwrap_or("")) } }
                 }
             }
@@ -655,21 +655,21 @@ fn api(ds: &Dataset, path: &str, url: &str) -> (J, bool) {
             p.get("limit").and_then(|s| s.parse().ok()).unwrap_or(200),
         ),
         "/api/facet" => {
-            let field = p.get("field").cloned().unwrap_or_default();
+            let field = p.get("property").cloned().unwrap_or_default();
             let counts = ds.facet(
                 &q(),
                 &field,
                 p.get("limit").and_then(|s| s.parse().ok()).unwrap_or(50),
             );
-            json!({ "field": field, "values":
-                J::Array(counts.iter().map(|(v, n)| json!({ "value": v, "records": n })).collect()) })
+            json!({ "property": field, "values":
+                J::Array(counts.iter().map(|(v, n)| json!({ "value": v, "claims": n })).collect()) })
         }
         "/api/fetch" => {
             let ids: Vec<String> = p
                 .get("id")
                 .map(|s| s.split(',').map(str::to_string).collect())
                 .unwrap_or_default();
-            json!({ "records": J::Array(ds.fetch(&ids).iter().map(|r| r.to_json()).collect()) })
+            json!({ "claims": J::Array(ds.fetch(&ids).iter().map(|r| r.to_json()).collect()) })
         }
         "/api/search" => {
             let query = q();
@@ -678,9 +678,9 @@ fn api(ds: &Dataset, path: &str, url: &str) -> (J, bool) {
                     "total": total,
                     "unanswered": unanswered.0,
                     "hits": J::Array(hits.iter().map(|h| json!({
-                        "record_id": h.record_id,
+                        "claim_id": h.record_id,
                         "rank": h.rank,
-                        "why": { "text": h.why_text, "field": h.why_field,
+                        "why": { "text": h.why_text, "property": h.why_field,
                                  "id": h.why_id.as_ref().map(|i| json!({
                                      "scheme": i.scheme, "value": i.value })) },
                         "title": h.title,
@@ -689,7 +689,7 @@ fn api(ds: &Dataset, path: &str, url: &str) -> (J, bool) {
                         "known": h.known,
                         "ids": J::Array(h.ids.iter().map(|i| json!({
                             "scheme": i.scheme, "value": i.value })).collect()),
-                        "fields": J::Object(h.fields.iter()
+                        "properties": J::Object(h.fields.iter()
                             .map(|(k, v)| (k.clone(), v.to_json())).collect()),
                     })).collect()),
                 }),
@@ -726,13 +726,13 @@ pub fn serve(ds: Dataset, addr: &str) -> Result<(), String> {
                 status = 404;
             }
             (answer.to_string(), "application/json")
-        } else if let Some(id) = path.strip_prefix("/record/") {
+        } else if let Some(id) = path.strip_prefix("/claim/") {
             match record_page(&ds, id, &url) {
                 Some(html) => (html, "text/html; charset=utf-8"),
                 None => {
                     status = 404;
                     (
-                        shell("Not here", html! { h1 { "No such record" } }),
+                        shell("Not here", html! { h1 { "No such claim" } }),
                         "text/html; charset=utf-8",
                     )
                 }

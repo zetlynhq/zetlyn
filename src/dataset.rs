@@ -221,7 +221,7 @@ impl Dataset {
             .into_iter()
             .map(|f| {
                 let mut o = json!({
-                    "name": f.name, "type": f.kind, "records": f.records,
+                    "name": f.name, "type": f.kind, "claims": f.records,
                 });
                 if let Some(v) = f.vocabulary {
                     o["vocabulary"] = json!(v);
@@ -230,7 +230,7 @@ impl Dataset {
                     o["values"] = J::Array(
                         f.values
                             .iter()
-                            .map(|(v, c)| json!({ "value": v, "records": c }))
+                            .map(|(v, c)| json!({ "value": v, "claims": c }))
                             .collect(),
                     );
                 }
@@ -242,11 +242,11 @@ impl Dataset {
             })
             .collect();
         json!({
-            "dataset": d.name,
+            "source": d.name,
             "kind": d.kind,
             "title": d.title,
             "about": d.about,
-            "records": self.store.count(),
+            "claims": self.store.count(),
             "state": self.state(),
             "last_run": last.as_ref().map(|r| json!({
                 "id": r.id, "at": r.started, "finished": r.finished, "complete": r.complete,
@@ -258,8 +258,8 @@ impl Dataset {
 
             "history": d.retention.history,
             "schemes": J::Array(self.store.schemes().iter()
-                .map(|(s, n)| json!({ "scheme": s, "records": n })).collect()),
-            "fields": J::Array(fields),
+                .map(|(s, n)| json!({ "scheme": s, "claims": n })).collect()),
+            "properties": J::Array(fields),
             "vocabulary": json!(d.vocabulary),
             // The whole shape, because a scope that adopts one reaches it only through here.
             "views": J::Array(d.view.iter().map(|v| json!({
@@ -285,7 +285,7 @@ impl Dataset {
     pub fn can(&self) -> Vec<&'static str> {
         let mut can = vec!["text", "changes"];
         if !self.decl.records.fields.is_empty() {
-            can.push("field");
+            can.push("property");
             can.push("facet");
         }
         if self.decl.records.id.is_some() {
@@ -436,7 +436,7 @@ impl Dataset {
             let mut moved = Vec::new();
             if let Some((old_title, old_fields)) = &before {
                 if old_title != &now.title {
-                    moved.push(json!({ "field": "title", "was": old_title, "is": now.title }));
+                    moved.push(json!({ "property": "title", "was": old_title, "is": now.title }));
                 }
                 let mut names: std::collections::BTreeSet<&String> = old_fields.keys().collect();
                 names.extend(now.fields.keys());
@@ -444,12 +444,12 @@ impl Dataset {
                     let was = old_fields.get(name).map(|v| v.display());
                     let is = now.fields.get(name).map(|v| v.display());
                     if was != is {
-                        moved.push(json!({ "field": name, "was": was, "is": is }));
+                        moved.push(json!({ "property": name, "was": was, "is": is }));
                     }
                 }
             }
             out.push(json!({
-                "record_id": record_id,
+                "claim_id": record_id,
                 "title": now.title,
                 "url": now.url,
                 "kind": now.kind,
@@ -457,18 +457,18 @@ impl Dataset {
                 "ids": now.ids_json(),
                 "how": if is_new { "added" } else { "changed" },
                 "run": run,
-                "fields": if moved.is_empty() { J::Null } else { J::Array(moved) },
+                "properties": if moved.is_empty() { J::Null } else { J::Array(moved) },
             }));
         }
         let (_, gone) = self.store.changes(since, limit);
         json!({
-            "dataset": self.decl.name,
+            "source": self.decl.name,
             "since": since,
             "mark": self.mark(),
             "history": history,
             "changed": J::Array(out),
             "removed": J::Array(gone.iter().map(|(id, title)| json!({
-                "record_id": id, "title": title, "how": "removed",
+                "claim_id": id, "title": title, "how": "removed",
             })).collect()),
         })
     }
@@ -543,7 +543,7 @@ impl Dataset {
         };
 
         if self.store.count() == 0 {
-            wrong.push("holds no records, so nothing below could be checked".into());
+            wrong.push("holds no claims, so nothing below could be checked".into());
             return wrong;
         }
 
@@ -570,14 +570,14 @@ impl Dataset {
 
         for name in d.search.compare.iter().chain(&d.search.suggest) {
             if !known(name) {
-                wrong.push(format!("`search` names {name}, which no record carries"));
+                wrong.push(format!("`search` names {name}, which no claim carries"));
             }
         }
         for v in &d.view {
             for name in v.columns.iter().chain(&v.facets) {
                 if !known(name) {
                     wrong.push(format!(
-                        "the view {:?} names {name}, which no record carries",
+                        "the view {:?} names {name}, which no claim carries",
                         v.name
                     ));
                 }
@@ -585,7 +585,7 @@ impl Dataset {
             if let Some(group) = &v.group {
                 if !known(group) {
                     wrong.push(format!(
-                        "the view {:?} groups by {group}, which no record carries",
+                        "the view {:?} groups by {group}, which no claim carries",
                         v.name
                     ));
                 }
@@ -601,7 +601,7 @@ impl Dataset {
                         crate::expr::fields_named(&p, &mut named);
                         for n in named.iter().filter(|n| !known(n)) {
                             wrong.push(format!(
-                                "the view {:?} filters on {n}, which no record carries",
+                                "the view {:?} filters on {n}, which no claim carries",
                                 v.name
                             ));
                         }
@@ -615,7 +615,7 @@ impl Dataset {
         for f in self.store.fields(d) {
             if f.records == 0 {
                 wrong.push(format!(
-                    "the field {} is declared and no record carries it",
+                    "the property {} is declared and no claim carries it",
                     f.name
                 ));
             }

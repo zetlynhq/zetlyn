@@ -121,9 +121,9 @@ impl Watch {
             let pred = self.pred();
             let empty = Vec::new();
             let mut kept = Vec::new();
-            for entry in report["entries"].as_array().unwrap_or(&empty) {
+            for entry in report["things"].as_array().unwrap_or(&empty) {
                 if let Some(p) = &pred {
-                    let Some(key) = entry["key"].as_object() else {
+                    let Some(key) = entry["identifier"].as_object() else {
                         continue;
                     };
                     let (scheme, value) = (
@@ -142,8 +142,8 @@ impl Watch {
                 kept.push(entry.clone());
             }
             return Ok((
-                json!({ "watch": self.decl.name, "scope": name, "since": since,
-                        "entries": J::Array(kept) }),
+                json!({ "watch": self.decl.name, "tracker": name, "since": since,
+                        "things": J::Array(kept) }),
                 mark,
             ));
         }
@@ -165,14 +165,14 @@ impl Watch {
             .unwrap_or(&empty)
             .iter()
             .filter(|c| match &pred {
-                Some(p) => ds.holds(c["record_id"].as_str().unwrap_or(""), p),
+                Some(p) => ds.holds(c["claim_id"].as_str().unwrap_or(""), p),
                 None => true,
             })
             .cloned()
             .collect();
         Ok((
-            json!({ "watch": self.decl.name, "dataset": name, "since": since,
-                    "entries": J::Array(kept) }),
+            json!({ "watch": self.decl.name, "source": name, "since": since,
+                    "things": J::Array(kept) }),
             ds.mark().to_string(),
         ))
     }
@@ -181,7 +181,7 @@ impl Watch {
     /// subscriber has not been told about, and the next check tells them.
     pub fn deliver(&self, report: &J, mark: &str) -> Result<Vec<String>, String> {
         let empty = Vec::new();
-        let entries = report["entries"].as_array().unwrap_or(&empty);
+        let entries = report["things"].as_array().unwrap_or(&empty);
         let mut done = Vec::new();
         if entries.is_empty() {
             return Ok(done);

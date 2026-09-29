@@ -1,4 +1,4 @@
-5 entries over 12 records, 4 of 4 members answered
+5 things over 12 claims, 4 of 4 sources answered
   1. Baz Router authentication bypass  [CVE-2026-0004]
      vulnerability: Baz Router authentication bypass (test/kev), baz: authentication bypass (test/vendor-a)
   2. Path traversal in qux  [CVE-2026-0005]
@@ -13,5 +13,5 @@
   5. bar: heap overflow  [CVE-2026-0002]
      vulnerability: bar: heap overflow (test/vendor-a), Heap overflow in bar (test/vendor-b)
      exploit: Bar heap overflow PoC (test/exploits)
-     cvss (divergent): test/vendor-a=9.8, test/vendor-b=7.5
-     severity (divergent): test/vendor-a=critical, test/vendor-b=medium
+     cvss (conflict): test/vendor-a=9.8, test/vendor-b=7.5
+     severity (conflict): test/vendor-a=critical, test/vendor-b=medium

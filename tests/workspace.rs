@@ -25,7 +25,7 @@ impl Workspace {
         copy(&fixtures().join("workspace"), &root);
         let ws = Workspace { root };
         for m in MEMBERS {
-            ws.z(&["dataset", "run", &ws.dataset(m)]);
+            ws.z(&["source", "update", &ws.dataset(m)]);
         }
         ws
     }
@@ -45,7 +45,7 @@ impl Workspace {
             self.root.join("sources/vendor-a/advisories.csv"),
         )
         .unwrap();
-        self.z(&["dataset", "run", &self.dataset("vendor-a")]);
+        self.z(&["source", "update", &self.dataset("vendor-a")]);
     }
 
     fn z(&self, args: &[&str]) -> String {
@@ -114,23 +114,23 @@ fn entry<'a>(listing: &'a str, key: &str) -> Vec<&'a str> {
 #[test]
 fn entries() {
     let ws = Workspace::new("entries");
-    let listing = ws.z(&["scope", "search", &ws.scope(), "--limit", "20"]);
+    let listing = ws.z(&["tracker", "search", &ws.scope(), "--limit", "20"]);
 
     // Two words for one judgement: `important` is Red Hat's `high`.
     let foo = entry(&listing, "CVE-2026-0001");
     assert!(foo.iter().any(|l| l.contains("severity: test/vendor-a=important→high")));
-    assert!(!foo.iter().any(|l| l.contains("divergent")), "{foo:#?}");
+    assert!(!foo.iter().any(|l| l.contains("conflict")), "{foo:#?}");
 
     // Two publishers, two judgements.
     let bar = entry(&listing, "CVE-2026-0002");
-    assert!(bar.iter().any(|l| l.contains("severity (divergent)")), "{bar:#?}");
-    assert!(bar.iter().any(|l| l.contains("cvss (divergent)")), "{bar:#?}");
+    assert!(bar.iter().any(|l| l.contains("severity (conflict)")), "{bar:#?}");
+    assert!(bar.iter().any(|l| l.contains("cvss (conflict)")), "{bar:#?}");
     // The lower-case reference joined the entry.
     assert!(bar.iter().any(|l| l.contains("Bar heap overflow PoC (test/exploits)")), "{bar:#?}");
 
     // One source saying two things is not a disagreement with itself.
     let qux = entry(&listing, "CVE-2026-0003");
-    assert!(!qux.iter().any(|l| l.contains("divergent")), "{qux:#?}");
+    assert!(!qux.iter().any(|l| l.contains("conflict")), "{qux:#?}");
 
     // The named checks first, so that a failure says which rule broke; then everything else.
     golden("entries.txt", &listing);
@@ -139,16 +139,16 @@ fn entries() {
 #[test]
 fn measure() {
     let ws = Workspace::new("measure");
-    let m = ws.z(&["scope", "measure", &ws.scope()]);
+    let m = ws.z(&["tracker", "measure", &ws.scope()]);
     let j: serde_json::Value = serde_json::from_str(&m).unwrap();
     // `cve-2026-0002` and `CVE-2026-0002` are one subject, named by three members.
-    assert_eq!(j["subjects"], 5);
-    assert_eq!(j["by_members"]["3"], 1);
+    assert_eq!(j["things"], 5);
+    assert_eq!(j["by_sources"]["3"], 1);
     // Both ratings of 0001 and 0002 differ in words; only 0002 differs after the map.
-    assert_eq!(j["fields"]["severity"]["differ_in_words"], 2);
-    assert_eq!(j["fields"]["severity"]["differ_after_the_map"], 1);
+    assert_eq!(j["properties"]["severity"]["differ_in_words"], 2);
+    assert_eq!(j["properties"]["severity"]["differ_after_the_map"], 1);
     // Two platforms from one source is not a field two members carry.
-    assert!(j["fields"]["platform"].is_null(), "{}", j["fields"]);
+    assert!(j["properties"]["platform"].is_null(), "{}", j["properties"]);
     golden("measure.json", &m);
 }
 
@@ -162,8 +162,8 @@ fn changes() {
         .as_array()
         .unwrap()
         .iter()
-        .flat_map(|c| c["fields"].as_array().cloned().unwrap_or_default())
-        .map(|f| format!("{} {} → {}", f["field"], f["was"], f["is"]))
+        .flat_map(|c| c["properties"].as_array().cloned().unwrap_or_default())
+        .map(|f| format!("{} {} → {}", f["property"], f["was"], f["is"]))
         .collect();
     assert_eq!(
         moved,
@@ -189,12 +189,12 @@ fn delivered(report: &str, watch: &str) -> Vec<String> {
     let json_at = body.find('{').expect("entries to report");
     let mut de = serde_json::Deserializer::from_str(&body[json_at..]).into_iter::<serde_json::Value>();
     let j = de.next().unwrap().unwrap();
-    let mut keys: Vec<String> = j["entries"]
+    let mut keys: Vec<String> = j["things"]
         .as_array()
         .unwrap()
         .iter()
         .map(|e| {
-            let key = if e["key"].is_object() { &e["key"] } else { &e["ids"][0] };
+            let key = if e["identifier"].is_object() { &e["identifier"] } else { &e["ids"][0] };
             key["value"].as_str().unwrap_or("").to_string()
         })
         .collect();
@@ -230,7 +230,7 @@ fn a_shrunken_source_is_refused() {
     )
     .unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_zetlyn"))
-        .args(["dataset", "run", &ws.dataset("kev")])
+        .args(["source", "update", &ws.dataset("kev")])
         .output()
         .unwrap();
     let said = format!(
@@ -240,7 +240,7 @@ fn a_shrunken_source_is_refused() {
     );
     assert!(said.contains("the store was not replaced"), "{said}");
     let held = ws.z(&["search", &ws.dataset("kev")]);
-    assert!(held.starts_with("2 records"), "{held}");
+    assert!(held.starts_with("2 claims"), "{held}");
 }
 
 /// A copy of the workspace as 0.1 wrote it, with its own identity home.
@@ -279,13 +279,13 @@ fn migrate_keeps_what_a_workspace_answers() {
 
     // What it answers afterwards is what the workspace written in 0.2 answers.
     for m in MEMBERS {
-        let (ok, said) = run(&root, &["dataset", "run", &ws.join("sources").join(m).display().to_string()]);
+        let (ok, said) = run(&root, &["source", "update", &ws.join("sources").join(m).display().to_string()]);
         assert!(ok, "{said}");
     }
-    let (ok, measured) = run(&root, &["scope", "measure", &ws.join("trackers/cve").display().to_string()]);
+    let (ok, measured) = run(&root, &["tracker", "measure", &ws.join("trackers/cve").display().to_string()]);
     assert!(ok, "{measured}");
     let fresh = Workspace::new("migrate-fresh");
-    assert_eq!(measured, fresh.z(&["scope", "measure", &fresh.scope()]));
+    assert_eq!(measured, fresh.z(&["tracker", "measure", &fresh.scope()]));
 
     // Once is enough, and a second time says so rather than doing something.
     let (ok, said) = run(&root, &["migrate", &ws.display().to_string()]);
@@ -297,7 +297,7 @@ fn migrate_keeps_what_a_workspace_answers() {
 fn a_file_from_before_is_refused_by_name() {
     let root = before("refused-old");
     let kev = root.join("workspace/datasets/kev");
-    let (ok, said) = run(&root, &["dataset", "run", &kev.display().to_string()]);
+    let (ok, said) = run(&root, &["source", "update", &kev.display().to_string()]);
     assert!(!ok);
     assert!(said.contains("dataset.toml is from before 0.2. `zetlyn migrate` rewrites it"), "{said}");
     let _ = std::fs::remove_dir_all(&root);

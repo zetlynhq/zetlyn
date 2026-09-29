@@ -1,13 +1,7 @@
 {
   "changed": [
     {
-      "fields": [
-        {
-          "field": "cvss",
-          "is": "8.1",
-          "was": "9.8"
-        }
-      ],
+      "claim_id": "3d273c10978b3581da07de0be8195165723a4a1112d72642022cecdded94ec92",
       "how": "changed",
       "ids": [
         {
@@ -17,24 +11,19 @@
       ],
       "kind": "vulnerability",
       "known": "2026-08-30",
-      "record_id": "3d273c10978b3581da07de0be8195165723a4a1112d72642022cecdded94ec92",
+      "properties": [
+        {
+          "is": "8.1",
+          "property": "cvss",
+          "was": "9.8"
+        }
+      ],
       "run": 2,
       "title": "foo: remote code execution",
       "url": null
     },
     {
-      "fields": [
-        {
-          "field": "cvss",
-          "is": "9.1",
-          "was": "6.5"
-        },
-        {
-          "field": "severity",
-          "is": "critical",
-          "was": "moderate"
-        }
-      ],
+      "claim_id": "814d1bf1c31d5fa136477fcaa5ef43d263fc83e4288820bf6f7a1f25b96f8d1a",
       "how": "changed",
       "ids": [
         {
@@ -44,15 +33,26 @@
       ],
       "kind": "vulnerability",
       "known": "2026-09-02",
-      "record_id": "814d1bf1c31d5fa136477fcaa5ef43d263fc83e4288820bf6f7a1f25b96f8d1a",
+      "properties": [
+        {
+          "is": "9.1",
+          "property": "cvss",
+          "was": "6.5"
+        },
+        {
+          "is": "critical",
+          "property": "severity",
+          "was": "moderate"
+        }
+      ],
       "run": 2,
       "title": "baz: authentication bypass",
       "url": null
     }
   ],
-  "dataset": "test/vendor-a",
   "history": true,
   "mark": 2,
   "removed": [],
-  "since": 1
+  "since": 1,
+  "source": "test/vendor-a"
 }

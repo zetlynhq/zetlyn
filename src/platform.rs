@@ -98,20 +98,20 @@ pub fn serve(root: &Path, addr: &str) -> Result<(), String> {
             (Err(e), _, _) => (500, page("Nothing here", html! { h1 { (e) } })),
             (Ok(p), false, [""]) | (Ok(p), false, []) => (200, overview(p)),
             (Ok(p), false, ["d", name]) => deployment(p, name),
-            (Ok(p), false, ["d", name, "dataset", ds]) => dataset(p, name, ds),
-            (Ok(p), true, ["d", name, "dataset", ds, "run"]) => run(p, name, ds),
-            (Ok(p), false, ["d", name, "dataset", ds, "declaration"]) => {
+            (Ok(p), false, ["d", name, "source", ds]) => dataset(p, name, ds),
+            (Ok(p), true, ["d", name, "source", ds, "run"]) => run(p, name, ds),
+            (Ok(p), false, ["d", name, "source", ds, "declaration"]) => {
                 declaration(p, name, ds, None, None)
             }
-            (Ok(p), true, ["d", name, "dataset", ds, "draft"]) => ask_for_draft(p, name, ds),
-            (Ok(p), true, ["d", name, "dataset", ds, "declaration"]) => {
+            (Ok(p), true, ["d", name, "source", ds, "draft"]) => ask_for_draft(p, name, ds),
+            (Ok(p), true, ["d", name, "source", ds, "declaration"]) => {
                 apply(p, name, ds, &body_of)
             }
             _ => (
                 404,
                 page(
                     "Nothing here",
-                    html! { p { a href="/" { "← every deployment" } } h1 { "Nothing at that address" } },
+                    html! { p { a href="/" { "← every workspace" } } h1 { "Nothing at that address" } },
                 ),
             ),
         };
@@ -159,7 +159,7 @@ fn overview(p: &Platform) -> String {
         html! {
             h1 { "Deployments" }
             p.about {
-                "Every one this platform holds a grant for. It holds no records and no accounts: "
+                "Every one this platform holds a grant for. It holds no claims and no accounts: "
                 "what is below was asked for just now, and nothing of it is kept."
             }
             table {
@@ -187,7 +187,7 @@ fn overview(p: &Platform) -> String {
                 }
             }
             @if asked.is_empty() {
-                p.dim { "No grants here yet. `zetlyn console grant` on a deployment writes one." }
+                p.dim { "No grants here yet. `zetlyn console grant` on a workspace writes one." }
             }
         },
     )
@@ -226,7 +226,7 @@ fn deployment(p: &Platform, name: &str) -> (u16, String) {
                 page(
                     name,
                     html! {
-                        p { a href="/" { "← every deployment" } }
+                        p { a href="/" { "← every workspace" } }
                         h1 { (name) }
                         div.note { "It did not answer. " (e) }
                     },
@@ -240,8 +240,8 @@ fn deployment(p: &Platform, name: &str) -> (u16, String) {
         page(
             name,
             html! {
-                p { a href="/" { "← every deployment" } }
-                h1 { (held["deployment"].as_str().unwrap_or(name)) }
+                p { a href="/" { "← every workspace" } }
+                h1 { (held["workspace"].as_str().unwrap_or(name)) }
                 p.state { "zetlyn " (held["zetlyn"].as_str().unwrap_or("?")) " · " (p.held[name].at) }
 
                 h2 { "Datasets" }
@@ -251,9 +251,9 @@ fn deployment(p: &Platform, name: &str) -> (u16, String) {
                         @for d in held["sources"].as_array().unwrap_or(&empty) {
                             @let at = d["at"].as_str().unwrap_or("");
                             tr {
-                                td { a href={"/d/" (name) "/dataset/" (at)} { (d["dataset"].as_str().unwrap_or("")) } }
+                                td { a href={"/d/" (name) "/source/" (at)} { (d["source"].as_str().unwrap_or("")) } }
                                 td.dim { (d["kind"].as_str().unwrap_or("")) }
-                                td.num { (d["records"].as_u64().unwrap_or(0)) }
+                                td.num { (d["claims"].as_u64().unwrap_or(0)) }
                                 @let state = d["state"].as_str().unwrap_or("empty");
                                 td { span.state.(state) { (state) } }
                                 td.dim { (d["next_run"].as_str().unwrap_or("—")) }
@@ -268,9 +268,9 @@ fn deployment(p: &Platform, name: &str) -> (u16, String) {
                     tbody {
                         @for s in held["trackers"].as_array().unwrap_or(&empty) {
                             tr {
-                                td { (s["scope"].as_str().unwrap_or("")) }
-                                td.num { (s["members"].as_u64().unwrap_or(0)) }
-                                td.num { (s["records"].as_u64().unwrap_or(0)) }
+                                td { (s["tracker"].as_str().unwrap_or("")) }
+                                td.num { (s["sources"].as_u64().unwrap_or(0)) }
+                                td.num { (s["claims"].as_u64().unwrap_or(0)) }
                                 @if s["promise_holds"].as_bool().unwrap_or(true) {
                                     td { span.state.current { "holds" } }
                                 } @else {
@@ -295,8 +295,8 @@ fn dataset(p: &Platform, name: &str, at: &str) -> (u16, String) {
         Ok(d) => d,
         Err(e) => return (404, page(name, html! { h1 { (e) } })),
     };
-    let described = driver.ask("GET", &format!("/dataset/{at}"), b"");
-    let runs = driver.ask("GET", &format!("/dataset/{at}/runs"), b"");
+    let described = driver.ask("GET", &format!("/source/{at}"), b"");
+    let runs = driver.ask("GET", &format!("/source/{at}/runs"), b"");
     let (described, runs) = match (described, runs) {
         (Ok(a), Ok(b)) => (a, b),
         (Err(e), _) | (_, Err(e)) => {
@@ -317,19 +317,19 @@ fn dataset(p: &Platform, name: &str, at: &str) -> (u16, String) {
     (
         200,
         page(
-            described["dataset"].as_str().unwrap_or(at),
+            described["source"].as_str().unwrap_or(at),
             html! {
                 p { a href={"/d/" (name)} { "← " (name) } }
-                h1 { (described["dataset"].as_str().unwrap_or(at)) }
+                h1 { (described["source"].as_str().unwrap_or(at)) }
                 @if let Some(about) = described["about"].as_str() { p.about { (about) } }
                 p.state {
-                    (described["records"].as_u64().unwrap_or(0)) " records · "
+                    (described["claims"].as_u64().unwrap_or(0)) " claims · "
                     (described["kind"].as_str().unwrap_or("")) " · "
                     @let state = described["state"].as_str().unwrap_or("empty");
                     span.state.(state) { (state) }
                 }
 
-                form.bar method="post" action={"/d/" (name) "/dataset/" (at) "/run"} {
+                form.bar method="post" action={"/d/" (name) "/source/" (at) "/run"} {
                     button type="submit" { "Fill it now" }
                 }
 
@@ -365,14 +365,14 @@ fn dataset(p: &Platform, name: &str, at: &str) -> (u16, String) {
 fn run(p: &Platform, name: &str, at: &str) -> (u16, String) {
     let answer = p
         .driver(name)
-        .and_then(|d| d.ask("POST", &format!("/dataset/{at}/run"), b""));
+        .and_then(|d| d.ask("POST", &format!("/source/{at}/run"), b""));
     match answer {
         Ok(j) => (
             200,
             page(
                 "Filled",
                 html! {
-                    p { a href={"/d/" (name) "/dataset/" (at)} { "← " (at) } }
+                    p { a href={"/d/" (name) "/source/" (at)} { "← " (at) } }
                     h1 { "Run " (j["run"].as_i64().unwrap_or(0)) }
                     p.state {
                         "+" (j["added"].as_u64().unwrap_or(0))
@@ -389,7 +389,7 @@ fn run(p: &Platform, name: &str, at: &str) -> (u16, String) {
             page(
                 "Not filled",
                 html! {
-                    p { a href={"/d/" (name) "/dataset/" (at)} { "← " (at) } }
+                    p { a href={"/d/" (name) "/source/" (at)} { "← " (at) } }
                     h1 { "It did not run" }
                     div.note { (e) }
                 },
@@ -462,12 +462,12 @@ fn brief(described: &J, runs: &J, declaration: &str) -> String {
         }
     }
     out.push_str("\n## What it holds\n\n");
-    for f in described["fields"].as_array().unwrap_or(&empty) {
+    for f in described["properties"].as_array().unwrap_or(&empty) {
         out.push_str(&format!(
-            "{} ({}) in {} records\n",
+            "{} ({}) in {} claims\n",
             f["name"].as_str().unwrap_or(""),
             f["type"].as_str().unwrap_or(""),
-            f["records"].as_u64().unwrap_or(0)
+            f["claims"].as_u64().unwrap_or(0)
         ));
     }
     out.push_str("\n## The declaration\n\n");
@@ -522,7 +522,7 @@ fn declaration(
         Ok(d) => d,
         Err(e) => return (404, page(name, html! { h1 { (e) } })),
     };
-    let held = match driver.ask("GET", &format!("/dataset/{at}/declaration"), b"") {
+    let held = match driver.ask("GET", &format!("/source/{at}/declaration"), b"") {
         Ok(j) => j["declaration"].as_str().unwrap_or("").to_string(),
         Err(e) => return (502, page(at, html! { h1 { (at) } div.note { (e) } })),
     };
@@ -532,7 +532,7 @@ fn declaration(
         page(
             at,
             html! {
-                p { a href={"/d/" (name) "/dataset/" (at)} { "← " (at) } }
+                p { a href={"/d/" (name) "/source/" (at)} { "← " (at) } }
                 h1 { "What " (at) " is" }
                 @if let Some(m) = said { div.note { (m) } }
 
@@ -543,23 +543,23 @@ fn declaration(
                         "yet: read it, and press the button if it is right. Whoever presses it is "
                         "who answers for the declaration afterwards."
                     }
-                    form method="post" action={"/d/" (name) "/dataset/" (at) "/declaration"} {
+                    form method="post" action={"/d/" (name) "/source/" (at) "/declaration"} {
                         textarea name="declaration" rows="28" style="width:100%" { (text) }
                         p.bar { button type="submit" { "Apply it" } }
                     }
                     h2 { "What is there now" }
                     pre { (held) }
                 } @else {
-                    form method="post" action={"/d/" (name) "/dataset/" (at) "/declaration"} {
+                    form method="post" action={"/d/" (name) "/source/" (at) "/declaration"} {
                         textarea name="declaration" rows="28" style="width:100%" { (held) }
                         p.bar { button type="submit" { "Apply it" } }
                     }
                     @if drafts {
-                        form.bar method="post" action={"/d/" (name) "/dataset/" (at) "/draft"} {
+                        form.bar method="post" action={"/d/" (name) "/source/" (at) "/draft"} {
                             button type="submit" { "Ask for a draft" }
                         }
                         p.dim {
-                            "The drafter is handed the last three runs and what the dataset holds, "
+                            "The drafter is handed the last three updates and what the source holds, "
                             "and answers with a declaration. It proposes; you apply."
                         }
                     } @else {
@@ -576,9 +576,9 @@ fn ask_for_draft(p: &Platform, name: &str, at: &str) -> (u16, String) {
         Ok(d) => d,
         Err(e) => return (404, page(name, html! { h1 { (e) } })),
     };
-    let described = driver.ask("GET", &format!("/dataset/{at}"), b"");
-    let runs = driver.ask("GET", &format!("/dataset/{at}/runs"), b"");
-    let held = driver.ask("GET", &format!("/dataset/{at}/declaration"), b"");
+    let described = driver.ask("GET", &format!("/source/{at}"), b"");
+    let runs = driver.ask("GET", &format!("/source/{at}/runs"), b"");
+    let held = driver.ask("GET", &format!("/source/{at}/declaration"), b"");
     let (described, runs, held) = match (described, runs, held) {
         (Ok(a), Ok(b), Ok(c)) => (a, b, c),
         (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
@@ -603,7 +603,7 @@ fn apply(p: &Platform, name: &str, at: &str, body: &str) -> (u16, String) {
     };
     match driver.ask(
         "PUT",
-        &format!("/dataset/{at}/declaration"),
+        &format!("/source/{at}/declaration"),
         text.as_bytes(),
     ) {
         Ok(j) if j["applied"].as_bool().unwrap_or(false) => (
@@ -611,7 +611,7 @@ fn apply(p: &Platform, name: &str, at: &str, body: &str) -> (u16, String) {
             page(
                 "Applied",
                 html! {
-                    p { a href={"/d/" (name) "/dataset/" (at)} { "← " (at) } }
+                    p { a href={"/d/" (name) "/source/" (at)} { "← " (at) } }
                     h1 { (at) " is now what you sent" }
                     p.dim { "The one that was there is kept beside it as " (j["kept"].as_str().unwrap_or("")) "." }
                 },

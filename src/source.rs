@@ -439,11 +439,11 @@ pub fn each_row(
                 let mut declined = 0u64;
                 let template = detail
                     .as_deref()
-                    .ok_or("a dataset that follows another needs a detail call")?;
+                    .ok_or("a source that follows another needs a detail call")?;
                 let root = base
                     .parent()
                     .and_then(|p| p.parent())
-                    .ok_or("this dataset is not inside a deployment")?;
+                    .ok_or("this source is not inside a workspace")?;
                 let values = crate::source::subjects_of(root, &each.dataset, &each.scheme)?;
                 for value in values {
                     let url = template.replace("{value}", &value);
@@ -475,7 +475,7 @@ pub fn each_row(
                     })?;
                 }
                 if declined > 0 {
-                    println!("  {declined} subjects the source would not answer for");
+                    println!("  {declined} things the source would not answer for");
                 }
                 return Ok(None);
             }
@@ -505,7 +505,7 @@ pub fn each_row(
         // Nothing to read here. A subscribed dataset holds records somebody else produced, and
         // asking its hub for newer ones is a different command.
         Source::Hub { reference, .. } => Err(format!(
-            "{reference} is subscribed. `zetlyn dataset update` asks its hub for a newer version"
+            "{reference} is subscribed. `zetlyn source pull` asks its hub for a newer version"
         )),
     }
 }

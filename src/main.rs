@@ -73,51 +73,59 @@ pub fn now() -> i64 {
 const USAGE: &str = "\
 zetlyn
 
-  zetlyn dataset new --from <path or URL> [--at <dir>] [--name owner/name] [--kind <word>]
+  zetlyn source new --from <path or URL> [--at <dir>] [--name owner/name] [--kind <word>]
       Reads a folder, a .csv or an .xlsx, guesses the identifier, the title, the text and the
-      field types, writes <dir>/dataset.toml, and prints the first three records it would produce.
+      property types, writes <dir>/source.yaml, and prints the first three claims it would make.
 
-  zetlyn dataset run <dir>
+  zetlyn source update <dir>
       Fills the store. Says what was added, changed, removed and unchanged.
 
-  zetlyn dataset describe <dir>
-      What this dataset is, what it holds, what it can be asked. JSON.
+  zetlyn source describe <dir>
+      What this source is, what it holds, what it can be asked. JSON.
 
   zetlyn search <dir> <query> [--view <name>] [--limit <n>]
       Free text and comparisons mixed: `log4j severity=high known>2026-01-01`.
 
-  zetlyn scope describe <dir> [--datasets <dir>]
-  zetlyn scope search <dir> <query> [--view <name>] [--kind <word>] [--limit <n>]
-      A scope holds no index. It rewrites the query per member, fans out, merges ranked lists,
-      and gathers the hits into one entry per subject.
+  zetlyn tracker describe <dir> [--sources <dir>]
+  zetlyn tracker search <dir> <query> [--view <name>] [--kind <word>] [--limit <n>]
+  zetlyn tracker measure <dir>
+      A tracker holds no index. It rewrites the query per source, fans out, merges ranked
+      lists, and gathers the claims into one thing per identifier.
 
-  zetlyn scope publish <dir> [--to <hub>] [--tag latest]
-  zetlyn scope subscribe <reference> [--from <hub>] [--at <deployment>]
-      A scope travels as its statement. Subscribing takes the statement and every dataset
-      it names, and rebuilds the stores here.
+  zetlyn tracker publish <dir> [--to <hub>] [--tag latest]
+  zetlyn tracker subscribe <reference> [--from <hub>] [--at <workspace>]
+      A tracker travels as its statement. Subscribing takes the statement and every source it
+      names, and rebuilds the stores here.
 
-  zetlyn account [list] <deployment>
-  zetlyn account grant --email <a> [--days 31] [--scopes a,b] <deployment>
-  zetlyn account cancel --email <a> <deployment>
-  zetlyn account key --email <a> [--name <what for>] <deployment>
-  zetlyn account curator --email <a> [--revoke] <deployment>
-  zetlyn account dunning [--within 7] [--send] <deployment>
+  zetlyn account [list] <workspace>
+  zetlyn account grant --email <a> [--days 31] [--trackers a,b] <workspace>
+  zetlyn account cancel --email <a> <workspace>
+  zetlyn account key --email <a> [--name <what for>] <workspace>
+  zetlyn account curator --email <a> [--revoke] <workspace>
+  zetlyn account dunning [--within 7] [--send] <workspace>
       The first customers arrive before a payment provider does, and are set by hand.
 
   zetlyn serve <dir> [--port 8080] [--addr 0.0.0.0:8080] [--base /owner/name]
-      Overview, views, browse with facets and columns, search, a record page.
+      Overview, views, browse with facets and columns, search, a thing, a claim.
 
-  zetlyn dataset publish <dir> [--to <hub>] [--tag latest]
-  zetlyn dataset subscribe <reference> [--from <hub>] [--at <dir>] [--key ed25519:…]
-  zetlyn dataset update <dir>
+  zetlyn source publish <dir> [--to <hub>] [--tag latest]
+  zetlyn source subscribe <reference> [--from <hub>] [--at <dir>] [--key ed25519:…]
+  zetlyn source pull <dir>
       A hub is a folder, a mount, s3://bucket/prefix or an address. Named nowhere, it is
       hub.zetlyn.com; a reference that carries a host means that host. What travels is the
-      records, so a subscriber needs none of the publisher's credentials.
+      claims, so a subscriber needs none of the publisher's credentials.
+
+  zetlyn run <workspace>
+  zetlyn watch [list | check [--deliver]] <workspace>
+      Every source that is due, updated, and every watch replayed.
+
+  zetlyn migrate [<workspace>]
+      A workspace written before 0.2, in the words and the format of 0.2.
 
   zetlyn id [new --name <n> --contact <c>]
       One key, everywhere you act. Readers are not this and hold none.
 
-  zetlyn console serve <deployment> | grant | call
+  zetlyn console serve <workspace> | grant | call
   zetlyn hub register | owners | serve
       Letting somebody else run it, and letting somebody else fetch from you.
 ";
@@ -153,12 +161,12 @@ fn main() {
 
 fn run(args: &[String]) -> Result<(), String> {
     match args.first().map(String::as_str) {
-        Some("dataset") => match args.get(1).map(String::as_str) {
+        Some("source") => match args.get(1).map(String::as_str) {
             Some("new") => dataset_new(args),
-            Some("run") => dataset_run(args),
+            Some("update") => dataset_run(args),
             Some("publish") => dataset_publish(args),
             Some("subscribe") => dataset_subscribe(args),
-            Some("update") => dataset_update(args),
+            Some("pull") => dataset_update(args),
             Some("check") => {
                 let ds = Dataset::open(&dir_at(args, 2)?)?;
                 let wrong = ds.check();
@@ -184,12 +192,14 @@ fn run(args: &[String]) -> Result<(), String> {
                 Ok(())
             }
         },
+        Some("dataset") => Err("`zetlyn dataset` is `zetlyn source` since 0.2, and `run` is `update`".into()),
+        Some("scope") => Err("`zetlyn scope` is `zetlyn tracker` since 0.2".into()),
         Some("search") => search(args),
         Some("changes") => changes(args),
         Some("run") => schedule(args),
         Some("watch") => watch_cmd(args),
         Some("account") => account_cmd(args),
-        Some("scope") => match args.get(1).map(String::as_str) {
+        Some("tracker") => match args.get(1).map(String::as_str) {
             Some("publish") => scope_publish(args),
             Some("subscribe") => scope_subscribe(args),
             Some("describe") => {
@@ -264,7 +274,7 @@ fn run(args: &[String]) -> Result<(), String> {
                 let scope = scope::Scope::open(&dir, &datasets)?;
                 for name in &scope.missing {
                     eprintln!(
-                        "zetlyn: {name} is not installed here, and the scope opens without it"
+                        "zetlyn: {name} is not installed here, and the tracker opens without it"
                     );
                 }
                 return servescope::serve(scope, &dir, &datasets, &addr);
@@ -273,7 +283,7 @@ fn run(args: &[String]) -> Result<(), String> {
             let ds = Dataset::open(&dir)?;
             if ds.store.count() == 0 {
                 eprintln!(
-                    "zetlyn: the store is empty. `zetlyn dataset run {}` first.",
+                    "zetlyn: the store is empty. `zetlyn source update {}` first.",
                     dir.display()
                 );
             }
@@ -295,7 +305,7 @@ fn dir_at(args: &[String], from: usize) -> Result<PathBuf, String> {
     let p = positional(args, from)
         .first()
         .map(|s| PathBuf::from(s.as_str()))
-        .ok_or("which dataset directory?")?;
+        .ok_or("which source directory?")?;
     if !p.join(crate::decl::FILE).exists() {
         return Err(missing(&p.join(crate::decl::FILE)));
     }
@@ -310,7 +320,7 @@ fn dataset_new(args: &[String]) -> Result<(), String> {
             .rsplit('/')
             .next()
             .map(|s| guess::slug(s.split('?').next().unwrap_or(s)))
-            .unwrap_or_else(|| "dataset".into());
+            .unwrap_or_else(|| "source".into());
         let dir = PathBuf::from(
             flag(args, "--at")
                 .map(str::to_string)
@@ -325,7 +335,7 @@ fn dataset_new(args: &[String]) -> Result<(), String> {
     let stem = from
         .file_stem()
         .map(|s| guess::slug(&s.to_string_lossy()))
-        .unwrap_or_else(|| "dataset".into());
+        .unwrap_or_else(|| "source".into());
     let dir = PathBuf::from(
         flag(args, "--at")
             .map(str::to_string)
@@ -383,7 +393,7 @@ fn dataset_run(args: &[String]) -> Result<(), String> {
         r.unchanged
     );
     if r.no_text > 0 {
-        println!("  {} records with no text", r.no_text);
+        println!("  {} claims with no text", r.no_text);
     }
     if r.no_known > 0 {
         println!("  {} took their date from the file", r.no_known);
@@ -407,7 +417,7 @@ fn dataset_run(args: &[String]) -> Result<(), String> {
     }
     if let Some(why) = &r.refused {
         println!(
-            "  {} records were read and the store was not replaced: {why}",
+            "  {} claims were read and the store was not replaced: {why}",
             r.unchanged
         );
         println!("  nothing was written, and the last complete run still stands");
@@ -471,7 +481,7 @@ fn deployment(args: &[String], from: usize) -> Result<PathBuf, String> {
         .map(|s| PathBuf::from(s.as_str()))
         .unwrap_or_else(|| PathBuf::from("."));
     if !root.join("sources").is_dir() {
-        return Err(format!("{}: no datasets here", root.display()));
+        return Err(format!("{}: no sources here", root.display()));
     }
     Ok(root)
 }
@@ -574,16 +584,16 @@ fn schedule(args: &[String]) -> Result<(), String> {
         for w in watch::all(&root) {
             match w.check(&root) {
                 Ok((report, mark)) => {
-                    let n = report["entries"].as_array().map(Vec::len).unwrap_or(0);
+                    let n = report["things"].as_array().map(Vec::len).unwrap_or(0);
                     if n == 0 {
                         continue;
                     }
                     if !deliver {
-                        println!("{}: {n} entries, not delivered", w.decl.name);
+                        println!("{}: {n} things, not delivered", w.decl.name);
                         continue;
                     }
                     match w.deliver(&report, &mark) {
-                        Ok(to) => println!("{}: {n} entries → {}", w.decl.name, to.join(", ")),
+                        Ok(to) => println!("{}: {n} things → {}", w.decl.name, to.join(", ")),
                         Err(e) => eprintln!("{}: {e}", w.decl.name),
                     }
                 }
@@ -628,8 +638,8 @@ fn watch_cmd(args: &[String]) -> Result<(), String> {
             let deliver = args.iter().any(|a| a == "--deliver");
             for w in &watches {
                 let (report, mark) = w.check(&root)?;
-                let n = report["entries"].as_array().map(Vec::len).unwrap_or(0);
-                println!("{}: {n} entries since {}", w.decl.name, report["since"]);
+                let n = report["things"].as_array().map(Vec::len).unwrap_or(0);
+                println!("{}: {n} things since {}", w.decl.name, report["since"]);
                 if deliver && n > 0 {
                     println!("  → {}", w.deliver(&report, &mark)?.join(", "));
                 } else if n > 0 {
@@ -655,7 +665,7 @@ fn account_cmd(args: &[String]) -> Result<(), String> {
             let days: i64 = flag(args, "--days")
                 .and_then(|d| d.parse().ok())
                 .unwrap_or(31);
-            let scopes: Vec<String> = flag(args, "--scopes")
+            let scopes: Vec<String> = flag(args, "--trackers")
                 .map(|s| s.split(',').map(str::to_string).collect())
                 .unwrap_or_default();
             let until = iso_date(now() + days * 86_400);
@@ -750,18 +760,18 @@ fn scope_at(args: &[String], from: usize) -> Result<(PathBuf, PathBuf), String> 
     let p = positional(args, from)
         .first()
         .map(|s| PathBuf::from(s.as_str()))
-        .ok_or("which scope directory?")?;
+        .ok_or("which tracker directory?")?;
     if !p.join(crate::scopedecl::FILE).exists() {
         return Err(missing(&p.join(crate::scopedecl::FILE)));
     }
     // A deployment holds `datasets/` beside `scopes/`, and a member is found there by its name.
-    let datasets = match flag(args, "--datasets") {
+    let datasets = match flag(args, "--sources") {
         Some(d) => PathBuf::from(d),
         None => p.join("..").join("..").join("sources"),
     };
     if !datasets.is_dir() {
         return Err(format!(
-            "{}: no datasets here. Name one with --datasets <dir>",
+            "{}: no sources here. Name one with --sources <dir>",
             datasets.display()
         ));
     }
@@ -788,13 +798,13 @@ fn scope_search(args: &[String]) -> Result<(), String> {
     };
     let answer = scope.search(&q);
     for name in &scope.missing {
-        println!("missing member: {name}");
+        println!("missing source: {name}");
     }
     for (member, reasons) in &answer.unanswered {
         println!("{member} did not answer: {}", reasons.join("; "));
     }
     println!(
-        "{} entries over {} records, {} of {} members answered",
+        "{} things over {} claims, {} of {} sources answered",
         answer.entries.len(),
         answer.total,
         answer.answered.len(),
@@ -833,7 +843,7 @@ fn scope_search(args: &[String]) -> Result<(), String> {
                 .collect();
             println!(
                 "     {name}{}: {}",
-                if view.divergent { " (divergent)" } else { "" },
+                if view.divergent { " (conflict)" } else { "" },
                 shown.join(", ")
             );
         }
@@ -843,7 +853,7 @@ fn scope_search(args: &[String]) -> Result<(), String> {
 
 fn search(args: &[String]) -> Result<(), String> {
     let rest = positional(args, 1);
-    let dir = PathBuf::from(rest.first().ok_or("which dataset directory?")?.as_str());
+    let dir = PathBuf::from(rest.first().ok_or("which source directory?")?.as_str());
     let terms: Vec<String> = rest.iter().skip(1).map(|s| s.to_string()).collect();
     let ds = Dataset::open(&dir)?;
     let (text, pred) = expr::parse_query(&terms.join(" "));
@@ -863,7 +873,7 @@ fn search(args: &[String]) -> Result<(), String> {
     for u in &unanswered.0 {
         println!("not answered here: {u}");
     }
-    println!("{total} records");
+    println!("{total} claims");
     for h in &hits {
         let why = if let Some(id) = &h.why_id {
             format!("identifier {}", id.value)
@@ -907,7 +917,7 @@ fn dataset_publish(args: &[String]) -> Result<(), String> {
     let place = place::at(to)?;
     let version = artifact::publish(&ds, place.as_ref(), tag, flag(args, "--expect"))?;
     println!(
-        "{}@{tag} is {version}, {} records, at {}",
+        "{}@{tag} is {version}, {} claims, at {}",
         ds.decl.name,
         ds.store.count(),
         place.describe()
@@ -920,7 +930,7 @@ fn dataset_subscribe(args: &[String]) -> Result<(), String> {
     let raw = positional(args, 2)
         .first()
         .map(|s| s.to_string())
-        .ok_or("which dataset? owner/name, with an optional @tag")?;
+        .ok_or("which source? owner/name, with an optional @tag")?;
     let reference = artifact::Reference::parse(&raw)?;
     let from = flag(args, "--from")
         .map(str::to_string)
@@ -939,7 +949,7 @@ fn dataset_subscribe(args: &[String]) -> Result<(), String> {
         flag(args, "--key"),
     )?;
     println!(
-        "{reference} is {version}, {held} records, in {}",
+        "{reference} is {version}, {held} claims, in {}",
         into.display()
     );
     Ok(())
@@ -954,7 +964,7 @@ fn dataset_update(args: &[String]) -> Result<(), String> {
     } = &decl.source
     else {
         return Err(format!(
-            "{} is not subscribed. `zetlyn dataset run` fills it from its source",
+            "{} is not subscribed. `zetlyn source update` fills it from where it fetches",
             decl.name
         ));
     };
@@ -980,7 +990,7 @@ fn dataset_update(args: &[String]) -> Result<(), String> {
         }
     }
     let (n, version) = artifact::subscribe(place.as_ref(), &reference, &dir, at, pinned)?;
-    println!("{reference} {held} → {version}, {n} records, whole");
+    println!("{reference} {held} → {version}, {n} claims, whole");
     Ok(())
 }
 
@@ -1002,7 +1012,7 @@ fn scope_publish(args: &[String]) -> Result<(), String> {
     let version =
         artifact::publish_scope(&dir, &datasets, place.as_ref(), tag, flag(args, "--expect"))?;
     println!(
-        "{}@{tag} is {version}, {} members, at {}",
+        "{}@{tag} is {version}, {} sources, at {}",
         scope.decl.name,
         scope.members.len(),
         place.describe()
@@ -1015,7 +1025,7 @@ fn scope_subscribe(args: &[String]) -> Result<(), String> {
     let raw = positional(args, 2)
         .first()
         .map(|s| s.to_string())
-        .ok_or("which scope? owner/name, with an optional @tag")?;
+        .ok_or("which tracker? owner/name, with an optional @tag")?;
     let reference = artifact::Reference::parse(&raw)?;
     let from = flag(args, "--from")
         .map(str::to_string)
@@ -1032,7 +1042,7 @@ fn scope_subscribe(args: &[String]) -> Result<(), String> {
         println!("  took {name}");
     }
     if taken.is_empty() {
-        println!("  every member was held already");
+        println!("  every source was held already");
     }
     Ok(())
 }
@@ -1059,7 +1069,7 @@ fn hub_command(args: &[String]) -> Result<(), String> {
             println!("{name} is yours, first come, and it belongs to");
             println!("  {who}");
             println!("\nNothing was handed out: you already hold the half that signs. It writes");
-            println!("under datasets/{name}/ and scopes/{name}/ and nowhere else.");
+            println!("under sources/{name}/ and trackers/{name}/ and nowhere else.");
             Ok(())
         }
         // The key a publisher signs with. It lives in the dataset directory and is read by
@@ -1069,7 +1079,7 @@ fn hub_command(args: &[String]) -> Result<(), String> {
             if let Some(held) = identity::or_local(&dir, artifact::KEY_FILE) {
                 println!("{held}");
                 println!("\nThat is the public half. Give it to subscribers; they pin it with");
-                println!("`zetlyn dataset subscribe … --key {held}`.");
+                println!("`zetlyn source subscribe … --key {held}`.");
                 return Ok(());
             }
             let public = artifact::new_key(&dir)?;
@@ -1079,7 +1089,7 @@ fn hub_command(args: &[String]) -> Result<(), String> {
                 dir.display(),
                 artifact::KEY_FILE
             );
-            println!("Do not publish this dataset from a second machine with a second key: every");
+            println!("Do not publish this source from a second machine with a second key: every");
             println!("subscriber who pinned the first would stop trusting you.");
             Ok(())
         }
@@ -1217,7 +1227,7 @@ fn deployment_name(root: &Path) -> String {
     root.canonicalize()
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-        .unwrap_or_else(|| "deployment".into())
+        .unwrap_or_else(|| "workspace".into())
 }
 
 /// The smallest thing that can drive a console, which is what a platform will be a larger one of.
@@ -1225,7 +1235,7 @@ fn console_call(args: &[String]) -> Result<(), String> {
     let url = positional(args, 2)
         .first()
         .map(|s| s.to_string())
-        .ok_or("which address? http://host:port/dataset/kev")?;
+        .ok_or("which address? http://host:port/source/kev")?;
     let method = flag(args, "--method").unwrap_or("GET").to_uppercase();
     let grant_path = PathBuf::from(flag(args, "--grant").ok_or("--grant which file?")?);
     // Your own identity by default. A caller with a key of its own is a caller somebody has to
@@ -1338,13 +1348,13 @@ fn id_command(args: &[String]) -> Result<(), String> {
             println!("{public}");
             println!("\nThat is you, everywhere you act: publishing to a hub, operating a");
             println!(
-                "deployment, driving a console. The private half is in {}/{},",
+                "workspace, driving a console. The private half is in {}/{},",
                 identity::home().display(),
                 identity::KEY_FILE
             );
             println!("readable by you and nobody else, and it is the one file worth backing up.");
-            println!("\nReaders are not this. A person who subscribes to a scope is an email");
-            println!("address in that deployment, and has no key.");
+            println!("\nReaders are not this. A person who subscribes to a tracker is an email");
+            println!("address in that workspace, and has no key.");
             Ok(())
         }
         _ => {
@@ -1399,7 +1409,7 @@ fn platform_command(args: &[String]) -> Result<(), String> {
             match platform.driver(name).and_then(|d| d.ask("GET", "/", b"")) {
                 Ok(j) => {
                     println!(
-                        "{name} answers: {} datasets, {} scopes",
+                        "{name} answers: {} sources, {} trackers",
                         j["sources"].as_array().map(Vec::len).unwrap_or(0),
                         j["trackers"].as_array().map(Vec::len).unwrap_or(0)
                     );

@@ -171,30 +171,30 @@ fn answer(root: &Path, name: &str, method: &str, path: &str, body: &[u8]) -> (u1
     let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
     match (method, parts.as_slice()) {
         ("GET", [""]) | ("GET", []) => (200, holdings(root, name)),
-        ("GET", ["dataset", named]) => match open(root, named) {
+        ("GET", ["source", named]) => match open(root, named) {
             Ok(ds) => (200, ds.describe()),
             Err(e) => (404, json!({ "refused": e })),
         },
-        ("GET", ["dataset", named, "runs"]) => match open(root, named) {
+        ("GET", ["source", named, "runs"]) => match open(root, named) {
             Ok(ds) => (200, runs(&ds)),
             Err(e) => (404, json!({ "refused": e })),
         },
-        ("GET", ["dataset", named, "declaration"]) => match declaration_of(root, named) {
-            Ok(text) => (200, json!({ "dataset": named, "declaration": text })),
+        ("GET", ["source", named, "declaration"]) => match declaration_of(root, named) {
+            Ok(text) => (200, json!({ "source": named, "declaration": text })),
             Err(e) => (404, json!({ "refused": e })),
         },
-        ("GET", ["dataset", named, "check"]) => match open(root, named) {
-            Ok(ds) => (200, json!({ "dataset": ds.decl.name, "wrong": ds.check() })),
+        ("GET", ["source", named, "check"]) => match open(root, named) {
+            Ok(ds) => (200, json!({ "source": ds.decl.name, "wrong": ds.check() })),
             Err(e) => (404, json!({ "refused": e })),
         },
-        ("POST", ["dataset", named, "run"]) => run_now(root, named),
-        ("PUT", ["dataset", named, "declaration"]) => apply(root, named, body),
-        ("GET", ["scope", named]) => match open_scope(root, named) {
+        ("POST", ["source", named, "run"]) => run_now(root, named),
+        ("PUT", ["source", named, "declaration"]) => apply(root, named, body),
+        ("GET", ["tracker", named]) => match open_scope(root, named) {
             Ok(s) => (200, s.describe()),
             Err(e) => (404, json!({ "refused": e })),
         },
-        ("GET", ["scope", named, "check"]) => match open_scope(root, named) {
-            Ok(s) => (200, json!({ "scope": s.decl.name, "wrong": s.check() })),
+        ("GET", ["tracker", named, "check"]) => match open_scope(root, named) {
+            Ok(s) => (200, json!({ "tracker": s.decl.name, "wrong": s.check() })),
             Err(e) => (404, json!({ "refused": e })),
         },
         _ => (
@@ -239,9 +239,9 @@ fn holdings(root: &Path, name: &str) -> J {
         .filter_map(|(named, dir)| {
             let ds = Dataset::open(dir).ok()?;
             Some(json!({
-                "dataset": named,
+                "source": named,
                 "kind": ds.decl.kind,
-                "records": ds.store.count(),
+                "claims": ds.store.count(),
                 "state": ds.state(),
                 "at": dir.file_name().map(|n| n.to_string_lossy().to_string()),
                 "next_run": ds.next_run(),
@@ -254,9 +254,9 @@ fn holdings(root: &Path, name: &str) -> J {
             let s = Scope::open(dir, &datasets(root)).ok()?;
             let (holds, late) = s.promise();
             Some(json!({
-                "scope": named,
-                "members": s.members.len(),
-                "records": s.records(),
+                "tracker": named,
+                "sources": s.members.len(),
+                "claims": s.records(),
                 "promise_holds": holds,
                 "behind": late,
                 "at": dir.file_name().map(|n| n.to_string_lossy().to_string()),
@@ -289,7 +289,7 @@ fn runs(ds: &Dataset) -> J {
             }))
         })
         .collect();
-    json!({ "dataset": ds.decl.name, "runs": reports })
+    json!({ "source": ds.decl.name, "runs": reports })
 }
 
 fn run_now(root: &Path, named: &str) -> (u16, J) {
@@ -304,7 +304,7 @@ fn run_now(root: &Path, named: &str) -> (u16, J) {
     match ds.run() {
         Ok(r) => (
             200,
-            json!({ "dataset": ds.decl.name, "run": r.id, "complete": r.complete,
+            json!({ "source": ds.decl.name, "run": r.id, "complete": r.complete,
                     "added": r.added, "changed": r.changed, "removed": r.removed,
                     "unchanged": r.unchanged, "error": r.error, "refused": r.refused }),
         ),
@@ -334,7 +334,7 @@ fn apply(root: &Path, named: &str, body: &[u8]) -> (u16, J) {
     if text == before {
         return (
             200,
-            json!({ "dataset": named, "applied": false, "why": "it is what is there" }),
+            json!({ "source": named, "applied": false, "why": "it is what is there" }),
         );
     }
     if let Err(e) = std::fs::write(dir.join("source.yaml.before"), &before) {
@@ -369,7 +369,7 @@ fn apply(root: &Path, named: &str, body: &[u8]) -> (u16, J) {
     }
     (
         200,
-        json!({ "dataset": ds.decl.name, "applied": true, "kept": "source.yaml.before" }),
+        json!({ "source": ds.decl.name, "applied": true, "kept": "source.yaml.before" }),
     )
 }
 

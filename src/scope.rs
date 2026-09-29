@@ -25,11 +25,11 @@ impl Resolved {
     pub fn kind(&self) -> String {
         self.described["kind"]
             .as_str()
-            .unwrap_or("record")
+            .unwrap_or("claim")
             .to_string()
     }
     pub fn records(&self) -> u64 {
-        self.described["records"].as_u64().unwrap_or(0)
+        self.described["claims"].as_u64().unwrap_or(0)
     }
     pub fn state(&self) -> &str {
         self.described["state"].as_str().unwrap_or("empty")
@@ -41,10 +41,10 @@ impl Resolved {
     }
     /// How many of this member's records carry a field, for the coverage beside a facet.
     pub fn field_records(&self, field: &str) -> Option<u64> {
-        self.described["fields"]
+        self.described["properties"]
             .as_array()?
             .iter()
-            .find(|f| f["name"].as_str() == Some(field))?["records"]
+            .find(|f| f["name"].as_str() == Some(field))?["claims"]
             .as_u64()
     }
     pub fn view(&self, name: &str) -> Option<&J> {
@@ -355,7 +355,7 @@ impl Scope {
         // Derived: what more than one member carries, and what every record has.
         let mut tally: BTreeMap<String, usize> = BTreeMap::new();
         for m in &self.members {
-            if let Some(fields) = m.described["fields"].as_array() {
+            if let Some(fields) = m.described["properties"].as_array() {
                 for f in fields {
                     if let Some(name) = f["name"].as_str() {
                         *tally.entry(self.field_out(m.name(), name)).or_default() += 1;
@@ -426,7 +426,7 @@ impl Scope {
         if !self.decl.view.facets.is_empty() {
             return self.decl.view.facets.clone();
         }
-        vec!["kind".into(), "dataset".into()]
+        vec!["kind".into(), "source".into()]
     }
 
     /// Whether this member can select anything for this query at all. Free text goes to every
@@ -783,7 +783,7 @@ impl Scope {
                 coverage += m.records();
                 continue;
             }
-            if field == "dataset" {
+            if field == "source" {
                 *tally.entry(m.name().to_string()).or_default() += m.records();
                 coverage += m.records();
                 continue;
@@ -869,11 +869,11 @@ impl Scope {
             .iter()
             .map(|m| {
                 json!({
-                    "dataset": m.name(),
+                    "source": m.name(),
                     "priority": m.decl.priority.name(),
                     "why": m.decl.why,
                     "kind": m.kind(),
-                    "records": m.records(),
+                    "claims": m.records(),
                     "state": m.state(),
                     "last_run": m.described["last_run"],
                     "can": m.described["can"],
@@ -882,16 +882,16 @@ impl Scope {
             })
             .collect();
         json!({
-            "scope": self.decl.name,
+            "tracker": self.decl.name,
             "title": self.decl.title,
             "about": self.decl.about,
-            "records": self.records(),
+            "claims": self.records(),
             "kinds": J::Array(self.kinds().iter()
-                .map(|(k, n)| json!({ "kind": k, "records": n })).collect()),
-            "members": J::Array(members),
+                .map(|(k, n)| json!({ "kind": k, "claims": n })).collect()),
+            "sources": J::Array(members),
             "missing": self.missing,
-            "join": self.decl.keys(),
-            "normalise": J::Object(self.decl.normalise.iter()
+            "identified_by": self.decl.keys(),
+            "align": J::Object(self.decl.normalise.iter()
                 .map(|(k, v)| (k.clone(), json!({ "scale": v.scale, "from": v.from })))
                 .collect()),
             "promise": json!({
@@ -977,10 +977,10 @@ impl Scope {
                         .find(|id| keys.iter().any(|k| *k == id.scheme));
                     let title = change["title"].as_str().unwrap_or("").to_string();
                     let mut one = change.clone();
-                    one["member"] = json!(m.name());
+                    one["source"] = json!(m.name());
                     let token = match &key {
                         Some(k) => format!("{}:{}", k.scheme, k.value.to_lowercase()),
-                        None => format!("{}#{}", m.name(), change["record_id"]),
+                        None => format!("{}#{}", m.name(), change["claim_id"]),
                     };
                     match index.get(&token) {
                         Some(i) => entries[*i].2.push(one),
@@ -994,15 +994,15 @@ impl Scope {
         }
 
         json!({
-            "scope": self.decl.name,
+            "tracker": self.decl.name,
             "since": since,
             "mark": self.mark(),
             "without_history": members_without_history,
-            "entries": J::Array(entries.iter().map(|(key, title, changes)| json!({
-                "key": key.as_ref().map(|k| json!({ "scheme": k.scheme, "value": k.value })),
+            "things": J::Array(entries.iter().map(|(key, title, changes)| json!({
+                "identifier": key.as_ref().map(|k| json!({ "scheme": k.scheme, "value": k.value })),
                 "title": title,
-                "members": J::Array(changes.iter()
-                    .map(|c| c["member"].clone()).collect()),
+                "sources": J::Array(changes.iter()
+                    .map(|c| c["source"].clone()).collect()),
                 "changes": J::Array(changes.clone()),
             })).collect()),
         })
@@ -1157,7 +1157,7 @@ impl Scope {
                     break;
                 }
             }
-            per_member.push(json!({ "dataset": m.name(), "kind": m.kind(), "records": seen }));
+            per_member.push(json!({ "source": m.name(), "kind": m.kind(), "claims": seen }));
         }
 
         let mut by_count: BTreeMap<usize, u64> = BTreeMap::new();
@@ -1194,13 +1194,13 @@ impl Scope {
         }
 
         json!({
-            "scope": self.decl.name,
-            "members": J::Array(per_member),
-            "subjects": subjects.len(),
-            "by_members": J::Object(by_count.iter()
+            "tracker": self.decl.name,
+            "sources": J::Array(per_member),
+            "things": subjects.len(),
+            "by_sources": J::Object(by_count.iter()
                 .map(|(n, c)| (n.to_string(), json!(c))).collect()),
             "with_an_exploit": with_exploit,
-            "fields": J::Object(fields.iter().map(|(name, (two, raw, mapped))| {
+            "properties": J::Object(fields.iter().map(|(name, (two, raw, mapped))| {
                 (name.clone(), json!({
                     "said_by_two_or_more": two,
                     "differ_in_words": raw,
@@ -1255,7 +1255,7 @@ impl Scope {
                 let want = right.display();
                 match left.as_str() {
                     "kind" => return entry.parts.iter().any(|p| cmp_str(&p.kind, op, &want)),
-                    "dataset" => return entry.parts.iter().any(|p| cmp_str(&p.member, op, &want)),
+                    "source" => return entry.parts.iter().any(|p| cmp_str(&p.member, op, &want)),
                     "title" => {
                         return cmp_str(&entry.title, op, &want)
                             || entry.parts.iter().any(|p| cmp_str(&p.title, op, &want))
@@ -1342,7 +1342,7 @@ impl Scope {
             wrong.push(format!("{name} is named and not installed here"));
         }
         if self.members.is_empty() {
-            wrong.push("no member resolved, so there is nothing to check".into());
+            wrong.push("no source resolved, so there is nothing to check".into());
             return wrong;
         }
 
@@ -1360,7 +1360,7 @@ impl Scope {
                 .map(|m| m.name())
                 .collect();
             match carrying.len() {
-                0 => wrong.push(format!("the join key {key} is carried by no member")),
+                0 => wrong.push(format!("the identifier {key} is carried by no source")),
                 1 => wrong.push(format!(
                     "the join key {key} is carried only by {}, so it joins nothing",
                     carrying[0]
@@ -1373,10 +1373,10 @@ impl Scope {
             for (member, their) in &n.from {
                 match self.members.iter().find(|m| m.name() == member) {
                     None => wrong.push(format!(
-                        "normalise.{field} names {member}, which is not a member"
+                        "align.{field} names {member}, which is not a source here"
                     )),
                     Some(m) if m.field_records(their).is_none() => wrong.push(format!(
-                        "normalise.{field} reads {their} from {member}, which has no such field"
+                        "align.{field} reads {their} from {member}, which has no such property"
                     )),
                     _ => {}
                 }
@@ -1384,7 +1384,7 @@ impl Scope {
             for member in n.members.keys() {
                 if !self.members.iter().any(|m| m.name() == member) {
                     wrong.push(format!(
-                        "normalise.{field} maps {member}, which is not a member"
+                        "align.{field} maps {member}, which is not a source here"
                     ));
                 }
             }
@@ -1415,7 +1415,7 @@ impl Scope {
         for kind in self.decl.view.kinds.keys() {
             if !self.kinds().iter().any(|(k, _)| k == kind) {
                 wrong.push(format!(
-                    "there is a view for {kind}, and no member holds one"
+                    "there is a view for {kind}, and no source holds one"
                 ));
             }
         }
@@ -1460,7 +1460,7 @@ fn cmp_str(have: &str, op: &Op, want: &str) -> bool {
 fn names_member(pred: &Pred, member: &str) -> bool {
     match pred {
         Pred::And(a, b) | Pred::Or(a, b) => names_member(a, member) || names_member(b, member),
-        Pred::Cmp { left, op, right } => left == "dataset" && cmp_str(member, op, &right.display()),
+        Pred::Cmp { left, op, right } => left == "source" && cmp_str(member, op, &right.display()),
     }
 }
 

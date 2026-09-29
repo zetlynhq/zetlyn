@@ -202,7 +202,7 @@ impl Owners {
         let tree = parts.next().unwrap_or_default();
         let named = parts.next().unwrap_or_default();
         if !matches!(tree, "sources" | "trackers") {
-            return Err(format!("{tree}: a hub holds datasets and scopes"));
+            return Err(format!("{tree}: a hub holds sources and trackers"));
         }
         if named != owner {
             return Err(format!("{owner} may not write under {named}"));
@@ -384,7 +384,7 @@ fn index_page(dir: &Path, serving: &[String]) -> Vec<u8> {
                 // first paint, and a reader who made none gets their system's.
                 script { (maud::PreEscaped("document.documentElement.className+=\" js\";try{var t=localStorage.getItem(\"theme\");if(t)document.documentElement.dataset.theme=t}catch(e){}")) }
                 title { "The hub — Zetlyn" }
-                meta name="description" content="Scopes and datasets you can subscribe to, and the ones answering here.";
+                meta name="description" content="Trackers and sources you can subscribe to, and the ones answering here.";
                 @if has("favicon.png") { link rel="icon" href="/favicon.png" type="image/png"; }
                 link rel="stylesheet" href="/style.css";
             }
@@ -395,8 +395,8 @@ fn index_page(dir: &Path, serving: &[String]) -> Vec<u8> {
                         span { "Zetlyn" }
                     }
                     nav {
-                        a href="https://zetlyn.com/scopes" { "Scopes" }
-                        a href="https://zetlyn.com/datasets" { "Datasets" }
+                        a href="https://zetlyn.com/trackers" { "Scopes" }
+                        a href="https://zetlyn.com/sources" { "Datasets" }
                         a href="https://zetlyn.com/hub" { "Hub" }
                     }
                 }
@@ -415,7 +415,7 @@ fn index_page(dir: &Path, serving: &[String]) -> Vec<u8> {
                     section.comparison.shell {
                         div.comparison-head {
                             p.overline { "SCOPES" }
-                            h2 { "A topic, and the datasets it is made of." }
+                            h2 { "A subject, and the sources it is made of." }
                         }
                         @if scopes.is_empty() { p.caption { "None yet." } }
                         div.rules {
@@ -427,7 +427,7 @@ fn index_page(dir: &Path, serving: &[String]) -> Vec<u8> {
                                             code { (c.reference()) }
                                             span {
                                                 @if !c.about.is_empty() { (c.about) " " }
-                                                (c.members) " members."
+                                                (c.members) " sources."
                                                 @if serving.iter().any(|s| *s == c.reference()) {
                                                     " " a href=(format!("/{}", c.reference())) { "Ask it here" } "."
                                                 }
@@ -438,10 +438,10 @@ fn index_page(dir: &Path, serving: &[String]) -> Vec<u8> {
                                 div.terminal {
                                     div.term-head { span {} span {} span {} b { "taking one" } }
                                     pre {
-                                        span.prompt { "$ " } "zetlyn scope subscribe "
+                                        span.prompt { "$ " } "zetlyn tracker subscribe "
                                         (scopes.first().map(|c| c.reference()).unwrap_or_else(|| "owner/name".into()))
                                         "\n"
-                                        span.cmt { "# the statement, and every dataset it names" }
+                                        span.cmt { "# the statement, and every source it names" }
                                     }
                                 }
                                 p.caption {
@@ -476,7 +476,7 @@ fn index_page(dir: &Path, serving: &[String]) -> Vec<u8> {
                                     }
                                 }
                             }
-                            p { code { "zetlyn dataset subscribe owner/name" } }
+                            p { code { "zetlyn source subscribe owner/name" } }
                         }
                     }
                 }
@@ -502,7 +502,7 @@ pub fn serve(dir: &Path, addr: &str, serving: &[String]) -> Result<(), String> {
     let server = tiny_http::Server::http(addr).map_err(|e| e.to_string())?;
     println!("a hub at {} on http://{addr}", dir.display());
     for name in serving {
-        println!("  a scope surface is mounted on this host at /{name}");
+        println!("  a tracker surface is mounted on this host at /{name}");
     }
     let place = crate::place::Folder {
         root: dir.to_path_buf(),

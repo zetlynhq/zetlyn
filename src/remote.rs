@@ -35,9 +35,9 @@ impl Remote {
             described: J::Null,
         };
         remote.described = remote.ask("/api/describe", &[])?;
-        remote.name = remote.described["dataset"]
+        remote.name = remote.described["source"]
             .as_str()
-            .ok_or("that address does not answer as a dataset")?
+            .ok_or("that address does not answer as a source")?
             .to_string();
         Ok(remote)
     }
@@ -101,14 +101,14 @@ fn spell(q: &Query) -> String {
 
 fn hit_of(v: &J, rank: usize) -> Hit {
     Hit {
-        record_id: v["record_id"].as_str().unwrap_or("").to_string(),
+        record_id: v["claim_id"].as_str().unwrap_or("").to_string(),
         rank,
         title: v["title"].as_str().unwrap_or("").to_string(),
         url: v["url"].as_str().map(str::to_string),
-        kind: v["kind"].as_str().unwrap_or("record").to_string(),
+        kind: v["kind"].as_str().unwrap_or("claim").to_string(),
         known: v["known"].as_str().unwrap_or("").to_string(),
         ids: parse_ids(&v["ids"].to_string()),
-        fields: parse_fields(&v["fields"].to_string()),
+        fields: parse_fields(&v["properties"].to_string()),
         why_text: v["why"]["text"]
             .as_array()
             .map(|a| {
@@ -117,7 +117,7 @@ fn hit_of(v: &J, rank: usize) -> Hit {
                     .collect()
             })
             .unwrap_or_default(),
-        why_field: v["why"]["field"]
+        why_field: v["why"]["property"]
             .as_array()
             .map(|a| {
                 a.iter()
@@ -176,7 +176,7 @@ impl Member for Remote {
 
     fn facet(&self, q: &Query, field: &str, limit: usize) -> Vec<(String, u64)> {
         let mut params = Remote::as_params(q);
-        params.push(("field", field.to_string()));
+        params.push(("property", field.to_string()));
         params.push(("limit", limit.to_string()));
         let Ok(answer) = self.ask("/api/facet", &params) else {
             return Vec::new();
@@ -189,7 +189,7 @@ impl Member for Remote {
             .filter_map(|v| {
                 Some((
                     v["value"].as_str()?.to_string(),
-                    v["records"].as_u64().unwrap_or(0),
+                    v["claims"].as_u64().unwrap_or(0),
                 ))
             })
             .collect()
@@ -200,19 +200,19 @@ impl Member for Remote {
             return Vec::new();
         };
         let empty = Vec::new();
-        answer["records"]
+        answer["claims"]
             .as_array()
             .unwrap_or(&empty)
             .iter()
             .map(|v| Record {
-                record_id: v["record_id"].as_str().unwrap_or("").to_string(),
+                record_id: v["claim_id"].as_str().unwrap_or("").to_string(),
                 dataset: self.name.clone(),
-                kind: v["kind"].as_str().unwrap_or("record").to_string(),
+                kind: v["kind"].as_str().unwrap_or("claim").to_string(),
                 ids: parse_ids(&v["ids"].to_string()),
                 title: v["title"].as_str().unwrap_or("").to_string(),
                 url: v["url"].as_str().map(str::to_string),
                 text: v["text"].as_str().unwrap_or("").to_string(),
-                fields: parse_fields(&v["fields"].to_string()),
+                fields: parse_fields(&v["properties"].to_string()),
                 known: v["known"].as_str().unwrap_or("").to_string(),
                 valid: None,
                 from: Origin {

@@ -28,7 +28,7 @@ fn link(q: &str, view: &str, kind: &str, page: usize) -> String {
 fn entry_link(e: &Entry) -> Option<String> {
     let k = e.key.as_ref()?;
     Some(format!(
-        "{}/entry/{}/{}",
+        "{}/thing/{}/{}",
         mounted(),
         urlencode(&k.scheme),
         urlencode(&k.value)
@@ -46,7 +46,7 @@ fn cell(e: &Entry, name: &str) -> Markup {
             let earliest = e.parts.iter().map(|p| p.known.as_str()).min().unwrap_or("");
             html! { (earliest) }
         }
-        "publishers" | "members" => html! { (e.members().len()) },
+        "publishers" | "sources" => html! { (e.members().len()) },
         other => match e.fields.get(other) {
             Some(f) => {
                 let distinct: Vec<&String> = {
@@ -122,13 +122,13 @@ fn overview(scope: &Scope, url: &str, v: &Viewer, site: &Site) -> String {
         (banner(v, scope, hidden))
         @if !d.about.is_empty() { p.about { (d.about) } }
         p.state.(if stale { "partial" } else { "current" }) {
-            (scope.records()) " records · " (scope.members.len()) " members · "
+            (scope.records()) " claims · " (scope.members.len()) " sources · "
             @for (k, n) in scope.kinds() { (k) " " (n) " · " }
             @if let Some(f) = &d.promise.fresh_within {
                 @if holds {
                     "fresh within " (f)
                     @if let Some(age) = scope.oldest_finish() {
-                        ", the member that ran longest ago " (crate::scope::human(age)) " ago"
+                        ", the source updated longest ago " (crate::scope::human(age)) " ago"
                     }
                 }
                 @else { "the promise of " (f) " does not hold" }
@@ -199,18 +199,18 @@ fn overview(scope: &Scope, url: &str, v: &Viewer, site: &Site) -> String {
             (answer.entries.len()) " shown of "
             @if answer.truncated { "at least " }
             (answer.total)
-            @if answer.subjects { " subjects" } @else { " records" }
+            @if answer.subjects { " things" } @else { " claims" }
         }
         @if answer.truncated {
             div.note {
-                "A member had more candidates than were read. The filter is applied over the "
-                "assembled subject, so what is not read is not counted, and this number is a "
+                "A source had more candidates than were read. The filter is applied over the "
+                "assembled thing, so what is not read is not counted, and this number is a "
                 "floor. Narrow the query to get an exact one."
             }
         }
         table {
             thead { tr {
-                th { "Subject" }
+                th { "Thing" }
                 @for c in &columns { th { (c) } }
             } }
             tbody {
@@ -248,7 +248,7 @@ fn overview(scope: &Scope, url: &str, v: &Viewer, site: &Site) -> String {
                     div.card {
                         h4 {
                             (name) " "
-                            span.cover { (coverage) " of " (scope.records()) " records" }
+                            span.cover { (coverage) " of " (scope.records()) " claims" }
                         }
                         @for (v, n) in &counts {
                             div.facet {
@@ -261,7 +261,7 @@ fn overview(scope: &Scope, url: &str, v: &Viewer, site: &Site) -> String {
             }
         }
 
-        h2 { "Members" }
+        h2 { "Sources" }
         div.grid {
             @for m in &scope.members {
                 div.card {
@@ -295,12 +295,12 @@ fn entry_page(scope: &Scope, scheme: &str, value: &str) -> Option<String> {
         p { a href=(at("/")) { "← " (d.title) } }
         h1 { (entry.title) }
         p.state { span.chip { (scheme) " " (value) } " "
-            span.dim { (entry.members().len()) " members, " (entry.parts.len()) " records" } }
+            span.dim { (entry.members().len()) " sources, " (entry.parts.len()) " claims" } }
 
         @if !entry.fields.is_empty() {
-            h2 { "What each member says" }
+            h2 { "What each source says" }
             table {
-                thead { tr { th { "Field" } th { "Member" } th { "Said" } th { "Means here" } } }
+                thead { tr { th { "Property" } th { "Source" } th { "Said" } th { "Means here" } } }
                 tbody {
                     @for (name, f) in &entry.fields {
                         @for (member, said) in &f.by {
@@ -308,7 +308,7 @@ fn entry_page(scope: &Scope, scheme: &str, value: &str) -> Option<String> {
                             @for (i, raw) in said.iter().enumerate() {
                                 tr {
                                     td { (name)
-                                        @if f.divergent { " " span.chip.on { "divergent" } } }
+                                        @if f.divergent { " " span.chip.on { "conflict" } } }
                                     td.dim { @if i == 0 { (member) } }
                                     td { (raw)
                                         @if let Some(means) = definition(scope, member, raw) {
@@ -333,7 +333,7 @@ fn entry_page(scope: &Scope, scheme: &str, value: &str) -> Option<String> {
                 @for p in parts {
                     tr {
                         td {
-                            a href={(at("/record/")) (urlencode(&p.member)) "/" (p.record_id)} { (p.title) }
+                            a href={(at("/claim/")) (urlencode(&p.member)) "/" (p.record_id)} { (p.title) }
                             div.why { (p.member) " · " (p.known) }
                         }
                         td {
@@ -376,7 +376,7 @@ fn record_page(scope: &Scope, member: &str, id: &str) -> Option<String> {
             span.dim { "known " (rec.known) } }
         @if let Some(u) = &rec.url { p { a href=(u) { (u) } } }
         @if !rec.fields.is_empty() {
-            h2 { "Fields" }
+            h2 { "Properties" }
             table { tbody {
                 @for (name, value) in &rec.fields {
                     tr {
@@ -435,15 +435,15 @@ fn api(scope: &Scope, path: &str, url: &str, v: &Viewer) -> (J, bool) {
             )
         }
         "/api/facet" => {
-            let field = p.get("field").cloned().unwrap_or_default();
+            let field = p.get("property").cloned().unwrap_or_default();
             let (counts, coverage) = scope.facet(&sq, &field, 50);
-            json!({ "field": field, "coverage": coverage, "records": scope.records(),
+            json!({ "property": field, "coverage": coverage, "claims": scope.records(),
                     "values": J::Array(counts.iter()
-                        .map(|(v, n)| json!({ "value": v, "records": n })).collect()) })
+                        .map(|(v, n)| json!({ "value": v, "claims": n })).collect()) })
         }
         // One subject, which is the page a reader opens and had no call of its own.
-        _ if path.starts_with("/api/entry/") => {
-            let rest: Vec<&str> = path["/api/entry/".len()..].splitn(2, '/').collect();
+        _ if path.starts_with("/api/thing/") => {
+            let rest: Vec<&str> = path["/api/thing/".len()..].splitn(2, '/').collect();
             match rest.as_slice() {
                 [scheme, value] => {
                     let value = crate::serve::urldecode(value);
@@ -451,7 +451,7 @@ fn api(scope: &Scope, path: &str, url: &str, v: &Viewer) -> (J, bool) {
                         Some(e) => entry_json(&e),
                         None => {
                             return (
-                                json!({ "error": "no such subject",
+                                json!({ "error": "no such thing",
                                         "scheme": scheme, "value": value }),
                                 true,
                             )
@@ -460,8 +460,8 @@ fn api(scope: &Scope, path: &str, url: &str, v: &Viewer) -> (J, bool) {
                 }
                 _ => {
                     return (
-                        json!({ "error": "an entry is named by a scheme and a value",
-                                "example": at("/api/entry/cve/CVE-2021-44228") }),
+                        json!({ "error": "a thing is named by a scheme and a value",
+                                "example": at("/api/thing/cve/CVE-2021-44228") }),
                         true,
                     )
                 }
@@ -471,18 +471,18 @@ fn api(scope: &Scope, path: &str, url: &str, v: &Viewer) -> (J, bool) {
             let answer = scope.search(&sq);
             json!({
                 "total": answer.total,
-                "counts": if answer.subjects { "subjects" } else { "records" },
+                "counts": if answer.subjects { "things" } else { "claims" },
                 "at_least": answer.truncated,
                 "answered": answer.answered,
                 "unanswered": J::Array(answer.unanswered.iter()
-                    .map(|(m, w)| json!({ "member": m, "why": w })).collect()),
-                "entries": J::Array(answer.entries.iter().map(entry_json).collect()),
+                    .map(|(m, w)| json!({ "source": m, "why": w })).collect()),
+                "things": J::Array(answer.entries.iter().map(entry_json).collect()),
             })
         }
         _ => {
             return (
                 json!({ "error": "no such call", "calls": [
-                    "/api/describe", "/api/search", "/api/entry/{scheme}/{value}",
+                    "/api/describe", "/api/search", "/api/thing/{scheme}/{value}",
                     "/api/facet", "/api/changes", "/api/mark",
                 ] }),
                 true,
@@ -496,15 +496,15 @@ fn api(scope: &Scope, path: &str, url: &str, v: &Viewer) -> (J, bool) {
 fn entry_json(e: &crate::scope::Entry) -> J {
     json!({
         "rank": e.rank,
-        "key": e.key.as_ref().map(|k| json!({ "scheme": k.scheme, "value": k.value })),
+        "identifier": e.key.as_ref().map(|k| json!({ "scheme": k.scheme, "value": k.value })),
         "title": e.title,
         "why": e.why,
-        "records": J::Array(e.parts.iter().map(|p| json!({
-            "member": p.member, "kind": p.kind, "record_id": p.record_id,
+        "claims": J::Array(e.parts.iter().map(|p| json!({
+            "source": p.member, "kind": p.kind, "claim_id": p.record_id,
             "title": p.title, "url": p.url, "known": p.known,
         })).collect()),
-        "fields": J::Object(e.fields.iter().map(|(name, f)| (name.clone(), json!({
-            "by": f.by, "means": f.means, "divergent": f.divergent,
+        "properties": J::Object(e.fields.iter().map(|(name, f)| (name.clone(), json!({
+            "by": f.by, "means": f.means, "conflict": f.divergent,
         }))).collect()),
     })
 }
@@ -532,7 +532,7 @@ fn banner(v: &Viewer, scope: &Scope, hidden: u64) -> Markup {
             }
             @if hidden > 0 {
                 a.chip href=(at("/pricing")) {
-                    (hidden) " records are newer than " (account::FREE_DELAY_DAYS)
+                    (hidden) " claims are newer than " (account::FREE_DELAY_DAYS)
                     " days and need a subscription"
                 }
             }
@@ -641,7 +641,7 @@ fn pricing_page(scope: &Scope, site: &Site, v: &Viewer) -> String {
         p { a href=(at("/")) { "← " (scope.decl.title) } }
         h1 { "What it costs" }
         p.about {
-            "Free is the whole of this scope, " (account::FREE_DELAY_DAYS) " days behind. "
+            "Free is the whole of this tracker, " (account::FREE_DELAY_DAYS) " days behind. "
             "A subscription is the same thing now, plus the part that is worth paying for: "
             "what changed since you last looked, delivered."
         }
@@ -656,21 +656,21 @@ fn pricing_page(scope: &Scope, site: &Site, v: &Viewer) -> String {
             }
             div.card {
                 h4 { (p.currency) (p.one) " a month" }
-                p.dim { "One person, this scope." }
+                p.dim { "One person, this tracker." }
                 div.facet { span { "Browse and search" } span.n { "current" } }
                 div.facet { span { "Change feeds" } span.n { "Atom, webhook, command" } }
                 div.facet { span { "API and export" } span.n { "yes" } }
             }
             div.card {
                 h4 { (p.currency) (p.team) " a month" }
-                p.dim { "A team, every scope this deployment serves." }
+                p.dim { "A team, every tracker this workspace serves." }
                 div.facet { span { "Everything above" } span.n { "yes" } }
                 div.facet { span { "Keys" } span.n { "as many as you need" } }
             }
         }
         @if p.buy.is_empty() {
             div.note {
-                "Card payment is not connected on this deployment. Write to "
+                "Card payment is not connected on this workspace. Write to "
                 @if site.contact.is_empty() { "the operator" } @else { (site.contact) }
                 " and a subscription is set by hand, which is what the first ones are anyway."
             }
@@ -689,7 +689,7 @@ fn pricing_page(scope: &Scope, site: &Site, v: &Viewer) -> String {
 
 fn terms_page(scope: &Scope, site: &Site) -> String {
     let who = if site.contact.is_empty() {
-        "the operator of this deployment"
+        "the operator of this workspace"
     } else {
         &site.contact
     };
@@ -697,7 +697,7 @@ fn terms_page(scope: &Scope, site: &Site) -> String {
         p { a href=(at("/")) { "← " (scope.decl.title) } }
         h1 { "Terms" }
         div.note {
-            "A draft. It says what this deployment actually does, and it has not been read by a "
+            "A draft. It says what this workspace actually does, and it has not been read by a "
             "lawyer. Anybody selling from it should have one read it first."
         }
         h2 { "What is sold" }
@@ -707,7 +707,7 @@ fn terms_page(scope: &Scope, site: &Site) -> String {
         @if !scope.decl.promise.excludes.is_empty() { p { "Not included: " (scope.decl.promise.excludes) } }
         h2 { "What is not promised" }
         p { "No availability guarantee, and no undertaking about how fast a change at a publisher "
-            "reaches this deployment beyond what the scope states and shows. Every source is a third "
+            "reaches this workspace beyond what the tracker states and shows. Every source is a third "
             "party and may change or stop without notice; where one does, the overview says so." }
         p { "The data is what publishers said. It is not advice, and nothing here decides which of "
             "two publishers is right." }
@@ -715,7 +715,7 @@ fn terms_page(scope: &Scope, site: &Site) -> String {
         p { "Monthly, in advance, cancellable at any time and effective at the end of the paid "
             "period. No refund for a part-used month. Prices include VAT where it applies." }
         h2 { "What happens when you stop" }
-        p { "Access to current records, feeds, the API and export ends. Anything already exported "
+        p { "Access to current claims, feeds, the API and export ends. Anything already exported "
             "stays yours; there is no recall." }
         h2 { "Your data" }
         p { "An address and, if you make them, API keys. No password is stored because none is "
@@ -753,12 +753,12 @@ fn export(scope: &Scope, url: &str, v: &Viewer, as_csv: bool) -> Option<(String,
             .iter()
             .map(|e| {
                 json!({
-                    "key": e.key.as_ref().map(|k| format!("{}:{}", k.scheme, k.value)),
+                    "identifier": e.key.as_ref().map(|k| format!("{}:{}", k.scheme, k.value)),
                     "title": e.title,
-                    "members": e.members(),
-                    "fields": J::Object(e.fields.iter()
+                    "sources": e.members(),
+                    "properties": J::Object(e.fields.iter()
                         .map(|(n, f)| (n.clone(), json!({ "by": f.by, "means": f.means,
-                                                          "divergent": f.divergent }))).collect()),
+                                                          "conflict": f.divergent }))).collect()),
                 })
             })
             .collect();
@@ -769,7 +769,7 @@ fn export(scope: &Scope, url: &str, v: &Viewer, as_csv: bool) -> Option<(String,
         names.extend(e.fields.keys().cloned());
     }
     let quote = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
-    let mut out = String::from("key,title,members");
+    let mut out = String::from("identifier,title,sources");
     for n in &names {
         out.push(',');
         out.push_str(n);
@@ -830,17 +830,17 @@ fn atom(title: &str, self_url: &str, entries: &[J], updated: &str) -> String {
     ));
     for e in entries.iter().rev() {
         let title = e["title"].as_str().unwrap_or("");
-        let key = e["key"]["value"].as_str().unwrap_or("");
+        let key = e["identifier"]["value"].as_str().unwrap_or("");
         let empty = Vec::new();
         let mut body = String::new();
         for c in e["changes"].as_array().unwrap_or(&empty) {
-            let member = c["member"].as_str().unwrap_or("");
+            let member = c["source"].as_str().unwrap_or("");
             let how = c["how"].as_str().unwrap_or("");
             body.push_str(&format!("{member}: {how}\n"));
-            for f in c["fields"].as_array().unwrap_or(&empty) {
+            for f in c["properties"].as_array().unwrap_or(&empty) {
                 body.push_str(&format!(
                     "  {}: {} → {}\n",
-                    f["field"].as_str().unwrap_or(""),
+                    f["property"].as_str().unwrap_or(""),
                     f["was"].as_str().unwrap_or("—"),
                     f["is"].as_str().unwrap_or("—"),
                 ));
@@ -871,7 +871,7 @@ fn changes_page(scope: &Scope, url: &str) -> String {
         .unwrap_or_else(|| scope.mark_before());
     let report = scope.changes(&since, 200);
     let empty = Vec::new();
-    let entries = report["entries"].as_array().unwrap_or(&empty);
+    let entries = report["things"].as_array().unwrap_or(&empty);
     let without: Vec<&str> = report["without_history"]
         .as_array()
         .unwrap_or(&empty)
@@ -888,18 +888,18 @@ fn changes_page(scope: &Scope, url: &str) -> String {
         }
         @if !without.is_empty() {
             div.note {
-                "These members keep no history, so a change from them says that a record moved and "
+                "These sources keep no history, so a change from them says that a claim moved and "
                 "not what in it did: " (without.join(", ")) "."
             }
         }
         @if entries.is_empty() { p.dim { "Nothing since then." } }
         @for e in entries {
-            @let key = e["key"]["value"].as_str().unwrap_or("");
-            @let scheme = e["key"]["scheme"].as_str().unwrap_or("");
+            @let key = e["identifier"]["value"].as_str().unwrap_or("");
+            @let scheme = e["identifier"]["scheme"].as_str().unwrap_or("");
             h3 {
                 @if key.is_empty() { (e["title"].as_str().unwrap_or("")) }
                 @else {
-                    a href={(at("/entry/")) (urlencode(scheme)) "/" (urlencode(key))} {
+                    a href={(at("/thing/")) (urlencode(scheme)) "/" (urlencode(key))} {
                         (e["title"].as_str().unwrap_or(""))
                     }
                 }
@@ -909,21 +909,21 @@ fn changes_page(scope: &Scope, url: &str) -> String {
                     tr {
                         td style="width: 10rem" {
                             span.chip { (c["how"].as_str().unwrap_or("")) } " "
-                            span.dim { (c["member"].as_str().unwrap_or("")) }
+                            span.dim { (c["source"].as_str().unwrap_or("")) }
                         }
                         td {
-                            @let moved = c["fields"].as_array();
+                            @let moved = c["properties"].as_array();
                             @match moved {
                                 Some(fields) if !fields.is_empty() => {
                                     @for f in fields {
                                         div {
-                                            (f["field"].as_str().unwrap_or("")) ": "
+                                            (f["property"].as_str().unwrap_or("")) ": "
                                             span.dim { (f["was"].as_str().unwrap_or("—")) }
                                             " → " strong { (f["is"].as_str().unwrap_or("—")) }
                                         }
                                     }
                                 }
-                                _ => span.dim { "the record moved; this member keeps no history" },
+                                _ => span.dim { "the claim moved; this source keeps no history" },
                             }
                         }
                     }
@@ -1023,7 +1023,7 @@ pub fn serve(mut scope: Scope, dir: &Path, datasets: &Path, addr: &str) -> Resul
                 None,
             ),
             // Curation is a permission, checked here rather than only hidden in the form.
-            "/catalogue/dataset" | "/catalogue/scope"
+            "/catalogue/source" | "/catalogue/tracker"
                 if post && !v.account.as_ref().is_some_and(|a| a.curator) =>
             {
                 (
@@ -1032,7 +1032,7 @@ pub fn serve(mut scope: Scope, dir: &Path, datasets: &Path, addr: &str) -> Resul
                     None,
                 )
             }
-            "/catalogue/dataset" if post => {
+            "/catalogue/source" if post => {
                 let said = match add_dataset(&scope, &form) {
                     Ok(m) => m,
                     Err(e) => e,
@@ -1043,7 +1043,7 @@ pub fn serve(mut scope: Scope, dir: &Path, datasets: &Path, addr: &str) -> Resul
                     None,
                 )
             }
-            "/catalogue/scope" if post => {
+            "/catalogue/tracker" if post => {
                 let said = match add_scope(&scope, &form) {
                     Ok(m) => m,
                     Err(e) => e,
@@ -1194,7 +1194,7 @@ pub fn serve(mut scope: Scope, dir: &Path, datasets: &Path, addr: &str) -> Resul
                     .unwrap_or_else(|| scope.mark_before());
                 let report = scope.changes(&since, 200);
                 let empty = Vec::new();
-                let entries = report["entries"].as_array().unwrap_or(&empty);
+                let entries = report["things"].as_array().unwrap_or(&empty);
                 (
                     atom(
                         &scope.decl.title,
@@ -1254,26 +1254,26 @@ pub fn serve(mut scope: Scope, dir: &Path, datasets: &Path, addr: &str) -> Resul
                     }
                 }
             }
-            _ if parts.len() == 3 && parts[0] == "entry" => {
+            _ if parts.len() == 3 && parts[0] == "thing" => {
                 match entry_page(&scope, &parts[1], &parts[2]) {
                     Some(html) => (html, "text/html; charset=utf-8", None),
                     None => {
                         missing = true;
                         (
-                            shell("Not here", html! { h1 { "No such subject" } }),
+                            shell("Not here", html! { h1 { "No such thing" } }),
                             "text/html; charset=utf-8",
                             None,
                         )
                     }
                 }
             }
-            _ if parts.len() == 3 && parts[0] == "record" => {
+            _ if parts.len() == 3 && parts[0] == "claim" => {
                 match record_page(&scope, &parts[1], &parts[2]) {
                     Some(html) => (html, "text/html; charset=utf-8", None),
                     None => {
                         missing = true;
                         (
-                            shell("Not here", html! { h1 { "No such record" } }),
+                            shell("Not here", html! { h1 { "No such claim" } }),
                             "text/html; charset=utf-8",
                             None,
                         )
@@ -1370,15 +1370,15 @@ fn catalogue(scope: &Scope, v: &Viewer, message: Option<&str>) -> String {
         p { a href=(at("/")) { "← " (scope.decl.title) } }
         h1 { "The catalogue" }
         p.about {
-            "Every dataset and scope this deployment holds. A dataset belongs to no scope: several "
+            "Every source and tracker this workspace holds. A source belongs to no tracker: several "
             "may name it, and the cost of a source is paid by whoever fetches it rather than by "
-            "each scope again."
+            "each tracker again."
         }
         @if let Some(m) = message { div.note { (m) } }
 
-        h2 { "Datasets" }
+        h2 { "Sources" }
         table {
-            thead { tr { th { "Name" } th { "Kind" } th { "Records" } th { "State" } } }
+            thead { tr { th { "Name" } th { "Kind" } th { "Claims" } th { "State" } } }
             tbody {
                 @for (name, kind, records, state) in &held {
                     tr {
@@ -1392,7 +1392,7 @@ fn catalogue(scope: &Scope, v: &Viewer, message: Option<&str>) -> String {
         }
         @if held.is_empty() { p.dim { "None." } }
 
-        h2 { "Scopes" }
+        h2 { "Trackers" }
         ul {
             @for (name, _) in &scopes { li { (name) } }
         }
@@ -1400,43 +1400,43 @@ fn catalogue(scope: &Scope, v: &Viewer, message: Option<&str>) -> String {
 
         @if !may {
             div.note {
-                "Adding a dataset or composing a scope needs a curator. "
+                "Adding a source or composing a tracker needs a curator. "
                 @match v.email() {
                     Some(mail) => { (mail) " is not one yet." }
                     None => { a href=(at("/signin")) { "Sign in" } " and ask the operator." }
                 }
             }
         } @else {
-            h2 { "Add a dataset" }
+            h2 { "Add a source" }
             p.dim {
                 "A link to a CSV or to a feed. The declaration is proposed from what is behind it, "
                 "and the scheduler fills the store on its next tick."
             }
-            form.bar method="post" action=(at("/catalogue/dataset")) {
+            form.bar method="post" action=(at("/catalogue/source")) {
                 input type="search" name="url" placeholder="https://…/something.csv";
                 input type="search" name="name" placeholder="owner/name";
-                input type="search" name="kind" placeholder="what one record is";
+                input type="search" name="kind" placeholder="what one claim is";
                 button type="submit" { "Propose it" }
             }
 
-            h2 { "Compose a scope" }
+            h2 { "Compose a tracker" }
             p.dim {
-                "Pick the members and say what makes two of their records the same thing. Every "
-                "member needs a sentence saying what it contributes that the others do not: a "
-                "member nobody can justify in a sentence is one somebody added and nobody removed."
+                "Pick the sources and say what identifies the thing they talk about. Every "
+                "source needs a sentence saying what it contributes that the others do not: a "
+                "source nobody can justify in a sentence is one somebody added and nobody removed."
             }
-            form method="post" action=(at("/catalogue/scope")) {
+            form method="post" action=(at("/catalogue/tracker")) {
                 p.bar {
                     input type="search" name="name" placeholder="owner/name";
                     input type="search" name="title" placeholder="Title";
-                    input type="search" name="key" placeholder="the identifier scheme to join on";
+                    input type="search" name="identifier" placeholder="the identifier scheme, such as cve";
                 }
-                p.bar { input type="search" name="about" placeholder="What this subject is, in one sentence"; }
+                p.bar { input type="search" name="about" placeholder="What this tracker is about, in one sentence"; }
                 table { tbody {
                     @for (name, kind, records, _) in &held {
                         tr {
                             td style="width: 2rem" {
-                                input type="checkbox" name="member" value=(name);
+                                input type="checkbox" name="source" value=(name);
                             }
                             td { (name) " " span.dim { (kind) " · " (records) } }
                             td { input type="search" name={"why_" (name)}
@@ -1464,7 +1464,7 @@ fn add_dataset(scope: &Scope, form: &str) -> Result<String, String> {
         .join("sources")
         .join(slug(if name.trim().is_empty() { &url } else { &name }));
     if dir.join(crate::decl::FILE).exists() {
-        return Err(format!("{} already holds a dataset", dir.display()));
+        return Err(format!("{} already holds a source", dir.display()));
     }
     crate::guess::propose_url(
         url.trim(),
@@ -1484,11 +1484,11 @@ fn add_dataset(scope: &Scope, form: &str) -> Result<String, String> {
 fn add_scope(scope: &Scope, form: &str) -> Result<String, String> {
     let name = form_field(form, "name");
     if !name.contains('/') {
-        return Err("a scope is named owner/name".into());
+        return Err("a tracker is named owner/name".into());
     }
-    let members = form_fields(form, "member");
+    let members = form_fields(form, "source");
     if members.is_empty() {
-        return Err("a scope with no members is a scope about nothing".into());
+        return Err("a tracker with no sources is a tracker about nothing".into());
     }
     let mut missing = Vec::new();
     let mut whys = Vec::new();
@@ -1501,14 +1501,14 @@ fn add_scope(scope: &Scope, form: &str) -> Result<String, String> {
     }
     if !missing.is_empty() {
         return Err(format!(
-            "these members have no sentence saying why they belong: {}",
+            "these sources have no sentence saying why they belong: {}",
             missing.join(", ")
         ));
     }
 
     let title = form_field(form, "title");
     let about = form_field(form, "about");
-    let key = form_field(form, "key");
+    let key = form_field(form, "identifier");
     let built = serde_json::json!({
         "name": name.trim(),
         "title": if title.trim().is_empty() { name.trim() } else { title.trim() },

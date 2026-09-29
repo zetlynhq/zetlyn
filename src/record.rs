@@ -251,14 +251,14 @@ impl Record {
 
     pub fn to_json(&self) -> J {
         json!({
-            "record_id": self.record_id,
-            "dataset": self.dataset,
+            "claim_id": self.record_id,
+            "source": self.dataset,
             "kind": self.kind,
             "ids": self.ids_json(),
             "title": self.title,
             "url": self.url,
             "text": self.text,
-            "fields": self.fields_json(),
+            "properties": self.fields_json(),
             "known": self.known,
             "valid": self.valid.as_ref().map(|(f, t)| json!({ "from": f, "to": t })),
             "from": self.from.to_json(),
@@ -298,7 +298,7 @@ impl Record {
             })
             .unwrap_or_default();
         let fields = j
-            .get("fields")
+            .get("properties")
             .and_then(J::as_object)
             .map(|o| {
                 o.iter()
@@ -314,7 +314,7 @@ impl Record {
             )
         });
         let record = Record {
-            record_id: s("record_id"),
+            record_id: s("claim_id"),
             dataset: dataset.to_string(),
             kind: s("kind"),
             ids,
@@ -334,12 +334,12 @@ impl Record {
             hash: s("hash"),
         };
         if record.record_id.is_empty() {
-            return Err("a record with no id".into());
+            return Err("a claim with no id".into());
         }
         let recomputed = record.compute_hash();
         if record.hash != recomputed {
             return Err(format!(
-                "{}: the hash does not describe the record",
+                "{}: the hash does not describe the claim",
                 record.record_id
             ));
         }

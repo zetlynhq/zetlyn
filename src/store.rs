@@ -570,12 +570,12 @@ impl Store {
                     _ => {}
                 }
                 let Some(kind) = types.get(left) else {
-                    unanswered.push(format!("{left}: no such field here"));
+                    unanswered.push(format!("{left}: no such property here"));
                     return "1=0".into();
                 };
                 if !kind.ordered() && !matches!(op, Op::Eq | Op::Ne) {
                     unanswered.push(format!(
-                        "{left} {} {}: a {} has no order until a scope declares a scale",
+                        "{left} {} {}: a {} has no order until a tracker declares a scale",
                         op.sql(),
                         right.display(),
                         kind.name()

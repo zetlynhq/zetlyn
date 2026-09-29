@@ -1,10 +1,11 @@
-severe: 3 entries since "test/kev=0,test/vendor-a=1,test/vendor-b=0,test/exploits=0"
+severe: 3 things since "test/kev=0,test/vendor-a=1,test/vendor-b=0,test/exploits=0"
 {
-  "entries": [
+  "since": "test/kev=0,test/vendor-a=1,test/vendor-b=0,test/exploits=0",
+  "things": [
     {
       "changes": [
         {
-          "fields": null,
+          "claim_id": "326f1a78b75d99d7062095f9babcbddc1afee5ed384bcee0d7a267c88013dbbd",
           "how": "added",
           "ids": [
             {
@@ -14,20 +15,14 @@ severe: 3 entries since "test/kev=0,test/vendor-a=1,test/vendor-b=0,test/exploit
           ],
           "kind": "vulnerability",
           "known": "2026-09-01",
-          "member": "test/kev",
-          "record_id": "326f1a78b75d99d7062095f9babcbddc1afee5ed384bcee0d7a267c88013dbbd",
+          "properties": null,
           "run": 1,
+          "source": "test/kev",
           "title": "Foo Server remote code execution",
           "url": null
         },
         {
-          "fields": [
-            {
-              "field": "cvss",
-              "is": "8.1",
-              "was": "9.8"
-            }
-          ],
+          "claim_id": "3d273c10978b3581da07de0be8195165723a4a1112d72642022cecdded94ec92",
           "how": "changed",
           "ids": [
             {
@@ -37,14 +32,20 @@ severe: 3 entries since "test/kev=0,test/vendor-a=1,test/vendor-b=0,test/exploit
           ],
           "kind": "vulnerability",
           "known": "2026-08-30",
-          "member": "test/vendor-a",
-          "record_id": "3d273c10978b3581da07de0be8195165723a4a1112d72642022cecdded94ec92",
+          "properties": [
+            {
+              "is": "8.1",
+              "property": "cvss",
+              "was": "9.8"
+            }
+          ],
           "run": 2,
+          "source": "test/vendor-a",
           "title": "foo: remote code execution",
           "url": null
         },
         {
-          "fields": null,
+          "claim_id": "cdfe8d2dfc7f207a3a045e9c78583b4ed4d987fbd93535000f06c785d88fe140",
           "how": "added",
           "ids": [
             {
@@ -54,14 +55,14 @@ severe: 3 entries since "test/kev=0,test/vendor-a=1,test/vendor-b=0,test/exploit
           ],
           "kind": "vulnerability",
           "known": "2026-08-30",
-          "member": "test/vendor-b",
-          "record_id": "cdfe8d2dfc7f207a3a045e9c78583b4ed4d987fbd93535000f06c785d88fe140",
+          "properties": null,
           "run": 1,
+          "source": "test/vendor-b",
           "title": "Remote code execution in foo",
           "url": null
         },
         {
-          "fields": null,
+          "claim_id": "85f7dbace40fe4f3e17e93ba9640c324248095d4492381e7452cd28af8843dff",
           "how": "added",
           "ids": [
             {
@@ -75,18 +76,18 @@ severe: 3 entries since "test/kev=0,test/vendor-a=1,test/vendor-b=0,test/exploit
           ],
           "kind": "exploit",
           "known": "2026-09-02",
-          "member": "test/exploits",
-          "record_id": "85f7dbace40fe4f3e17e93ba9640c324248095d4492381e7452cd28af8843dff",
+          "properties": null,
           "run": 1,
+          "source": "test/exploits",
           "title": "Foo Server RCE (Metasploit)",
           "url": null
         }
       ],
-      "key": {
+      "identifier": {
         "scheme": "cve",
         "value": "CVE-2026-0001"
       },
-      "members": [
+      "sources": [
         "test/kev",
         "test/vendor-a",
         "test/vendor-b",
@@ -97,7 +98,7 @@ severe: 3 entries since "test/kev=0,test/vendor-a=1,test/vendor-b=0,test/exploit
     {
       "changes": [
         {
-          "fields": null,
+          "claim_id": "614175e8894c3bf8c976a16bfc089f312b0a40a3e0ee6767a54670d82f045e2e",
           "how": "added",
           "ids": [
             {
@@ -107,25 +108,14 @@ severe: 3 entries since "test/kev=0,test/vendor-a=1,test/vendor-b=0,test/exploit
           ],
           "kind": "vulnerability",
           "known": "2026-09-03",
-          "member": "test/kev",
-          "record_id": "614175e8894c3bf8c976a16bfc089f312b0a40a3e0ee6767a54670d82f045e2e",
+          "properties": null,
           "run": 1,
+          "source": "test/kev",
           "title": "Baz Router authentication bypass",
           "url": null
         },
         {
-          "fields": [
-            {
-              "field": "cvss",
-              "is": "9.1",
-              "was": "6.5"
-            },
-            {
-              "field": "severity",
-              "is": "critical",
-              "was": "moderate"
-            }
-          ],
+          "claim_id": "814d1bf1c31d5fa136477fcaa5ef43d263fc83e4288820bf6f7a1f25b96f8d1a",
           "how": "changed",
           "ids": [
             {
@@ -135,18 +125,29 @@ severe: 3 entries since "test/kev=0,test/vendor-a=1,test/vendor-b=0,test/exploit
           ],
           "kind": "vulnerability",
           "known": "2026-09-02",
-          "member": "test/vendor-a",
-          "record_id": "814d1bf1c31d5fa136477fcaa5ef43d263fc83e4288820bf6f7a1f25b96f8d1a",
+          "properties": [
+            {
+              "is": "9.1",
+              "property": "cvss",
+              "was": "6.5"
+            },
+            {
+              "is": "critical",
+              "property": "severity",
+              "was": "moderate"
+            }
+          ],
           "run": 2,
+          "source": "test/vendor-a",
           "title": "baz: authentication bypass",
           "url": null
         }
       ],
-      "key": {
+      "identifier": {
         "scheme": "cve",
         "value": "CVE-2026-0004"
       },
-      "members": [
+      "sources": [
         "test/kev",
         "test/vendor-a"
       ],
@@ -155,7 +156,7 @@ severe: 3 entries since "test/kev=0,test/vendor-a=1,test/vendor-b=0,test/exploit
     {
       "changes": [
         {
-          "fields": null,
+          "claim_id": "8603ef9ff6be78d990275ab4a8ded967427e8bd2089f3992757ddcc1e63aed82",
           "how": "added",
           "ids": [
             {
@@ -165,14 +166,14 @@ severe: 3 entries since "test/kev=0,test/vendor-a=1,test/vendor-b=0,test/exploit
           ],
           "kind": "vulnerability",
           "known": "2026-08-31",
-          "member": "test/vendor-b",
-          "record_id": "8603ef9ff6be78d990275ab4a8ded967427e8bd2089f3992757ddcc1e63aed82",
+          "properties": null,
           "run": 1,
+          "source": "test/vendor-b",
           "title": "Heap overflow in bar",
           "url": null
         },
         {
-          "fields": null,
+          "claim_id": "062121216fbd2126cfbdcfa5c23827149ecf47602de8768b5f57d456b7a37404",
           "how": "added",
           "ids": [
             {
@@ -186,45 +187,34 @@ severe: 3 entries since "test/kev=0,test/vendor-a=1,test/vendor-b=0,test/exploit
           ],
           "kind": "exploit",
           "known": "2026-09-01",
-          "member": "test/exploits",
-          "record_id": "062121216fbd2126cfbdcfa5c23827149ecf47602de8768b5f57d456b7a37404",
+          "properties": null,
           "run": 1,
+          "source": "test/exploits",
           "title": "Bar heap overflow PoC",
           "url": null
         }
       ],
-      "key": {
+      "identifier": {
         "scheme": "cve",
         "value": "CVE-2026-0002"
       },
-      "members": [
+      "sources": [
         "test/vendor-b",
         "test/exploits"
       ],
       "title": "Heap overflow in bar"
     }
   ],
-  "scope": "test/cve",
-  "since": "test/kev=0,test/vendor-a=1,test/vendor-b=0,test/exploits=0",
+  "tracker": "test/cve",
   "watch": "severe"
 }
-vendor-a-critical: 1 entries since 1
+vendor-a-critical: 1 things since 1
 {
-  "dataset": "test/vendor-a",
-  "entries": [
+  "since": 1,
+  "source": "test/vendor-a",
+  "things": [
     {
-      "fields": [
-        {
-          "field": "cvss",
-          "is": "9.1",
-          "was": "6.5"
-        },
-        {
-          "field": "severity",
-          "is": "critical",
-          "was": "moderate"
-        }
-      ],
+      "claim_id": "814d1bf1c31d5fa136477fcaa5ef43d263fc83e4288820bf6f7a1f25b96f8d1a",
       "how": "changed",
       "ids": [
         {
@@ -234,12 +224,22 @@ vendor-a-critical: 1 entries since 1
       ],
       "kind": "vulnerability",
       "known": "2026-09-02",
-      "record_id": "814d1bf1c31d5fa136477fcaa5ef43d263fc83e4288820bf6f7a1f25b96f8d1a",
+      "properties": [
+        {
+          "is": "9.1",
+          "property": "cvss",
+          "was": "6.5"
+        },
+        {
+          "is": "critical",
+          "property": "severity",
+          "was": "moderate"
+        }
+      ],
       "run": 2,
       "title": "baz: authentication bypass",
       "url": null
     }
   ],
-  "since": 1,
   "watch": "vendor-a-critical"
 }

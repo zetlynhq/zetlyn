@@ -20,7 +20,7 @@ use crate::place::{sha256, Place};
 use crate::record::Record;
 use crate::store::Store;
 
-pub const SPEC_VERSION: &str = "1.0";
+pub const SPEC_VERSION: &str = "2.0";
 
 /// Where a reference with no host is fetched from and published to.
 ///
@@ -290,7 +290,7 @@ fn write_delta(
             continue;
         }
         let j: J = serde_json::from_str(line).map_err(|e| e.to_string())?;
-        let (Some(id), Some(hash)) = (j["record_id"].as_str(), j["hash"].as_str()) else {
+        let (Some(id), Some(hash)) = (j["claim_id"].as_str(), j["hash"].as_str()) else {
             continue;
         };
         held.insert(id.to_string(), hash.to_string());
@@ -316,7 +316,7 @@ fn write_delta(
     let mut gone = Vec::new();
     for id in held.keys() {
         if !seen.contains(id) {
-            gone.push(format!("{}\n", serde_json::json!({ "record_id": id })));
+            gone.push(format!("{}\n", serde_json::json!({ "claim_id": id })));
         }
     }
     let removed_body = gone.concat().into_bytes();
@@ -784,7 +784,7 @@ pub fn apply_delta(
             continue;
         }
         let j: J = serde_json::from_str(line).map_err(|e| e.to_string())?;
-        if let Some(id) = j["record_id"].as_str() {
+        if let Some(id) = j["claim_id"].as_str() {
             if store.remove(id, run, &at)? {
                 removed += 1;
             }
@@ -832,7 +832,7 @@ pub fn apply_delta(
     let got = store.count();
     if want != got {
         return Err(format!(
-            "after the delta this holds {got} records and the manifest says {want}"
+            "after the delta this holds {got} claims and the manifest says {want}"
         ));
     }
     Ok(Some((added, changed, removed)))

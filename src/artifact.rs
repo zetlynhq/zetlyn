@@ -109,7 +109,14 @@ pub fn version_of(payloads: &BTreeMap<String, (u64, String)>) -> String {
 }
 
 /// What a published source says about itself, without fetching its claims.
-pub fn manifest_of(ds: &Source, payloads: &BTreeMap<String, (u64, String)>) -> J {
+/// `content` names what the version is: every payload by its plain name and the hash of its plain
+/// bytes, so a version is its claims and not the compressor that packed them. `payloads` is what is
+/// served, packed, and what a subscriber holds each file against.
+pub fn manifest_of(
+    ds: &Source,
+    content: &BTreeMap<String, (u64, String)>,
+    payloads: &BTreeMap<String, (u64, String)>,
+) -> J {
     let d = &ds.decl;
     let last = ds.store.run_report(ds.store.last_run());
     let (first_known, last_known) = ds.store.known_span();
@@ -139,7 +146,7 @@ pub fn manifest_of(ds: &Source, payloads: &BTreeMap<String, (u64, String)>) -> J
         // fetch there is nothing to catch it with, which is what pinning by hand is for.
         "signed_by": crate::identity::or_local(&ds.dir, KEY_FILE),
         "source": d.name,
-        "version": version_of(payloads),
+        "version": version_of(content),
         "built_at": crate::now(),
         "kind": d.kind,
         "title": d.title,
@@ -234,6 +241,46 @@ pub fn readable(spec: &str) -> bool {
     }
 }
 
+/// A payload as it is written: gzip, under its name with `.gz`. The claims of NVD with their
+/// receipts and history are 170 MB as JSON and 25 MB compressed, and a hub keeps every version.
+fn packed(name: &str, body: &[u8]) -> Result<(String, Vec<u8>), String> {
+    use std::io::Write;
+    let mut z = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(6));
+    z.write_all(body).map_err(|e| e.to_string())?;
+    Ok((format!("{name}.gz"), z.finish().map_err(|e| e.to_string())?))
+}
+
+/// A payload as it is read: under whichever of its two names the manifest lists, held against
+/// its hash, and unpacked. `None` where the manifest lists neither. A 2.0 artifact is plain.
+fn unpacked(
+    place: &dyn Place,
+    path: impl Fn(&str) -> String,
+    manifest: &J,
+    name: &str,
+) -> Result<Option<Vec<u8>>, String> {
+    let gz = format!("{name}.gz");
+    if !manifest["payloads"][&gz].is_null() {
+        let raw = payload(place, &path(&gz), &manifest["payloads"][&gz], &gz)?;
+        let mut out = Vec::new();
+        use std::io::Read;
+        flate2::read::GzDecoder::new(&raw[..])
+            .read_to_end(&mut out)
+            .map_err(|e| format!("{gz}: {e}"))?;
+        return Ok(Some(out));
+    }
+    if !manifest["payloads"][name].is_null() {
+        return payload(place, &path(name), &manifest["payloads"][name], name).map(Some);
+    }
+    Ok(None)
+}
+
+/// How many bytes a manifest says a payload is, under either of its names.
+pub fn declared_bytes(manifest: &J, name: &str) -> Option<u64> {
+    manifest["payloads"][format!("{name}.gz")]["bytes"]
+        .as_u64()
+        .or_else(|| manifest["payloads"][name]["bytes"].as_u64())
+}
+
 /// A payload the manifest names, fetched and held against its hash.
 fn payload(place: &dyn Place, path: &str, declared: &J, name: &str) -> Result<Vec<u8>, String> {
     let body = place.get(path)?;
@@ -282,20 +329,22 @@ pub fn publish(
 
     let history = history_of(ds, None)?;
 
-    let mut payloads = BTreeMap::new();
-    payloads.insert(
-        "claims.jsonl".to_string(),
-        (body.len() as u64, sha256(&body)),
-    );
-    // The history travels, so a subscriber shows the same receipts the publisher does. A source
-    // that keeps none ships none, and the manifest does not name a payload that is not there.
-    if !history.is_empty() {
-        payloads.insert(
-            "history.jsonl".to_string(),
-            (history.len() as u64, sha256(&history)),
-        );
+    // What the version is, by content, and what is served, packed. A source that keeps no
+    // history ships none, and the manifest does not name a payload that is not there.
+    let mut content = BTreeMap::new();
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    for (name, plain) in [("claims.jsonl", &body), ("history.jsonl", &history)] {
+        if name == "history.jsonl" && plain.is_empty() {
+            continue;
+        }
+        content.insert(name.to_string(), (plain.len() as u64, sha256(plain)));
+        files.push(packed(name, plain)?);
     }
-    let manifest = manifest_of(ds, &payloads);
+    let payloads: BTreeMap<String, (u64, String)> = files
+        .iter()
+        .map(|(n, b)| (n.clone(), (b.len() as u64, sha256(b))))
+        .collect();
+    let manifest = manifest_of(ds, &content, &payloads);
     let version = manifest["version"].as_str().unwrap_or_default().to_string();
     let reference = Reference::parse(&format!("{}@{tag}", ds.decl.name))?;
 
@@ -308,16 +357,16 @@ pub fn publish(
     // both the put and the signing use the same ones.
     let served = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
     let held = place.get(&manifest_path).ok();
-    if held.is_none() {
-        place.put(
-            &reference.version_path("sources", &version, "claims.jsonl"),
-            &body,
-        )?;
-        if !history.is_empty() {
-            place.put(
-                &reference.version_path("sources", &version, "history.jsonl"),
-                &history,
-            )?;
+    // The same claims can already be there in another packing: a version is its content, and one
+    // published plain is the version a packed publication makes again. Its files are written
+    // wherever the manifest there does not name the ones this one does.
+    let listed = held
+        .as_deref()
+        .and_then(|b| serde_json::from_slice::<J>(b).ok())
+        .map(|m| m["payloads"].clone());
+    if listed.as_ref() != Some(&manifest["payloads"]) {
+        for (name, bytes) in &files {
+            place.put(&reference.version_path("sources", &version, name), bytes)?;
         }
     }
     if held.as_deref().map(|b| differs(b, &manifest)).unwrap_or(true) {
@@ -368,7 +417,11 @@ fn write_delta(
     version: &str,
     full: &J,
 ) -> Result<(), String> {
-    let before = place.get(&reference.version_path("sources", previous, "claims.jsonl"))?;
+    let prev_path = |n: &str| reference.version_path("sources", previous, n);
+    let prev: J = serde_json::from_slice(&place.get(&prev_path("manifest.json"))?)
+        .map_err(|e| format!("{previous}: {e}"))?;
+    let before = unpacked(place, prev_path, &prev, "claims.jsonl")?
+        .ok_or_else(|| format!("{previous}: its manifest names no claims"))?;
     // The line as it was served, and not only its hash: a claim that did not change can still
     // have gained its receipt, and the receipt is what a subscriber would otherwise never get.
     let mut held: BTreeMap<String, (String, String)> = BTreeMap::new();
@@ -385,7 +438,7 @@ fn write_delta(
     // The versions a subscriber at the previous version already holds. A previous version with
     // no history, which every 2.0 artifact is, holds none, and the delta carries all of it.
     let mut had = std::collections::BTreeSet::new();
-    if let Ok(old) = place.get(&reference.version_path("sources", previous, "history.jsonl")) {
+    if let Ok(Some(old)) = unpacked(place, prev_path, &prev, "history.jsonl") {
         for line in String::from_utf8_lossy(&old).lines() {
             let Ok(j) = serde_json::from_str::<J>(line) else {
                 continue;
@@ -425,34 +478,27 @@ fn write_delta(
     }
     let removed_body = gone.concat().into_bytes();
 
-    // A delta nobody gains from is not written. The whole is one fetch and the delta is two.
-    let cost = body.len() + removed_body.len() + history.len();
-    let whole = full["payloads"]["claims.jsonl"]["bytes"]
-        .as_u64()
+    // Packed as the whole is, and compared packed, since that is what a subscriber fetches.
+    let mut files: Vec<(String, Vec<u8>)> = vec![packed("claims.jsonl", &body)?];
+    files.push(("removed.jsonl".to_string(), removed_body));
+    if !history.is_empty() {
+        files.push(packed("history.jsonl", &history)?);
+    }
+    let cost: u64 = files.iter().map(|(_, b)| b.len() as u64).sum();
+    let whole = declared_bytes(full, "claims.jsonl")
         .unwrap_or(u64::MAX)
-        .saturating_add(full["payloads"]["history.jsonl"]["bytes"].as_u64().unwrap_or(0))
-        as usize;
+        .saturating_add(declared_bytes(full, "history.jsonl").unwrap_or(0));
+    // A delta nobody gains from is not written. The whole is one fetch and the delta is two.
     if cost >= whole {
         return Err(format!(
             "{cost} bytes against {whole} for the whole, so the whole is the cheaper fetch"
         ));
     }
 
-    let mut payloads = BTreeMap::new();
-    payloads.insert(
-        "claims.jsonl".to_string(),
-        (body.len() as u64, sha256(&body)),
-    );
-    payloads.insert(
-        "removed.jsonl".to_string(),
-        (removed_body.len() as u64, sha256(&removed_body)),
-    );
-    if !history.is_empty() {
-        payloads.insert(
-            "history.jsonl".to_string(),
-            (history.len() as u64, sha256(&history)),
-        );
-    }
+    let payloads: BTreeMap<String, (u64, String)> = files
+        .iter()
+        .map(|(n, b)| (n.clone(), (b.len() as u64, sha256(b))))
+        .collect();
     let manifest = serde_json::json!({
         "spec_version": SPEC_VERSION,
         "built_by": concat!("zetlyn ", env!("CARGO_PKG_VERSION")),
@@ -469,19 +515,8 @@ fn write_delta(
             .collect()),
     });
 
-    place.put(
-        &reference.delta_path("sources", version, previous, "claims.jsonl"),
-        &body,
-    )?;
-    place.put(
-        &reference.delta_path("sources", version, previous, "removed.jsonl"),
-        &removed_body,
-    )?;
-    if !history.is_empty() {
-        place.put(
-            &reference.delta_path("sources", version, previous, "history.jsonl"),
-            &history,
-        )?;
+    for (name, bytes) in &files {
+        place.put(&reference.delta_path("sources", version, previous, name), bytes)?;
     }
     place.put(
         &reference.delta_path("sources", version, previous, "manifest.json"),
@@ -587,15 +622,10 @@ pub fn subscribe(
         ));
     }
 
-    let declared = manifest["payloads"]["claims.jsonl"].clone();
-    let body = place.get(&reference.version_path("sources", &version, "claims.jsonl"))?;
-    let want = declared["sha256"].as_str().unwrap_or_default();
-    let got = sha256(&body);
-    if want != got {
-        return Err(format!(
-            "{reference}: claims.jsonl is {got} and the manifest says {want}"
-        ));
-    }
+    let at_version = |n: &str| reference.version_path("sources", &version, n);
+    let body = unpacked(place, at_version, &manifest, "claims.jsonl")
+        .map_err(|e| format!("{reference}: {e}"))?
+        .ok_or_else(|| format!("{reference}: the manifest names no claims"))?;
 
     std::fs::create_dir_all(into).map_err(|e| format!("{}: {e}", into.display()))?;
     std::fs::write(
@@ -647,15 +677,9 @@ pub fn subscribe(
     }
     // The publisher's history, where the version carries one. It replaces what was held, because
     // a whole version is the whole of the claim's past as its publisher kept it.
-    let declared_history = &manifest["payloads"]["history.jsonl"];
-    if !declared_history.is_null() {
-        let h = payload(
-            place,
-            &reference.version_path("sources", &version, "history.jsonl"),
-            declared_history,
-            "history.jsonl",
-        )
-        .map_err(|e| format!("{reference}: {e}"))?;
+    if let Some(h) = unpacked(place, at_version, &manifest, "history.jsonl")
+        .map_err(|e| format!("{reference}: {e}"))?
+    {
         take_history(&store, &h, true)?;
     }
     // A subscription replaces the source. A claim the new version does not carry is a claim
@@ -879,17 +903,17 @@ pub fn apply_delta(
     }
 
     let mut fetched = Vec::new();
-    for name in ["claims.jsonl", "removed.jsonl"] {
-        let bytes = place.get(&reference.delta_path("sources", to, from, name))?;
-        let want = manifest["payloads"][name]["sha256"]
-            .as_str()
-            .unwrap_or_default();
-        let got = sha256(&bytes);
-        if want != got {
-            return Err(format!("{name} is {got} and the manifest says {want}"));
-        }
-        fetched.push(bytes);
-    }
+    let at_delta = |n: &str| reference.delta_path("sources", to, from, n);
+    fetched.push(
+        unpacked(place, at_delta, &manifest, "claims.jsonl")?
+            .ok_or_else(|| format!("{path}: it names no claims"))?,
+    );
+    fetched.push(payload(
+        place,
+        &at_delta("removed.jsonl"),
+        &manifest["payloads"]["removed.jsonl"],
+        "removed.jsonl",
+    )?);
 
     let store = Store::open(into)?;
     let run = store.begin_run()?;
@@ -929,14 +953,7 @@ pub fn apply_delta(
     }
 
     // The versions the subscriber did not have, added to the ones it did.
-    let declared_history = &manifest["payloads"]["history.jsonl"];
-    if !declared_history.is_null() {
-        let h = payload(
-            place,
-            &reference.delta_path("sources", to, from, "history.jsonl"),
-            declared_history,
-            "history.jsonl",
-        )?;
+    if let Some(h) = unpacked(place, at_delta, &manifest, "history.jsonl")? {
         take_history(&store, &h, false)?;
     }
 

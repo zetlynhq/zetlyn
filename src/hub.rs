@@ -311,8 +311,7 @@ fn carried(dir: &Path) -> Vec<Carried> {
                         built_at: manifest["built_at"].as_u64().unwrap_or(0),
                         records: manifest["claims"].as_u64().unwrap_or(0),
                         members: manifest["sources"].as_array().map(Vec::len).unwrap_or(0),
-                        bytes: manifest["payloads"]["claims.jsonl"]["bytes"]
-                            .as_u64()
+                        bytes: crate::artifact::declared_bytes(&manifest, "claims.jsonl")
                             .unwrap_or(0),
                     });
                 }

@@ -28,7 +28,7 @@ pub struct Grant {
     pub workspace: String,
     /// Whose key may use it.
     pub to: String,
-    /// `read`, `run`, `apply`. Absent is refused rather than assumed.
+    /// `read`, `update`, `apply`. Absent is refused rather than assumed.
     pub can: Vec<String>,
     /// A date, after which the console stops taking it.
     pub until: String,
@@ -107,16 +107,16 @@ pub fn issue(
     why: &str,
 ) -> Result<Signed, String> {
     crate::key::bytes(to).map_err(|e| format!("--to {to}: {e}"))?;
-    let known: BTreeSet<&str> = ["read", "run", "apply"].into_iter().collect();
+    let known: BTreeSet<&str> = ["read", "update", "apply"].into_iter().collect();
     for one in can {
         if !known.contains(one.as_str()) {
             return Err(format!(
-                "{one}: a grant may read, run or apply, and nothing else"
+                "{one}: a grant may read, update or apply, and nothing else"
             ));
         }
     }
     if can.is_empty() {
-        return Err("--can what? read, run, apply".into());
+        return Err("--can what? read, update, apply".into());
     }
     if until.len() != 10 || *until <= *crate::iso_date(crate::now()) {
         return Err(format!("--until {until}: a date, later than today"));

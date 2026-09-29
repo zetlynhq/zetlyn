@@ -16,9 +16,9 @@ severe: 3 things since "test/kev=0,test/vendor-a=1,test/vendor-b=0,test/exploits
           "kind": "vulnerability",
           "known": "2026-09-01",
           "properties": null,
-          "run": 1,
           "source": "test/kev",
           "title": "Foo Server remote code execution",
+          "update": 1,
           "url": null
         },
         {
@@ -39,9 +39,9 @@ severe: 3 things since "test/kev=0,test/vendor-a=1,test/vendor-b=0,test/exploits
               "was": "9.8"
             }
           ],
-          "run": 2,
           "source": "test/vendor-a",
           "title": "foo: remote code execution",
+          "update": 2,
           "url": null
         },
         {
@@ -56,9 +56,9 @@ severe: 3 things since "test/kev=0,test/vendor-a=1,test/vendor-b=0,test/exploits
           "kind": "vulnerability",
           "known": "2026-08-30",
           "properties": null,
-          "run": 1,
           "source": "test/vendor-b",
           "title": "Remote code execution in foo",
+          "update": 1,
           "url": null
         },
         {
@@ -77,9 +77,9 @@ severe: 3 things since "test/kev=0,test/vendor-a=1,test/vendor-b=0,test/exploits
           "kind": "exploit",
           "known": "2026-09-02",
           "properties": null,
-          "run": 1,
           "source": "test/exploits",
           "title": "Foo Server RCE (Metasploit)",
+          "update": 1,
           "url": null
         }
       ],
@@ -109,9 +109,9 @@ severe: 3 things since "test/kev=0,test/vendor-a=1,test/vendor-b=0,test/exploits
           "kind": "vulnerability",
           "known": "2026-09-03",
           "properties": null,
-          "run": 1,
           "source": "test/kev",
           "title": "Baz Router authentication bypass",
+          "update": 1,
           "url": null
         },
         {
@@ -137,9 +137,9 @@ severe: 3 things since "test/kev=0,test/vendor-a=1,test/vendor-b=0,test/exploits
               "was": "moderate"
             }
           ],
-          "run": 2,
           "source": "test/vendor-a",
           "title": "baz: authentication bypass",
+          "update": 2,
           "url": null
         }
       ],
@@ -167,9 +167,9 @@ severe: 3 things since "test/kev=0,test/vendor-a=1,test/vendor-b=0,test/exploits
           "kind": "vulnerability",
           "known": "2026-08-31",
           "properties": null,
-          "run": 1,
           "source": "test/vendor-b",
           "title": "Heap overflow in bar",
+          "update": 1,
           "url": null
         },
         {
@@ -188,9 +188,9 @@ severe: 3 things since "test/kev=0,test/vendor-a=1,test/vendor-b=0,test/exploits
           "kind": "exploit",
           "known": "2026-09-01",
           "properties": null,
-          "run": 1,
           "source": "test/exploits",
           "title": "Bar heap overflow PoC",
+          "update": 1,
           "url": null
         }
       ],
@@ -236,8 +236,8 @@ vendor-a-critical: 1 things since 1
           "was": "moderate"
         }
       ],
-      "run": 2,
       "title": "baz: authentication bypass",
+      "update": 2,
       "url": null
     }
   ],

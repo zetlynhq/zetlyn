@@ -1103,7 +1103,7 @@ impl Store {
         let lost: Vec<&String> = had.iter().filter(|f| !fields.contains(*f)).collect();
         if !lost.is_empty() {
             return Some(format!(
-                "the last complete run carried {} and this one does not",
+                "the last complete update carried {} and this one does not",
                 lost.iter()
                     .map(|s| s.as_str())
                     .collect::<Vec<_>>()

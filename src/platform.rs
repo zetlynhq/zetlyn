@@ -99,7 +99,7 @@ pub fn serve(root: &Path, addr: &str) -> Result<(), String> {
             (Ok(p), false, [""]) | (Ok(p), false, []) => (200, overview(p)),
             (Ok(p), false, ["d", name]) => deployment(p, name),
             (Ok(p), false, ["d", name, "source", ds]) => dataset(p, name, ds),
-            (Ok(p), true, ["d", name, "source", ds, "run"]) => run(p, name, ds),
+            (Ok(p), true, ["d", name, "source", ds, "update"]) => run(p, name, ds),
             (Ok(p), false, ["d", name, "source", ds, "declaration"]) => {
                 declaration(p, name, ds, None, None)
             }
@@ -256,7 +256,7 @@ fn deployment(p: &Platform, name: &str) -> (u16, String) {
                                 td.num { (d["claims"].as_u64().unwrap_or(0)) }
                                 @let state = d["state"].as_str().unwrap_or("empty");
                                 td { span.state.(state) { (state) } }
-                                td.dim { (d["next_run"].as_str().unwrap_or("—")) }
+                                td.dim { (d["next_update"].as_str().unwrap_or("—")) }
                             }
                         }
                     }
@@ -296,7 +296,7 @@ fn dataset(p: &Platform, name: &str, at: &str) -> (u16, String) {
         Err(e) => return (404, page(name, html! { h1 { (e) } })),
     };
     let described = driver.ask("GET", &format!("/source/{at}"), b"");
-    let runs = driver.ask("GET", &format!("/source/{at}/runs"), b"");
+    let runs = driver.ask("GET", &format!("/source/{at}/updates"), b"");
     let (described, runs) = match (described, runs) {
         (Ok(a), Ok(b)) => (a, b),
         (Err(e), _) | (_, Err(e)) => {
@@ -329,7 +329,7 @@ fn dataset(p: &Platform, name: &str, at: &str) -> (u16, String) {
                     span.state.(state) { (state) }
                 }
 
-                form.bar method="post" action={"/d/" (name) "/source/" (at) "/run"} {
+                form.bar method="post" action={"/d/" (name) "/source/" (at) "/update"} {
                     button type="submit" { "Fill it now" }
                 }
 
@@ -337,7 +337,7 @@ fn dataset(p: &Platform, name: &str, at: &str) -> (u16, String) {
                 table {
                     thead { tr { th { "Run" } th { "Started" } th { "Added" } th { "Changed" } th { "Removed" } th { "Complete" } } }
                     tbody {
-                        @for r in runs["runs"].as_array().unwrap_or(&empty) {
+                        @for r in runs["updates"].as_array().unwrap_or(&empty) {
                             tr {
                                 td.num { (r["id"].as_i64().unwrap_or(0)) }
                                 td.dim { (r["started"].as_str().unwrap_or("")) }
@@ -365,7 +365,7 @@ fn dataset(p: &Platform, name: &str, at: &str) -> (u16, String) {
 fn run(p: &Platform, name: &str, at: &str) -> (u16, String) {
     let answer = p
         .driver(name)
-        .and_then(|d| d.ask("POST", &format!("/source/{at}/run"), b""));
+        .and_then(|d| d.ask("POST", &format!("/source/{at}/update"), b""));
     match answer {
         Ok(j) => (
             200,
@@ -373,7 +373,7 @@ fn run(p: &Platform, name: &str, at: &str) -> (u16, String) {
                 "Filled",
                 html! {
                     p { a href={"/d/" (name) "/source/" (at)} { "← " (at) } }
-                    h1 { "Run " (j["run"].as_i64().unwrap_or(0)) }
+                    h1 { "Update " (j["update"].as_i64().unwrap_or(0)) }
                     p.state {
                         "+" (j["added"].as_u64().unwrap_or(0))
                         " ~" (j["changed"].as_u64().unwrap_or(0))
@@ -390,7 +390,7 @@ fn run(p: &Platform, name: &str, at: &str) -> (u16, String) {
                 "Not filled",
                 html! {
                     p { a href={"/d/" (name) "/source/" (at)} { "← " (at) } }
-                    h1 { "It did not run" }
+                    h1 { "It did not update" }
                     div.note { (e) }
                 },
             ),
@@ -430,7 +430,7 @@ pub fn drafter(root: &Path) -> Drafting {
 /// The complaints, the declaration and the fields, handed over as one document.
 fn brief(described: &J, runs: &J, declaration: &str) -> String {
     let empty = Vec::new();
-    let recent: Vec<&J> = runs["runs"]
+    let recent: Vec<&J> = runs["updates"]
         .as_array()
         .unwrap_or(&empty)
         .iter()
@@ -440,10 +440,10 @@ fn brief(described: &J, runs: &J, declaration: &str) -> String {
         "A dataset declaration, and what its last runs could not make sense of.\n\
          Answer with a declaration and nothing else.\n\n",
     );
-    out.push_str("## What the runs said\n\n");
+    out.push_str("## What the updates said\n\n");
     for r in recent {
         out.push_str(&format!(
-            "run {} {}: +{} ~{} -{} ={}, unparsed {}, no_text {}, no_known {}, duplicates {}\n",
+            "update {} {}: +{} ~{} -{} ={}, unparsed {}, no_text {}, no_known {}, duplicates {}\n",
             r["id"].as_i64().unwrap_or(0),
             r["started"].as_str().unwrap_or(""),
             r["added"].as_u64().unwrap_or(0),
@@ -539,7 +539,7 @@ fn declaration(
                 @if let Some(text) = proposed {
                     h2 { "Proposed" }
                     p.about {
-                        "Drafted from what the runs could not make sense of. Nothing has changed "
+                        "Drafted from what the updates could not make sense of. Nothing has changed "
                         "yet: read it, and press the button if it is right. Whoever presses it is "
                         "who answers for the declaration afterwards."
                     }
@@ -577,7 +577,7 @@ fn ask_for_draft(p: &Platform, name: &str, at: &str) -> (u16, String) {
         Err(e) => return (404, page(name, html! { h1 { (e) } })),
     };
     let described = driver.ask("GET", &format!("/source/{at}"), b"");
-    let runs = driver.ask("GET", &format!("/source/{at}/runs"), b"");
+    let runs = driver.ask("GET", &format!("/source/{at}/updates"), b"");
     let held = driver.ask("GET", &format!("/source/{at}/declaration"), b"");
     let (described, runs, held) = match (described, runs, held) {
         (Ok(a), Ok(b), Ok(c)) => (a, b, c),

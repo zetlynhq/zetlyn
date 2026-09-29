@@ -383,7 +383,7 @@ fn dataset_run(args: &[String]) -> Result<(), String> {
     let started = std::time::Instant::now();
     let r = ds.run()?;
     println!(
-        "run {} {} in {:.1}s: +{} ~{} −{} ={}",
+        "update {} {} in {:.1}s: +{} ~{} −{} ={}",
         r.id,
         if r.complete { "complete" } else { "partial" },
         started.elapsed().as_secs_f64(),
@@ -420,11 +420,11 @@ fn dataset_run(args: &[String]) -> Result<(), String> {
             "  {} claims were read and the store was not replaced: {why}",
             r.unchanged
         );
-        println!("  nothing was written, and the last complete run still stands");
+        println!("  nothing was written, and the last complete update still stands");
     }
     if let Some(e) = &r.error {
-        println!("  the run did not finish: {e}");
-        println!("  nothing was removed, because a partial run has not seen the source");
+        println!("  the update did not finish: {e}");
+        println!("  nothing was removed, because a partial update has not seen the source");
     }
     Ok(())
 }
@@ -529,7 +529,7 @@ fn schedule(args: &[String]) -> Result<(), String> {
             match ds.run() {
                 Ok(r) => {
                     println!(
-                        "{} run {} {}: +{} ~{} −{} ={}{}",
+                        "{} update {} {}: +{} ~{} −{} ={}{}",
                         name,
                         r.id,
                         if r.complete { "complete" } else { "partial" },
@@ -568,7 +568,7 @@ fn schedule(args: &[String]) -> Result<(), String> {
             };
             match ds.run() {
                 Ok(r) => println!(
-                    "{name} run {} {} after {}: +{} ~{} −{} ={}",
+                    "{name} update {} {} after {}: +{} ~{} −{} ={}",
                     r.id,
                     if r.complete { "complete" } else { "partial" },
                     ds.decl.source.after().unwrap_or(""),
@@ -1329,7 +1329,7 @@ const CONSOLE_USAGE: &str = "\
   zetlyn console key [--at <dir>] [--name operator.key]
       The key in a directory. Makes one where there is none, and prints the public half.
 
-  zetlyn console grant --to <key> --can read,run,apply --until <date> [--at <deployment>]
+  zetlyn console grant --to <key> --can read,update,apply --until <date> [--at <workspace>]
       What the operator signs. Not a secret, and not a way in on its own.
 
   zetlyn console call <url> [--method GET] [--body <file>] --grant <file> [--key <dir>]

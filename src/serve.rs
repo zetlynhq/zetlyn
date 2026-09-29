@@ -355,7 +355,7 @@ fn overview(ds: &Dataset, url: &str) -> String {
         p.state.(state) {
             (state) " · " (total_records) " claims"
             @if let Some(r) = &report {
-                " · run " (r.id) " " (r.started)
+                " · update " (r.id) " " (r.started)
                 @if r.added + r.changed + r.removed > 0 {
                     " · +" (r.added) " ~" (r.changed) " −" (r.removed)
                 }
@@ -364,10 +364,10 @@ fn overview(ds: &Dataset, url: &str) -> String {
 
         @if let Some(r) = &report {
             @if let Some(why) = &r.refused {
-                div.note { "The last run was refused and the store was not replaced: " (why) }
+                div.note { "The last update was refused and the store was not replaced: " (why) }
             }
             @if let Some(err) = &r.error {
-                div.note { "The last run did not finish: " (err) }
+                div.note { "The last update did not finish: " (err) }
             }
             @if r.no_text > 0 || r.unparsed > 0 || r.no_known > 0 {
                 div.note {
@@ -604,7 +604,7 @@ fn changes_page(ds: &Dataset, url: &str) -> String {
     let body = html! {
         p { a href=(at("/")) { "← " (ds.decl.title) } }
         h1 { "Changes" }
-        p.dim { "Since run " (since) ". The mark now is " (ds.mark()) "." }
+        p.dim { "Since update " (since) ". The mark now is " (ds.mark()) "." }
         @if changed.is_empty() && removed.is_empty() {
             p.dim { "Nothing since then." }
         }

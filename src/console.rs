@@ -99,7 +99,7 @@ fn allowed(
 ) -> Result<(), String> {
     let what = match (method, path) {
         ("GET", _) => "read",
-        ("POST", p) if p.ends_with("/run") => "run",
+        ("POST", p) if p.ends_with("/update") => "update",
         ("PUT", p) if p.ends_with("/declaration") => "apply",
         _ => {
             return Err(format!(
@@ -175,7 +175,7 @@ fn answer(root: &Path, name: &str, method: &str, path: &str, body: &[u8]) -> (u1
             Ok(ds) => (200, ds.describe()),
             Err(e) => (404, json!({ "refused": e })),
         },
-        ("GET", ["source", named, "runs"]) => match open(root, named) {
+        ("GET", ["source", named, "updates"]) => match open(root, named) {
             Ok(ds) => (200, runs(&ds)),
             Err(e) => (404, json!({ "refused": e })),
         },
@@ -187,7 +187,7 @@ fn answer(root: &Path, name: &str, method: &str, path: &str, body: &[u8]) -> (u1
             Ok(ds) => (200, json!({ "source": ds.decl.name, "wrong": ds.check() })),
             Err(e) => (404, json!({ "refused": e })),
         },
-        ("POST", ["source", named, "run"]) => run_now(root, named),
+        ("POST", ["source", named, "update"]) => run_now(root, named),
         ("PUT", ["source", named, "declaration"]) => apply(root, named, body),
         ("GET", ["tracker", named]) => match open_scope(root, named) {
             Ok(s) => (200, s.describe()),
@@ -244,7 +244,7 @@ fn holdings(root: &Path, name: &str) -> J {
                 "claims": ds.store.count(),
                 "state": ds.state(),
                 "at": dir.file_name().map(|n| n.to_string_lossy().to_string()),
-                "next_run": ds.next_run(),
+                "next_update": ds.next_run(),
             }))
         })
         .collect();
@@ -289,7 +289,7 @@ fn runs(ds: &Dataset) -> J {
             }))
         })
         .collect();
-    json!({ "source": ds.decl.name, "runs": reports })
+    json!({ "source": ds.decl.name, "updates": reports })
 }
 
 fn run_now(root: &Path, named: &str) -> (u16, J) {
@@ -304,7 +304,7 @@ fn run_now(root: &Path, named: &str) -> (u16, J) {
     match ds.run() {
         Ok(r) => (
             200,
-            json!({ "source": ds.decl.name, "run": r.id, "complete": r.complete,
+            json!({ "source": ds.decl.name, "update": r.id, "complete": r.complete,
                     "added": r.added, "changed": r.changed, "removed": r.removed,
                     "unchanged": r.unchanged, "error": r.error, "refused": r.refused }),
         ),
@@ -312,7 +312,7 @@ fn run_now(root: &Path, named: &str) -> (u16, J) {
     }
 }
 
-/// The dangerous one, and the reason a grant separates it from `run`.
+/// The dangerous one, and the reason a grant separates it from `update`.
 ///
 /// What arrives is held against three things before it is kept: it parses, the dataset opens
 /// under it, and the dataset still answers for itself. The declaration that was there is written

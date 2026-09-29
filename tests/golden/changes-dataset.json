@@ -18,8 +18,8 @@
           "was": "9.8"
         }
       ],
-      "run": 2,
       "title": "foo: remote code execution",
+      "update": 2,
       "url": null
     },
     {
@@ -45,8 +45,8 @@
           "was": "moderate"
         }
       ],
-      "run": 2,
       "title": "baz: authentication bypass",
+      "update": 2,
       "url": null
     }
   ],

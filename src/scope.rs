@@ -875,7 +875,7 @@ impl Scope {
                     "kind": m.kind(),
                     "claims": m.records(),
                     "state": m.state(),
-                    "last_run": m.described["last_run"],
+                    "last_update": m.described["last_update"],
                     "can": m.described["can"],
                     "views": m.described["views"],
                 })
@@ -1042,7 +1042,7 @@ impl Scope {
         let now = crate::now();
         let mut late = Vec::new();
         for m in &self.members {
-            let finished = m.described["last_run"]["finished"]
+            let finished = m.described["last_update"]["finished"]
                 .as_str()
                 .map(crate::fetch::seconds_of);
             match finished {
@@ -1052,7 +1052,7 @@ impl Scope {
                     m.name(),
                     human(now - at)
                 )),
-                None => late.push(format!("{} has not completed a run", m.name())),
+                None => late.push(format!("{} has not completed an update", m.name())),
             }
         }
         (late.is_empty(), late)
@@ -1064,7 +1064,7 @@ impl Scope {
         let now = crate::now();
         let mut oldest: Option<i64> = None;
         for m in &self.members {
-            let at = m.described["last_run"]["finished"]
+            let at = m.described["last_update"]["finished"]
                 .as_str()
                 .map(crate::fetch::seconds_of)?;
             let age = now - at;

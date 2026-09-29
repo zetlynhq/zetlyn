@@ -148,7 +148,7 @@ impl Dataset {
             return self
                 .store
                 .run_report(run)
-                .ok_or_else(|| "the run left no report".to_string());
+                .ok_or_else(|| "the update left no report".to_string());
         }
 
         let removed = if complete && whole {
@@ -180,7 +180,7 @@ impl Dataset {
         )?;
         self.store
             .run_report(run)
-            .ok_or_else(|| "the run left no report".to_string())
+            .ok_or_else(|| "the update left no report".to_string())
     }
 
     // -- describe -----------------------------------------------------------------------------
@@ -248,12 +248,12 @@ impl Dataset {
             "about": d.about,
             "claims": self.store.count(),
             "state": self.state(),
-            "last_run": last.as_ref().map(|r| json!({
+            "last_update": last.as_ref().map(|r| json!({
                 "id": r.id, "at": r.started, "finished": r.finished, "complete": r.complete,
                 "added": r.added, "changed": r.changed, "removed": r.removed,
                 "unchanged": r.unchanged,
             })),
-            "next_run": self.next_run(),
+            "next_update": self.next_run(),
             "cadence": d.schedule.every,
 
             "history": d.retention.history,
@@ -456,7 +456,7 @@ impl Dataset {
                 "known": now.known,
                 "ids": now.ids_json(),
                 "how": if is_new { "added" } else { "changed" },
-                "run": run,
+                "update": run,
                 "properties": if moved.is_empty() { J::Null } else { J::Array(moved) },
             }));
         }

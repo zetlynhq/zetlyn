@@ -387,6 +387,22 @@ impl App {
                 let id = self.propose_why(tracker, source, form_title(&query));
                 (200, json_kind, json!({ "job": id }).to_string())
             }
+            (false, ["publish", tracker]) => (200, html_kind, self.publish_page(tracker, None)),
+            (true, ["publish", tracker]) => {
+                let said = match form.get("visibility").map(String::as_str) {
+                    Some(v @ ("public" | "private")) => self.set_visibility(tracker, v),
+                    _ => Err("public or private".into()),
+                };
+                self.sites.remove(*tracker);
+                let said = said.unwrap_or_else(|e| e);
+                (200, html_kind, self.publish_page(tracker, Some(&said)))
+            }
+            // On this machine: the sources and the tracker onto a hub, by the commands a terminal
+            // would run, so the page does nothing the command line does not.
+            (true, ["publish-hub", tracker]) => {
+                let id = self.publish_to_hub(tracker);
+                (200, json_kind, json!({ "job": id }).to_string())
+            }
             (false, ["review", tracker, source]) => match self.review_page(tracker, source, &query) {
                 Ok(p) => (200, html_kind, p),
                 Err(e) => (404, html_kind, page("Not here", html! { p { (e) } })),
@@ -616,6 +632,116 @@ impl App {
         })
     }
 
+    /// Who may see a tracker, and what its sources say about being shown.
+    fn publish_page(&self, tracker: &str, said: Option<&str>) -> String {
+        let dir = self.trackers().join(tracker);
+        let opened = Tracker::open(&dir, &self.sources());
+        let body = match &opened {
+            Err(e) => html! { div.note { (e) } },
+            Ok(t) => {
+                let blocked = t.not_public();
+                let public = !t.private();
+                let where_ = if self.hosted.is_some() {
+                    format!("{}{}", crate::account::Site::load(&self.root).url.trim_end_matches('/'), serve::at(&format!("/t/{tracker}/")))
+                } else {
+                    String::new()
+                };
+                html! {
+                    p { a href=(serve::at("/")) { "← Zetlyn" } " · " a href=(serve::at(&format!("/t/{tracker}/"))) { (t.decl.title) } }
+                    h1 { "Who may see " (t.decl.title) }
+                    @if let Some(s) = said { div.note { (s) } }
+                    p.about {
+                        @if public { "Public: its overview and its things are open to anyone, its claims to subscribers." }
+                        @else { "Private: every page is for the accounts it gives access to." }
+                        @if !where_.is_empty() { " It is at " a href=(where_) { (where_) } "." }
+                    }
+                    h2 { "What each source says about being shown" }
+                    table { tbody {
+                        @for (source, republish) in t.licences() {
+                            tr {
+                                td { (source) }
+                                td { @match republish.as_str() {
+                                    "yes" => span.chip { "in full" },
+                                    "summary" => span.chip { "titles, values and a link" },
+                                    "no" => span.chip.on { "not in public" },
+                                    _ => span.chip.on { "has not said" },
+                                } }
+                            }
+                        }
+                    } }
+                    @if !blocked.is_empty() {
+                        p.dim { "Public is refused while " (blocked.join("; ")) ". A source says so in its declaration: "
+                            code { "licence: { republish: yes | summary | no, terms: <url> }" } "." }
+                    }
+                    form.bar method="post" action=(serve::at(&format!("/publish/{tracker}"))) {
+                        @if public {
+                            input type="hidden" name="visibility" value="private";
+                            button type="submit" { "Make it private" }
+                        } @else {
+                            input type="hidden" name="visibility" value="public";
+                            button.primary type="submit" disabled[!blocked.is_empty()] { "Make it public" }
+                        }
+                    }
+                    @if self.hosted.is_none() {
+                        h2 { "On a hub" }
+                        p.dim { "Publishing puts its sources and its statement on hub.zetlyn.com, signed with this machine's key (" code { "zetlyn id" } "), where anybody can subscribe to them." }
+                        form #publish data-job=(serve::at(&format!("/publish-hub/{tracker}"))) {
+                            button type="submit" disabled[public && !blocked.is_empty()] { "Publish to hub.zetlyn.com" }
+                        }
+                        pre #log data-jobs=(serve::at("/job/")) hidden {}
+                        div #error .note hidden {}
+                        (PreEscaped(JOB_SCRIPT))
+                    }
+                }
+            }
+        };
+        page("Publish", body)
+    }
+
+    /// `visibility:` in the tracker's file, as text, so its comments stay.
+    fn set_visibility(&self, tracker: &str, visibility: &str) -> Result<String, String> {
+        let dir = self.trackers().join(tracker);
+        if visibility == "public" {
+            let t = Tracker::open(&dir, &self.sources())?;
+            let blocked = t.not_public();
+            if !blocked.is_empty() {
+                return Err(format!("Not made public: {}.", blocked.join("; ")));
+            }
+        }
+        let path = dir.join(crate::trackerdecl::FILE);
+        let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let mut out: Vec<String> = text.lines().filter(|l| !l.starts_with("visibility:")).map(str::to_string).collect();
+        if visibility == "private" {
+            out.push("visibility: private".into());
+        }
+        let text = format!("{}\n", out.join("\n"));
+        let _: TrackerDecl = crate::yaml::parse(&text)?;
+        std::fs::write(&path, text).map_err(|e| e.to_string())?;
+        Ok(format!("It is {visibility} now."))
+    }
+
+    fn publish_to_hub(&self, tracker: &str) -> u64 {
+        let (dir, sources) = (self.trackers().join(tracker), self.sources());
+        self.start(move |p| {
+            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            let t = Tracker::open(&dir, &sources)?;
+            let registry = crate::tracker::registry(&sources);
+            let run = |args: &[&str]| -> Result<String, String> {
+                let out = std::process::Command::new(&exe).args(args).output().map_err(|e| e.to_string())?;
+                let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+                if out.status.success() { Ok(said) } else { Err(said.trim().to_string()) }
+            };
+            for m in &t.decl.members {
+                let Some(sdir) = registry.get(&m.dataset) else { continue };
+                p.say(format!("zetlyn source publish {}", sdir.display()));
+                p.say(run(&["source", "publish", &sdir.display().to_string()])?.trim().to_string());
+            }
+            p.say(format!("zetlyn tracker publish {}", dir.display()));
+            p.say(run(&["tracker", "publish", &dir.display().to_string()])?.trim().to_string());
+            Ok(serve::at(&format!("/publish/{}", dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())))
+        })
+    }
+
     fn start_page(&self) -> String {
         let trackers = listed(&self.trackers());
         let body = html! {
@@ -635,6 +761,7 @@ impl App {
                             td { a href={(serve::at("/t/")) (name) "/"} { strong { (decl.title) } } div.why { (decl.members.len()) " sources · identified by " (decl.join.join(", ")) } }
                             td.num { @if *fresh > 0 { span.chip.on { (fresh) " signals since yesterday" } } @else { span.dim { "nothing new since yesterday" } } }
                             td.num { a href={(serve::at("/new/")) (name) "?title=" (urlencode(&decl.title))} { "Add a source" } }
+                            td.num { a href={(serve::at("/publish/")) (name)} { (if decl.visibility == "private" { "Private" } else { "Publish" }) } }
                         }
                     }
                 } }

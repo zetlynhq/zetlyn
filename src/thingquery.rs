@@ -68,10 +68,37 @@ pub struct ThingView {
 pub struct Context<'a> {
     pub decl: &'a TrackerDecl,
     pub sources: Vec<String>,
+    /// Per source, the properties it says, under the names this tracker shows them by, and the
+    /// kind of its claims. Empty where the caller does not know them, and then nothing is refused.
+    pub properties: BTreeMap<String, BTreeSet<String>>,
+    pub kinds: BTreeSet<String>,
     pub now: i64,
 }
 
 impl Context<'_> {
+    /// A property some source says, or the one named says. One nobody says is refused by name,
+    /// with what there is, rather than read as a question nothing can ever answer.
+    pub fn property(&self, source: Option<&str>, name: &str) -> Result<(), String> {
+        if self.properties.is_empty() {
+            return Ok(());
+        }
+        match source {
+            Some(s) => {
+                let has = self.properties.get(s).cloned().unwrap_or_default();
+                if has.contains(name) {
+                    Ok(())
+                } else {
+                    Err(format!("{s} says no {name}. It says: {}", has.into_iter().collect::<Vec<_>>().join(", ")))
+                }
+            }
+            None if self.properties.values().any(|p| p.contains(name)) => Ok(()),
+            None => {
+                let all: BTreeSet<&String> = self.properties.values().flatten().collect();
+                Err(format!("no source here says {name}. Properties: {}", all.into_iter().cloned().collect::<Vec<_>>().join(", ")))
+            }
+        }
+    }
+
     /// A source by its name or the end of it. Ambiguous or unknown is an error that names the
     /// candidates, because a watch that silently matched nothing is one nobody hears from.
     pub fn source(&self, named: &str) -> Result<String, String> {
@@ -228,6 +255,12 @@ fn atom(word: &str, cx: &Context) -> Result<Q, String> {
             let (what, within) = rest
                 .split_once('<')
                 .ok_or_else(|| format!("{word}: say how recent, as {prefix}…<7d"))?;
+            if prefix == "appeared:" && !cx.kinds.is_empty() && !cx.kinds.contains(what) {
+                return Err(format!("{word}: no source here makes claims of kind {what}. Kinds: {}", cx.kinds.iter().cloned().collect::<Vec<_>>().join(", ")));
+            }
+            if prefix == "changed:" {
+                cx.property(None, what)?;
+            }
             return Ok(make(what.to_string(), duration(within)?));
         }
     }
@@ -252,12 +285,15 @@ fn atom(word: &str, cx: &Context) -> Result<Q, String> {
         if !matches!(op, Op::Eq | Op::Ne) {
             return Err(format!("{word}: two sources are compared with = or != only"));
         }
+        cx.property(Some(&a.0), &a.1)?;
+        cx.property(Some(&b.0), &b.1)?;
         return Ok(Q::Between { a, op, b });
     }
     let (source, property) = match l {
         Some((s, p)) => (Some(s), p),
         None => (None, left.to_string()),
     };
+    cx.property(source.as_deref(), &property)?;
     Ok(Q::Cmp { source, property, op, value: right.trim_matches('"').to_string() })
 }
 

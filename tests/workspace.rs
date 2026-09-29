@@ -607,6 +607,10 @@ fn a_question_about_things_is_answered_or_refused_by_name() {
         ("nosuch.cvss>1", "no source here is called that"),
         ("conflict:title", "only aligned properties are compared: cvss, exploited, severity"),
         ("a.cvss>b.cvss", "compared with = or != only"),
+        // A property or kind no source has is refused with what there is.
+        ("exploits.cvss>1", "says no cvss. It says:"),
+        ("severty=high", "no source here says severty"),
+        ("appeared:exploits<7d", "no source here makes claims of kind exploits"),
     ] {
         let (ok, said) = run(&ws.root, &["tracker", "things", &ws.scope(), q]);
         assert!(!ok && said.contains(why), "{q}: {said}");
@@ -721,4 +725,19 @@ fn an_alignment_is_proposed_counted_and_kept_with_its_comments() {
     assert!(!after.contains("urgent"), "{after}");
     let record = std::fs::read_to_string(ws.root.join("trackers/cve/assist.yaml")).unwrap();
     assert!(record.contains("allowed: true") && record.contains("task: align"), "{record}");
+}
+
+#[test]
+fn a_question_in_words_becomes_a_filter_or_is_refused() {
+    let ws = Workspace::new("ask");
+    ws.z(&["tracker", "refresh", &ws.scope()]);
+    let scope = ws.scope();
+    let (ok, said) = assisted(&ws, &["assist", "ask", &scope, "exploited ones that also have exploit code", "--send"]);
+    assert!(ok, "{said}");
+    assert!(said.starts_with("has:kev and has:exploits\n"), "{said}");
+    assert!(said.contains("1 thing\n"), "{said}");
+    // An answer naming a source that is not here goes back once with the parser's words, and a
+    // second that is still wrong is refused rather than run.
+    let (ok, said) = assisted(&ws, &["assist", "ask", &scope, "What does vendor C say is high?", "--send"]);
+    assert!(!ok && said.contains("no filter came out of it") && said.contains("no source here is called that"), "{said}");
 }

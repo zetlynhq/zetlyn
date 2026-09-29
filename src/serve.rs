@@ -47,7 +47,7 @@ h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .12em;
 h3 { font-size: 1rem; margin: 1.4rem 0 .4rem; }
 .about { color: var(--dim); margin: 0 0 1.2rem; max-width: 48rem; }
 .bar { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; margin: 1rem 0; }
-input[type=search] { flex: 1 1 22rem; min-width: 0; padding: .55rem .7rem; font: inherit;
+input[type=search], input[type=text] { flex: 1 1 22rem; min-width: 0; padding: .55rem .7rem; font: inherit;
   background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; }
 button { padding: .55rem .9rem; font: inherit; cursor: pointer; border-radius: 6px;
   border: 1px solid var(--line); background: var(--panel); color: var(--fg); }

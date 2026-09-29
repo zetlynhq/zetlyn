@@ -111,6 +111,11 @@ zetlyn
       One sentence on why a source is in a tracker; a declaration mended from what its updates
       complained about, tried before it is shown.
 
+  zetlyn assist ask <tracker> <question in words> [--send]
+      The question as the filters it becomes, and how many things they hold for. It never
+      answers in words: a question that is not a filter is refused, and so is a filter that
+      names a source, a property or a kind the tracker does not have.
+
   zetlyn assist score <proposed dir> <reference dir>
       A proposal against a declaration a person wrote: identifier, title, date, typed properties.
 
@@ -1738,6 +1743,31 @@ fn assist_command(args: &[String]) -> Result<(), String> {
                     }
                     Ok(())
                 }
+            }
+        }
+        Some("ask") => {
+            let p = positional(args, 2);
+            let dir = PathBuf::from(p.first().ok_or("which tracker?")?.as_str());
+            let question = p.iter().skip(1).map(|s| s.as_str()).collect::<Vec<_>>().join(" ");
+            if question.trim().is_empty() {
+                return Err("what is the question?".into());
+            }
+            let (dir, sources) = scope_at(&[String::new(), String::new(), dir.display().to_string()], 2)?;
+            let t = tracker::Tracker::open(&dir, &sources)?;
+            let a = assist::Assist::configured(&workspace_of(&dir));
+            match teach::translate(&a, &t, &question, args.iter().any(|a| a == "--send"))? {
+                teach::Outcome::NeedsConsent(d) => Err(consent_needed(&d, &dir)),
+                teach::Outcome::Done(tr) => match tr.query {
+                    Some(q) => {
+                        let cx = t.context();
+                        let parsed = crate::thingquery::parse(&q, &cx)?;
+                        let n = crate::thingstore::ThingStore::open(&dir)?.matching(&parsed, &cx)?.len();
+                        println!("{q}");
+                        eprintln!("{n} {}", if n == 1 { "thing" } else { "things" });
+                        Ok(())
+                    }
+                    None => Err(format!("no filter: {}", tr.refused.unwrap_or_default())),
+                },
             }
         }
         Some("score") => {

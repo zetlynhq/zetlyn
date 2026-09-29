@@ -1590,6 +1590,21 @@ impl Tracker {
         crate::thingquery::Context {
             decl: &self.decl,
             sources: self.members.iter().map(|m| m.name().to_string()).collect(),
+            properties: self
+                .members
+                .iter()
+                .map(|m| {
+                    let said = m.described["properties"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|f| f["name"].as_str())
+                        .map(|n| self.field_out(m.name(), n))
+                        .collect();
+                    (m.name().to_string(), said)
+                })
+                .collect(),
+            kinds: self.members.iter().map(|m| m.kind()).collect(),
             now: crate::now(),
         }
     }

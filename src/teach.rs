@@ -978,3 +978,120 @@ mod tests {
         assert_eq!(last_page("https://x/cves", &answer, &facts).as_deref(), Some("https://x/cves?startIndex=6"));
     }
 }
+
+// -- asking in words -------------------------------------------------------------------------
+
+/// A question in words, as the filters it becomes. Never an answer: what comes back is a query
+/// in the tracker's own language, parsed before anyone runs it, or a reason it is not one.
+pub struct Translated {
+    pub query: Option<String>,
+    /// Why there is no query: the question asks for prose, or for something no source says.
+    pub refused: Option<String>,
+}
+
+pub fn translate(assist: &Assist, tracker: &crate::tracker::Tracker, question: &str, yes: bool) -> Result<Outcome<Translated>, String> {
+    let sends = vec![
+        "the question".to_string(),
+        "the tracker's structure: its sources' names, their properties and types, the scales it aligns, and the twelve commonest values of each coded property".to_string(),
+    ];
+    let Some(disclosure) = consent(assist, &tracker.dir, sends.clone(), yes)? else {
+        return Ok(Outcome::NeedsConsent(Disclosure { to: assist.who(), sends }));
+    };
+    let facts = structure(tracker);
+    let user = format!("{facts}\n## The question\n{question}\n");
+    let cx = tracker.context();
+    let key = format!("{}#{}", tracker.decl.name, question.trim().to_lowercase());
+    let mut answer = assist.ask("ask", &key, ASK_SYSTEM, &user, &ask_schema())?;
+    crate::assist::sent(&tracker.dir, "ask", &disclosure)?;
+    let query = |a: &J| a["query"].as_str().unwrap_or("").trim().to_string();
+    if !query(&answer).is_empty() {
+        if let Err(e) = crate::thingquery::parse(&query(&answer), &cx) {
+            // Once, with what the parser said. A second wrong answer is refused, not run.
+            let again = format!("{user}\nYour answer was `{}`, and it does not parse: {e}\nAnswer again.", query(&answer));
+            answer = assist.ask("ask-mend", &format!("{key}#mend"), ASK_SYSTEM, &again, &ask_schema())?;
+            crate::assist::sent(&tracker.dir, "ask", &disclosure)?;
+            if let Err(e) = crate::thingquery::parse(&query(&answer), &cx) {
+                return Ok(Outcome::Done(Translated { query: None, refused: Some(format!("no filter came out of it: {e}")) }));
+            }
+        }
+    }
+    let q = query(&answer);
+    Ok(Outcome::Done(if q.is_empty() {
+        Translated {
+            query: None,
+            refused: Some(answer["refused"].as_str().unwrap_or("that is not a question about which things").trim().to_string()),
+        }
+    } else {
+        Translated { query: Some(q), refused: None }
+    }))
+}
+
+/// What a tracker is made of, in the words a question is translated into.
+fn structure(t: &crate::tracker::Tracker) -> String {
+    let names: Vec<&str> = t.members.iter().map(|m| m.name()).collect();
+    let mut out = format!("## The tracker\n{}: {}\n\n## Its sources (name them by the short name)\n", t.decl.title, t.decl.about);
+    let q = crate::source::Query { text: String::new(), pred: None, view: None, ids: Vec::new(), seen_before: None, sort: None, limit: 0, offset: 0 };
+    for m in &t.members {
+        let short = short_name(m.name(), &names);
+        out.push_str(&format!("\n### {short} ({}), claims of kind {}\n{}\n", m.name(), m.kind(), m.decl.why));
+        for f in m.described["properties"].as_array().into_iter().flatten() {
+            let (name, kind) = (f["name"].as_str().unwrap_or(""), f["type"].as_str().unwrap_or(""));
+            let shown = t.decl.normalise.iter().find(|(_, a)| a.from.get(m.name()).map(String::as_str) == Some(name)).map(|(n, _)| n.clone()).unwrap_or(name.to_string());
+            out.push_str(&format!("- {shown}: {kind}"));
+            if matches!(kind, "code" | "bool") {
+                let values: Vec<String> = m.member.facet(&q, name, 12).into_iter().map(|(v, n)| format!("{v} ({n})")).collect();
+                if !values.is_empty() {
+                    out.push_str(&format!("; values: {}", values.join(", ")));
+                }
+            }
+            out.push('\n');
+        }
+    }
+    out.push_str("\n## Aligned properties (compared across sources; only these can conflict)\n");
+    for (p, a) in &t.decl.normalise {
+        if a.scale.is_empty() {
+            out.push_str(&format!("- {p}\n"));
+        } else {
+            out.push_str(&format!("- {p}, on the scale {} (first is highest)\n", a.scale.join(" > ")));
+        }
+    }
+    let kinds: BTreeSet<String> = t.members.iter().map(|m| m.kind()).collect();
+    out.push_str(&format!("\n## Kinds of claim\n{}\n", kinds.into_iter().collect::<Vec<_>>().join(", ")));
+    out
+}
+
+/// The shortest name that still names one source: `kev` for `zetlyn/cve-kev`.
+fn short_name(name: &str, all: &[&str]) -> String {
+    let last = name.rsplit('/').next().unwrap_or(name);
+    let tail = last.rsplit('-').next().unwrap_or(last);
+    let clash = all.iter().filter(|o| **o != name).any(|o| o.rsplit('/').next().unwrap_or(o).rsplit('-').next() == Some(tail));
+    if clash { last.to_string() } else { tail.to_string() }
+}
+
+const ASK_SYSTEM: &str = "You translate a person's question about a tracker into a filter over its \
+things, in the tracker's query language. You never answer the question, never explain, never \
+summarise: a question that asks for an explanation, an opinion or a summary gets no query and a \
+one-line reason. \
+\n\nThe language. Terms: `has:S` (source S says something about the thing), `only:S` (only S does), \
+`conflict:P` (its sources disagree about aligned property P), `S.P op value` (what source S says of \
+property P; op is = != < <= > >=; on a scale, > means higher on it), `P op value` (any source), \
+`S.P != T.P` or `S.P = T.P` (two sources compared), `appeared:K<7d` (a claim of kind K appeared \
+within that long; h, d or w), `changed:P<24h` (P changed at a source that recently), `id=VALUE`. \
+Join with `and`, `or`, `not` and parentheses. Values with spaces go in quotes. \
+\n\nUse only the sources, properties, values and kinds listed. Use a source's short name. A word the \
+person uses may be a value of a coded property (a vendor, a status); use the value as the source \
+spells it. Severity words for a CVSS score are the CVSS bands: critical is 9.0 and above, high 7.0 \
+to 8.9, medium 4.0 to 6.9, low below 4. \"Exploited\" means CISA lists it (has:kev) unless the \
+question says otherwise; \"has an exploit\" or \"public code\" means an exploit source speaks about it. \
+Prefer the simplest filter that says exactly what was asked, and add nothing the question did not ask.";
+
+fn ask_schema() -> J {
+    json!({
+        "type": "object",
+        "required": ["query"],
+        "properties": {
+            "query": { "type": "string", "description": "the filter, or empty when the question is not one" },
+            "refused": { "type": "string", "description": "when there is no filter: why, in one line" },
+        },
+    })
+}

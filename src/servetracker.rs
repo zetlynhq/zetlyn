@@ -1383,7 +1383,29 @@ impl TrackerSite {
                 "text/html; charset=utf-8",
                 None,
             ),
-            "/things" => (things_page(&scope, &url), "text/html; charset=utf-8", None),
+            // In words, for the person at the machine: the assist is theirs, and so is what it is
+            // sent. A reader of a published tracker types the filters.
+            "/things/ask" if post && *operator => {
+                let words = form_field(&form, "words");
+                let assist = crate::assist::Assist::configured(&scope.root);
+                let page = match crate::teach::translate(&assist, scope, &words, form_field(&form, "send") == "1") {
+                    Ok(crate::teach::Outcome::NeedsConsent(d)) => consent_page(&words, &d),
+                    Ok(crate::teach::Outcome::Done(t)) => match t.query {
+                        Some(q) => things_page(scope, &format!("/things?q={}&asked={}", urlencode(&q), urlencode(&words)), true),
+                        None => things_page(scope, &format!("/things?asked={}&refused={}", urlencode(&words), urlencode(&t.refused.unwrap_or_default())), true),
+                    },
+                    Err(e) => things_page(scope, &format!("/things?asked={}&refused={}", urlencode(&words), urlencode(&e)), true),
+                };
+                (page, "text/html; charset=utf-8", None)
+            }
+            // A question kept: a watch on it, in the workspace, with a feed.
+            "/things/watch" if post && *operator => {
+                let q = form_field(&form, "q");
+                let title = form_field(&form, "title");
+                let said = watch_question(scope, &q, &title);
+                (things_page(scope, &format!("/things?q={}&watched={}", urlencode(&q), urlencode(&said)), true), "text/html; charset=utf-8", None)
+            }
+            "/things" => (things_page(&scope, &url, *operator), "text/html; charset=utf-8", None),
             "/things.atom" => {
                 let question = params(&url).get("q").cloned().unwrap_or_default();
                 match view_of(&scope, &question) {
@@ -1911,10 +1933,13 @@ fn view_of(scope: &Tracker, question: &str) -> Result<(Vec<String>, Vec<J>), Str
 
 /// The things a question holds for, from the tracker's store: what a view is before it is saved,
 /// and what a watch on it would hear about.
-fn things_page(scope: &Tracker, url: &str) -> String {
-    let question = params(url).get("q").cloned().unwrap_or_default();
+fn things_page(scope: &Tracker, url: &str, operator: bool) -> String {
+    let p = params(url);
+    let question = p.get("q").cloned().unwrap_or_default();
+    let (asked, refused, watched) = (p.get("asked").cloned(), p.get("refused").cloned(), p.get("watched").cloned());
     let store = crate::thingstore::ThingStore::open(&scope.dir).ok();
     let answer = if question.trim().is_empty() { None } else { Some(view_of(scope, &question)) };
+    let assist = operator.then(|| crate::assist::Assist::configured(&scope.root)).filter(|a| a.available());
     let examples = [
         "conflict:severity",
         "conflict:cvss and has:kev",
@@ -1922,18 +1947,45 @@ fn things_page(scope: &Tracker, url: &str) -> String {
         "appeared:exploit<7d",
         "changed:severity<24h",
     ];
+    let terms = top_terms(&question);
     let body = html! {
         p { a href=(at("/")) { "← " (scope.decl.title) } }
         h1 { "Things" }
+        @if let Some(a) = &assist {
+            form.bar method="post" action=(at("/things/ask")) {
+                input type="search" name="words" value=(asked.clone().unwrap_or_default())
+                    placeholder="Ask in words: exploited, with a Metasploit module";
+                button type="submit" { "Ask" }
+            }
+            p.dim { "Translated by " (a.who()) " into the filters below, which are what runs. It never answers in words." }
+        }
+        @if let Some(w) = &asked {
+            @if let Some(r) = &refused {
+                div.note { "“" (w) "” did not become a filter: " (r) }
+            } @else {
+                p.dim { "“" (w) "” became:" }
+            }
+        }
         form.bar method="get" action=(at("/things")) {
             input type="search" name="q" value=(question)
                 placeholder="conflict:severity and has:kev";
-            button type="submit" { "Ask" }
+            button type="submit" { "Filter" }
         }
-        p.bar {
-            span.dim { "Try:" }
-            @for ex in examples {
-                " " a.chip href={(at("/things?q=")) (urlencode(ex))} { (ex) }
+        // Each part of the filter a chip, and the × takes that part away.
+        @if terms.len() > 1 || (terms.len() == 1 && asked.is_some()) {
+            p.bar {
+                @for (i, t) in terms.iter().enumerate() {
+                    @let rest = terms.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, t)| t.as_str()).collect::<Vec<_>>().join(" and ");
+                    span.chip.on { (t) " " a href={(at("/things?q=")) (urlencode(&rest))} style="color:inherit" { "×" } } " "
+                }
+            }
+        }
+        @if question.trim().is_empty() {
+            p.bar {
+                span.dim { "Try:" }
+                @for ex in examples {
+                    " " a.chip href={(at("/things?q=")) (urlencode(ex))} { (ex) }
+                }
             }
         }
         @match &answer {
@@ -1947,8 +1999,18 @@ fn things_page(scope: &Tracker, url: &str) -> String {
             Some(Ok((keys, _))) => {
                 p.state {
                     (keys.len()) @if keys.len() == 1 { " thing. " } @else { " things. " }
-                    a href={(at("/things.atom?q=")) (urlencode(&question))} { "Watch it as a feed" }
-                    span.dim { ", or in a workspace as " code { "query: " (question) } " in a watch." }
+                    a href={(at("/things.atom?q=")) (urlencode(&question))} { "Its feed" }
+                }
+                @if operator {
+                    @if let Some(w) = &watched {
+                        div.note { (w) }
+                    } @else {
+                        form.bar method="post" action=(at("/things/watch")) {
+                            input type="hidden" name="q" value=(question);
+                            input type="text" name="title" value=(asked.clone().unwrap_or_default()) placeholder="What to call it";
+                            button type="submit" { "Watch it" }
+                        }
+                    }
                 }
                 table { tbody {
                     @for key in keys.iter().take(500) {
@@ -1972,4 +2034,84 @@ fn things_page(scope: &Tracker, url: &str) -> String {
         }
     };
     shell("Things", body)
+}
+
+/// A filter's parts joined by `and` at its top level, which is what a chip can take away without
+/// changing what the rest means. Inside parentheses, or under `or`, it is one part.
+fn top_terms(q: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut cur = String::new();
+    let words: Vec<&str> = q.split_whitespace().collect();
+    if words.iter().any(|w| w.eq_ignore_ascii_case("or")) && !q.contains('(') {
+        return if q.trim().is_empty() { Vec::new() } else { vec![q.trim().to_string()] };
+    }
+    for w in words {
+        depth += w.matches('(').count() as i32 - w.matches(')').count() as i32;
+        if depth == 0 && w.eq_ignore_ascii_case("and") {
+            if !cur.trim().is_empty() {
+                out.push(cur.trim().to_string());
+            }
+            cur.clear();
+            continue;
+        }
+        cur.push_str(w);
+        cur.push(' ');
+    }
+    if !cur.trim().is_empty() {
+        out.push(cur.trim().to_string());
+    }
+    out
+}
+
+/// What the assist would be sent to translate a question, and the button that sends it (D10).
+fn consent_page(words: &str, d: &crate::assist::Disclosure) -> String {
+    shell("Ask in words", html! {
+        p { a href=(at("/things")) { "← Things" } }
+        h1 { "Before it is asked" }
+        div.note {
+            "Translating “" (words) "” sends " strong { (d.to) } ":"
+            ul { @for s in &d.sends { li { (s) } } }
+            "Asked once for this tracker; what is sent is written in its " code { "assist.yaml" } "."
+        }
+        form method="post" action=(at("/things/ask")) {
+            input type="hidden" name="words" value=(words);
+            input type="hidden" name="send" value="1";
+            button type="submit" { "Send it" }
+        }
+    })
+}
+
+/// A watch file for a question, in the workspace's `watches/`, delivered as a feed.
+fn watch_question(scope: &Tracker, q: &str, title: &str) -> String {
+    let cx = scope.context();
+    if let Err(e) = crate::thingquery::parse(q, &cx) {
+        return e;
+    }
+    let dir = scope.root.join("watches");
+    let base = crate::guess::slug(if title.trim().is_empty() { q } else { title }).replace('_', "-");
+    let base: String = base.chars().take(48).collect();
+    let mut name = if base.is_empty() { "question".to_string() } else { base };
+    let mut n = 2;
+    while dir.join(format!("{name}.yaml")).exists() {
+        name = format!("{}-{n}", name.trim_end_matches(char::is_numeric).trim_end_matches('-'));
+        n += 1;
+    }
+    let decl = serde_json::json!({
+        "name": name,
+        "title": if title.trim().is_empty() { q.to_string() } else { title.trim().to_string() },
+        "tracker": scope.decl.name,
+        "query": q,
+        "deliver": [{ "to": "feed" }],
+    });
+    let written = serde_json::from_value::<crate::watch::WatchDecl>(decl)
+        .map_err(|e| e.to_string())
+        .and_then(|w| {
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            crate::yaml::write(&dir.join(format!("{name}.yaml")), &w)
+        });
+    match written {
+        Ok(()) => format!("Watched as {name}: its first check remembers what it holds, and each one after says what entered, what left and what changed. The feed is {}.", at(&format!("/watch/{name}.atom"))),
+        Err(e) => e,
+    }
 }

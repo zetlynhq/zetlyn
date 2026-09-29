@@ -401,34 +401,9 @@ fn run(p: &Platform, name: &str, at: &str) -> (u16, String) {
 // ---------------------------------------------------------------------------------------------
 // Changing what a source is.
 
-/// What the platform may ask to draft a declaration, where an operator names one.
-///
-/// Zetlyn ships no model and holds no key for one, the same way it ships no mail client. An
-/// operator names the thing that already knows how to reach one, the run's own complaints go in
-/// on its standard input, and a declaration comes out.
-///
-/// It drafts and it does not decide. What comes back is held against the same three checks an
-/// `apply` is held against, and then a person reads it and presses a button. That is the whole of
-/// the difference between this and the thing `CONCEPT.md` refuses: a source's shape is not
-/// guessable from one response, so what is guessed here is a proposal and never a fact.
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Drafting {
-    #[serde(default)]
-    pub run: Vec<String>,
-}
-
-pub fn drafter(root: &Path) -> Drafting {
-    #[derive(Default, Deserialize)]
-    struct Config {
-        #[serde(default)]
-        draft: Drafting,
-    }
-    crate::yaml::read_or_default::<Config>(&root.join("platform.yaml")).draft
-}
 
 /// The complaints, the declaration and the fields, handed over as one document.
-fn brief(described: &J, runs: &J, declaration: &str) -> String {
+pub(crate) fn brief(described: &J, runs: &J, declaration: &str) -> String {
     let empty = Vec::new();
     let recent: Vec<&J> = runs["updates"]
         .as_array()
@@ -475,40 +450,6 @@ fn brief(described: &J, runs: &J, declaration: &str) -> String {
     out
 }
 
-/// Run what the operator named, with the brief on its standard input.
-fn draft(root: &Path, brief: &str) -> Result<String, String> {
-    let named = drafter(root).run;
-    let (first, rest) = named
-        .split_first()
-        .ok_or("no drafter named. `draft: { run: [...] }` in platform.yaml names one")?;
-    let mut child = std::process::Command::new(first)
-        .args(rest)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("{first}: {e}"))?;
-    if let Some(mut input) = child.stdin.take() {
-        use std::io::Write;
-        input
-            .write_all(brief.as_bytes())
-            .map_err(|e| format!("{first}: {e}"))?;
-    }
-    let out = child
-        .wait_with_output()
-        .map_err(|e| format!("{first}: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "{first}: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    let text = String::from_utf8_lossy(&out.stdout).to_string();
-    if text.trim().is_empty() {
-        return Err(format!("{first} answered with nothing"));
-    }
-    Ok(text)
-}
 
 /// The declaration, what a drafter proposes, and the button a person presses.
 fn declaration(
@@ -526,7 +467,8 @@ fn declaration(
         Ok(j) => j["declaration"].as_str().unwrap_or("").to_string(),
         Err(e) => return (502, page(at, html! { h1 { (at) } div.note { (e) } })),
     };
-    let drafts = !drafter(&p.root).run.is_empty();
+    let assist = crate::assist::Assist::configured(&p.root);
+    let drafts = assist.available();
     (
         200,
         page(
@@ -556,14 +498,14 @@ fn declaration(
                     }
                     @if drafts {
                         form.bar method="post" action={"/d/" (name) "/source/" (at) "/draft"} {
-                            button type="submit" { "Ask for a draft" }
+                            button type="submit" { "Ask the assist for a draft" }
                         }
                         p.dim {
-                            "The drafter is handed the last three updates and what the source holds, "
-                            "and answers with a declaration. It proposes; you apply."
+                            "This sends " (assist.who()) " the declaration, the names and counts of what the source holds "
+                            "and what its last three updates said, nothing the source says about any one thing. It proposes; you apply."
                         }
                     } @else {
-                        p.dim { "No drafter named. `draft: { run: [...] }` in platform.yaml names one." }
+                        p.dim { (crate::assist::Assist::missing()) }
                     }
                 }
             },
@@ -586,8 +528,12 @@ fn ask_for_draft(p: &Platform, name: &str, at: &str) -> (u16, String) {
         }
     };
     let text = held["declaration"].as_str().unwrap_or("");
-    match draft(&p.root, &brief(&described, &runs, text)) {
-        Ok(proposed) => declaration(p, name, at, Some(&proposed), None),
+    let assist = crate::assist::Assist::configured(&p.root);
+    match crate::teach::mend_text(&assist, &brief(&described, &runs, text), &format!("{name}/{at}#mend")) {
+        Ok((proposed, changed)) => {
+            let note = format!("Proposed by {}: {changed}", assist.who());
+            declaration(p, name, at, Some(&proposed), Some(&note))
+        }
         Err(e) => declaration(p, name, at, None, Some(&format!("No draft: {e}"))),
     }
 }

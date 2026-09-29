@@ -117,6 +117,17 @@ pub enum Fetch {
         #[serde(default = "thousand", skip_serializing_if = "is_thousand")]
         pause_ms: u64,
     },
+    /// A query against PostgreSQL. The connection string names a variable, never a password,
+    /// and the query carries the watermark as `{since}`.
+    Sql {
+        dsn: String,
+        query: String,
+        /// Where a row says when it changed: the next update asks only for rows after it.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        since: Option<String>,
+        #[serde(default = "epoch", skip_serializing_if = "is_epoch")]
+        since_default: String,
+    },
     /// Subscribed rather than fetched. The claims arrived built, so there is nothing here to
     /// extract and nothing to re-run: a run against this asks the hub for a newer version.
     Hub {
@@ -202,6 +213,7 @@ impl Fetch {
             Fetch::Http { .. } => "http",
             Fetch::Feed { .. } => "feed",
             Fetch::Hub { .. } => "hub",
+            Fetch::Sql { .. } => "sql",
         }
     }
 
@@ -222,6 +234,8 @@ impl Fetch {
             }
             Fetch::Feed { urls, .. } => urls.join(", "),
             Fetch::Hub { at, reference, .. } => format!("{at} {reference}"),
+            // Never the connection string: it is a password, however it was written.
+            Fetch::Sql { .. } => "a PostgreSQL database".into(),
         }
     }
 
@@ -232,7 +246,7 @@ impl Fetch {
         match self {
             Fetch::Feed { text_is, .. } => text_is,
             Fetch::Folder { .. } | Fetch::Csv { .. } | Fetch::Xlsx { .. } => "whole",
-            Fetch::Http { .. } => "whole",
+            Fetch::Http { .. } | Fetch::Sql { .. } => "whole",
             Fetch::Hub { text_is, .. } => text_is,
         }
     }
@@ -251,7 +265,7 @@ impl Fetch {
             }
             Fetch::Csv { path, .. } => path,
             Fetch::Xlsx { path, .. } => path,
-            Fetch::Http { .. } | Fetch::Feed { .. } | Fetch::Hub { .. } => {
+            Fetch::Http { .. } | Fetch::Feed { .. } | Fetch::Hub { .. } | Fetch::Sql { .. } => {
                 return base.to_path_buf()
             }
         };

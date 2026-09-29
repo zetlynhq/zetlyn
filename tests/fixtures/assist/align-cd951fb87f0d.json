@@ -1,0 +1,10 @@
+{
+  "scale": ["critical", "high", "medium", "low"],
+  "maps": [
+    { "source": "test/vendor-a", "word": "critical", "means": "critical" },
+    { "source": "test/vendor-a", "word": "important", "means": "high" },
+    { "source": "test/vendor-a", "word": "moderate", "means": "medium" },
+    { "source": "test/vendor-b", "word": "high", "means": "high" },
+    { "source": "test/vendor-b", "word": "medium", "means": "medium" }
+  ]
+}

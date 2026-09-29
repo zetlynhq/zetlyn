@@ -492,6 +492,10 @@ pub fn each_row(
             let high = crate::fetch::http_rows(&f, &spec, mark, root, &mut on_row)?;
             Ok(high)
         }
+        Fetch::Sql { dsn, query, since, since_default } => {
+            let spec = crate::sql::Spec { dsn, query, since: since.as_deref(), since_default };
+            crate::sql::rows(&spec, mark, root, &mut on_row)
+        }
         Fetch::Feed {
             urls,
             text_is,

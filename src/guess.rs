@@ -782,3 +782,110 @@ fn mentioned(body: &str) -> Option<&'static Scheme> {
         .max_by_key(|(_, n)| *n)
         .map(|(s, _)| s)
 }
+
+/// GitHub, by what a person would say: `github:advisories` (the whole Advisory Database),
+/// `github:owner/repo/releases`, `github:owner/repo/advisories` (one repository's), or
+/// `github:owner/repo` for the files of a checkout. The API's shape is GitHub's, the same for
+/// every repository, so it is written here once rather than taught each time. The token is
+/// optional and lifts the limit from sixty calls an hour.
+pub fn propose_github(spec: &str, dir: &Path, name: Option<&str>) -> Result<String, String> {
+    let rest = spec.strip_prefix("github:").unwrap_or(spec).trim_matches('/');
+    let parts: Vec<&str> = rest.split('/').filter(|p| !p.is_empty()).collect();
+    let headers = json!({ "Accept": "application/vnd.github+json", "Authorization": "Bearer ${GITHUB_TOKEN?}" });
+    let named = |fallback: String| name.map(str::to_string).unwrap_or(fallback);
+    let advisory_claims = json!({
+        "each": "field:*",
+        "id": [{ "scheme": "ghsa", "from": "field:ghsa_id" }, { "scheme": "cve", "from": "field:cve_id" }],
+        "title": "field:summary",
+        "url": "field:html_url",
+        "text": ["field:summary", "field:description"],
+        "known": "field:published_at",
+        "properties": {
+            "severity": { "type": "code", "from": "field:severity" },
+            "cvss": { "type": "number", "from": "field:cvss_severities.cvss_v3.score" },
+            "cwe": { "type": "code", "from": "field:cwes[].cwe_id" },
+            "ecosystem": { "type": "code", "from": "field:vulnerabilities[].package.ecosystem" },
+            "package": { "type": "text", "from": "field:vulnerabilities[].package.name" },
+            "patched_version": { "type": "text", "from": "field:vulnerabilities[].first_patched_version" },
+        },
+    });
+    let view = |columns: J, facets: J| json!([{ "name": "recent", "title": "Newest first", "default": true,
+                                               "columns": columns, "facets": facets, "sort": "known desc" }]);
+    let built = match parts.as_slice() {
+        ["advisories"] => json!({
+            "name": named("github/advisories".into()),
+            "title": "GitHub Advisory Database",
+            "kind": "advisory",
+            "about": "GitHub's reviewed advisories: the packages and versions a vulnerability affects, where it is patched, how severe GitHub judges it.",
+            "fetch": { "type": "http", "list": "https://api.github.com/advisories?published={since_date}..{until_date}",
+                       "page": { "cursor": "link", "size": "per_page" }, "headers": headers, "pause_ms": 1200,
+                       "since": "field:published_at", "since_default": crate::iso_date(crate::now() - 30 * 86_400) },
+            "schedule": { "every": "6h" },
+            "claims": advisory_claims,
+            "views": view(json!(["severity", "cvss", "ecosystem", "known"]), json!(["severity", "ecosystem"])),
+            "search": { "text": ["title", "text"], "compare": ["cvss", "known"], "suggest": ["severity", "ecosystem"] },
+        }),
+        [owner, repo, "advisories"] => json!({
+            "name": named(format!("github/{}-advisories", slug(repo).replace('_', "-"))),
+            "title": format!("{owner}/{repo} security advisories"),
+            "kind": "advisory",
+            "about": format!("The security advisories {owner}/{repo} publishes for itself."),
+            "fetch": { "type": "http", "list": format!("https://api.github.com/repos/{owner}/{repo}/security-advisories"),
+                       "page": { "cursor": "link", "size": "per_page" }, "headers": headers, "pause_ms": 1200 },
+            "schedule": { "every": "6h" },
+            "claims": advisory_claims,
+            "views": view(json!(["severity", "cvss", "known"]), json!(["severity"])),
+            "search": { "text": ["title", "text"], "compare": ["cvss", "known"], "suggest": ["severity"] },
+        }),
+        [owner, repo, "releases"] => json!({
+            "name": named(format!("github/{}-releases", slug(repo).replace('_', "-"))),
+            "title": format!("{owner}/{repo} releases"),
+            "kind": "release",
+            "about": format!("Every release {owner}/{repo} publishes on GitHub, with its notes."),
+            "fetch": { "type": "http", "list": format!("https://api.github.com/repos/{owner}/{repo}/releases"),
+                       "page": { "cursor": "link", "size": "per_page" }, "headers": headers, "pause_ms": 1200 },
+            "schedule": { "every": "6h" },
+            "claims": {
+                "each": "field:*",
+                // A release is named by its tag, which is what a changelog, a package and an
+                // advisory's patched version all say.
+                "id": { "scheme": format!("{}-release", slug(repo).replace('_', "-")), "from": "field:tag_name" },
+                "title": "field:name",
+                "url": "field:html_url",
+                "text": ["field:name", "field:body"],
+                "known": "field:published_at",
+                "properties": {
+                    "tag": { "type": "code", "from": "field:tag_name" },
+                    "prerelease": { "type": "bool", "from": "field:prerelease" },
+                    "draft": { "type": "bool", "from": "field:draft" },
+                    "author": { "type": "code", "from": "field:author.login" },
+                },
+            },
+            "views": view(json!(["tag", "prerelease", "known"]), json!(["prerelease"])),
+            "search": { "text": ["title", "text"], "compare": ["known"], "suggest": ["tag"] },
+        }),
+        [owner, repo] => folder_declaration(
+            &named(format!("github/{}", slug(repo).replace('_', "-"))),
+            "document",
+            "checkout",
+            0,
+        )
+        .as_object()
+        .cloned()
+        .map(|mut o| {
+            o.insert("title".into(), json!(format!("{owner}/{repo}")));
+            o.insert("about".into(), json!(format!("The files of {owner}/{repo}, from a checkout pulled before each update.")));
+            if let Some(f) = o.get_mut("fetch") {
+                f["git"] = json!(format!("https://github.com/{owner}/{repo}.git"));
+            }
+            J::Object(o)
+        })
+        .ok_or("the folder declaration is not an object")?,
+        _ => {
+            return Err(format!(
+                "{spec}: github:advisories, github:owner/repo/releases, github:owner/repo/advisories or github:owner/repo"
+            ))
+        }
+    };
+    finish(built, dir)
+}

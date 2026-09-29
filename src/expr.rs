@@ -26,7 +26,7 @@ pub struct Row<'a> {
 }
 
 /// Walks `a.b.c`, expanding `a[]` into every element of a list.
-fn walk(value: &J, path: &str) -> Vec<J> {
+pub(crate) fn walk(value: &J, path: &str) -> Vec<J> {
     let mut here = vec![value.clone()];
     if path == "*" {
         // Every value of an object, which is how a file keyed by name hands over its claims.

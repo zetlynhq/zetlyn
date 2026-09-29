@@ -33,6 +33,12 @@ regex = { version = "1", default-features = false, features = ["std", "perf", "u
 # A published version is signed by its publisher, and a subscriber following a tag pins the key.
 # Verifying is the whole of what a subscriber does with this; the rest is the publisher's.
 ed25519-dalek = { version = "2.1.1", default-features = false, features = ["std", "fast", "zeroize"] }
+# A source that is a query against PostgreSQL. Synchronous, over rustls with the ring provider
+# ureq already brings, so no second TLS stack and no C crypto in the binary.
+postgres = { version = "0.19", default-features = false }
+tokio-postgres-rustls = { version = "0.14", default-features = false }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
 
 [profile.release]
 strip = true

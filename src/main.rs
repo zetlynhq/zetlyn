@@ -3,10 +3,12 @@
 
 mod account;
 mod app;
+mod assist;
 mod artifact;
 mod build;
 mod console;
 mod source;
+mod sql;
 mod sourcedecl;
 mod expr;
 mod fetch;
@@ -27,6 +29,7 @@ mod servetracker;
 mod rows;
 mod schemes;
 mod store;
+mod teach;
 mod thingquery;
 mod thingstore;
 mod watch;
@@ -84,6 +87,32 @@ zetlyn
   zetlyn source new --from <path or URL> [--at <dir>] [--name owner/name] [--kind <word>]
       Reads a folder, a .csv or an .xlsx, guesses the identifier, the title, the text and the
       property types, writes <dir>/source.yaml, and prints the first three claims it would make.
+
+  zetlyn source new --from github:advisories | github:<owner>/<repo>[/releases|/advisories]
+      GitHub, written once: the Advisory Database, a repository's releases or advisories, or the
+      files of its checkout. ${GITHUB_TOKEN?} lifts the limit of sixty calls an hour.
+
+  zetlyn assist [key anthropic|openai]
+      Who the assist asks here; `key` keeps a key from standard input. workspace.yaml's
+      `assist: { provider, model, url, off }` or ZETLYN_ASSIST_URL / ZETLYN_ASSIST_MODEL name an
+      OpenAI-compatible endpoint instead of Claude.
+
+  zetlyn assist teach <URL> --at <dir> [--name owner/name] [--send]
+      A JSON API: its answer outlined, a declaration proposed, tried against the API, mended
+      once if the try complains. Nothing is sent before --send; what was sent is kept in
+      <dir>/assist.yaml.
+
+  zetlyn assist align <tracker> <property> [--send] [--apply]
+      Which words of the tracker's sources mean the same thing, and how many disagreements that
+      takes away. --apply writes the entry into tracker.yaml and keeps its comments.
+
+  zetlyn assist why <tracker> <source dir> [--send]
+  zetlyn assist mend <source dir> [--send] [--apply]
+      One sentence on why a source is in a tracker; a declaration mended from what its updates
+      complained about, tried before it is shown.
+
+  zetlyn assist score <proposed dir> <reference dir>
+      A proposal against a declaration a person wrote: identifier, title, date, typed properties.
 
   zetlyn source update <dir> [--reread | --from-start]
       Fills the store. Says what was added, changed, removed and unchanged. `--reread` reads the
@@ -354,6 +383,7 @@ fn run(args: &[String]) -> Result<(), String> {
         // One command, and the directory says which it is.
         Some("console") => console_command(args),
         Some("hub") => hub_command(args),
+        Some("assist") => assist_command(args),
         Some("id") => id_command(args),
         Some("platform") => platform_command(args),
         Some("serve") => {
@@ -422,6 +452,14 @@ fn dir_at(args: &[String], from: usize) -> Result<PathBuf, String> {
 
 fn dataset_new(args: &[String]) -> Result<(), String> {
     let from = flag(args, "--from").ok_or("--from <path> or a URL is required")?;
+    if from.starts_with("github:") {
+        let stem = guess::slug(from.trim_start_matches("github:").rsplit('/').next().unwrap_or("github"));
+        let dir = PathBuf::from(flag(args, "--at").map(str::to_string).unwrap_or(format!("./{stem}")));
+        let proposed = guess::propose_github(from, &dir, flag(args, "--name"))?;
+        println!("{}\n", dir.join(crate::sourcedecl::FILE).display());
+        print!("{proposed}");
+        return Ok(());
+    }
     if from.starts_with("http://") || from.starts_with("https://") {
         let stem = from
             .trim_end_matches('/')
@@ -1229,6 +1267,7 @@ fn hub_command(args: &[String]) -> Result<(), String> {
         }
         Some("console") => console_command(args),
         Some("hub") => hub_command(args),
+        Some("assist") => assist_command(args),
         Some("id") => id_command(args),
         Some("platform") => platform_command(args),
         Some("serve") => {
@@ -1601,4 +1640,126 @@ fn missing(path: &std::path::Path) -> String {
         ),
         None => format!("{}: not here", path.display()),
     }
+}
+
+/// The workspace a directory sits in: the nearest parent holding a `workspace.yaml`, else here.
+fn workspace_of(dir: &Path) -> PathBuf {
+    let start = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    start
+        .ancestors()
+        .find(|p| p.join("workspace.yaml").exists())
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn assist_command(args: &[String]) -> Result<(), String> {
+    match args.get(1).map(String::as_str) {
+        Some("key") => {
+            let provider = positional(args, 2).first().map(|s| s.to_string()).unwrap_or_else(|| "anthropic".into());
+            let path = assist::store_key(&provider)?;
+            println!("kept in {}", path.display());
+            Ok(())
+        }
+        Some("teach") => {
+            let url = positional(args, 2).first().map(|s| s.to_string()).ok_or("which address?")?;
+            let dir = PathBuf::from(flag(args, "--at").ok_or("--at <dir> is where the source goes")?);
+            let name = flag(args, "--name").map(str::to_string).unwrap_or_else(|| {
+                format!("local/{}", dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "source".into()))
+            });
+            let a = assist::Assist::configured(&workspace_of(&dir));
+            let yes = args.iter().any(|a| a == "--send");
+            match teach::api(&a, &url, &dir, &name, yes)? {
+                teach::Outcome::NeedsConsent(d) => Err(format!(
+                    "this would send to {}:\n  {}\nAsked once per source. Run again with --send to agree, and {} records it.",
+                    d.to,
+                    d.sends.join("\n  "),
+                    dir.join(assist::CONSENT).display()
+                )),
+                teach::Outcome::Done(t) => {
+                    print!("{}", t.declaration);
+                    eprintln!("\n{}{}", if t.mended { "mended once; " } else { "" }, t.trial);
+                    Ok(())
+                }
+            }
+        }
+        Some("align") => {
+            let p = positional(args, 2);
+            let dir = PathBuf::from(p.first().ok_or("which tracker?")?.as_str());
+            let property = p.get(1).ok_or("which property?")?.to_string();
+            let (dir, sources) = scope_at(&[String::new(), String::new(), dir.display().to_string()], 2)?;
+            let a = assist::Assist::configured(&workspace_of(&dir));
+            match teach::align(&a, &dir, &sources, &property, args.iter().any(|a| a == "--send"))? {
+                teach::Outcome::NeedsConsent(d) => Err(consent_needed(&d, &dir)),
+                teach::Outcome::Done(al) => {
+                    print!("{}", al.entry);
+                    eprintln!("\n{property}: {} disagreements after the map now, {} with this one", al.before, al.after);
+                    if args.iter().any(|a| a == "--apply") {
+                        let path = dir.join(crate::trackerdecl::FILE);
+                        let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+                        let spliced = teach::splice_align(&text, &property, &al.entry);
+                        // What goes in must still be the tracker the proposal was counted as.
+                        let _: crate::trackerdecl::TrackerDecl = crate::yaml::parse(&spliced)?;
+                        std::fs::write(&path, spliced).map_err(|e| e.to_string())?;
+                        eprintln!("written into {}", dir.join(crate::trackerdecl::FILE).display());
+                    }
+                    Ok(())
+                }
+            }
+        }
+        Some("why") => {
+            let p = positional(args, 2);
+            let tracker = PathBuf::from(p.first().ok_or("which tracker?")?.as_str());
+            let source = PathBuf::from(p.get(1).ok_or("which source directory?")?.as_str());
+            let a = assist::Assist::configured(&workspace_of(&source));
+            match teach::why(&a, &tracker, &source, args.iter().any(|a| a == "--send"))? {
+                teach::Outcome::NeedsConsent(d) => Err(consent_needed(&d, &source)),
+                teach::Outcome::Done(why) => {
+                    println!("{why}");
+                    Ok(())
+                }
+            }
+        }
+        Some("mend") => {
+            let dir = dir_at(args, 2)?;
+            let ds = crate::source::Source::open(&dir)?;
+            let text = std::fs::read_to_string(dir.join(crate::sourcedecl::FILE)).map_err(|e| e.to_string())?;
+            let brief = platform::brief(&ds.describe(), &console::runs(&ds), &text);
+            let a = assist::Assist::configured(&workspace_of(&dir));
+            match teach::mend(&a, &brief, &format!("{}#mend", ds.decl.name), &dir, args.iter().any(|a| a == "--send"))? {
+                teach::Outcome::NeedsConsent(d) => Err(consent_needed(&d, &dir)),
+                teach::Outcome::Done(proposed) => {
+                    print!("{proposed}");
+                    if args.iter().any(|a| a == "--apply") {
+                        let path = dir.join(crate::sourcedecl::FILE);
+                        std::fs::write(dir.join("source.yaml.before"), &text).map_err(|e| e.to_string())?;
+                        std::fs::write(&path, &proposed).map_err(|e| e.to_string())?;
+                        eprintln!("written; the one before is source.yaml.before");
+                    }
+                    Ok(())
+                }
+            }
+        }
+        Some("score") => {
+            let p = positional(args, 2);
+            let (a, b) = (p.first().ok_or("which proposal?")?, p.get(1).ok_or("against which declaration?")?);
+            println!("{}", serde_json::to_string_pretty(&teach::score(Path::new(a.as_str()), Path::new(b.as_str()))?).unwrap_or_default());
+            Ok(())
+        }
+        _ => {
+            let root = std::env::current_dir().map_err(|e| e.to_string())?;
+            let a = assist::Assist::configured(&root);
+            println!("the assist here asks {}", a.who());
+            Ok(())
+        }
+    }
+}
+
+fn consent_needed(d: &assist::Disclosure, dir: &Path) -> String {
+    format!(
+        "this would send to {}:\n  {}\nAsked once per source. Run again with --send to agree, and {} records it.",
+        d.to,
+        d.sends.join("\n  "),
+        dir.join(assist::CONSENT).display()
+    )
 }

@@ -381,6 +381,9 @@ pub struct Site {
     pub price: Price,
     #[serde(default)]
     pub mail: Mail,
+    /// Who the assist asks, if anyone. See assist.rs.
+    #[serde(default)]
+    pub assist: crate::assist::Config,
 }
 
 #[derive(Debug, Deserialize)]

@@ -199,6 +199,15 @@ pub fn expand<'a>(
                 sub.file = Some(format!("{f}#{k}"));
                 sub.row = None;
             }
+            // From an address, the same: each item of one answer is its own place in it. The
+            // address alone names all 7,183 modules of Metasploit's metadata as one claim.
+            if let Some(u) = &origin.url {
+                sub.url = Some(match &key {
+                    Some(k) => format!("{u}#{}", crate::serve::urlencode(k)),
+                    None => format!("{u}#{}", i + 1),
+                });
+                sub.row = None;
+            }
             (
                 Row {
                     value,

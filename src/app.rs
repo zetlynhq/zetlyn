@@ -242,6 +242,15 @@ impl App {
                     (200, json_kind, json!({ "job": id }).to_string())
                 }
             }
+            (false, ["assist", tracker, source]) => (200, html_kind, self.assist_page(tracker, source, &query)),
+            (true, ["teach", tracker, source]) => {
+                let id = self.teach(tracker, source, query.get("url").cloned().unwrap_or_default(), form_title(&query));
+                (200, json_kind, json!({ "job": id }).to_string())
+            }
+            (true, ["why", tracker, source]) => {
+                let id = self.propose_why(tracker, source, form_title(&query));
+                (200, json_kind, json!({ "job": id }).to_string())
+            }
             (false, ["review", tracker, source]) => match self.review_page(tracker, source, &query) {
                 Ok(p) => (200, html_kind, p),
                 Err(e) => (404, html_kind, page("Not here", html! { p { (e) } })),
@@ -314,6 +323,7 @@ impl App {
         let tracker = tracker.to_string();
         self.start(move |p| {
             let local = Path::new(&from).is_file();
+            let github = from.starts_with("github:");
             // An upload already sits in its own directory; an address gets one named after it.
             let dir = if local {
                 Path::new(&from).parent().map(Path::to_path_buf).unwrap_or_else(|| sources.clone())
@@ -334,11 +344,21 @@ impl App {
             let name = format!("local/{source}");
             let shown = if local { Path::new(&from).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default() } else { from.clone() };
             p.say(format!("Reading {shown}"));
-            let proposed = if local {
+            let proposed = if github {
+                crate::guess::propose_github(&from, &dir, Some(&name))
+            } else if local {
                 crate::guess::propose(Path::new(&from), &dir, Some(&name), None)
             } else {
                 crate::guess::propose_url(&from, &dir, Some(&name), None)
             };
+            // A JSON API has no shape to guess from a table. The assist can read it, once the
+            // person has seen what that sends: the page that says so is where the job goes.
+            if let Err(e) = &proposed {
+                if e.contains("answers JSON") {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    return Ok(format!("/assist/{tracker}/{source}?url={}&title={}", urlencode(&from), urlencode(&title)));
+                }
+            }
             if let Err(e) = proposed {
                 let _ = std::fs::remove_dir_all(&dir);
                 return Err(e);
@@ -387,6 +407,77 @@ impl App {
         }
         write_tracker(&dir, decl)?;
         Ok(format!("/review/{tracker}/{source}?added=1"))
+    }
+
+    /// What the assist would be sent to read a JSON API, and the button that sends it (D10).
+    fn assist_page(&self, tracker: &str, source: &str, query: &BTreeMap<String, String>) -> String {
+        let url = query.get("url").cloned().unwrap_or_default();
+        let title = form_title(query);
+        let assist = crate::assist::Assist::configured(&self.root);
+        let body = html! {
+            p { a href={"/new/" (tracker) "?title=" (urlencode(&title))} { "← another address" } }
+            h1 { "This address answers JSON" }
+            p.about { code { (url) } " is an API, and an API has no shape to guess the way a table has. The assist can read it and propose a declaration, which is then tried against the API before you see it." }
+            @if assist.available() {
+                div.note {
+                    "This would send " strong { (assist.who()) } ":"
+                    ul {
+                        li { "the address" }
+                        li { "an outline of its answer: the paths in it, each with one example value of at most 80 characters, from up to 20 items, and the same of its last page where it has one" }
+                    }
+                    "Nothing else, and only for this source. What was sent is written beside its declaration, in " code { (crate::assist::CONSENT) } "."
+                }
+                form #teach data-job={"/teach/" (tracker) "/" (source) "?url=" (urlencode(&url)) "&title=" (urlencode(&title))} {
+                    button.primary type="submit" { "Send it and read the API" }
+                }
+            } @else {
+                div.note { "There is no assist here: " (crate::assist::Assist::missing()) "." }
+            }
+            pre #log hidden {}
+            div #error .note hidden {}
+            (PreEscaped(JOB_SCRIPT))
+        };
+        page("An API", body)
+    }
+
+    fn teach(&self, tracker: &str, source: &str, url: String, title: String) -> u64 {
+        let root = self.root.clone();
+        let dir = self.sources().join(source);
+        let (tracker, source) = (tracker.to_string(), source.to_string());
+        self.start(move |p| {
+            let assist = crate::assist::Assist::configured(&root);
+            p.say(format!("Asking {} to read {url}", assist.who()));
+            let taught = match crate::teach::api(&assist, &url, &dir, &format!("local/{source}"), true) {
+                Ok(crate::teach::Outcome::Done(t)) => t,
+                Ok(crate::teach::Outcome::NeedsConsent(_)) => return Err("not agreed to".into()),
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    return Err(e);
+                }
+            };
+            p.say(format!("Proposed{}, and tried: {}", if taught.mended { " and mended once" } else { "" }, taught.trial.lines().next().unwrap_or("")));
+            let ds = Source::open(&dir)?;
+            describe_ids(&ds, p);
+            p.say("Reading every claim");
+            let started = std::time::Instant::now();
+            let report = ds.run()?;
+            p.say(format!("{} claims in {:.1}s", report.added + report.changed + report.unchanged, started.elapsed().as_secs_f64()));
+            Ok(format!("/review/{tracker}/{source}?title={}", urlencode(&title)))
+        })
+    }
+
+    fn propose_why(&self, tracker: &str, source: &str, title: String) -> u64 {
+        let root = self.root.clone();
+        let (tdir, sdir) = (self.trackers().join(tracker), self.sources().join(source));
+        let (tracker, source) = (tracker.to_string(), source.to_string());
+        self.start(move |p| {
+            let assist = crate::assist::Assist::configured(&root);
+            p.say(format!("Asking {}", assist.who()));
+            match crate::teach::why(&assist, &tdir, &sdir, true)? {
+                crate::teach::Outcome::Done(why) => Ok(format!("/review/{tracker}/{source}?title={}&why={}", urlencode(&title), urlencode(&why))),
+                crate::teach::Outcome::NeedsConsent(_) => Err("not agreed to".into()),
+            }
+        })
     }
 
     fn start_page(&self) -> String {
@@ -440,8 +531,8 @@ impl App {
             } @else {
                 p.about { "Another perspective: a second source about the same things. Zetlyn reads it, then shows how many things the two share before anything is connected." }
             }
-            form #analyse .bar data-action={"/analyse/" (tracker) "?title=" (urlencode(&title))} {
-                input.wide type="url" name="url" value=(prefill) placeholder="https://…/something.csv" autofocus;
+            form #analyse .bar data-job={"/analyse/" (tracker) "?title=" (urlencode(&title))} {
+                input.wide type="text" name="url" value=(prefill) placeholder="https://…/something.csv, or github:owner/repo/releases" autofocus;
                 button.primary type="submit" { "Read it" }
             }
             p.dim { "or " label.file { input #file type="file" data-action={"/upload/" (tracker) "?title=" (urlencode(&title))}; } }
@@ -544,11 +635,20 @@ impl App {
                     a.chip href={"/new/" (tracker) "?title=" (urlencode(&title))} { "Add another perspective" }
                 }
             } @else {
+                @if decl.is_some() && crate::assist::Assist::configured(&self.root).available() {
+                    form #why .bar data-job={"/why/" (tracker) "/" (source) "?title=" (urlencode(&title))} {
+                        button type="submit" { "Let the assist propose why" }
+                        span.dim { "sends " (crate::assist::Assist::configured(&self.root).who()) " the names and descriptions of these sources, nothing they hold" }
+                    }
+                    pre #log hidden {}
+                    div #error .note hidden {}
+                    (PreEscaped(JOB_SCRIPT))
+                }
                 form method="post" action={"/accept/" (tracker) "/" (source) "?title=" (urlencode(&title))} {
                     p { label { "What to call it" br;
                         input.wide type="text" name="name" value=(example_name(&ds).unwrap_or(&ds.decl.title)); } }
                     p { label { "Why this source, in one sentence" br;
-                        input.wide type="text" name="why" value=(example_why(&ds)) placeholder={"What " (ds.decl.title) " says that nothing else does."}; } }
+                        input.wide type="text" name="why" value=(query.get("why").cloned().unwrap_or_else(|| example_why(&ds))) placeholder={"What " (ds.decl.title) " says that nothing else does."}; } }
                     p.bar {
                         button.primary type="submit" { @if decl.is_none() { "Looks right" } @else { "Connect" } }
                         button type="submit" formaction={"/discard/" (tracker) "/" (source) "?title=" (urlencode(&title))} { "Not right" }
@@ -739,13 +839,14 @@ const JOB_SCRIPT: &str = r#"<script>
       error.hidden = true; follow(j.job);
     });
   }
-  var form = document.getElementById('analyse');
-  form.addEventListener('submit', function (e) {
-    e.preventDefault();
-    fetch(form.dataset.action, { method: 'POST', body: new URLSearchParams(new FormData(form)) }).then(started);
+  document.querySelectorAll('form[data-job]').forEach(function (form) {
+    form.addEventListener('submit', function (e) {
+      e.preventDefault();
+      fetch(form.dataset.job, { method: 'POST', body: new URLSearchParams(new FormData(form)) }).then(started);
+    });
   });
   var file = document.getElementById('file');
-  file.addEventListener('change', function () {
+  if (file) file.addEventListener('change', function () {
     var f = file.files[0]; if (!f) return;
     fetch(file.dataset.action + '&name=' + encodeURIComponent(f.name), { method: 'POST', body: f }).then(started);
   });

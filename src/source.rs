@@ -574,6 +574,12 @@ impl Source {
                 || fields.iter().any(|f| f == name)
         };
 
+        // A connection string written out is a password in a file that is meant to be shared.
+        if let crate::sourcedecl::Fetch::Sql { dsn, .. } = &d.source {
+            if !dsn.contains("${") {
+                wrong.push("the connection string is written into the declaration; name a variable, as `dsn: \"${ORDERS_DSN}\"`".into());
+            }
+        }
         if self.store.count() == 0 {
             wrong.push("holds no claims, so nothing below could be checked".into());
             return wrong;

@@ -666,3 +666,59 @@ fn a_claim_about_two_things_is_part_of_both() {
     let m = json_of(&ws.z(&["tracker", "measure", &ws.scope()]));
     assert_eq!(m["with_an_exploit"], 5, "{m}");
 }
+
+/// The assist, answered from a recorded answer: the same run a model's answer would make, and
+/// nothing on the network.
+fn assisted(ws: &Workspace, args: &[&str]) -> (bool, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_zetlyn"))
+        .args(args)
+        .env("ZETLYN_ASSIST_REPLAY", fixtures().join("assist"))
+        .env("ZETLYN_HOME", ws.root.join("home"))
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("ZETLYN_ASSIST_URL")
+        .output()
+        .unwrap();
+    let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    (out.status.success(), said)
+}
+
+#[test]
+fn an_alignment_is_proposed_counted_and_kept_with_its_comments() {
+    let ws = Workspace::new("align");
+    let file = ws.root.join("trackers/cve/tracker.yaml");
+    // Without its map, and with a comment somebody wrote.
+    let text = std::fs::read_to_string(&file).unwrap();
+    let mut kept = String::new();
+    let mut skipping = false;
+    for line in text.lines() {
+        if line == "  severity:" {
+            kept.push_str("  # Ours, by hand.\n  severity: {}\n");
+            skipping = true;
+            continue;
+        }
+        if skipping && line.starts_with("   ") {
+            continue;
+        }
+        skipping = false;
+        kept.push_str(line);
+        kept.push('\n');
+    }
+    std::fs::write(&file, &kept).unwrap();
+    let scope = ws.scope();
+
+    // Nothing leaves before the person has said so, and what would leave is said.
+    let (ok, said) = assisted(&ws, &["assist", "align", &scope, "severity"]);
+    assert!(!ok && said.contains("the words 2 sources use for severity"), "{said}");
+
+    let (ok, said) = assisted(&ws, &["assist", "align", &scope, "severity", "--send", "--apply"]);
+    assert!(ok, "{said}");
+    // important and moderate are vendor A's words for high and medium; urgent means nothing on
+    // the scale and stays unmapped, so 0002's critical against medium is the one left.
+    assert!(said.contains("2 disagreements after the map now, 1 with this one"), "{said}");
+    let after = std::fs::read_to_string(&file).unwrap();
+    assert!(after.contains("  # Ours, by hand.\n  severity:\n    scale:\n    - critical"), "{after}");
+    assert!(after.contains("      important: high"), "{after}");
+    assert!(!after.contains("urgent"), "{after}");
+    let record = std::fs::read_to_string(ws.root.join("trackers/cve/assist.yaml")).unwrap();
+    assert!(record.contains("allowed: true") && record.contains("task: align"), "{record}");
+}

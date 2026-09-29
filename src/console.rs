@@ -271,7 +271,7 @@ fn holdings(root: &Path, name: &str) -> J {
     })
 }
 
-fn runs(ds: &Source) -> J {
+pub(crate) fn runs(ds: &Source) -> J {
     let last = ds.store.last_run();
     let reports: Vec<J> = (0..20)
         .filter_map(|back| {

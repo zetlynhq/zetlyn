@@ -31,18 +31,18 @@ impl Workspace {
     }
 
     fn dataset(&self, name: &str) -> String {
-        self.root.join("datasets").join(name).display().to_string()
+        self.root.join("sources").join(name).display().to_string()
     }
 
     fn scope(&self) -> String {
-        self.root.join("scopes/cve").display().to_string()
+        self.root.join("trackers/cve").display().to_string()
     }
 
     /// The second update: vendor A rates CVE-2026-0004 critical and moves two scores.
     fn update(&self) {
         std::fs::copy(
             fixtures().join("update-2/vendor-a.csv"),
-            self.root.join("datasets/vendor-a/advisories.csv"),
+            self.root.join("sources/vendor-a/advisories.csv"),
         )
         .unwrap();
         self.z(&["dataset", "run", &self.dataset("vendor-a")]);
@@ -224,7 +224,7 @@ fn a_shrunken_source_is_refused() {
     // Half the catalogue gone at once looks exactly like a source that broke, and the store
     // keeps what it had.
     std::fs::write(
-        ws.root.join("datasets/kev/kev.csv"),
+        ws.root.join("sources/kev/kev.csv"),
         "cveID,vulnerabilityName,dateAdded,vendorProject\n\
          CVE-2026-0001,Foo Server remote code execution,2026-09-01,Foo\n",
     )
@@ -241,4 +241,75 @@ fn a_shrunken_source_is_refused() {
     assert!(said.contains("the store was not replaced"), "{said}");
     let held = ws.z(&["search", &ws.dataset("kev")]);
     assert!(held.starts_with("2 records"), "{held}");
+}
+
+/// A copy of the workspace as 0.1 wrote it, with its own identity home.
+fn before(name: &str) -> PathBuf {
+    let root = std::env::temp_dir().join(format!("zetlyn-test-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    copy(&fixtures().join("before-0.2"), &root.join("workspace"));
+    std::fs::create_dir_all(root.join("home")).unwrap();
+    root
+}
+
+fn run(root: &Path, args: &[&str]) -> (bool, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_zetlyn"))
+        .args(args)
+        .env("ZETLYN_HOME", root.join("home"))
+        .output()
+        .unwrap();
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (out.status.success(), said.replace(&root.display().to_string(), "ROOT"))
+}
+
+#[test]
+fn migrate_keeps_what_a_workspace_answers() {
+    let root = before("migrate");
+    let ws = root.join("workspace");
+    let (ok, said) = run(&root, &["migrate", &ws.display().to_string()]);
+    assert!(ok, "{said}");
+    assert!(said.contains("datasets → ROOT/workspace/sources"), "{said}");
+    assert!(ws.join("sources/kev/source.yaml").exists());
+    assert!(!ws.join("sources/kev/dataset.toml").exists());
+    assert!(ws.join("watches/severe.yaml").exists());
+
+    // What it answers afterwards is what the workspace written in 0.2 answers.
+    for m in MEMBERS {
+        let (ok, said) = run(&root, &["dataset", "run", &ws.join("sources").join(m).display().to_string()]);
+        assert!(ok, "{said}");
+    }
+    let (ok, measured) = run(&root, &["scope", "measure", &ws.join("trackers/cve").display().to_string()]);
+    assert!(ok, "{measured}");
+    let fresh = Workspace::new("migrate-fresh");
+    assert_eq!(measured, fresh.z(&["scope", "measure", &fresh.scope()]));
+
+    // Once is enough, and a second time says so rather than doing something.
+    let (ok, said) = run(&root, &["migrate", &ws.display().to_string()]);
+    assert!(!ok && said.contains("nothing here is from before 0.2"), "{said}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_file_from_before_is_refused_by_name() {
+    let root = before("refused-old");
+    let kev = root.join("workspace/datasets/kev");
+    let (ok, said) = run(&root, &["dataset", "run", &kev.display().to_string()]);
+    assert!(!ok);
+    assert!(said.contains("dataset.toml is from before 0.2. `zetlyn migrate` rewrites it"), "{said}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_half_migration_is_refused() {
+    let root = before("half");
+    let ws = root.join("workspace");
+    std::fs::create_dir_all(ws.join("sources")).unwrap();
+    let (ok, said) = run(&root, &["migrate", &ws.display().to_string()]);
+    assert!(!ok && said.contains("stopped half way"), "{said}");
+    assert!(ws.join("datasets/kev/dataset.toml").exists(), "nothing is touched");
+    let _ = std::fs::remove_dir_all(&root);
 }

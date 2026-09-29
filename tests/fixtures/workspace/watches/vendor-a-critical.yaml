@@ -1,0 +1,6 @@
+name: vendor-a-critical
+title: Critical at vendor A
+source: test/vendor-a
+query: severity=critical
+deliver:
+- to: feed

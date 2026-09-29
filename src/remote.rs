@@ -23,7 +23,7 @@ impl Remote {
     pub fn open(base: &str, key: Option<String>) -> Result<Remote, String> {
         let base = base.trim_end_matches('/').to_string();
         let agent = ureq::Agent::config_builder()
-            .user_agent("zetlyn/3")
+            .user_agent(crate::decl::AGENT)
             .timeout_global(Some(std::time::Duration::from_secs(30)))
             .build()
             .new_agent();

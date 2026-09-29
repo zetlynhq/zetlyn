@@ -249,8 +249,8 @@ pub fn each_row(
             for f in files {
                 let rel = f.strip_prefix(&dir).unwrap_or(&f).display().to_string();
                 // A dataset pointed at its own directory would otherwise read its own store.
-                if matches!(rel.as_str(), "dataset.toml" | "runs.jsonl")
-                    || rel.starts_with("records.db")
+                if matches!(rel.as_str(), "source.yaml" | "updates.jsonl")
+                    || rel.starts_with("claims.db")
                     || rel.starts_with("blobs/")
                 {
                     continue;
@@ -294,7 +294,7 @@ pub fn each_row(
             // `local or at a URL`. A URL is fetched once into the dataset directory, so the
             // extraction reads a file either way.
             let file = if path.starts_with("http://") || path.starts_with("https://") {
-                let f = crate::fetch::Fetcher::new("zetlyn/3", &BTreeMap::new(), 0)?;
+                let f = crate::fetch::Fetcher::new(crate::decl::AGENT, &BTreeMap::new(), 0)?;
                 let body = f.get(path)?;
                 let cached = base.join("source.csv");
                 std::fs::write(&cached, body).map_err(|e| format!("{}: {e}", cached.display()))?;
@@ -512,7 +512,7 @@ pub fn each_row(
 
 /// Every identifier of a scheme another dataset holds, through the same `search` a reader uses.
 pub fn subjects_of(root: &Path, dataset: &str, scheme: &str) -> Result<Vec<String>, String> {
-    let dir = crate::scope::registry(&root.join("datasets"))
+    let dir = crate::scope::registry(&root.join("sources"))
         .get(dataset)
         .cloned()
         .ok_or_else(|| format!("{dataset} is not installed here"))?;

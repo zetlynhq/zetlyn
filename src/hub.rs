@@ -48,8 +48,8 @@ const REFUSED: &[&str] = &[
     "ns1",
     "ns2",
     // Reserved by the layout itself: a reference could not tell these from a tree.
-    "datasets",
-    "scopes",
+    "sources",
+    "trackers",
     "versions",
     "tags",
     "owners",
@@ -126,18 +126,15 @@ pub fn why_not(name: &str) -> Option<String> {
 
 impl Owners {
     pub fn load(dir: &Path) -> Owners {
-        std::fs::read_to_string(Self::path(dir))
-            .ok()
-            .and_then(|raw| toml::from_str(&raw).ok())
-            .unwrap_or_default()
+        crate::yaml::read_or_default(&Self::path(dir))
     }
 
     fn path(dir: &Path) -> PathBuf {
-        dir.join("owners.toml")
+        dir.join("owners.yaml")
     }
 
     fn save(&self, dir: &Path) -> Result<(), String> {
-        let text = toml::to_string_pretty(self).map_err(|e| e.to_string())?;
+        let text = crate::yaml::to_string(self)?;
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         std::fs::write(Self::path(dir), text).map_err(|e| format!("{}: {e}", dir.display()))
     }
@@ -204,7 +201,7 @@ impl Owners {
         let mut parts = path.split('/');
         let tree = parts.next().unwrap_or_default();
         let named = parts.next().unwrap_or_default();
-        if !matches!(tree, "datasets" | "scopes") {
+        if !matches!(tree, "sources" | "trackers") {
             return Err(format!("{tree}: a hub holds datasets and scopes"));
         }
         if named != owner {
@@ -279,7 +276,7 @@ fn read_dir_names(dir: &Path) -> Vec<String> {
 /// Everything under `datasets/` and `scopes/`, one row per tag.
 fn carried(dir: &Path) -> Vec<Carried> {
     let mut out = Vec::new();
-    for tree in ["datasets", "scopes"] {
+    for tree in ["sources", "trackers"] {
         let root = dir.join(tree);
         for owner in read_dir_names(&root) {
             for name in read_dir_names(&root.join(&owner)) {
@@ -312,9 +309,9 @@ fn carried(dir: &Path) -> Vec<Carried> {
                         },
                         about: s("about"),
                         built_at: manifest["built_at"].as_u64().unwrap_or(0),
-                        records: manifest["records"].as_u64().unwrap_or(0),
-                        members: manifest["members"].as_array().map(Vec::len).unwrap_or(0),
-                        bytes: manifest["payloads"]["records.jsonl"]["bytes"]
+                        records: manifest["claims"].as_u64().unwrap_or(0),
+                        members: manifest["sources"].as_array().map(Vec::len).unwrap_or(0),
+                        bytes: manifest["payloads"]["claims.jsonl"]["bytes"]
                             .as_u64()
                             .unwrap_or(0),
                     });
@@ -332,8 +329,8 @@ fn index_json(dir: &Path) -> Vec<u8> {
             serde_json::json!({
                 "tree": c.tree, "reference": c.reference(), "tag": c.tag,
                 "version": c.version, "title": c.title, "about": c.about,
-                "built_at": c.built_at, "records": c.records,
-                "members": c.members, "bytes": c.bytes,
+                "built_at": c.built_at, "claims": c.records,
+                "sources": c.members, "bytes": c.bytes,
             })
         })
         .collect();
@@ -374,7 +371,7 @@ fn index_page(dir: &Path, serving: &[String]) -> Vec<u8> {
     use maud::html;
     let rows = carried(dir);
     let (scopes, datasets): (Vec<&Carried>, Vec<&Carried>) =
-        rows.iter().partition(|c| c.tree == "scopes");
+        rows.iter().partition(|c| c.tree == "trackers");
     let has = |name: &str| dir.join(name).exists();
     let page = html! {
         (maud::DOCTYPE)

@@ -1,0 +1,6 @@
+name: severe
+title: High or worse
+tracker: test/cve
+query: severity>=high
+deliver:
+- to: feed

@@ -16,6 +16,7 @@ mod identity;
 mod key;
 mod place;
 mod platform;
+mod migrate;
 mod record;
 mod remote;
 mod scope;
@@ -25,6 +26,7 @@ mod servescope;
 mod source;
 mod store;
 mod watch;
+mod yaml;
 
 use std::path::{Path, PathBuf};
 
@@ -226,6 +228,18 @@ fn run(args: &[String]) -> Result<(), String> {
                 Ok(())
             }
         },
+        // Everything 0.1 wrote, in the words and the format of 0.2.
+        Some("migrate") => {
+            let root = PathBuf::from(positional(args, 1).first().map(|s| s.as_str()).unwrap_or("."));
+            let done = migrate::workspace(&root)?;
+            for line in &done.0 {
+                println!("{line}");
+            }
+            if let Some(line) = migrate::identity(&identity::home())? {
+                println!("{line}");
+            }
+            Ok(())
+        }
         // One command, and the directory says which it is.
         Some("console") => console_command(args),
         Some("hub") => hub_command(args),
@@ -245,7 +259,7 @@ fn run(args: &[String]) -> Result<(), String> {
                 .first()
                 .map(|s| PathBuf::from(s.as_str()))
                 .ok_or("which directory?")?;
-            if named.join("scope.toml").exists() {
+            if named.join(crate::scopedecl::FILE).exists() {
                 let (dir, datasets) = scope_at(args, 1)?;
                 let scope = scope::Scope::open(&dir, &datasets)?;
                 for name in &scope.missing {
@@ -282,8 +296,8 @@ fn dir_at(args: &[String], from: usize) -> Result<PathBuf, String> {
         .first()
         .map(|s| PathBuf::from(s.as_str()))
         .ok_or("which dataset directory?")?;
-    if !p.join("dataset.toml").exists() {
-        return Err(format!("{}: no dataset.toml here", p.display()));
+    if !p.join(crate::decl::FILE).exists() {
+        return Err(missing(&p.join(crate::decl::FILE)));
     }
     Ok(p)
 }
@@ -303,7 +317,7 @@ fn dataset_new(args: &[String]) -> Result<(), String> {
                 .unwrap_or(format!("./{stem}")),
         );
         let toml = guess::propose_url(from, &dir, flag(args, "--name"), flag(args, "--kind"))?;
-        println!("{}\n", dir.join("dataset.toml").display());
+        println!("{}\n", dir.join(crate::decl::FILE).display());
         print!("{toml}");
         return Ok(());
     }
@@ -319,7 +333,7 @@ fn dataset_new(args: &[String]) -> Result<(), String> {
     );
     let toml = guess::propose(from, &dir, flag(args, "--name"), flag(args, "--kind"))?;
 
-    println!("{}", dir.join("dataset.toml").display());
+    println!("{}", dir.join(crate::decl::FILE).display());
     println!();
     print!("{toml}");
     println!();
@@ -411,7 +425,7 @@ fn changes(args: &[String]) -> Result<(), String> {
     let limit = flag(args, "--limit")
         .and_then(|s| s.parse().ok())
         .unwrap_or(50);
-    let report = if dir.join("scope.toml").exists() {
+    let report = if dir.join(crate::scopedecl::FILE).exists() {
         let (dir, datasets) = scope_at(args, 1)?;
         let scope = scope::Scope::open(&dir, &datasets)?;
         let since = flag(args, "--since")
@@ -456,7 +470,7 @@ fn deployment(args: &[String], from: usize) -> Result<PathBuf, String> {
         .first()
         .map(|s| PathBuf::from(s.as_str()))
         .unwrap_or_else(|| PathBuf::from("."));
-    if !root.join("datasets").is_dir() {
+    if !root.join("sources").is_dir() {
         return Err(format!("{}: no datasets here", root.display()));
     }
     Ok(root)
@@ -475,7 +489,7 @@ fn schedule(args: &[String]) -> Result<(), String> {
         // that is being throttled can take twenty minutes, and an hourly dataset behind it
         // would wait that out. Shortest cadence first, so what is asked for most often is
         // asked for first.
-        let mut due: Vec<(i64, String, PathBuf)> = scope::registry(&root.join("datasets"))
+        let mut due: Vec<(i64, String, PathBuf)> = scope::registry(&root.join("sources"))
             .into_iter()
             .filter_map(|(name, dir)| {
                 let every = Dataset::open(&dir)
@@ -737,13 +751,13 @@ fn scope_at(args: &[String], from: usize) -> Result<(PathBuf, PathBuf), String> 
         .first()
         .map(|s| PathBuf::from(s.as_str()))
         .ok_or("which scope directory?")?;
-    if !p.join("scope.toml").exists() {
-        return Err(format!("{}: no scope.toml here", p.display()));
+    if !p.join(crate::scopedecl::FILE).exists() {
+        return Err(missing(&p.join(crate::scopedecl::FILE)));
     }
     // A deployment holds `datasets/` beside `scopes/`, and a member is found there by its name.
     let datasets = match flag(args, "--datasets") {
         Some(d) => PathBuf::from(d),
-        None => p.join("..").join("..").join("datasets"),
+        None => p.join("..").join("..").join("sources"),
     };
     if !datasets.is_dir() {
         return Err(format!(
@@ -914,7 +928,7 @@ fn dataset_subscribe(args: &[String]) -> Result<(), String> {
         .unwrap_or_else(|| artifact::DEFAULT_HUB.to_string());
     let into = match flag(args, "--at") {
         Some(p) => PathBuf::from(p),
-        None => PathBuf::from("datasets").join(&reference.name),
+        None => PathBuf::from("sources").join(&reference.name),
     };
     let place = place::at(&from)?;
     let (held, version) = artifact::subscribe(
@@ -947,7 +961,7 @@ fn dataset_update(args: &[String]) -> Result<(), String> {
     let pinned = Some(key.as_str()).filter(|k| !k.trim().is_empty());
     let reference = artifact::Reference::parse(reference)?;
     let place = place::at(at)?;
-    let manifest = artifact::manifest_signed_by(place.as_ref(), &reference, "datasets", pinned)?;
+    let manifest = artifact::manifest_signed_by(place.as_ref(), &reference, "sources", pinned)?;
     let offered = manifest["version"].as_str().unwrap_or_default();
     let held = artifact::held_version(&dir).unwrap_or_default();
     if offered == held {
@@ -1008,8 +1022,8 @@ fn scope_subscribe(args: &[String]) -> Result<(), String> {
         .or_else(|| reference.host.as_ref().map(|h| format!("https://{h}")))
         .unwrap_or_else(|| artifact::DEFAULT_HUB.to_string());
     let root = PathBuf::from(flag(args, "--at").unwrap_or("."));
-    let into = root.join("scopes").join(&reference.name);
-    let datasets = root.join("datasets");
+    let into = root.join("trackers").join(&reference.name);
+    let datasets = root.join("sources");
     let place = place::at(&from)?;
     let (version, taken) =
         artifact::subscribe_scope(place.as_ref(), &reference, &into, &datasets, &from)?;
@@ -1166,7 +1180,7 @@ fn console_command(args: &[String]) -> Result<(), String> {
                 until,
                 flag(args, "--why").unwrap_or(""),
             )?;
-            let out = PathBuf::from(flag(args, "--out").unwrap_or("grant.toml"));
+            let out = PathBuf::from(flag(args, "--out").unwrap_or("grant.yaml"));
             signed.write(&out)?;
             println!("{} may {} on {name} until {until}", to, can.join(", "));
             println!(
@@ -1366,20 +1380,19 @@ fn platform_command(args: &[String]) -> Result<(), String> {
             if name.contains('/') || name.contains("..") {
                 return Err(format!("{name}: a name, not a path"));
             }
-            let dir = root.join("deployments");
+            let dir = root.join("workspaces");
             std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
             let grants = root.join("grants");
             std::fs::create_dir_all(&grants).map_err(|e| format!("{}: {e}", grants.display()))?;
-            let grant_file = format!("{name}.toml");
+            let grant_file = format!("{name}.yaml");
             std::fs::copy(&from, grants.join(&grant_file))
                 .map_err(|e| format!("{}: {e}", from.display()))?;
-            let held = format!(
-                "at    = \"{}\"\ngrant = \"{grant_file}\"\ntitle = \"{}\"\n",
-                address.trim_end_matches('/'),
-                flag(args, "--title").unwrap_or("")
-            );
-            std::fs::write(dir.join(format!("{name}.toml")), held)
-                .map_err(|e| format!("{}: {e}", dir.display()))?;
+            let held = platform::Held {
+                at: address.trim_end_matches('/').to_string(),
+                grant: grant_file,
+                title: flag(args, "--title").unwrap_or("").to_string(),
+            };
+            crate::yaml::write(&dir.join(format!("{name}.yaml")), &held)?;
 
             // Held against the thing itself rather than against the file that was handed over.
             let platform = platform::Platform::open(&root)?;
@@ -1387,8 +1400,8 @@ fn platform_command(args: &[String]) -> Result<(), String> {
                 Ok(j) => {
                     println!(
                         "{name} answers: {} datasets, {} scopes",
-                        j["datasets"].as_array().map(Vec::len).unwrap_or(0),
-                        j["scopes"].as_array().map(Vec::len).unwrap_or(0)
+                        j["sources"].as_array().map(Vec::len).unwrap_or(0),
+                        j["trackers"].as_array().map(Vec::len).unwrap_or(0)
                     );
                     Ok(())
                 }
@@ -1433,7 +1446,7 @@ fn follows(root: &Path, moved: &[String]) -> Vec<(String, PathBuf)> {
     if moved.is_empty() {
         return Vec::new();
     }
-    scope::registry(&root.join("datasets"))
+    scope::registry(&root.join("sources"))
         .into_iter()
         .filter(|(_, dir)| {
             decl::Declaration::load(dir)
@@ -1442,4 +1455,17 @@ fn follows(root: &Path, moved: &[String]) -> Vec<(String, PathBuf)> {
                 .is_some_and(|after| moved.contains(&after))
         })
         .collect()
+}
+
+/// A directory without the file that makes it what was asked for. Where it holds the file 0.1
+/// wrote instead, that is the thing to say.
+fn missing(path: &std::path::Path) -> String {
+    match yaml::older(path) {
+        Some(old) => format!(
+            "{} is from before 0.2. `zetlyn migrate` rewrites it as {}",
+            old.display(),
+            path.display()
+        ),
+        None => format!("{}: not here", path.display()),
+    }
 }

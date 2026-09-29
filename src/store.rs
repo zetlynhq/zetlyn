@@ -179,7 +179,7 @@ fn migrate(db: &Connection) {
 
 impl Store {
     pub fn open(dir: &Path) -> Result<Store, String> {
-        let db = Connection::open(dir.join("records.db")).map_err(|e| e.to_string())?;
+        let db = Connection::open(dir.join("claims.db")).map_err(|e| e.to_string())?;
         db.execute_batch("pragma journal_mode=wal; pragma synchronous=normal;")
             .map_err(|e| e.to_string())?;
         db.execute_batch(SCHEMA).map_err(|e| e.to_string())?;

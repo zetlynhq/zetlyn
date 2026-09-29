@@ -15,18 +15,18 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use maud::{html, Markup, PreEscaped, DOCTYPE};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value as J;
 
 use crate::console::Driver;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Held {
     /// Where its console answers.
     pub at: String,
-    /// The grant file, under `grants/`. Kept apart from this one because both are TOML and a
-    /// directory that holds two kinds of TOML is a directory somebody parses the wrong one from.
+    /// The grant file, under `grants/`. Kept apart from this one because both are YAML and a
+    /// directory that holds two kinds of YAML is a directory somebody parses the wrong one from.
     pub grant: String,
     #[serde(default)]
     pub title: String,
@@ -40,12 +40,12 @@ pub struct Platform {
 
 impl Platform {
     pub fn open(root: &Path) -> Result<Platform, String> {
-        let dir = root.join("deployments");
+        let dir = root.join("workspaces");
         let mut held = BTreeMap::new();
         let entries = std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().map(|e| e != "toml").unwrap_or(true) {
+            if path.extension().map(|e| e != "yaml").unwrap_or(true) {
                 continue;
             }
             let Some(name) = path.file_stem().map(|s| s.to_string_lossy().to_string()) else {
@@ -53,7 +53,7 @@ impl Platform {
             };
             let raw =
                 std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-            let one: Held = toml::from_str(&raw).map_err(|e| format!("{}: {e}", path.display()))?;
+            let one: Held = crate::yaml::parse(&raw).map_err(|e| format!("{}: {e}", path.display()))?;
             held.insert(name, one);
         }
         Ok(Platform {
@@ -173,8 +173,8 @@ fn overview(p: &Platform) -> String {
                             }
                             @match answer {
                                 Ok(j) => {
-                                    td.num { (j["datasets"].as_array().map(Vec::len).unwrap_or(0)) }
-                                    td.num { (j["scopes"].as_array().map(Vec::len).unwrap_or(0)) }
+                                    td.num { (j["sources"].as_array().map(Vec::len).unwrap_or(0)) }
+                                    td.num { (j["trackers"].as_array().map(Vec::len).unwrap_or(0)) }
                                     td { (summary(j)) }
                                 }
                                 Err(e) => {
@@ -196,8 +196,8 @@ fn overview(p: &Platform) -> String {
 /// What is wrong with a deployment, in as few words as a table cell holds.
 fn summary(j: &J) -> Markup {
     let empty = Vec::new();
-    let datasets = j["datasets"].as_array().unwrap_or(&empty);
-    let scopes = j["scopes"].as_array().unwrap_or(&empty);
+    let datasets = j["sources"].as_array().unwrap_or(&empty);
+    let scopes = j["trackers"].as_array().unwrap_or(&empty);
     let unwell: Vec<&str> = datasets
         .iter()
         .filter_map(|d| d["state"].as_str())
@@ -248,7 +248,7 @@ fn deployment(p: &Platform, name: &str) -> (u16, String) {
                 table {
                     thead { tr { th { "Dataset" } th { "Kind" } th { "Records" } th { "State" } th { "Due" } } }
                     tbody {
-                        @for d in held["datasets"].as_array().unwrap_or(&empty) {
+                        @for d in held["sources"].as_array().unwrap_or(&empty) {
                             @let at = d["at"].as_str().unwrap_or("");
                             tr {
                                 td { a href={"/d/" (name) "/dataset/" (at)} { (d["dataset"].as_str().unwrap_or("")) } }
@@ -266,7 +266,7 @@ fn deployment(p: &Platform, name: &str) -> (u16, String) {
                 table {
                     thead { tr { th { "Scope" } th { "Members" } th { "Records" } th { "Promise" } } }
                     tbody {
-                        @for s in held["scopes"].as_array().unwrap_or(&empty) {
+                        @for s in held["trackers"].as_array().unwrap_or(&empty) {
                             tr {
                                 td { (s["scope"].as_str().unwrap_or("")) }
                                 td.num { (s["members"].as_u64().unwrap_or(0)) }
@@ -419,16 +419,12 @@ pub struct Drafting {
 }
 
 pub fn drafter(root: &Path) -> Drafting {
-    #[derive(Deserialize)]
+    #[derive(Default, Deserialize)]
     struct Config {
         #[serde(default)]
         draft: Drafting,
     }
-    std::fs::read_to_string(root.join("platform.toml"))
-        .ok()
-        .and_then(|raw| toml::from_str::<Config>(&raw).ok())
-        .map(|c| c.draft)
-        .unwrap_or_default()
+    crate::yaml::read_or_default::<Config>(&root.join("platform.yaml")).draft
 }
 
 /// The complaints, the declaration and the fields, handed over as one document.
@@ -484,7 +480,7 @@ fn draft(root: &Path, brief: &str) -> Result<String, String> {
     let named = drafter(root).run;
     let (first, rest) = named
         .split_first()
-        .ok_or("no drafter named. `[draft] run = [...]` in platform.toml names one")?;
+        .ok_or("no drafter named. `draft: { run: [...] }` in platform.yaml names one")?;
     let mut child = std::process::Command::new(first)
         .args(rest)
         .stdin(std::process::Stdio::piped())
@@ -567,7 +563,7 @@ fn declaration(
                             "and answers with a declaration. It proposes; you apply."
                         }
                     } @else {
-                        p.dim { "No drafter named. `[draft] run = [...]` in platform.toml names one." }
+                        p.dim { "No drafter named. `draft: { run: [...] }` in platform.yaml names one." }
                     }
                 }
             },

@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use serde_json::Value as J;
+use serde_json::{json, Value as J};
 
 use crate::build::as_date;
 use crate::decl::FieldType;
@@ -173,10 +173,6 @@ fn cell(d: &calamine::Data) -> J {
     }
 }
 
-fn quote(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
-}
-
 struct Shape {
     id: Option<String>,
     title: String,
@@ -302,63 +298,47 @@ fn examples(cols: &[Column], sh: &Shape) -> Vec<String> {
     out
 }
 
-fn write_blocks(
-    name: &str,
-    kind: &str,
-    source: &str,
-    cols: &[Column],
-    sh: &Shape,
-    _total_hint: usize,
-) -> String {
-    let mut t = String::new();
-    t.push_str(&format!("name  = {}\n", quote(name)));
-    t.push_str(&format!("title = {}\n", quote(&title_case(name))));
-    t.push_str(&format!("kind  = {}\n", quote(kind)));
-    t.push_str(&format!(
-        "about = {}\n\n",
-        quote(&format!("Read from {}.", source_name(source)))
-    ));
-    t.push_str(source);
-    t.push_str("\n[records]\n");
-    if let Some(id) = &sh.id {
-        t.push_str(&format!(
-            "id    = {{ scheme = {}, from = {} }}\n",
-            quote(&scheme_name(id)),
-            quote(&format!("field:{id}"))
-        ));
-    }
-    t.push_str(&format!(
-        "title = {}\n",
-        quote(&format!("field:{}", sh.title))
-    ));
-    let text: Vec<String> = sh
-        .text
-        .iter()
-        .map(|c| quote(&format!("field:{c}")))
-        .collect();
-    t.push_str(&format!("text  = [{}]\n", text.join(", ")));
-    match &sh.known {
-        Some(k) => t.push_str(&format!("known = {}\n", quote(&format!("field:{k}")))),
-        None => t.push_str(&format!("known = {}\n", quote("file:modified"))),
-    }
+/// What a proposal becomes: read back as a declaration before it is written, so a proposal is a
+/// file this program opens, and written by the same code as every other declaration.
+fn finish(built: J, dir: &Path) -> Result<String, String> {
+    let decl: crate::decl::Declaration = serde_json::from_value(built)
+        .map_err(|e| format!("the proposal does not make a declaration: {e}"))?;
+    let text = crate::yaml::to_string(&decl)?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let path = dir.join(crate::decl::FILE);
+    std::fs::write(&path, &text).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(text)
+}
 
-    if !sh.fields.is_empty() {
-        t.push_str("\n[records.fields]\n");
-        let width = sh
-            .fields
-            .iter()
-            .map(|(n, _)| slug(n).len())
-            .max()
-            .unwrap_or(4);
-        for (n, kind) in &sh.fields {
-            t.push_str(&format!(
-                "{:width$} = {{ type = {}, from = {} }}\n",
-                slug(n),
-                quote(kind.name()),
-                quote(&format!("field:{n}")),
-            ));
-        }
+fn write_blocks(name: &str, kind: &str, fetch: J, cols: &[Column], sh: &Shape) -> J {
+    let about = format!("Read from {}.", source_name(&fetch));
+    let mut claims = serde_json::Map::new();
+    if let Some(id) = &sh.id {
+        claims.insert(
+            "id".into(),
+            json!({ "scheme": scheme_name(id), "from": format!("field:{id}") }),
+        );
     }
+    claims.insert("title".into(), json!(format!("field:{}", sh.title)));
+    claims.insert(
+        "text".into(),
+        json!(sh.text.iter().map(|c| format!("field:{c}")).collect::<Vec<_>>()),
+    );
+    claims.insert(
+        "known".into(),
+        json!(match &sh.known {
+            Some(k) => format!("field:{k}"),
+            None => "file:modified".into(),
+        }),
+    );
+    let mut properties = serde_json::Map::new();
+    for (n, kind) in &sh.fields {
+        properties.insert(
+            slug(n),
+            json!({ "type": kind.name(), "from": format!("field:{n}") }),
+        );
+    }
+    claims.insert("properties".into(), J::Object(properties));
 
     // One default view, plus one per code field, because that is what a person clicks first.
     let mut columns: Vec<String> = Vec::new();
@@ -374,73 +354,61 @@ fn write_blocks(
     if sh.known.is_some() {
         columns.push("known".into());
     }
-    t.push_str("\n[[view]]\nname    = \"recent\"\ntitle   = \"Newest first\"\ndefault = true\n");
-    t.push_str(&format!(
-        "columns = [{}]\n",
-        columns
-            .iter()
-            .map(|c| quote(c))
-            .collect::<Vec<_>>()
-            .join(", ")
-    ));
     let facets: Vec<String> = sh
         .fields
         .iter()
         .filter(|(_, k)| matches!(k, FieldType::Code | FieldType::Bool))
-        .map(|(n, _)| quote(&slug(n)))
+        .map(|(n, _)| slug(n))
         .take(4)
         .collect();
-    t.push_str(&format!("facets  = [{}]\n", facets.join(", ")));
-    t.push_str("sort    = \"known desc\"\n");
-
+    let mut views = vec![json!({
+        "name": "recent", "title": "Newest first", "default": true,
+        "columns": columns, "facets": facets, "sort": "known desc",
+    })];
     if let Some((n, _)) = sh.fields.iter().find(|(_, k)| *k == FieldType::Code) {
-        t.push_str(&format!(
-            "\n[[view]]\nname    = \"by-{0}\"\ntitle   = \"By {0}\"\ngroup   = {1}\ncolumns = [\"title\", \"known\"]\n",
-            slug(n),
-            quote(&slug(n))
-        ));
+        views.push(json!({
+            "name": format!("by-{}", slug(n)), "title": format!("By {}", slug(n)),
+            "group": slug(n), "columns": ["title", "known"],
+        }));
     }
 
     let compare: Vec<String> = sh
         .fields
         .iter()
         .filter(|(_, k)| k.ordered())
-        .map(|(n, _)| quote(&slug(n)))
-        .chain(std::iter::once(quote("known")))
+        .map(|(n, _)| slug(n))
+        .chain(std::iter::once("known".to_string()))
         .collect();
     let suggest: Vec<String> = sh
         .fields
         .iter()
         .filter(|(_, k)| *k == FieldType::Code)
-        .map(|(n, _)| quote(&slug(n)))
+        .map(|(n, _)| slug(n))
         .take(3)
         .collect();
-    t.push_str("\n[search]\ntext     = [\"title\", \"text\"]\n");
-    t.push_str(&format!("compare  = [{}]\n", compare.join(", ")));
-    t.push_str(&format!("suggest  = [{}]\n", suggest.join(", ")));
-    let ex: Vec<String> = examples(cols, sh).iter().map(|e| quote(e)).collect();
-    t.push_str(&format!("examples = [{}]\n", ex.join(", ")));
-    t.push_str("\n[retention]\nhistory = false\n");
-    t
+    json!({
+        "name": name,
+        "title": title_case(name),
+        "kind": kind,
+        "about": about,
+        "fetch": fetch,
+        "claims": claims,
+        "views": views,
+        "search": {
+            "text": ["title", "text"],
+            "compare": compare,
+            "suggest": suggest,
+            "examples": examples(cols, sh),
+        },
+    })
 }
 
-/// The file a source block names, for the one sentence a proposal can honestly write.
-fn source_name(block: &str) -> String {
-    for line in block.lines() {
-        let Some(rest) = line.strip_prefix("path") else {
-            continue;
-        };
-        let Some(start) = rest.find('"') else {
-            continue;
-        };
-        let inner = &rest[start + 1..];
-        let Some(end) = inner.rfind('"') else {
-            continue;
-        };
-        let path = &inner[..end];
-        return path.rsplit('/').next().unwrap_or(path).to_string();
+/// The file a fetch block names, for the one sentence a proposal can honestly write.
+fn source_name(fetch: &J) -> String {
+    match fetch["path"].as_str() {
+        Some(path) => path.rsplit('/').next().unwrap_or(path).to_string(),
+        None => "the source".into(),
     }
-    "the source".into()
 }
 /// A column name as a field name. `knownRansomwareCampaignUse` is four words and reads as four.
 pub fn slug(s: &str) -> String {
@@ -490,7 +458,7 @@ fn title_case(name: &str) -> String {
     c
 }
 
-/// Reads the source, writes `dataset.toml`, and hands back what it wrote.
+/// Reads the source, writes `source.yaml`, and hands back what it wrote.
 pub fn propose(
     from: &Path,
     dir: &Path,
@@ -503,12 +471,12 @@ pub fn propose(
     let stem = from
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "dataset".into());
+        .unwrap_or_else(|| "source".into());
     let name = name
         .map(str::to_string)
         .unwrap_or_else(|| format!("local/{}", slug(&stem)));
 
-    // A path inside the dataset directory travels with it; anything else is where it is.
+    // A path inside the source directory travels with it; anything else is where it is.
     let shown = match from.strip_prefix(dir.canonicalize().unwrap_or(dir.to_path_buf())) {
         Ok(rel) => format!("./{}", rel.display()),
         Err(_) => from.display().to_string(),
@@ -518,63 +486,38 @@ pub fn propose(
         .extension()
         .map(|s| s.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
-    let toml = if from.is_dir() {
-        let source = format!("[source]\ntype = \"folder\"\npath = {}\n", quote(&shown));
+    let built = if from.is_dir() {
         let mut files = Vec::new();
         let exc: Vec<_> = BUILD_OUTPUT
             .iter()
             .map(|p| crate::source::glob_to_regex(p))
             .collect();
         crate::source::walk_dir(&from, &from, &exc, &mut files, 200_000);
-        folder_declaration(&name, kind.unwrap_or("document"), &source, files.len())
+        folder_declaration(&name, kind.unwrap_or("document"), &shown, files.len())
     } else if ext == "csv" || ext == "tsv" {
         let (headers, rows) = read_csv(&from)?;
         let cols = columns_from_rows(&headers, &rows);
         let sh = shape(&cols);
-        let delim = if ext == "tsv" { "\\t" } else { "," };
-        let source = format!(
-            "[source]\ntype      = \"csv\"\npath      = {}\ndelimiter = \"{delim}\"\n",
-            quote(&shown)
-        );
-        write_blocks(
-            &name,
-            kind.unwrap_or("row"),
-            &source,
-            &cols,
-            &sh,
-            rows.len(),
-        )
+        let delim = if ext == "tsv" { "\t" } else { "," };
+        let fetch = json!({ "type": "csv", "path": shown, "delimiter": delim });
+        write_blocks(&name, kind.unwrap_or("row"), fetch, &cols, &sh)
     } else if ext == "xlsx" || ext == "xls" || ext == "xlsm" {
         let (sheet, header_row, headers, rows) = read_xlsx(&from)?;
         let cols = columns_from_rows(&headers, &rows);
         let sh = shape(&cols);
-        let source = format!(
-            "[source]\ntype       = \"xlsx\"\npath       = {}\nsheets     = [{}]\nheader_row = {header_row}\n",
-            quote(&shown),
-            quote(&sheet)
-        );
-        write_blocks(
-            &name,
-            kind.unwrap_or("row"),
-            &source,
-            &cols,
-            &sh,
-            rows.len(),
-        )
+        let fetch = json!({ "type": "xlsx", "path": shown, "sheets": [sheet],
+                            "header_row": header_row });
+        write_blocks(&name, kind.unwrap_or("row"), fetch, &cols, &sh)
     } else {
         return Err(format!(
-            "{}: a dataset is proposed from a folder, a .csv, a .tsv or an .xlsx",
+            "{}: a source is proposed from a folder, a .csv, a .tsv or an .xlsx",
             from.display()
         ));
     };
-
-    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let path = dir.join("dataset.toml");
-    std::fs::write(&path, &toml).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(toml)
+    finish(built, dir)
 }
 
-/// What a build leaves behind, which nobody points a dataset at on purpose. Proposed as `exclude`
+/// What a build leaves behind, which nobody points a source at on purpose. Proposed as `exclude`
 /// so a creator can see it and take it out, rather than hidden in the walk.
 const BUILD_OUTPUT: [&str; 8] = [
     "**/target/**",
@@ -587,57 +530,49 @@ const BUILD_OUTPUT: [&str; 8] = [
     "**/__pycache__/**",
 ];
 
-fn folder_declaration(name: &str, kind: &str, source: &str, files: usize) -> String {
-    let exclude = BUILD_OUTPUT
-        .iter()
-        .map(|p| quote(p))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "name  = {}\ntitle = {}\nkind  = {}\nabout = {}\n\n{source}exclude = [{exclude}]\n\n\
-         [records]\n\
-         title = \"file:stem\"\n\
-         text  = [\"file:self\"]\n\
-         known = \"file:modified\"\n\n\
-         [records.fields]\n\
-         media_type = {{ type = \"code\",   from = \"file:media_type\" }}\n\
-         bytes      = {{ type = \"number\", from = \"file:size\" }}\n\n\
-         [[view]]\n\
-         name    = \"recent\"\n\
-         title   = \"Newest first\"\n\
-         default = true\n\
-         columns = [\"media_type\", \"bytes\", \"known\"]\n\
-         facets  = [\"media_type\"]\n\
-         sort    = \"known desc\"\n\n\
-         [search]\n\
-         text     = [\"title\", \"text\"]\n\
-         compare  = [\"bytes\", \"known\"]\n\
-         suggest  = [\"media_type\"]\n\
-         examples = []\n\n\
-         [retention]\n\
-         history = false\n",
-        quote(name),
-        quote(&title_case(name)),
-        quote(kind),
-        quote(&format!(
-            "{files} files, excluding what a build left behind."
-        )),
-    )
+fn folder_declaration(name: &str, kind: &str, path: &str, files: usize) -> J {
+    json!({
+        "name": name,
+        "title": title_case(name),
+        "kind": kind,
+        "about": format!("{files} files, excluding what a build left behind."),
+        "fetch": { "type": "folder", "path": path, "exclude": BUILD_OUTPUT },
+        "claims": {
+            "title": "file:stem",
+            "text": ["file:self"],
+            "known": "file:modified",
+            "properties": {
+                "media_type": { "type": "code", "from": "file:media_type" },
+                "bytes": { "type": "number", "from": "file:size" },
+            },
+        },
+        "views": [{
+            "name": "recent", "title": "Newest first", "default": true,
+            "columns": ["media_type", "bytes", "known"], "facets": ["media_type"],
+            "sort": "known desc",
+        }],
+        "search": {
+            "text": ["title", "text"],
+            "compare": ["bytes", "known"],
+            "suggest": ["media_type"],
+        },
+    })
 }
-/// A URL, read once into the scratch of the dataset directory so the shape can be guessed, and
-/// left in the declaration so every run fetches it again. Somebody who has a link should not have
-/// to download it first.
+
+/// A URL, read once into the scratch of the source directory so the shape can be guessed, and
+/// left in the declaration so every update fetches it again. Somebody who has a link should not
+/// have to download it first.
 pub fn propose_url(
     url: &str,
     dir: &Path,
     name: Option<&str>,
     kind: Option<&str>,
 ) -> Result<String, String> {
-    let f = crate::fetch::Fetcher::new("zetlyn/3", &BTreeMap::new(), 0)?;
+    let f = crate::fetch::Fetcher::new(crate::decl::AGENT, &BTreeMap::new(), 0)?;
     let body = f.get(url)?;
 
     // The directory is made once the shape is known. Refusing a JSON API after making it
-    // leaves an empty dataset directory that every later run trips over.
+    // leaves an empty source directory that every later update trips over.
     let looks_like = if body.trim_start().starts_with('<') {
         "feed"
     } else if body.trim_start().starts_with('{') || body.trim_start().starts_with('[') {
@@ -651,23 +586,20 @@ pub fn propose_url(
         .next()
         .map(|s| s.split('?').next().unwrap_or(s))
         .map(|s| s.split('.').next().unwrap_or(s))
-        .unwrap_or("dataset");
+        .unwrap_or("source");
     let name = name
         .map(str::to_string)
         .unwrap_or_else(|| format!("local/{}", slug(stem)));
 
-    let toml = match looks_like {
+    let built = match looks_like {
         // A feed knows its own shape, so the declaration is the same every time.
-        "feed" => {
-            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-            feed_declaration(&name, kind.unwrap_or("article"), url)
-        }
+        "feed" => feed_declaration(&name, kind.unwrap_or("article"), url),
         "json" => {
             return Err(format!(
-            "{url} answers JSON, and a JSON API needs a declaration somebody writes: which list \
-             holds the records, which field is the identifier, what each field means. \
-             `zetlyn dataset new` guesses a shape from a table, not from an API"
-        ))
+                "{url} answers JSON, and a JSON API needs a declaration somebody writes: which \
+                 list holds the claims, which field is the identifier, what each field means. \
+                 `zetlyn source new` guesses a shape from a table, not from an API"
+            ))
         }
         _ => {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -676,61 +608,36 @@ pub fn propose_url(
             let (headers, rows) = read_csv(&scratch)?;
             let cols = columns_from_rows(&headers, &rows);
             let sh = shape(&cols);
-            let source = format!(
-                "[source]\ntype      = \"csv\"\npath      = {}\ndelimiter = \",\"\n",
-                quote(url)
-            );
-            write_blocks(
-                &name,
-                kind.unwrap_or("row"),
-                &source,
-                &cols,
-                &sh,
-                rows.len(),
-            )
+            let fetch = json!({ "type": "csv", "path": url });
+            write_blocks(&name, kind.unwrap_or("row"), fetch, &cols, &sh)
         }
     };
-    let path = dir.join("dataset.toml");
-    std::fs::write(&path, &toml).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(toml)
+    finish(built, dir)
 }
 
-fn feed_declaration(name: &str, kind: &str, url: &str) -> String {
-    format!(
-        "name  = {}\ntitle = {}\nkind  = {}\nabout = {}\n\n\
-         [source]\n\
-         type       = \"feed\"\n\
-         urls       = [{}]\n\
-         text_is    = \"summary\"\n\
-         user_agent = \"zetlyn/3\"\n\
-         pause_ms   = 1000\n\n\
-         [schedule]\n\
-         every = \"1h\"\n\n\
-         [records]\n\
-         title = \"meta:title\"\n\
-         url   = \"meta:link\"\n\
-         text  = [\"meta:summary\"]\n\
-         known = \"meta:published\"\n\n\
-         [records.fields]\n\
-         author = {{ type = \"text\", from = \"meta:author\" }}\n\n\
-         [[view]]\n\
-         name    = \"recent\"\n\
-         title   = \"Newest first\"\n\
-         default = true\n\
-         columns = [\"author\", \"known\"]\n\
-         facets  = [\"author\"]\n\
-         sort    = \"known desc\"\n\n\
-         [search]\n\
-         text     = [\"title\", \"text\"]\n\
-         compare  = [\"known\"]\n\
-         suggest  = [\"author\"]\n\
-         examples = []\n\n\
-         [retention]\n\
-         history = false\n",
-        quote(name),
-        quote(&title_case(name)),
-        quote(kind),
-        quote(&format!("Read from {url}.")),
-        quote(url),
-    )
+fn feed_declaration(name: &str, kind: &str, url: &str) -> J {
+    json!({
+        "name": name,
+        "title": title_case(name),
+        "kind": kind,
+        "about": format!("Read from {url}."),
+        "fetch": { "type": "feed", "urls": [url] },
+        "schedule": { "every": "1h" },
+        "claims": {
+            "title": "meta:title",
+            "url": "meta:link",
+            "text": ["meta:summary"],
+            "known": "meta:published",
+            "properties": { "author": { "type": "text", "from": "meta:author" } },
+        },
+        "views": [{
+            "name": "recent", "title": "Newest first", "default": true,
+            "columns": ["author", "known"], "facets": ["author"], "sort": "known desc",
+        }],
+        "search": {
+            "text": ["title", "text"],
+            "compare": ["known"],
+            "suggest": ["author"],
+        },
+    })
 }

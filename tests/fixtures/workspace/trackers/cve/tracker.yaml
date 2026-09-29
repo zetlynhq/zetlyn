@@ -1,0 +1,39 @@
+name: test/cve
+title: CVE
+about: What four sources say about a vulnerability.
+sources:
+- source: test/kev
+  priority: primary
+  why: Whether it is being exploited.
+- source: test/vendor-a
+  priority: high
+  why: A distribution's rating.
+- source: test/vendor-b
+  priority: high
+  why: An ecosystem's rating.
+- source: test/exploits
+  why: Whether working code exists.
+identified_by:
+- cve
+align:
+  exploited:
+    scale:
+    - "yes"
+    - "no"
+  severity:
+    scale:
+    - critical
+    - high
+    - medium
+    - low
+    - unknown
+    test/vendor-a:
+      critical: critical
+      important: high
+      low: low
+      moderate: medium
+    test/vendor-b:
+      critical: critical
+      high: high
+      low: low
+      medium: medium

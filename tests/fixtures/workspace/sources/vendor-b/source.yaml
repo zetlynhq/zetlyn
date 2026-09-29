@@ -1,0 +1,29 @@
+name: test/vendor-b
+title: Vendor B advisories
+kind: vulnerability
+about: An ecosystem's rating of a vulnerability.
+fetch:
+  type: csv
+  path: advisories.csv
+claims:
+  id:
+    scheme: cve
+    from: field:cve
+  title: field:title
+  known: field:published
+  properties:
+    cvss:
+      type: number
+      from: field:cvss
+    severity:
+      type: code
+      vocabulary: vendor-b-severity
+      from: field:severity
+vocabulary:
+  vendor-b-severity:
+    critical: Critical.
+    high: High.
+    low: Low.
+    medium: Medium.
+retention:
+  history: true

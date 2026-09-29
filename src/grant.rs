@@ -1,4 +1,4 @@
-//! What an operator signs to let somebody else drive their deployment.
+//! What an operator signs to let somebody else drive their workspace.
 //!
 //! The console holds no secret. It holds the public half of the operator's own key, and
 //! everything it will accept has to be traceable to that: a grant the operator signed, naming a
@@ -14,7 +14,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-/// The operator's own key, beside their deployment.
+/// The operator's own key, beside their workspace.
 pub const OPERATOR_KEY: &str = "operator.key";
 
 /// How far apart the two clocks may be before a signed request is refused. A replay of a request
@@ -24,8 +24,8 @@ pub const WINDOW_SECONDS: i64 = 300;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Grant {
-    /// Which deployment this is about, by the name it calls itself.
-    pub deployment: String,
+    /// Which workspace this is about, by the name it calls itself.
+    pub workspace: String,
     /// Whose key may use it.
     pub to: String,
     /// `read`, `run`, `apply`. Absent is refused rather than assumed.
@@ -42,8 +42,8 @@ impl Grant {
     /// reader of the file sees rather than over a re-serialisation of it.
     pub fn statement(&self) -> String {
         format!(
-            "zetlyn-grant-1\ndeployment={}\nto={}\ncan={}\nuntil={}\n",
-            self.deployment,
+            "zetlyn-grant-2\nworkspace={}\nto={}\ncan={}\nuntil={}\n",
+            self.workspace,
             self.to.trim(),
             self.can.join(","),
             self.until
@@ -54,12 +54,12 @@ impl Grant {
         self.can.iter().any(|c| c == what)
     }
 
-    /// Whether this grant is still one today, and covers this deployment and this act.
-    pub fn holds(&self, deployment: &str, what: &str, today: &str) -> Result<(), String> {
-        if self.deployment != deployment {
+    /// Whether this grant is still one today, and covers this workspace and this act.
+    pub fn holds(&self, workspace: &str, what: &str, today: &str) -> Result<(), String> {
+        if self.workspace != workspace {
             return Err(format!(
-                "that grant is for {}, and this is {deployment}",
-                self.deployment
+                "that grant is for {}, and this is {workspace}",
+                self.workspace
             ));
         }
         if self.until.as_str() < today {
@@ -85,11 +85,11 @@ pub struct Signed {
 
 impl Signed {
     pub fn write(&self, path: &Path) -> Result<(), String> {
-        let text = toml::to_string_pretty(self).map_err(|e| e.to_string())?;
+        let text = crate::yaml::to_string(self)?;
         std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
     }
 
-    /// Signed by the operator of this deployment, and not by anybody else.
+    /// Signed by the operator of this workspace, and not by anybody else.
     pub fn by(&self, operator: &str) -> Result<(), String> {
         crate::key::verify(operator, self.grant.statement().as_bytes(), &self.signature)
             .map_err(|e| format!("the grant is not this operator's: {e}"))
@@ -99,7 +99,7 @@ impl Signed {
 /// Write one, signed with the operator's key. The key is made on the first grant, because that is
 /// the first moment there is anything to sign.
 pub fn issue(
-    deployment: &Path,
+    workspace: &Path,
     name: &str,
     to: &str,
     can: &[String],
@@ -121,19 +121,19 @@ pub fn issue(
     if until.len() != 10 || *until <= *crate::iso_date(crate::now()) {
         return Err(format!("--until {until}: a date, later than today"));
     }
-    if crate::key::public(deployment, OPERATOR_KEY).is_none() {
-        let public = crate::key::new(deployment, OPERATOR_KEY)?;
-        println!("this deployment is {public}");
+    if crate::key::public(workspace, OPERATOR_KEY).is_none() {
+        let public = crate::key::new(workspace, OPERATOR_KEY)?;
+        println!("this workspace is {public}");
     }
     let grant = Grant {
-        deployment: name.to_string(),
+        workspace: name.to_string(),
         to: to.trim().to_string(),
         can: can.to_vec(),
         until: until.to_string(),
         why: why.to_string(),
     };
-    let signature = crate::key::sign(deployment, OPERATOR_KEY, grant.statement().as_bytes())?
-        .ok_or("this deployment has no operator key")?;
+    let signature = crate::key::sign(workspace, OPERATOR_KEY, grant.statement().as_bytes())?
+        .ok_or("this workspace has no operator key")?;
     Ok(Signed { grant, signature })
 }
 

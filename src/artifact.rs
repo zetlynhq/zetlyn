@@ -118,7 +118,7 @@ pub fn manifest_of(ds: &Dataset, payloads: &BTreeMap<String, (u64, String)>) -> 
         .fields(d)
         .into_iter()
         .map(|f| {
-            json!({ "name": f.name, "type": f.kind, "records": f.records,
+            json!({ "name": f.name, "type": f.kind, "claims": f.records,
                     "vocabulary": f.vocabulary })
         })
         .collect();
@@ -138,17 +138,17 @@ pub fn manifest_of(ds: &Dataset, payloads: &BTreeMap<String, (u64, String)>) -> 
         // first fetch, so a key that changes under them afterwards is caught; on that first
         // fetch there is nothing to catch it with, which is what pinning by hand is for.
         "signed_by": crate::identity::or_local(&ds.dir, KEY_FILE),
-        "dataset": d.name,
+        "source": d.name,
         "version": version_of(payloads),
         "built_at": crate::now(),
         "kind": d.kind,
         "title": d.title,
         "about": d.about,
 
-        "records": ds.store.count(),
+        "claims": ds.store.count(),
         "identifiers": J::Object(ds.store.distinct_identifiers().into_iter()
             .map(|(k, v)| (k, json!(v))).collect()),
-        "fields": fields,
+        "properties": fields,
         "known": { "first": first_known, "last": last_known },
 
         // What the subscriber inherits. A run that reached 578 of 2,684 subjects ships those 578,
@@ -160,7 +160,7 @@ pub fn manifest_of(ds: &Dataset, payloads: &BTreeMap<String, (u64, String)>) -> 
 
         // Fetching, indexing and republishing are three acts. When bytes travel the publisher
         // performs the third on the subscriber's behalf, and this is where that is visible.
-        "source": d.source.address(),
+        "fetched_from": d.source.address(),
         "text_is": d.source.text_is(),
         "terms": d.terms,
 
@@ -196,7 +196,7 @@ fn differs(held: &[u8], built: &J) -> bool {
     old != new
 }
 
-/// Write `records.jsonl`, the manifest and the tag. Returns the version.
+/// Write `claims.jsonl`, the manifest and the tag. Returns the version.
 pub fn publish(
     ds: &Dataset,
     place: &dyn Place,
@@ -213,7 +213,7 @@ pub fn publish(
 
     let mut payloads = BTreeMap::new();
     payloads.insert(
-        "records.jsonl".to_string(),
+        "claims.jsonl".to_string(),
         (body.len() as u64, sha256(&body)),
     );
     let manifest = manifest_of(ds, &payloads);
@@ -224,14 +224,14 @@ pub fn publish(
     // anything that would change them is a different version. The manifest describing them can be
     // corrected — a title the publisher fixed is not a different set of records, and the payload
     // hashes inside it are the same either way.
-    let manifest_path = reference.version_path("datasets", &version, "manifest.json");
+    let manifest_path = reference.version_path("sources", &version, "manifest.json");
     // The signature is over the manifest exactly as it is served, so the bytes are made once and
     // both the put and the signing use the same ones.
     let served = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
     let held = place.get(&manifest_path).ok();
     if held.is_none() {
         place.put(
-            &reference.version_path("datasets", &version, "records.jsonl"),
+            &reference.version_path("sources", &version, "claims.jsonl"),
             &body,
         )?;
     }
@@ -246,7 +246,7 @@ pub fn publish(
         };
         if let Some(signature) = signature {
             place.put(
-                &reference.version_path("datasets", &version, "manifest.sig"),
+                &reference.version_path("sources", &version, "manifest.sig"),
                 signature.as_bytes(),
             )?;
         }
@@ -256,7 +256,7 @@ pub fn publish(
     // worth writing. Where it is missing or unreadable the publication still stands: a delta is
     // a saving and never the only way to the records.
     let held = place
-        .get(&reference.tag_path("datasets"))
+        .get(&reference.tag_path("sources"))
         .ok()
         .map(|b| String::from_utf8_lossy(&b).trim().to_string())
         .filter(|p| !p.is_empty() && *p != version);
@@ -266,7 +266,7 @@ pub fn publish(
         }
     }
 
-    move_tag(place, &reference.tag_path("datasets"), &version, expect)?;
+    move_tag(place, &reference.tag_path("sources"), &version, expect)?;
     Ok(version)
 }
 
@@ -283,7 +283,7 @@ fn write_delta(
     version: &str,
     full: &J,
 ) -> Result<(), String> {
-    let before = place.get(&reference.version_path("datasets", previous, "records.jsonl"))?;
+    let before = place.get(&reference.version_path("sources", previous, "claims.jsonl"))?;
     let mut held: BTreeMap<String, String> = BTreeMap::new();
     for line in String::from_utf8_lossy(&before).lines() {
         if line.trim().is_empty() {
@@ -323,7 +323,7 @@ fn write_delta(
 
     // A delta nobody gains from is not written. The whole is one fetch and the delta is two.
     let cost = body.len() + removed_body.len();
-    let whole = full["payloads"]["records.jsonl"]["bytes"]
+    let whole = full["payloads"]["claims.jsonl"]["bytes"]
         .as_u64()
         .unwrap_or(u64::MAX) as usize;
     if cost >= whole {
@@ -334,7 +334,7 @@ fn write_delta(
 
     let mut payloads = BTreeMap::new();
     payloads.insert(
-        "records.jsonl".to_string(),
+        "claims.jsonl".to_string(),
         (body.len() as u64, sha256(&body)),
     );
     payloads.insert(
@@ -344,29 +344,29 @@ fn write_delta(
     let manifest = serde_json::json!({
         "spec_version": SPEC_VERSION,
         "built_by": concat!("zetlyn ", env!("CARGO_PKG_VERSION")),
-        "dataset": full["dataset"],
+        "source": full["source"],
         "version": version,
         "applies_to": previous,
         "built_at": crate::now(),
         "added": added,
         "changed": changed,
         "removed": gone.len(),
-        "records": full["records"],
+        "claims": full["claims"],
         "payloads": J::Object(payloads.iter()
             .map(|(n, (bytes, hash))| (n.clone(), serde_json::json!({ "bytes": bytes, "sha256": hash })))
             .collect()),
     });
 
     place.put(
-        &reference.delta_path("datasets", version, previous, "records.jsonl"),
+        &reference.delta_path("sources", version, previous, "claims.jsonl"),
         &body,
     )?;
     place.put(
-        &reference.delta_path("datasets", version, previous, "removed.jsonl"),
+        &reference.delta_path("sources", version, previous, "removed.jsonl"),
         &removed_body,
     )?;
     place.put(
-        &reference.delta_path("datasets", version, previous, "manifest.json"),
+        &reference.delta_path("sources", version, previous, "manifest.json"),
         serde_json::to_string_pretty(&manifest)
             .map_err(|e| e.to_string())?
             .as_bytes(),
@@ -460,7 +460,7 @@ pub fn subscribe(
     location: &str,
     pinned: Option<&str>,
 ) -> Result<(u64, String), String> {
-    let manifest = manifest_signed_by(place, reference, "datasets", pinned)?;
+    let manifest = manifest_signed_by(place, reference, "sources", pinned)?;
     let version = manifest["version"].as_str().unwrap_or_default().to_string();
     let spec = manifest["spec_version"].as_str().unwrap_or_default();
     if spec != SPEC_VERSION {
@@ -469,19 +469,19 @@ pub fn subscribe(
         ));
     }
 
-    let declared = manifest["payloads"]["records.jsonl"].clone();
-    let body = place.get(&reference.version_path("datasets", &version, "records.jsonl"))?;
+    let declared = manifest["payloads"]["claims.jsonl"].clone();
+    let body = place.get(&reference.version_path("sources", &version, "claims.jsonl"))?;
     let want = declared["sha256"].as_str().unwrap_or_default();
     let got = sha256(&body);
     if want != got {
         return Err(format!(
-            "{reference}: records.jsonl is {got} and the manifest says {want}"
+            "{reference}: claims.jsonl is {got} and the manifest says {want}"
         ));
     }
 
     std::fs::create_dir_all(into).map_err(|e| format!("{}: {e}", into.display()))?;
     std::fs::write(
-        into.join("dataset.toml"),
+        into.join(crate::decl::FILE),
         // The key it was pinned to, or the one that actually signed what arrived. Written down
         // either way, so the next fetch is held against this one.
         declaration(
@@ -503,7 +503,7 @@ pub fn subscribe(
     // The indexes are derived, so they are built here rather than shipped.
     let store = Store::open(into)?;
     let run = store.begin_run()?;
-    let name = manifest["dataset"].as_str().unwrap_or_default();
+    let name = manifest["source"].as_str().unwrap_or_default();
     let at = crate::iso_stamp(crate::now());
     let mut added = 0u64;
     let mut changed = 0u64;
@@ -559,90 +559,38 @@ fn declaration(
     key: &str,
 ) -> Result<String, String> {
     let s = |k: &str| manifest[k].as_str().unwrap_or_default();
-    let mut out = String::new();
-    out.push_str(&format!("name  = {}\n", quoted(s("dataset"))));
-    out.push_str(&format!("title = {}\n", quoted(s("title"))));
-    out.push_str(&format!("kind  = {}\n", quoted(s("kind"))));
-    out.push_str(&format!("about = {}\n\n", quoted(s("about"))));
-    out.push_str("# Subscribed, not fetched. `zetlyn dataset run` on this asks the hub whether\n");
-    out.push_str("# there is a newer version and applies it; the source belongs to whoever\n");
-    out.push_str("# published these records.\n");
-    out.push_str("[source]\n");
-    out.push_str("type = \"hub\"\n");
-    out.push_str(&format!("at   = {}\n", quoted(location)));
-    out.push_str(&format!("ref  = {}\n", quoted(&reference.to_string())));
+    let mut properties = serde_json::Map::new();
+    for f in manifest["properties"].as_array().unwrap_or(&Vec::new()) {
+        let mut spec = serde_json::Map::new();
+        spec.insert("type".into(), json!(f["type"].as_str().unwrap_or("text")));
+        if let Some(v) = f["vocabulary"].as_str() {
+            spec.insert("vocabulary".into(), json!(v));
+        }
+        properties.insert(f["name"].as_str().unwrap_or_default().to_string(), J::Object(spec));
+    }
+    let mut fetch = json!({ "type": "hub", "at": location, "ref": reference.to_string() });
     if !key.trim().is_empty() {
-        out.push_str(&format!("key  = {}\n", quoted(key.trim())));
+        fetch["key"] = json!(key.trim());
     }
-    out.push('\n');
-
-    out.push_str("[records]\n");
-    out.push_str(&format!("title = {}\n", quoted("field:title")));
-    if let Some(fields) = manifest["fields"].as_array() {
-        if !fields.is_empty() {
-            out.push_str("\n[records.fields]\n");
-            for f in fields {
-                let name = f["name"].as_str().unwrap_or_default();
-                let kind = f["type"].as_str().unwrap_or("text");
-                match f["vocabulary"].as_str() {
-                    Some(v) => out.push_str(&format!(
-                        "{name} = {{ type = {}, vocabulary = {} }}\n",
-                        quoted(kind),
-                        quoted(v)
-                    )),
-                    None => out.push_str(&format!("{name} = {{ type = {} }}\n", quoted(kind))),
-                }
-            }
-        }
-    }
-    if let Some(views) = manifest["read"]["views"].as_array() {
-        for v in views {
-            out.push_str("\n[[view]]\n");
-            out.push_str(&format!(
-                "name    = {}\n",
-                quoted(v["name"].as_str().unwrap_or(""))
-            ));
-            if let Some(t) = v["title"].as_str().filter(|t| !t.is_empty()) {
-                out.push_str(&format!("title   = {}\n", quoted(t)));
-            }
-            if v["default"].as_bool().unwrap_or(false) {
-                out.push_str("default = true\n");
-            }
-            if let Some(w) = v["where"].as_str() {
-                out.push_str(&format!("where   = {}\n", quoted(w)));
-            }
-            if let Some(g) = v["group"].as_str() {
-                out.push_str(&format!("group   = {}\n", quoted(g)));
-            }
-            out.push_str(&format!("columns = {}\n", list(&v["columns"])));
-            out.push_str(&format!("facets  = {}\n", list(&v["facets"])));
-            if let Some(sort) = v["sort"].as_str() {
-                out.push_str(&format!("sort    = {}\n", quoted(sort)));
-            }
-        }
-    }
-    let search = &manifest["read"]["search"];
-    out.push_str("\n[search]\n");
-    for key in ["text", "compare", "suggest", "examples"] {
-        out.push_str(&format!("{key:<8} = {}\n", list(&search[key])));
-    }
-    Ok(out)
-}
-
-fn quoted(s: &str) -> String {
-    let escaped = s
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', " ");
-    format!("\"{escaped}\"")
-}
-
-fn list(j: &J) -> String {
-    let items: Vec<String> = j
-        .as_array()
-        .map(|a| a.iter().filter_map(J::as_str).map(quoted).collect())
-        .unwrap_or_default();
-    format!("[{}]", items.join(", "))
+    let built = json!({
+        "name": s("source"),
+        "title": s("title"),
+        "kind": s("kind"),
+        "about": s("about"),
+        "fetch": fetch,
+        "claims": { "title": "field:title", "properties": properties },
+        "views": manifest["read"]["views"].as_array().cloned().unwrap_or_default(),
+        "search": manifest["read"]["search"].clone(),
+    });
+    // Read back as a declaration before it is written, so what lands on disk is one this program
+    // opens: a hand-assembled file was a file that could say something no declaration says.
+    let decl: crate::decl::Declaration = serde_json::from_value(built)
+        .map_err(|e| format!("{reference}: the manifest does not make a declaration: {e}"))?;
+    Ok(format!(
+        "# Subscribed, not fetched. `zetlyn source update` on this asks the hub whether there is a\n\
+         # newer version and applies it; the source belongs to whoever published these claims.\n{}",
+        crate::yaml::to_string(&decl)?
+    ))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -658,7 +606,7 @@ pub fn publish_scope(
     tag: &str,
     expect: Option<&str>,
 ) -> Result<String, String> {
-    let path = dir.join("scope.toml");
+    let path = dir.join(crate::scopedecl::FILE);
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let decl = crate::scopedecl::ScopeDecl::load(dir)?;
     let version = sha256(text.as_bytes())[..24].to_string();
@@ -685,15 +633,15 @@ pub fn publish_scope(
         "spec_version": SPEC_VERSION,
         "built_by": concat!("zetlyn ", env!("CARGO_PKG_VERSION")),
         "signed_by": crate::identity::key(),
-        "scope": decl.name,
+        "tracker": decl.name,
         "version": version,
         "built_at": crate::now(),
         "title": decl.title,
         "about": decl.about,
-        "members": J::Array(decl.members.iter()
+        "sources": J::Array(decl.members.iter()
             .map(|m| json!(if m.dataset.is_empty() { m.remote.clone().unwrap_or_default() } else { m.dataset.clone() }))
             .collect()),
-        "join": J::Array(decl.keys().iter().map(|k| json!(k)).collect()),
+        "identified_by": J::Array(decl.keys().iter().map(|k| json!(k)).collect()),
         "promise": {
             "fresh_within": decl.promise.fresh_within,
             "covers": decl.promise.covers,
@@ -704,7 +652,7 @@ pub fn publish_scope(
     });
 
     let reference = Reference::parse(&format!("{}@{tag}", decl.name))?;
-    let manifest_path = reference.version_path("scopes", &version, "manifest.json");
+    let manifest_path = reference.version_path("trackers", &version, "manifest.json");
     if !place.exists(&manifest_path) {
         let served = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
         place.put(&manifest_path, served.as_bytes())?;
@@ -713,12 +661,12 @@ pub fn publish_scope(
         // subscriber assembles and what their words are taken to mean.
         if let Some(signature) = crate::identity::sign(served.as_bytes())? {
             place.put(
-                &reference.version_path("scopes", &version, "manifest.sig"),
+                &reference.version_path("trackers", &version, "manifest.sig"),
                 signature.as_bytes(),
             )?;
         }
     }
-    move_tag(place, &reference.tag_path("scopes"), &version, expect)?;
+    move_tag(place, &reference.tag_path("trackers"), &version, expect)?;
     Ok(version)
 }
 
@@ -730,7 +678,7 @@ pub fn subscribe_scope(
     datasets: &Path,
     location: &str,
 ) -> Result<(String, Vec<String>), String> {
-    let manifest = manifest_at(place, reference, "scopes")?;
+    let manifest = manifest_at(place, reference, "trackers")?;
     let spec = manifest["spec_version"].as_str().unwrap_or_default();
     if spec != SPEC_VERSION {
         return Err(format!(
@@ -741,7 +689,7 @@ pub fn subscribe_scope(
         .as_str()
         .ok_or_else(|| format!("{reference}: the manifest carries no declaration"))?;
     std::fs::create_dir_all(into).map_err(|e| format!("{}: {e}", into.display()))?;
-    std::fs::write(into.join("scope.toml"), text)
+    std::fs::write(into.join(crate::scopedecl::FILE), text)
         .map_err(|e| format!("{}: {e}", into.display()))?;
     std::fs::write(
         into.join("manifest.json"),
@@ -750,12 +698,12 @@ pub fn subscribe_scope(
     .map_err(|e| format!("{}: {e}", into.display()))?;
 
     let mut taken = Vec::new();
-    for member in manifest["members"].as_array().unwrap_or(&Vec::new()) {
+    for member in manifest["sources"].as_array().unwrap_or(&Vec::new()) {
         let Some(name) = member.as_str().filter(|n| !n.starts_with("http")) else {
             continue;
         };
         let here = datasets.join(name.rsplit('/').next().unwrap_or(name));
-        if here.join("dataset.toml").exists() {
+        if here.join(crate::decl::FILE).exists() {
             continue;
         }
         let member_ref = Reference::parse(name)?;
@@ -785,7 +733,7 @@ pub fn apply_delta(
     to: &str,
     full: &J,
 ) -> Result<Option<(u64, u64, u64)>, String> {
-    let path = reference.delta_path("datasets", to, from, "manifest.json");
+    let path = reference.delta_path("sources", to, from, "manifest.json");
     let Ok(raw) = place.get(&path) else {
         return Ok(None);
     };
@@ -797,8 +745,8 @@ pub fn apply_delta(
     }
 
     let mut fetched = Vec::new();
-    for name in ["records.jsonl", "removed.jsonl"] {
-        let bytes = place.get(&reference.delta_path("datasets", to, from, name))?;
+    for name in ["claims.jsonl", "removed.jsonl"] {
+        let bytes = place.get(&reference.delta_path("sources", to, from, name))?;
         let want = manifest["payloads"][name]["sha256"]
             .as_str()
             .unwrap_or_default();
@@ -812,7 +760,7 @@ pub fn apply_delta(
     let store = Store::open(into)?;
     let run = store.begin_run()?;
     let at = crate::iso_stamp(crate::now());
-    let name = full["dataset"].as_str().unwrap_or_default();
+    let name = full["source"].as_str().unwrap_or_default();
     let mut added = 0u64;
     let mut changed = 0u64;
     let mut fields = std::collections::BTreeSet::new();
@@ -868,7 +816,7 @@ pub fn apply_delta(
         _ => (String::new(), String::new()),
     };
     std::fs::write(
-        into.join("dataset.toml"),
+        into.join(crate::decl::FILE),
         declaration(full, &location, reference, &pinned)?,
     )
     .map_err(|e| format!("{}: {e}", into.display()))?;
@@ -880,7 +828,7 @@ pub fn apply_delta(
 
     // The count the publisher declared is what the store must now hold. A delta that leaves it
     // somewhere else has been applied to something other than what it was computed against.
-    let want = full["records"].as_u64().unwrap_or_default();
+    let want = full["claims"].as_u64().unwrap_or_default();
     let got = store.count();
     if want != got {
         return Err(format!(

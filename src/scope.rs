@@ -916,7 +916,7 @@ pub fn registry(datasets: &Path) -> BTreeMap<String, PathBuf> {
     };
     for e in entries.flatten() {
         let dir = e.path();
-        if !dir.join("dataset.toml").exists() {
+        if !dir.join(crate::decl::FILE).exists() {
             continue;
         }
         if let Ok(d) = crate::decl::Declaration::load(&dir) {
@@ -1017,7 +1017,7 @@ pub fn scope_registry(scopes: &Path) -> BTreeMap<String, PathBuf> {
     };
     for e in entries.flatten() {
         let dir = e.path();
-        if !dir.join("scope.toml").exists() {
+        if !dir.join(crate::scopedecl::FILE).exists() {
             continue;
         }
         if let Ok(d) = ScopeDecl::load(&dir) {

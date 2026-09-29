@@ -963,7 +963,7 @@ pub fn serve(mut scope: Scope, dir: &Path, datasets: &Path, addr: &str) -> Resul
     let server = tiny_http::Server::http(addr).map_err(|e| e.to_string())?;
     println!("{} on http://{addr}", scope.decl.name);
     if site.mail.run.is_empty() {
-        println!("no mailer named in zetlyn.toml, so sign-in links are printed here");
+        println!("no mailer named in workspace.yaml, so sign-in links are printed here");
     }
     let mut read_at = crate::now();
 
@@ -1347,8 +1347,8 @@ fn slug(s: &str) -> String {
 
 fn catalogue(scope: &Scope, v: &Viewer, message: Option<&str>) -> String {
     let root = &scope.root;
-    let datasets = crate::scope::registry(&root.join("datasets"));
-    let scopes = crate::scope::scope_registry(&root.join("scopes"));
+    let datasets = crate::scope::registry(&root.join("sources"));
+    let scopes = crate::scope::scope_registry(&root.join("trackers"));
     let may = v.account.as_ref().is_some_and(|a| a.curator);
 
     let held: Vec<(String, String, u64, String)> = datasets
@@ -1461,9 +1461,9 @@ fn add_dataset(scope: &Scope, form: &str) -> Result<String, String> {
     let kind = form_field(form, "kind");
     let dir = scope
         .root
-        .join("datasets")
+        .join("sources")
         .join(slug(if name.trim().is_empty() { &url } else { &name }));
-    if dir.join("dataset.toml").exists() {
+    if dir.join(crate::decl::FILE).exists() {
         return Err(format!("{} already holds a dataset", dir.display()));
     }
     crate::guess::propose_url(
@@ -1509,38 +1509,28 @@ fn add_scope(scope: &Scope, form: &str) -> Result<String, String> {
     let title = form_field(form, "title");
     let about = form_field(form, "about");
     let key = form_field(form, "key");
-    let quote = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
+    let built = serde_json::json!({
+        "name": name.trim(),
+        "title": if title.trim().is_empty() { name.trim() } else { title.trim() },
+        "about": about.trim(),
+        "sources": members.iter().zip(&whys)
+            .map(|(m, why)| serde_json::json!({ "source": m, "why": why.trim() }))
+            .collect::<Vec<_>>(),
+        "identified_by": if key.trim().is_empty() { vec![] } else { vec![key.trim()] },
+        "view": { "columns": ["kind", "known"], "facets": ["kind", "source"] },
+        "promise": { "fresh_within": "24h" },
+    });
+    // Read back as a declaration before it is written, as every declaration this program writes.
+    let decl: crate::scopedecl::ScopeDecl = serde_json::from_value(built)
+        .map_err(|e| format!("that does not make a tracker: {e}"))?;
 
-    let mut toml = format!(
-        "name  = {}\ntitle = {}\nabout = {}\n",
-        quote(name.trim()),
-        quote(if title.trim().is_empty() {
-            name.trim()
-        } else {
-            title.trim()
-        }),
-        quote(about.trim())
-    );
-    for (m, why) in members.iter().zip(&whys) {
-        toml.push_str(&format!(
-            "\n[[members]]\ndataset  = {}\npriority = \"normal\"\nwhy      = {}\n",
-            quote(m),
-            quote(why.trim())
-        ));
-    }
-    if !key.trim().is_empty() {
-        toml.push_str(&format!("\n[[join]]\nkey = {}\n", quote(key.trim())));
-    }
-    toml.push_str("\n[view]\ncolumns = [\"kind\", \"known\"]\nfacets  = [\"kind\", \"dataset\"]\n");
-    toml.push_str("\n[promise]\nfresh_within = \"24h\"\ncovers       = \"\"\n");
-
-    let dir = scope.root.join("scopes").join(slug(name.trim()));
-    if dir.join("scope.toml").exists() {
-        return Err(format!("{} already holds a scope", dir.display()));
+    let dir = scope.root.join("trackers").join(slug(name.trim()));
+    if dir.join(crate::scopedecl::FILE).exists() {
+        return Err(format!("{} already holds a tracker", dir.display()));
     }
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let path = dir.join("scope.toml");
-    std::fs::write(&path, toml).map_err(|e| format!("{}: {e}", path.display()))?;
+    let path = dir.join(crate::scopedecl::FILE);
+    crate::yaml::write(&path, &decl)?;
     Ok(format!(
         "{} is composed. Its promise says nothing yet, which is the one thing a curator has to \
          write themselves.",

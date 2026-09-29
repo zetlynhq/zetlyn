@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 pub const KEY_FILE: &str = "identity.key";
-const DESCRIPTION: &str = "identity.toml";
+const DESCRIPTION: &str = "identity.yaml";
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Who {
@@ -45,10 +45,7 @@ pub fn home() -> PathBuf {
 }
 
 pub fn read() -> Who {
-    std::fs::read_to_string(home().join(DESCRIPTION))
-        .ok()
-        .and_then(|raw| toml::from_str(&raw).ok())
-        .unwrap_or_default()
+    crate::yaml::read_or_default(&home().join(DESCRIPTION))
 }
 
 /// The public half, where there is one.
@@ -65,7 +62,7 @@ pub fn new(name: &str, contact: &str) -> Result<String, String> {
         name: name.to_string(),
         contact: contact.to_string(),
     };
-    let text = toml::to_string_pretty(&who).map_err(|e| e.to_string())?;
+    let text = crate::yaml::to_string(&who)?;
     std::fs::write(dir.join(DESCRIPTION), text).map_err(|e| format!("{}: {e}", dir.display()))?;
     Ok(public)
 }

@@ -30,7 +30,7 @@ pub fn serve(root: &Path, addr: &str) -> Result<(), String> {
         .canonicalize()
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-        .unwrap_or_else(|| "deployment".into());
+        .unwrap_or_else(|| "workspace".into());
 
     let server = tiny_http::Server::http(addr).map_err(|e| e.to_string())?;
     println!("the console for {name} on http://{addr}");
@@ -112,7 +112,7 @@ fn allowed(
     }
     let raw = decode(carried)?;
     let signed: Signed =
-        toml::from_str(&raw).map_err(|e| format!("that grant does not read: {e}"))?;
+        crate::yaml::parse(&raw).map_err(|e| format!("that grant does not read: {e}"))?;
     signed.by(operator)?;
     signed
         .grant
@@ -205,7 +205,7 @@ fn answer(root: &Path, name: &str, method: &str, path: &str, body: &[u8]) -> (u1
 }
 
 fn datasets(root: &Path) -> PathBuf {
-    root.join("datasets")
+    root.join("sources")
 }
 
 /// A name in a call is one segment, and a call cannot reach outside the deployment it is against.
@@ -221,15 +221,15 @@ fn at(root: &Path, kind: &str, named: &str) -> Result<PathBuf, String> {
 }
 
 fn open(root: &Path, named: &str) -> Result<Dataset, String> {
-    Dataset::open(&at(root, "datasets", named)?)
+    Dataset::open(&at(root, "sources", named)?)
 }
 
 fn open_scope(root: &Path, named: &str) -> Result<Scope, String> {
-    Scope::open(&at(root, "scopes", named)?, &datasets(root))
+    Scope::open(&at(root, "trackers", named)?, &datasets(root))
 }
 
 fn declaration_of(root: &Path, named: &str) -> Result<String, String> {
-    let path = at(root, "datasets", named)?.join("dataset.toml");
+    let path = at(root, "sources", named)?.join(crate::decl::FILE);
     std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
@@ -248,7 +248,7 @@ fn holdings(root: &Path, name: &str) -> J {
             }))
         })
         .collect();
-    let scopes: Vec<J> = scope::scope_registry(&root.join("scopes"))
+    let scopes: Vec<J> = scope::scope_registry(&root.join("trackers"))
         .iter()
         .filter_map(|(named, dir)| {
             let s = Scope::open(dir, &datasets(root)).ok()?;
@@ -264,10 +264,10 @@ fn holdings(root: &Path, name: &str) -> J {
         })
         .collect();
     json!({
-        "deployment": name,
+        "workspace": name,
         "zetlyn": env!("CARGO_PKG_VERSION"),
-        "datasets": held,
-        "scopes": scopes,
+        "sources": held,
+        "trackers": scopes,
     })
 }
 
@@ -293,7 +293,7 @@ fn runs(ds: &Dataset) -> J {
 }
 
 fn run_now(root: &Path, named: &str) -> (u16, J) {
-    let dir = match at(root, "datasets", named) {
+    let dir = match at(root, "sources", named) {
         Ok(d) => d,
         Err(e) => return (404, json!({ "refused": e })),
     };
@@ -319,14 +319,14 @@ fn run_now(root: &Path, named: &str) -> (u16, J) {
 /// beside it first, so an apply that passes all three and is still wrong is one file move away
 /// from undone.
 fn apply(root: &Path, named: &str, body: &[u8]) -> (u16, J) {
-    let dir = match at(root, "datasets", named) {
+    let dir = match at(root, "sources", named) {
         Ok(d) => d,
         Err(e) => return (404, json!({ "refused": e })),
     };
     let Ok(text) = String::from_utf8(body.to_vec()) else {
         return (400, json!({ "refused": "a declaration is text" }));
     };
-    let path = dir.join("dataset.toml");
+    let path = dir.join(crate::decl::FILE);
     let before = match std::fs::read_to_string(&path) {
         Ok(t) => t,
         Err(e) => return (500, json!({ "failed": format!("{}: {e}", path.display()) })),
@@ -337,7 +337,7 @@ fn apply(root: &Path, named: &str, body: &[u8]) -> (u16, J) {
             json!({ "dataset": named, "applied": false, "why": "it is what is there" }),
         );
     }
-    if let Err(e) = std::fs::write(dir.join("dataset.toml.before"), &before) {
+    if let Err(e) = std::fs::write(dir.join("source.yaml.before"), &before) {
         return (
             500,
             json!({ "failed": format!("keeping the old one: {e}") }),
@@ -350,7 +350,7 @@ fn apply(root: &Path, named: &str, body: &[u8]) -> (u16, J) {
     // replaced is a file somebody finds later and cannot date.
     let put_back = |why: String| -> (u16, J) {
         let _ = std::fs::write(&path, &before);
-        let _ = std::fs::remove_file(dir.join("dataset.toml.before"));
+        let _ = std::fs::remove_file(dir.join("source.yaml.before"));
         (400, json!({ "refused": why, "applied": false }))
     };
     let ds = match Dataset::open(&dir) {
@@ -369,7 +369,7 @@ fn apply(root: &Path, named: &str, body: &[u8]) -> (u16, J) {
     }
     (
         200,
-        json!({ "dataset": ds.decl.name, "applied": true, "kept": "dataset.toml.before" }),
+        json!({ "dataset": ds.decl.name, "applied": true, "kept": "source.yaml.before" }),
     )
 }
 

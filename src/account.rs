@@ -414,12 +414,12 @@ pub struct Mail {
     pub run: Vec<String>,
 }
 
+/// The workspace's own file: what it calls itself, its address, its mailer.
+pub const WORKSPACE: &str = "workspace.yaml";
+
 impl Site {
     pub fn load(root: &Path) -> Site {
-        std::fs::read_to_string(root.join("zetlyn.toml"))
-            .ok()
-            .and_then(|t| toml::from_str(&t).ok())
-            .unwrap_or_default()
+        crate::yaml::read_or_default(&root.join(WORKSPACE))
     }
 
     /// Hands the mailer the message on its standard input. Where none is named, the link goes to

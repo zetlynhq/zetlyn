@@ -1,0 +1,4 @@
+cve,title,severity,cvss,published
+CVE-2026-0001,Remote code execution in foo,high,9.8,2026-08-30
+CVE-2026-0002,Heap overflow in bar,medium,7.5,2026-08-31
+CVE-2026-0005,Path traversal in qux,urgent,8.0,2026-09-04

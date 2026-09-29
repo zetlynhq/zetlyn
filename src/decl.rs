@@ -3,37 +3,41 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Declaration {
     pub name: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub title: String,
+    /// The kind of claim this source makes: an advisory, an exploit, an article.
     pub kind: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub about: String,
+    /// Where the bytes are. `source` is the whole of this file, so this part is `fetch`.
+    #[serde(rename = "fetch")]
     pub source: Source,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Schedule::is_empty")]
     pub schedule: Schedule,
+    #[serde(rename = "claims")]
     pub records: Records,
     /// Each publisher's own words, defined in each publisher's own sentence.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub vocabulary: BTreeMap<String, BTreeMap<String, String>>,
-    #[serde(default)]
+    #[serde(default, rename = "views", skip_serializing_if = "Vec::is_empty")]
     pub view: Vec<View>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Search::is_empty")]
     pub search: Search,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Retention::is_empty")]
     pub retention: Retention,
-    /// What a subscriber may do with these records, in the publisher's own words. Nothing checks
+    /// What a subscriber may do with these claims, in the publisher's own words. Nothing checks
     /// it. It is the claim a person makes and answers for, and it travels in the manifest.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub terms: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 // The variants differ in size because `http` carries far more than `csv` does. Boxing one
 // of them to even that out would put an indirection in the hot path of every row for the
@@ -42,70 +46,75 @@ pub struct Declaration {
 pub enum Source {
     /// A directory of files, recursively. May name a git repository, pulled before each run.
     Folder {
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         git: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         include: Vec<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         exclude: Vec<String>,
     },
     Csv {
         path: String,
-        #[serde(default = "comma")]
+        #[serde(default = "comma", skip_serializing_if = "is_comma")]
         delimiter: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "is_zero")]
         skip: usize,
     },
     Xlsx {
         path: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         sheets: Vec<String>,
-        #[serde(default = "one")]
+        #[serde(default = "one", skip_serializing_if = "is_one")]
         header_row: usize,
     },
     /// A JSON API, optionally a list call and a detail call per item.
     Http {
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "String::is_empty")]
         list: String,
         /// Where the identifiers come from, when they come from another dataset rather
         /// than from a list call. A GGUF repository names the model it quantised, and
         /// nothing but that dataset knows which models those are.
+        #[serde(skip_serializing_if = "Option::is_none")]
         for_each: Option<ForEach>,
         /// One call per item. The row is that answer, with the list item under `_list`.
+        #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         page: Option<Page>,
         /// Splits a stretch into calls the source will accept.
+        #[serde(skip_serializing_if = "Option::is_none")]
         window: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         headers: BTreeMap<String, String>,
-        #[serde(default = "agent")]
+        #[serde(default = "agent", skip_serializing_if = "is_agent")]
         user_agent: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "is_zero")]
         pause_ms: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
         since: Option<String>,
-        #[serde(default = "epoch")]
+        #[serde(default = "epoch", skip_serializing_if = "is_epoch")]
         since_default: String,
         /// For trying a shape. A truncated run has not seen the source, so it never removes
         /// and never advances the mark.
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "is_zero")]
         limit: usize,
         /// The first this many the source lists, in its own order. A declared coverage
         /// rather than a truncation: a source ordered by popularity has no date to stop
         /// at, and `the 5,000 most downloaded` is a promise somebody can check.
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "is_zero")]
         top: usize,
     },
     /// RSS and Atom. Several feeds of the same shape are one dataset.
     Feed {
         urls: Vec<String>,
         /// The licence decision, made once and visible in one line.
-        #[serde(default = "summary")]
+        #[serde(default = "summary", skip_serializing_if = "is_summary")]
         text_is: String,
-        #[serde(default = "agent")]
+        #[serde(default = "agent", skip_serializing_if = "is_agent")]
         user_agent: String,
-        #[serde(default = "thousand")]
+        #[serde(default = "thousand", skip_serializing_if = "is_thousand")]
         pause_ms: u64,
     },
     /// Subscribed rather than fetched. The records arrived built, so there is nothing here to
@@ -118,18 +127,48 @@ pub enum Source {
         reference: String,
         /// What the publisher declared. The licence fact travels with the records, because a
         /// subscriber holding them has to answer for them too.
-        #[serde(default = "summary")]
+        #[serde(default = "summary", skip_serializing_if = "is_summary")]
         text_is: String,
         /// The publisher's public key, pinned here. Where it is set, a version whose manifest is
         /// not signed by it is not applied. It is the one thing a hub cannot produce, and the
         /// reason a hub that is only a directory over HTTPS is enough.
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "String::is_empty")]
         key: String,
     },
 }
 
+/// What the program calls itself when it asks a source, where the declaration does not say.
+pub const AGENT: &str = concat!("zetlyn/", env!("CARGO_PKG_VERSION"));
+
 fn agent() -> String {
-    "zetlyn/3".into()
+    AGENT.into()
+}
+
+// A default is not written back. A file the interface writes says what somebody chose, and a
+// line for every value nobody chose would bury it.
+fn is_agent(s: &str) -> bool {
+    s == AGENT
+}
+fn is_epoch(s: &str) -> bool {
+    s == epoch()
+}
+fn is_summary(s: &str) -> bool {
+    s == summary()
+}
+fn is_thousand(n: &u64) -> bool {
+    *n == thousand()
+}
+fn is_comma(s: &str) -> bool {
+    s == comma()
+}
+fn is_one(n: &usize) -> bool {
+    *n == one()
+}
+fn is_zero<T: Default + PartialEq>(n: &T) -> bool {
+    *n == T::default()
+}
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 fn epoch() -> String {
     "1970-01-01".into()
@@ -274,54 +313,63 @@ impl Source {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Schedule {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub every: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Records {
     /// Names the list where one fetched thing holds many records.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub each: Option<String>,
-    #[serde(rename = "where")]
+    #[serde(rename = "where", skip_serializing_if = "Option::is_none")]
     pub filter: Option<String>,
     /// One, or several. A GitHub advisory issues a GHSA and names the CVE it is about,
     /// and that cross-reference is what lets two datasets meet.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<Ids>,
     pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub text: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub known: Option<String>,
-    #[serde(default)]
+    #[serde(default, rename = "properties", skip_serializing_if = "BTreeMap::is_empty")]
     pub fields: BTreeMap<String, FieldSpec>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Spec {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub from: String,
-    #[serde(rename = "match")]
+    #[serde(rename = "match", skip_serializing_if = "Option::is_none")]
     pub matches: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub separator: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub all: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct IdSpec {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub scheme: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub from: String,
-    #[serde(rename = "match")]
+    #[serde(rename = "match", skip_serializing_if = "Option::is_none")]
     pub matches: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub separator: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub all: bool,
 }
 
@@ -337,7 +385,7 @@ impl IdSpec {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum FieldType {
     Text,
@@ -369,19 +417,22 @@ impl FieldType {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FieldSpec {
     #[serde(rename = "type")]
     pub kind: FieldType,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub vocabulary: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub from: String,
-    #[serde(rename = "match")]
+    #[serde(rename = "match", skip_serializing_if = "Option::is_none")]
     pub matches: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub separator: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub all: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
 }
 
@@ -397,55 +448,78 @@ impl FieldSpec {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct View {
     pub name: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub title: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub default: bool,
-    #[serde(rename = "where")]
+    #[serde(rename = "where", skip_serializing_if = "Option::is_none")]
     pub filter: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub columns: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub facets: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub sort: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Search {
     /// Which parts of a record the full-text index covers.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub text: Vec<String>,
     /// Which fields answer a comparison.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub compare: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub suggest: Vec<String>,
     /// Real queries in this source's own vocabulary, shown on an empty search box.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub examples: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 #[derive(Default)]
 pub struct Retention {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub history: bool,
 }
 
+impl Schedule {
+    fn is_empty(&self) -> bool {
+        self.every.is_none()
+    }
+}
+
+impl Search {
+    fn is_empty(&self) -> bool {
+        self.text.is_empty()
+            && self.compare.is_empty()
+            && self.suggest.is_empty()
+            && self.examples.is_empty()
+    }
+}
+
+impl Retention {
+    fn is_empty(&self) -> bool {
+        !self.history
+    }
+}
+
+/// The file a source is, inside its directory.
+pub const FILE: &str = "source.yaml";
+
 impl Declaration {
     pub fn load(dir: &Path) -> Result<Declaration, String> {
-        let path = dir.join("dataset.toml");
-        let text =
-            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let mut d: Declaration =
-            toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        let path = dir.join(FILE);
+        let mut d: Declaration = crate::yaml::read(&path)?;
         if d.title.is_empty() {
             d.title = d.name.clone();
         }
@@ -493,22 +567,24 @@ impl Declaration {
 }
 
 /// How a source pages. `max` is what it will hand over in one answer.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Page {
     /// Where the next page is named. `link` reads the `Link` header; otherwise the page is
     /// asked for by number or by offset.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub offset: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub size: String,
     /// Where the answer says how many there are in total.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<String>,
     /// `offset` counts records, `page` counts pages from one. Sources do both.
-    #[serde(default = "offset_word")]
+    #[serde(default = "offset_word", skip_serializing_if = "is_offset_word")]
     pub by: String,
-    #[serde(default = "hundred")]
+    #[serde(default = "hundred", skip_serializing_if = "is_hundred")]
     pub max: usize,
 }
 
@@ -516,12 +592,20 @@ fn offset_word() -> String {
     "offset".into()
 }
 
+fn is_offset_word(s: &str) -> bool {
+    s == offset_word()
+}
+
+fn is_hundred(n: &usize) -> bool {
+    *n == hundred()
+}
+
 fn hundred() -> usize {
     100
 }
 
 /// A declaration writes one table or a list of them, and both mean the same thing.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum Ids {
     One(IdSpec),
@@ -543,10 +627,10 @@ impl Ids {
 
 /// A dataset that takes its subjects from another one. The named dataset has to be installed in
 /// the same deployment, and a run without it refuses rather than reading nothing.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ForEach {
-    #[serde(default)]
+    #[serde(default, rename = "source", skip_serializing_if = "String::is_empty")]
     pub dataset: String,
     pub scheme: String,
 }
@@ -571,7 +655,7 @@ impl Source {
     pub fn agent(&self) -> &str {
         match self {
             Source::Http { user_agent, .. } | Source::Feed { user_agent, .. } => user_agent,
-            _ => "zetlyn/3",
+            _ => AGENT,
         }
     }
 }

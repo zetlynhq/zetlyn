@@ -1,0 +1,22 @@
+name: test/kev
+title: Known exploited
+kind: vulnerability
+about: Which vulnerabilities are being exploited.
+fetch:
+  type: csv
+  path: kev.csv
+claims:
+  id:
+    scheme: cve
+    from: field:cveID
+  title: field:vulnerabilityName
+  known: field:dateAdded
+  properties:
+    exploited:
+      type: code
+      from: const:yes
+    vendor:
+      type: text
+      from: field:vendorProject
+retention:
+  history: true

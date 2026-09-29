@@ -1,0 +1,29 @@
+name: test/vendor-a
+title: Vendor A advisories
+kind: vulnerability
+about: A distribution's own rating of a vulnerability.
+fetch:
+  type: csv
+  path: advisories.csv
+claims:
+  id:
+    scheme: cve
+    from: field:cve
+  title: field:title
+  known: field:published
+  properties:
+    cvss:
+      type: number
+      from: field:cvss
+    severity:
+      type: code
+      vocabulary: vendor-a-severity
+      from: field:severity
+vocabulary:
+  vendor-a-severity:
+    critical: Exploitable remotely without authentication.
+    important: Easily compromises confidentiality, integrity or availability.
+    low: Unlikely to be exploited.
+    moderate: Harder to exploit, or limited in impact.
+retention:
+  history: true

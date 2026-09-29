@@ -51,7 +51,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     if !args.iter().any(|a| a == "--no-open") {
         open_browser(&url);
     }
-    let mut app = App { root, addr, sites: BTreeMap::new(), jobs: Arc::new(Mutex::new(Jobs::default())) };
+    let mut app = App { root, addr, sites: BTreeMap::new(), jobs: Arc::new(Mutex::new(Jobs::default())), base: String::new(), hosted: None, visitor: false };
     for request in server.incoming_requests() {
         app.answer(request);
     }
@@ -114,6 +114,11 @@ struct App {
     /// Each tracker, opened on first visit and opened again after it changes.
     sites: BTreeMap<String, TrackerSite>,
     jobs: Arc<Mutex<Jobs>>,
+    /// Where it is mounted: empty on this machine, `/<name>` hosted.
+    base: String,
+    hosted: Option<Hosted>,
+    /// This request is not the owner's: the trackers answer it as they would a reader.
+    visitor: bool,
 }
 
 /// A job's handle, for the thread doing it.
@@ -168,10 +173,140 @@ impl App {
         id
     }
 
-    fn answer(&mut self, mut request: tiny_http::Request) {
-        let url = request.url().to_string();
+    fn answer(&mut self, request: tiny_http::Request) {
+        // Hosted, every address carries the workspace's prefix; the router matches without it.
+        let url = serve::unmount(request.url());
         let path = url.split('?').next().unwrap_or("/").to_string();
         let parts: Vec<String> = path.split('/').filter(|s| !s.is_empty()).map(serve::urldecode).collect();
+        if self.hosted.is_some() {
+            if let Some(request) = self.hosted_gate(request, &url, &path, &parts) {
+                return self.answer_as_owner(request, url, path, parts);
+            }
+            return;
+        }
+        self.answer_as_owner(request, url, path, parts)
+    }
+
+    /// What anybody may reach on a hosted workspace, and whether this request is its owner's. The
+    /// request comes back where the owner's app should answer it; otherwise it has been answered.
+    fn hosted_gate(&mut self, mut request: tiny_http::Request, url: &str, path: &str, parts: &[String]) -> Option<tiny_http::Request> {
+        let h = self.hosted.as_ref()?;
+        let header = |name: &'static str| request.headers().iter().find(|x| x.field.equiv(name)).map(|x| x.value.as_str().to_string());
+        let (cookie, signature) = (header("Cookie"), header("X-Hub-Signature-256").or_else(|| header("X-Zetlyn-Signature")));
+        let session = cookie.and_then(|c| c.split(';').filter_map(|p| p.trim().split_once('=')).find(|(k, _)| *k == "zs").map(|(_, v)| v.to_string()));
+        let owner = session.and_then(|s| h.accounts.by_session(&s)).is_some_and(|a| a.email.eq_ignore_ascii_case(&h.owner));
+        let post = request.method() == &tiny_http::Method::Post;
+        let html_kind = "text/html; charset=utf-8";
+        match parts.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+            ["style.css"] => Some(request),
+            // Signed by its sender, so nobody signs in to push to a source.
+            ["hook", source] if post => {
+                let sig = signature;
+                let mut body = Vec::new();
+                let _ = std::io::Read::read_to_end(request.as_reader(), &mut body);
+                let dir = self.sources().join(source);
+                match crate::hook::receive(&dir, &body, sig.as_deref()) {
+                    Ok(name) => {
+                        let root = self.root.clone();
+                        // Read now, and the trackers that name it look again, so a push is a
+                        // signal in seconds and not at the next scheduled pass.
+                        std::thread::spawn(move || {
+                            if let Ok(ds) = Source::open(&dir) {
+                                let _ = ds.run();
+                            }
+                            for t in crate::tracker::scope_registry(&root.join("trackers")).values() {
+                                let _ = Tracker::open(t, &root.join("sources")).and_then(|t| t.refresh_if_moved());
+                            }
+                        });
+                        respond(request, 202, "application/json", &json!({ "kept": name }).to_string());
+                    }
+                    Err(e) => respond(request, if e.contains("signature") { 401 } else { 400 }, "application/json", &json!({ "error": e }).to_string()),
+                }
+                None
+            }
+            ["signin"] if post => {
+                let mut body = String::new();
+                let _ = std::io::Read::read_to_string(request.as_reader(), &mut body);
+                let email = parse_form(&body).get("email").cloned().unwrap_or_default();
+                // The same words whoever asks, so the page does not say whose workspace it is.
+                if email.trim().eq_ignore_ascii_case(&h.owner) {
+                    let sent = h.accounts.ensure(&h.owner).and_then(|a| h.accounts.new_link(a.id)).and_then(|raw| {
+                        let site = crate::account::Site::load(&self.root);
+                        let link = format!("{}{}", site.url.trim_end_matches('/'), serve::at(&format!("/signin/{raw}")));
+                        site.send(&h.owner, "Your Zetlyn sign-in link", &format!("{link}\n\nGood for a quarter of an hour, and once."))
+                    });
+                    if let Err(e) = sent {
+                        eprintln!("sign-in mail: {e}");
+                    }
+                }
+                respond(request, 200, html_kind, &page("Sign in", html! { h1 { "Check your mail" } p { "If that address owns this workspace, a link to sign in is on its way. It is good for a quarter of an hour, and once." } }));
+                None
+            }
+            ["signin"] => {
+                respond(request, 200, html_kind, &page("Sign in", html! {
+                    h1 { "Sign in" }
+                    p.about { "The owner of this workspace signs in with a link sent to their address." }
+                    form.bar method="post" action=(serve::at("/signin")) {
+                        input.wide type="email" name="email" placeholder="you@example.org" required;
+                        button.primary type="submit" { "Send me a link" }
+                    }
+                }));
+                None
+            }
+            ["signin", raw] => {
+                match h.accounts.spend_link(raw) {
+                    Some(session) => {
+                        let cookie = format!("zs={session}; Path={}; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000", if self.base.is_empty() { "/" } else { &self.base });
+                        let mut response = tiny_http::Response::from_string("").with_status_code(303);
+                        for (k, v) in [("Location", serve::at("/")), ("Set-Cookie", cookie)] {
+                            if let Ok(hd) = tiny_http::Header::from_bytes(k.as_bytes(), v.as_bytes()) {
+                                response = response.with_header(hd);
+                            }
+                        }
+                        let _ = request.respond(response);
+                    }
+                    None => respond(request, 410, html_kind, &page("Sign in", html! { h1 { "That link is spent" } p { a href=(serve::at("/signin")) { "Ask for another" } } })),
+                }
+                None
+            }
+            // The trackers answer for themselves, the owner as their operator.
+            ["t", ..] => {
+                self.visitor = !owner;
+                Some(request)
+            }
+            _ if owner => {
+                self.visitor = false;
+                Some(request)
+            }
+            [] => {
+                respond(request, 200, html_kind, &self.visitor_page());
+                None
+            }
+            _ => {
+                let _ = url;
+                let _ = path;
+                redirect(request, &serve::at("/signin"));
+                None
+            }
+        }
+    }
+
+    /// What somebody who does not own this workspace sees at its address: what it publishes.
+    fn visitor_page(&self) -> String {
+        let trackers = listed(&self.trackers());
+        page("Zetlyn", html! {
+            h1 { (crate::account::Site::load(&self.root).title) }
+            @if trackers.is_empty() { p.dim { "Nothing published here yet." } }
+            table { tbody {
+                @for (name, decl, _) in &trackers {
+                    tr { td { a href=(serve::at(&format!("/t/{name}/"))) { strong { (decl.title) } } @if decl.visibility == "private" { " " span.chip { "private" } } div.why { (decl.about) } } }
+                }
+            } }
+            p.dim { a href=(serve::at("/signin")) { "Sign in" } " if this workspace is yours." }
+        })
+    }
+
+    fn answer_as_owner(&mut self, mut request: tiny_http::Request, url: String, _path: String, parts: Vec<String>) {
 
         // A tracker's own pages, as a reader would see them published.
         if parts.first().map(String::as_str) == Some("t") && parts.len() >= 2 {
@@ -187,11 +322,12 @@ impl App {
                     Err(e) => return respond(request, 404, "text/html; charset=utf-8", &page("Not here", html! { p { (e) } })),
                 }
             }
-            serve::mount(&format!("/t/{name}"));
+            serve::mount(&format!("{}/t/{name}", self.base));
             if let Some(site) = self.sites.get_mut(&name) {
+                site.set_operator(!self.visitor);
                 site.answer(request);
             }
-            serve::mount("");
+            serve::mount(&self.base);
             return;
         }
 
@@ -212,7 +348,7 @@ impl App {
                 let title = form.get("title").cloned().unwrap_or_default();
                 let title = if title.trim().is_empty() { "My tracker".to_string() } else { title.trim().to_string() };
                 let slug = self.free(&self.trackers(), &crate::guess::slug(&title));
-                return redirect(request, &format!("/new/{slug}?title={}", urlencode(&title)));
+                return redirect(request, &serve::at(&format!("/new/{slug}?title={}", urlencode(&title))));
             }
             (true, ["example"]) => {
                 let slug = self.free(&self.trackers(), &crate::guess::slug(EXAMPLE_TITLE));
@@ -258,7 +394,7 @@ impl App {
             // Not right: the source goes, and the person tries another address.
             (true, ["discard", tracker, source]) => {
                 let _ = std::fs::remove_dir_all(self.sources().join(source));
-                return redirect(request, &format!("/new/{tracker}?title={}", urlencode(&form_title(&query))));
+                return redirect(request, &serve::at(&format!("/new/{tracker}?title={}", urlencode(&form_title(&query)))));
             }
             (true, ["accept", tracker, source]) => {
                 let why = form.get("why").cloned().unwrap_or_default();
@@ -286,7 +422,7 @@ impl App {
                     None => (404, json_kind, json!({ "error": "no such job" }).to_string()),
                 }
             }
-            _ => (404, html_kind, page("Not here", html! { h1 { "Nothing here" } p { a href="/" { "Start" } } })),
+            _ => (404, html_kind, page("Not here", html! { h1 { "Nothing here" } p { a href=(serve::at("/")) { "Start" } } })),
         };
         respond(request, status, kind, &text)
     }
@@ -356,7 +492,7 @@ impl App {
             if let Err(e) = &proposed {
                 if e.contains("answers JSON") {
                     let _ = std::fs::remove_dir_all(&dir);
-                    return Ok(format!("/assist/{tracker}/{source}?url={}&title={}", urlencode(&from), urlencode(&title)));
+                    return Ok(serve::at(&format!("/assist/{tracker}/{source}?url={}&title={}", urlencode(&from), urlencode(&title))));
                 }
             }
             if let Err(e) = proposed {
@@ -375,7 +511,7 @@ impl App {
                 report.added + report.changed + report.unchanged,
                 started.elapsed().as_secs_f64()
             ));
-            Ok(format!("/review/{tracker}/{source}?title={}", urlencode(&title)))
+            Ok(serve::at(&format!("/review/{tracker}/{source}?title={}", urlencode(&title))))
         })
     }
 
@@ -397,7 +533,7 @@ impl App {
                 "identified_by": [scheme],
             });
             write_tracker(&dir, decl)?;
-            return Ok(format!("/review/{tracker}/{source}?added=1"));
+            return Ok(serve::at(&format!("/review/{tracker}/{source}?added=1")));
         }
         let mut decl = serde_json::to_value(TrackerDecl::load(&dir)?).map_err(|e| e.to_string())?;
         if let Some(list) = decl["sources"].as_array_mut() {
@@ -406,7 +542,7 @@ impl App {
             }
         }
         write_tracker(&dir, decl)?;
-        Ok(format!("/review/{tracker}/{source}?added=1"))
+        Ok(serve::at(&format!("/review/{tracker}/{source}?added=1")))
     }
 
     /// What the assist would be sent to read a JSON API, and the button that sends it (D10).
@@ -415,7 +551,7 @@ impl App {
         let title = form_title(query);
         let assist = crate::assist::Assist::configured(&self.root);
         let body = html! {
-            p { a href={"/new/" (tracker) "?title=" (urlencode(&title))} { "← another address" } }
+            p { a href={(serve::at("/new/")) (tracker) "?title=" (urlencode(&title))} { "← another address" } }
             h1 { "This address answers JSON" }
             p.about { code { (url) } " is an API, and an API has no shape to guess the way a table has. The assist can read it and propose a declaration, which is then tried against the API before you see it." }
             @if assist.available() {
@@ -427,13 +563,13 @@ impl App {
                     }
                     "Nothing else, and only for this source. What was sent is written beside its declaration, in " code { (crate::assist::CONSENT) } "."
                 }
-                form #teach data-job={"/teach/" (tracker) "/" (source) "?url=" (urlencode(&url)) "&title=" (urlencode(&title))} {
+                form #teach data-job={(serve::at("/teach/")) (tracker) "/" (source) "?url=" (urlencode(&url)) "&title=" (urlencode(&title))} {
                     button.primary type="submit" { "Send it and read the API" }
                 }
             } @else {
                 div.note { "There is no assist here: " (crate::assist::Assist::missing()) "." }
             }
-            pre #log hidden {}
+            pre #log data-jobs=(serve::at("/job/")) hidden {}
             div #error .note hidden {}
             (PreEscaped(JOB_SCRIPT))
         };
@@ -462,7 +598,7 @@ impl App {
             let started = std::time::Instant::now();
             let report = ds.run()?;
             p.say(format!("{} claims in {:.1}s", report.added + report.changed + report.unchanged, started.elapsed().as_secs_f64()));
-            Ok(format!("/review/{tracker}/{source}?title={}", urlencode(&title)))
+            Ok(serve::at(&format!("/review/{tracker}/{source}?title={}", urlencode(&title))))
         })
     }
 
@@ -474,7 +610,7 @@ impl App {
             let assist = crate::assist::Assist::configured(&root);
             p.say(format!("Asking {}", assist.who()));
             match crate::teach::why(&assist, &tdir, &sdir, true)? {
-                crate::teach::Outcome::Done(why) => Ok(format!("/review/{tracker}/{source}?title={}&why={}", urlencode(&title), urlencode(&why))),
+                crate::teach::Outcome::Done(why) => Ok(serve::at(&format!("/review/{tracker}/{source}?title={}&why={}", urlencode(&title), urlencode(&why)))),
                 crate::teach::Outcome::NeedsConsent(_) => Err("not agreed to".into()),
             }
         })
@@ -486,7 +622,7 @@ impl App {
             @if trackers.is_empty() {
                 h1.big { "What do you want to track?" }
                 p.about { "A tracker reads several sources about the same things, shows where they agree, where they disagree and what changed. It starts with one source: an address or a file." }
-                form.bar method="post" action="/new" {
+                form.bar method="post" action=(serve::at("/new")) {
                     input.wide type="text" name="title" placeholder="Exploited vulnerabilities, papers on protein folding, our suppliers…" autofocus;
                     button.primary type="submit" { "Start" }
                 }
@@ -496,14 +632,14 @@ impl App {
                 table { tbody {
                     @for (name, decl, fresh) in &trackers {
                         tr {
-                            td { a href={"/t/" (name) "/"} { strong { (decl.title) } } div.why { (decl.members.len()) " sources · identified by " (decl.join.join(", ")) } }
+                            td { a href={(serve::at("/t/")) (name) "/"} { strong { (decl.title) } } div.why { (decl.members.len()) " sources · identified by " (decl.join.join(", ")) } }
                             td.num { @if *fresh > 0 { span.chip.on { (fresh) " signals since yesterday" } } @else { span.dim { "nothing new since yesterday" } } }
-                            td.num { a href={"/new/" (name) "?title=" (urlencode(&decl.title))} { "Add a source" } }
+                            td.num { a href={(serve::at("/new/")) (name) "?title=" (urlencode(&decl.title))} { "Add a source" } }
                         }
                     }
                 } }
                 h2 { "Another tracker" }
-                form.bar method="post" action="/new" {
+                form.bar method="post" action=(serve::at("/new")) {
                     input.wide type="text" name="title" placeholder="What do you want to track?";
                     button.primary type="submit" { "Start" }
                 }
@@ -524,19 +660,19 @@ impl App {
         let example_next = existing.as_ref().is_some_and(|d| d.title == EXAMPLE_TITLE && d.members.len() == 1);
         let prefill = if prefill.is_empty() && example_next { EXAMPLE[1].0.to_string() } else { prefill };
         let body = html! {
-            p { a href="/" { "← Zetlyn" } }
+            p { a href=(serve::at("/")) { "← Zetlyn" } }
             h1 { (if title.is_empty() { tracker.to_string() } else { title.clone() }) }
             @if first {
                 p.about { "The first source. Paste the address of a CSV file or a feed, or choose a file on this machine." }
             } @else {
                 p.about { "Another perspective: a second source about the same things. Zetlyn reads it, then shows how many things the two share before anything is connected." }
             }
-            form #analyse .bar data-job={"/analyse/" (tracker) "?title=" (urlencode(&title))} {
+            form #analyse .bar data-job={(serve::at("/analyse/")) (tracker) "?title=" (urlencode(&title))} {
                 input.wide type="text" name="url" value=(prefill) placeholder="https://…/something.csv, or github:owner/repo/releases" autofocus;
                 button.primary type="submit" { "Read it" }
             }
-            p.dim { "or " label.file { input #file type="file" data-action={"/upload/" (tracker) "?title=" (urlencode(&title))}; } }
-            pre #log hidden {}
+            p.dim { "or " label.file { input #file type="file" data-action={(serve::at("/upload/")) (tracker) "?title=" (urlencode(&title))}; } }
+            pre #log data-jobs=(serve::at("/job/")) hidden {}
             div #error .note hidden {}
             (PreEscaped(JOB_SCRIPT))
         };
@@ -576,7 +712,7 @@ impl App {
         }
 
         let body = html! {
-            p { a href="/" { "← Zetlyn" } @if decl.is_some() { " · " a href={"/t/" (tracker) "/"} { (title) } } }
+            p { a href=(serve::at("/")) { "← Zetlyn" } @if decl.is_some() { " · " a href={(serve::at("/t/")) (tracker) "/"} { (title) } } }
             h1 { (ds.decl.title) }
             p.about { (total) " claims read from " code { (source_of(&ds)) } }
 
@@ -622,36 +758,36 @@ impl App {
                     @if joined {
                         p { "For example " @for (i, (scheme, value)) in m.examples.iter().enumerate() {
                             @if i > 0 { ", " }
-                            a href={"/t/" (tracker) "/thing/" (urlencode(scheme)) "/" (urlencode(value))} { (value) }
+                            a href={(serve::at("/t/")) (tracker) "/thing/" (urlencode(scheme)) "/" (urlencode(value))} { (value) }
                         } ", each with two perspectives." }
                     }
                 }
             }
 
             @if joined {
-                div.note { @if added { "Connected. " } (ds.decl.title) " is part of " a href={"/t/" (tracker) "/"} { (title) } "." }
+                div.note { @if added { "Connected. " } (ds.decl.title) " is part of " a href={(serve::at("/t/")) (tracker) "/"} { (title) } "." }
                 p.bar {
-                    a.chip href={"/t/" (tracker) "/"} { "Open the tracker" }
-                    a.chip href={"/new/" (tracker) "?title=" (urlencode(&title))} { "Add another perspective" }
+                    a.chip href={(serve::at("/t/")) (tracker) "/"} { "Open the tracker" }
+                    a.chip href={(serve::at("/new/")) (tracker) "?title=" (urlencode(&title))} { "Add another perspective" }
                 }
             } @else {
                 @if decl.is_some() && crate::assist::Assist::configured(&self.root).available() {
-                    form #why .bar data-job={"/why/" (tracker) "/" (source) "?title=" (urlencode(&title))} {
+                    form #why .bar data-job={(serve::at("/why/")) (tracker) "/" (source) "?title=" (urlencode(&title))} {
                         button type="submit" { "Let the assist propose why" }
                         span.dim { "sends " (crate::assist::Assist::configured(&self.root).who()) " the names and descriptions of these sources, nothing they hold" }
                     }
-                    pre #log hidden {}
+                    pre #log data-jobs=(serve::at("/job/")) hidden {}
                     div #error .note hidden {}
                     (PreEscaped(JOB_SCRIPT))
                 }
-                form method="post" action={"/accept/" (tracker) "/" (source) "?title=" (urlencode(&title))} {
+                form method="post" action={(serve::at("/accept/")) (tracker) "/" (source) "?title=" (urlencode(&title))} {
                     p { label { "What to call it" br;
                         input.wide type="text" name="name" value=(example_name(&ds).unwrap_or(&ds.decl.title)); } }
                     p { label { "Why this source, in one sentence" br;
                         input.wide type="text" name="why" value=(query.get("why").cloned().unwrap_or_else(|| example_why(&ds))) placeholder={"What " (ds.decl.title) " says that nothing else does."}; } }
                     p.bar {
                         button.primary type="submit" { @if decl.is_none() { "Looks right" } @else { "Connect" } }
-                        button type="submit" formaction={"/discard/" (tracker) "/" (source) "?title=" (urlencode(&title))} { "Not right" }
+                        button type="submit" formaction={(serve::at("/discard/")) (tracker) "/" (source) "?title=" (urlencode(&title))} { "Not right" }
                     }
                 }
                 p.dim { "The declaration is " code { (self.sources().join(source).join(crate::sourcedecl::FILE).display()) } ", and can be edited." }
@@ -773,7 +909,7 @@ fn example_card() -> Markup {
         div.card.example {
             h4 { "Or start from an example" }
             p.dim { "CISA's list of exploited vulnerabilities and Exploit-DB: two CSV files that both carry the CVE number. Two pastes, and you see which exploited vulnerabilities have public code." }
-            form method="post" action="/example" { button type="submit" { "Start from the CVE example" } }
+            form method="post" action=(serve::at("/example")) { button type="submit" { "Start from the CVE example" } }
         }
     }
 }
@@ -825,7 +961,7 @@ const JOB_SCRIPT: &str = r#"<script>
 (function () {
   var log = document.getElementById('log'), error = document.getElementById('error');
   function follow(id) {
-    fetch('/job/' + id).then(function (r) { return r.json(); }).then(function (j) {
+    fetch(((log && log.dataset.jobs) || '/job/') + id).then(function (r) { return r.json(); }).then(function (j) {
       log.hidden = false;
       log.textContent = j.lines.join('\n') + (j.done ? '' : '\n…');
       if (!j.done) { setTimeout(function () { follow(id); }, 400); return; }
@@ -867,4 +1003,59 @@ fn rename(dir: &Path, title: &str) -> Result<(), String> {
 
 fn example_name(ds: &Source) -> Option<&'static str> {
     EXAMPLE.iter().find(|(url, _, _)| source_of(ds) == *url).map(|(_, name, _)| *name)
+}
+
+/// A workspace hosted for somebody: whose it is, and where its plan is kept.
+struct Hosted {
+    owner: String,
+    accounts: crate::account::Accounts,
+}
+
+/// `zetlyn host <workspace> --name <name> --billing <dir> [--addr 127.0.0.1:2300]`: one person's
+/// workspace, served under `/<name>`, updated on its plan's terms. The same program as on their
+/// own machine; what is added is that the owner signs in, visitors read, and the plan decides how
+/// much runs.
+pub fn host(args: &[String]) -> Result<(), String> {
+    let root = crate::positional(args, 1).first().map(|s| PathBuf::from(s.as_str())).ok_or("which workspace?")?;
+    let name = crate::flag(args, "--name").ok_or("--name, the workspace's address")?.to_string();
+    let billing = PathBuf::from(crate::flag(args, "--billing").ok_or("--billing, where plans.yaml and customers.db are")?);
+    let addr = crate::flag(args, "--addr").unwrap_or("127.0.0.1:2300").to_string();
+    let owner = crate::billing::Book::open(&billing)?.get(&name).map(|c| c.email).ok_or_else(|| format!("{name}: no customer by that name"))?;
+    let base = format!("/{}", name.trim_matches('/'));
+    serve::mount(&base);
+    let server = tiny_http::Server::http(&addr).map_err(|e| e.to_string())?;
+    println!("{} for {owner} on http://{addr}{base}/", root.display());
+
+    // The plan's pass, on its own thread: sources, trackers, watches, as `zetlyn run` does them,
+    // within what the plan allows, and not at all while it is not paid for.
+    {
+        let (root, billing, name) = (root.clone(), billing.clone(), name.clone());
+        std::thread::spawn(move || loop {
+            let (paid, limits, _mails) = crate::billing::limits(&billing, &name);
+            let wait = if paid {
+                let soonest = crate::schedule_pass(&root, true, &limits);
+                soonest.map(|s| (s - crate::now()).clamp(60, 3600)).unwrap_or(3600)
+            } else {
+                eprintln!("{name}: not paid for, so nothing is updated");
+                600
+            };
+            std::thread::sleep(std::time::Duration::from_secs(wait as u64));
+        });
+    }
+
+    let accounts = crate::account::Accounts::open(&root)?;
+    let mut app = App {
+        root,
+        addr,
+        sites: BTreeMap::new(),
+        jobs: Arc::new(Mutex::new(Jobs::default())),
+        base,
+        hosted: Some(Hosted { owner, accounts }),
+        visitor: false,
+    };
+    for request in server.incoming_requests() {
+        serve::mount(&app.base);
+        app.answer(request);
+    }
+    Ok(())
 }

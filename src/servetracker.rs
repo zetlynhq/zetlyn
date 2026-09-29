@@ -2342,3 +2342,10 @@ fn private_page(scope: &Tracker) -> String {
         p.bar { a.chip.on href=(at("/signin")) { "Sign in" } a.chip href=(at("/pricing")) { "What it costs" } }
     })
 }
+
+impl TrackerSite {
+    /// Hosted, the same tracker answers its owner as their operator and anybody else as a reader.
+    pub fn set_operator(&mut self, yes: bool) {
+        self.operator = yes;
+    }
+}

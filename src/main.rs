@@ -5,6 +5,7 @@ mod account;
 mod app;
 mod assist;
 mod artifact;
+mod billing;
 mod build;
 mod console;
 mod source;
@@ -15,6 +16,7 @@ mod fetch;
 mod grant;
 pub mod guess;
 mod hub;
+mod hook;
 mod identity;
 mod key;
 mod place;
@@ -435,6 +437,8 @@ fn run(args: &[String]) -> Result<(), String> {
         Some("console") => console_command(args),
         Some("hub") => hub_command(args),
         Some("assist") => assist_command(args),
+        Some("billing") => billing::command(args),
+        Some("host") => app::host(args),
         Some("id") => id_command(args),
         Some("platform") => platform_command(args),
         Some("serve") => {
@@ -692,6 +696,30 @@ fn schedule(args: &[String]) -> Result<(), String> {
     let once = args.iter().any(|a| a == "--once");
     let deliver = !args.iter().any(|a| a == "--no-deliver");
     loop {
+        let soonest = schedule_pass(&root, deliver, &Limits::default());
+        if once {
+            return Ok(());
+        }
+        // A minute at least, an hour at most: the promise is checked on the same tick.
+        let wait = soonest.map(|s| (s - now()).clamp(60, 3600)).unwrap_or(3600);
+        println!("next in {wait}s");
+        std::thread::sleep(std::time::Duration::from_secs(wait as u64));
+    }
+}
+
+/// What a hosted workspace's plan allows: how many sources it updates, and how often at most.
+/// Nothing is limited for a workspace somebody runs themselves.
+#[derive(Debug, Default, Clone)]
+pub struct Limits {
+    pub sources: Option<usize>,
+    pub every: i64,
+}
+
+/// One pass: every source that is due runs, the trackers whose sources moved look again, and every
+/// watch is asked. When the next source is due, if any is.
+pub fn schedule_pass(root: &Path, deliver: bool, limits: &Limits) -> Option<i64> {
+    let root = root.to_path_buf();
+    {
         let tick = now();
         let mut soonest: Option<i64> = None;
         let mut moved: Vec<String> = Vec::new();
@@ -713,6 +741,13 @@ fn schedule(args: &[String]) -> Result<(), String> {
             })
             .collect();
         due.sort();
+        // A plan's sources, in the order they are asked for; the rest are said, not run.
+        if let Some(n) = limits.sources {
+            for (_, name, _) in due.iter().skip(n) {
+                eprintln!("{name}: not updated, the plan updates {n} sources");
+            }
+            due.truncate(n);
+        }
         for (_, name, dir) in due {
             let ds = match Source::open(&dir) {
                 Ok(ds) => ds,
@@ -722,6 +757,11 @@ fn schedule(args: &[String]) -> Result<(), String> {
                 }
             };
             let Some(due) = due_at(&ds) else { continue };
+            // And no more often than the plan allows, whatever the source asks for.
+            let due = match last_finished(&ds) {
+                Some(at) if limits.every > 0 => due.max(at + limits.every),
+                _ => due,
+            };
             if due > tick {
                 soonest = Some(soonest.map_or(due, |s: i64| s.min(due)));
                 continue;
@@ -811,13 +851,7 @@ fn schedule(args: &[String]) -> Result<(), String> {
             }
         }
 
-        if once {
-            return Ok(());
-        }
-        // A minute at least, an hour at most: the promise is checked on the same tick.
-        let wait = soonest.map(|s| (s - now()).clamp(60, 3600)).unwrap_or(3600);
-        println!("next in {wait}s");
-        std::thread::sleep(std::time::Duration::from_secs(wait as u64));
+        soonest
     }
 }
 
@@ -1318,7 +1352,6 @@ fn hub_command(args: &[String]) -> Result<(), String> {
         }
         Some("console") => console_command(args),
         Some("hub") => hub_command(args),
-        Some("assist") => assist_command(args),
         Some("id") => id_command(args),
         Some("platform") => platform_command(args),
         Some("serve") => {
@@ -1838,4 +1871,8 @@ fn consent_needed(d: &assist::Disclosure, dir: &Path) -> String {
         d.sends.join("\n  "),
         dir.join(assist::CONSENT).display()
     )
+}
+
+fn last_finished(ds: &Source) -> Option<i64> {
+    ds.store.run_report(ds.store.last_run()).and_then(|r| r.finished).map(|f| fetch::seconds_of(&f))
 }

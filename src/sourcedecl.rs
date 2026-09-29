@@ -122,6 +122,13 @@ pub enum Fetch {
         #[serde(default = "thousand", skip_serializing_if = "is_thousand")]
         pause_ms: u64,
     },
+    /// Pushed to rather than fetched: every signed POST to the workspace's `/hook/<source>` is kept
+    /// as a file in `inbox/`, and an update reads those as it reads an API's answers.
+    Webhook {
+        /// A variable, `${HOOK_SECRET}`: the key the sender signs each body with (HMAC-SHA256,
+        /// `X-Hub-Signature-256: sha256=…`).
+        secret: String,
+    },
     /// A query against PostgreSQL. The connection string names a variable, never a password,
     /// and the query carries the watermark as `{since}`.
     Sql {
@@ -219,6 +226,7 @@ impl Fetch {
             Fetch::Feed { .. } => "feed",
             Fetch::Hub { .. } => "hub",
             Fetch::Sql { .. } => "sql",
+            Fetch::Webhook { .. } => "webhook",
         }
     }
 
@@ -241,6 +249,7 @@ impl Fetch {
             Fetch::Hub { at, reference, .. } => format!("{at} {reference}"),
             // Never the connection string: it is a password, however it was written.
             Fetch::Sql { .. } => "a PostgreSQL database".into(),
+            Fetch::Webhook { .. } => "what its sender pushes to it".into(),
         }
     }
 
@@ -251,7 +260,7 @@ impl Fetch {
         match self {
             Fetch::Feed { text_is, .. } => text_is,
             Fetch::Folder { .. } | Fetch::Csv { .. } | Fetch::Xlsx { .. } => "whole",
-            Fetch::Http { .. } | Fetch::Sql { .. } => "whole",
+            Fetch::Http { .. } | Fetch::Sql { .. } | Fetch::Webhook { .. } => "whole",
             Fetch::Hub { text_is, .. } => text_is,
         }
     }
@@ -270,7 +279,7 @@ impl Fetch {
             }
             Fetch::Csv { path, .. } => path,
             Fetch::Xlsx { path, .. } => path,
-            Fetch::Http { .. } | Fetch::Feed { .. } | Fetch::Hub { .. } | Fetch::Sql { .. } => {
+            Fetch::Http { .. } | Fetch::Feed { .. } | Fetch::Hub { .. } | Fetch::Sql { .. } | Fetch::Webhook { .. } => {
                 return base.to_path_buf()
             }
         };

@@ -415,3 +415,38 @@ mod tests {
         );
     }
 }
+
+/// HMAC-SHA256 (RFC 2104), what a webhook's sender signs a body with.
+pub fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut k = [0u8; 64];
+    if key.len() > 64 {
+        k[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let mut inner = Sha256::new();
+    inner.update(k.iter().map(|b| b ^ 0x36).collect::<Vec<u8>>());
+    inner.update(message);
+    let mut outer = Sha256::new();
+    outer.update(k.iter().map(|b| b ^ 0x5c).collect::<Vec<u8>>());
+    outer.update(inner.finalize());
+    outer.finalize().into()
+}
+
+/// Two strings compared in time that does not depend on where they differ.
+pub fn same(a: &str, b: &str) -> bool {
+    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+#[cfg(test)]
+mod hmac_tests {
+    #[test]
+    fn hmac_is_rfc_4231() {
+        // Test case 2 of RFC 4231.
+        let mac = super::hmac_sha256(b"Jefe", b"what do ya want for nothing?");
+        let hex: String = mac.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex, "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
+        assert!(super::same("abc", "abc") && !super::same("abc", "abd") && !super::same("abc", "ab"));
+    }
+}

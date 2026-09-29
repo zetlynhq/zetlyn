@@ -1,0 +1,7 @@
+name    = "vendor-a-critical"
+title   = "Critical at vendor A"
+dataset = "test/vendor-a"
+query   = "severity=critical"
+
+[[deliver]]
+to = "feed"

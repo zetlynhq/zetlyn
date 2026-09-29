@@ -1,0 +1,26 @@
+name  = "test/vendor-a"
+title = "Vendor A advisories"
+kind  = "vulnerability"
+about = "A distribution's own rating of a vulnerability."
+
+[source]
+type = "csv"
+path = "advisories.csv"
+
+[records]
+id    = { scheme = "cve", from = "field:cve" }
+title = "field:title"
+known = "field:published"
+
+[records.fields]
+severity = { type = "code",   from = "field:severity", vocabulary = "vendor-a-severity" }
+cvss     = { type = "number", from = "field:cvss" }
+
+[vocabulary.vendor-a-severity]
+critical  = "Exploitable remotely without authentication."
+important = "Easily compromises confidentiality, integrity or availability."
+moderate  = "Harder to exploit, or limited in impact."
+low       = "Unlikely to be exploited."
+
+[retention]
+history = true

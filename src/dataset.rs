@@ -125,13 +125,15 @@ impl Dataset {
 
         // The shape check, before anything is kept. A run whose shape moved too far does not
         // replace the store: it is rolled back and it says why.
+        //
+        // Held against what the store will hold after this run. A run over the whole source
+        // sweeps what it did not see, so that is what it saw; the store's count here is from
+        // before the sweep and never falls, which let a source that lost half its rows empty
+        // half the store. A run over a slice keeps the rest, so there it is the store's count.
+        let read = added + changed + unchanged;
+        let after = if whole { read } else { self.store.count() };
         let refusal = if complete {
-            self.store.shape_refusal(
-                run,
-                self.store.count(),
-                added + changed + unchanged,
-                &seen_fields,
-            )
+            self.store.shape_refusal(run, after, read, &seen_fields)
         } else {
             None
         };
@@ -470,6 +472,12 @@ impl Dataset {
             })).collect()),
         })
     }
+    /// Whether a record this dataset holds satisfies a query, read the way a search reads it.
+    pub fn holds(&self, record_id: &str, pred: &Pred) -> bool {
+        let filter = self.store.filter(pred, &self.types());
+        self.store.satisfies(record_id, &filter)
+    }
+
     /// The current mark, to be handed back to `changes` later. A run number, because that is what
     /// this dataset counts in.
     pub fn mark(&self) -> i64 {

@@ -727,6 +727,22 @@ impl Store {
         Ok((total, out))
     }
 
+    /// Whether one record satisfies a filter, by the same SQL a search runs, so that a watch and
+    /// a search cannot disagree about what a record says.
+    pub fn satisfies(&self, record_id: &str, filter: &Filter) -> bool {
+        let mut params = filter.params.clone();
+        params.push(S::Text(record_id.to_string()));
+        let sql = format!(
+            "select count(*) from record r where r.record_id = ?{} and ({})",
+            params.len(),
+            filter.sql
+        );
+        self.db
+            .query_row(&sql, params_from_iter(params.iter()), |r| r.get::<_, i64>(0))
+            .map(|n| n > 0)
+            .unwrap_or(false)
+    }
+
     pub fn facet(
         &self,
         field: &str,

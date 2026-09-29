@@ -135,9 +135,6 @@ pub struct KindView {
     pub columns: Vec<String>,
     #[serde(default)]
     pub facets: Vec<String>,
-    /// Fields held against the map and marked where members that name one key do not agree.
-    #[serde(default)]
-    pub divergence: Vec<String>,
     pub sort: Option<String>,
     /// A view the member already declared about itself, as `dataset:view`.
     pub adopt: Option<String>,

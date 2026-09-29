@@ -1,0 +1,7 @@
+name  = "severe"
+title = "High or worse"
+scope = "test/cve"
+query = "severity>=high"
+
+[[deliver]]
+to = "feed"

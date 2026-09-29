@@ -1,0 +1,83 @@
+{
+  "entries": [
+    {
+      "changes": [
+        {
+          "fields": [
+            {
+              "field": "cvss",
+              "is": "8.1",
+              "was": "9.8"
+            }
+          ],
+          "how": "changed",
+          "ids": [
+            {
+              "scheme": "cve",
+              "value": "CVE-2026-0001"
+            }
+          ],
+          "kind": "vulnerability",
+          "known": "2026-08-30",
+          "member": "test/vendor-a",
+          "record_id": "3d273c10978b3581da07de0be8195165723a4a1112d72642022cecdded94ec92",
+          "run": 2,
+          "title": "foo: remote code execution",
+          "url": null
+        }
+      ],
+      "key": {
+        "scheme": "cve",
+        "value": "CVE-2026-0001"
+      },
+      "members": [
+        "test/vendor-a"
+      ],
+      "title": "foo: remote code execution"
+    },
+    {
+      "changes": [
+        {
+          "fields": [
+            {
+              "field": "cvss",
+              "is": "9.1",
+              "was": "6.5"
+            },
+            {
+              "field": "severity",
+              "is": "critical",
+              "was": "moderate"
+            }
+          ],
+          "how": "changed",
+          "ids": [
+            {
+              "scheme": "cve",
+              "value": "CVE-2026-0004"
+            }
+          ],
+          "kind": "vulnerability",
+          "known": "2026-09-02",
+          "member": "test/vendor-a",
+          "record_id": "814d1bf1c31d5fa136477fcaa5ef43d263fc83e4288820bf6f7a1f25b96f8d1a",
+          "run": 2,
+          "title": "baz: authentication bypass",
+          "url": null
+        }
+      ],
+      "key": {
+        "scheme": "cve",
+        "value": "CVE-2026-0004"
+      },
+      "members": [
+        "test/vendor-a"
+      ],
+      "title": "baz: authentication bypass"
+    }
+  ],
+  "mark": "test/kev=1,test/vendor-a=2,test/vendor-b=1,test/exploits=1",
+  "scope": "test/cve",
+  "since": "test/kev=1,test/vendor-a=1,test/vendor-b=1,test/exploits=1",
+  "without_history": []
+}

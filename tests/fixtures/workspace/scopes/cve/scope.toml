@@ -1,0 +1,34 @@
+name  = "test/cve"
+title = "CVE"
+about = "What four sources say about a vulnerability."
+
+[[members]]
+dataset  = "test/kev"
+priority = "primary"
+why      = "Whether it is being exploited."
+
+[[members]]
+dataset  = "test/vendor-a"
+priority = "high"
+why      = "A distribution's rating."
+
+[[members]]
+dataset  = "test/vendor-b"
+priority = "high"
+why      = "An ecosystem's rating."
+
+[[members]]
+dataset  = "test/exploits"
+priority = "normal"
+why      = "Whether working code exists."
+
+[[join]]
+key = "cve"
+
+[normalise.severity]
+scale = ["critical", "high", "medium", "low", "unknown"]
+"test/vendor-a" = { critical = "critical", important = "high", moderate = "medium", low = "low" }
+"test/vendor-b" = { critical = "critical", high = "high", medium = "medium", low = "low" }
+
+[normalise.exploited]
+scale = ["yes", "no"]

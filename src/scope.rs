@@ -402,7 +402,6 @@ impl Scope {
             } else {
                 declared.facets.clone()
             },
-            divergence: declared.divergence.clone(),
             sort: declared
                 .sort
                 .clone()
@@ -758,8 +757,7 @@ impl Scope {
             // Collected into sets and read out in order, so an entry is the same whatever order
             // its records arrived in. Keeping one value per member kept whichever arrived last,
             // and two stores holding the same records answered differently.
-            let distinct: BTreeSet<&String> = means.values().flatten().collect();
-            let divergent = distinct.len() > 1;
+            let divergent = disagree(means.values());
             entry.fields.insert(
                 name,
                 FieldView {
@@ -1095,8 +1093,11 @@ impl Scope {
     /// measurement of something nobody can ask for.
     pub fn measure(&self) -> J {
         let keys = self.decl.keys();
-        // key value -> member -> (kind, field -> (what it said, what this scope makes of it))
-        type Said = BTreeMap<String, (String, BTreeMap<String, (String, String)>)>;
+        // key value -> member -> (kinds, field -> (what it said, what this scope makes of it)).
+        // Every record a member holds for the subject, as the entry page shows them: keeping the
+        // last one measured a different thing from the one a reader sees.
+        type Words = (BTreeSet<String>, BTreeSet<String>);
+        type Said = BTreeMap<String, (BTreeSet<String>, BTreeMap<String, Words>)>;
         let mut subjects: BTreeMap<String, Said> = BTreeMap::new();
         let mut per_member = Vec::new();
 
@@ -1131,7 +1132,14 @@ impl Scope {
                     };
                     // Every field, under the name this scope shows it by. A measurement
                     // of one field is a measurement of the field somebody guessed.
-                    let mut shown: BTreeMap<String, (String, String)> = BTreeMap::new();
+                    // Compared with the case folded, as the entry is gathered: `cve-2021-44228`
+                    // and `CVE-2021-44228` are one subject there and must be one here, and so is the scheme.
+                    let said = subjects
+                        .entry(format!("{}:{}", key.scheme, key.value.to_lowercase()))
+                        .or_default()
+                        .entry(m.name().to_string())
+                        .or_default();
+                    said.0.insert(hit.kind.clone());
                     for (name, value) in &hit.fields {
                         let scope_name = self.field_out(m.name(), name);
                         let raw = value.display();
@@ -1139,12 +1147,10 @@ impl Scope {
                             Some(n) => n.means(m.name(), &raw),
                             None => raw.clone(),
                         };
-                        shown.insert(scope_name, (raw, mapped));
+                        let words = said.1.entry(scope_name).or_default();
+                        words.0.insert(raw);
+                        words.1.insert(mapped);
                     }
-                    subjects
-                        .entry(key.value.clone())
-                        .or_default()
-                        .insert(m.name().to_string(), (hit.kind.clone(), shown));
                 }
                 offset += hits.len();
                 if hits.len() < 5000 {
@@ -1161,7 +1167,7 @@ impl Scope {
 
         for members in subjects.values() {
             *by_count.entry(members.len()).or_default() += 1;
-            if members.values().any(|(kind, _)| kind == "exploit") {
+            if members.values().any(|(kinds, _)| kinds.contains("exploit")) {
                 with_exploit += 1;
             }
             let mut names: BTreeSet<&String> = BTreeSet::new();
@@ -1169,24 +1175,19 @@ impl Scope {
                 names.extend(said.keys());
             }
             for name in names {
-                let raws: Vec<&String> = members
+                let carried: Vec<&Words> = members
                     .values()
-                    .filter_map(|(_, s)| s.get(name).map(|(r, _)| r))
+                    .filter_map(|(_, s)| s.get(name))
                     .collect();
-                if raws.len() < 2 {
+                if carried.len() < 2 {
                     continue;
                 }
-                let mapped: BTreeSet<&String> = members
-                    .values()
-                    .filter_map(|(_, s)| s.get(name).map(|(_, m)| m))
-                    .collect();
-                let distinct_raw: BTreeSet<&&String> = raws.iter().collect();
                 let e = fields.entry(name.clone()).or_default();
                 e.0 += 1;
-                if distinct_raw.len() > 1 {
+                if disagree(carried.iter().map(|w| &w.0)) {
                     e.1 += 1;
                 }
-                if mapped.len() > 1 {
+                if disagree(carried.iter().map(|w| &w.1)) {
                     e.2 += 1;
                 }
             }
@@ -1432,6 +1433,16 @@ impl Scope {
 
 /// One comparison between two strings, case folded, for the four things an entry is rather than
 /// says. A date and a title order the same way here: lexically, which is what an ISO date wants.
+/// Whether members disagree: two of them, each with everything it said, and not the same. One
+/// member saying two things is not a disagreement with itself: two exploits for one CVE on two
+/// platforms are two statements by one publisher, and counting them as a conflict made one.
+fn disagree<'a, S: PartialEq + 'a>(mut said: impl Iterator<Item = &'a S>) -> bool {
+    match said.next() {
+        Some(first) => said.any(|s| s != first),
+        None => false,
+    }
+}
+
 fn cmp_str(have: &str, op: &Op, want: &str) -> bool {
     let o = have.to_lowercase().cmp(&want.to_lowercase());
     match op {

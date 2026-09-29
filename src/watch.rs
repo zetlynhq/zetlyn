@@ -132,7 +132,9 @@ impl Watch {
                     let Some(full) = scope.entry(scheme, value) else {
                         continue;
                     };
-                    if !satisfies(&full, p) {
+                    // The scope's own reading of the query, on its scale. A watch that compared
+                    // the words as strings put `critical` below `high` and `urgent` above it.
+                    if !scope.entry_holds(&full, p) {
                         continue;
                     }
                 }
@@ -153,9 +155,23 @@ impl Watch {
         let ds = Dataset::open(&dir)?;
         let since: i64 = state.mark.parse().unwrap_or((ds.mark() - 1).max(0));
         let report = Member::changes(&ds, since, 500);
+        // Narrowed by the query as a scope's watch is. Without this a watch over a dataset
+        // delivered every change and its query was decoration.
+        let pred = self.pred();
+        let empty = Vec::new();
+        let kept: Vec<J> = report["changed"]
+            .as_array()
+            .unwrap_or(&empty)
+            .iter()
+            .filter(|c| match &pred {
+                Some(p) => ds.holds(c["record_id"].as_str().unwrap_or(""), p),
+                None => true,
+            })
+            .cloned()
+            .collect();
         Ok((
             json!({ "watch": self.decl.name, "dataset": name, "since": since,
-                    "entries": report["changed"].clone() }),
+                    "entries": J::Array(kept) }),
             ds.mark().to_string(),
         ))
     }
@@ -221,30 +237,6 @@ impl Watch {
         state.delivered.extend(entries.iter().cloned());
         self.write_state(&state)?;
         Ok(done)
-    }
-}
-
-/// A watch's query, against the values an answer shows.
-fn satisfies(entry: &crate::scope::Entry, pred: &Pred) -> bool {
-    match pred {
-        Pred::And(a, b) => satisfies(entry, a) && satisfies(entry, b),
-        Pred::Or(a, b) => satisfies(entry, a) || satisfies(entry, b),
-        Pred::Cmp { left, op, right } => {
-            let Some(field) = entry.fields.get(left) else {
-                return false;
-            };
-            field.means.values().flatten().any(|v| {
-                let ord = v.to_lowercase().cmp(&right.display().to_lowercase());
-                match op {
-                    expr::Op::Eq => ord.is_eq(),
-                    expr::Op::Ne => ord.is_ne(),
-                    expr::Op::Lt => ord.is_lt(),
-                    expr::Op::Le => ord.is_le(),
-                    expr::Op::Gt => ord.is_gt(),
-                    expr::Op::Ge => ord.is_ge(),
-                }
-            })
-        }
     }
 }
 

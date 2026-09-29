@@ -1,0 +1,17 @@
+5 entries over 12 records, 4 of 4 members answered
+  1. Baz Router authentication bypass  [CVE-2026-0004]
+     vulnerability: Baz Router authentication bypass (test/kev), baz: authentication bypass (test/vendor-a)
+  2. Path traversal in qux  [CVE-2026-0005]
+     vulnerability: Path traversal in qux (test/vendor-b)
+  3. Qux traversal (Windows)  [CVE-2026-0003]
+     exploit: Qux traversal (Windows) (test/exploits), Qux traversal (Linux) (test/exploits)
+  4. Foo Server remote code execution  [CVE-2026-0001]
+     vulnerability: Foo Server remote code execution (test/kev), foo: remote code execution (test/vendor-a), Remote code execution in foo (test/vendor-b)
+     exploit: Foo Server RCE (Metasploit) (test/exploits)
+     cvss: test/vendor-a=9.8, test/vendor-b=9.8
+     severity: test/vendor-a=important→high, test/vendor-b=high
+  5. bar: heap overflow  [CVE-2026-0002]
+     vulnerability: bar: heap overflow (test/vendor-a), Heap overflow in bar (test/vendor-b)
+     exploit: Bar heap overflow PoC (test/exploits)
+     cvss (divergent): test/vendor-a=9.8, test/vendor-b=7.5
+     severity (divergent): test/vendor-a=critical, test/vendor-b=medium

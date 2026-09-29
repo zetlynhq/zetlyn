@@ -1,0 +1,4 @@
+cve,title,severity,cvss,published
+CVE-2026-0001,foo: remote code execution,important,8.1,2026-08-30
+CVE-2026-0002,bar: heap overflow,critical,9.8,2026-08-31
+CVE-2026-0004,baz: authentication bypass,critical,9.1,2026-09-02

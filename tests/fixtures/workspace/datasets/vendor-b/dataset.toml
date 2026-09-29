@@ -1,0 +1,26 @@
+name  = "test/vendor-b"
+title = "Vendor B advisories"
+kind  = "vulnerability"
+about = "An ecosystem's rating of a vulnerability."
+
+[source]
+type = "csv"
+path = "advisories.csv"
+
+[records]
+id    = { scheme = "cve", from = "field:cve" }
+title = "field:title"
+known = "field:published"
+
+[records.fields]
+severity = { type = "code",   from = "field:severity", vocabulary = "vendor-b-severity" }
+cvss     = { type = "number", from = "field:cvss" }
+
+[vocabulary.vendor-b-severity]
+critical = "Critical."
+high     = "High."
+medium   = "Medium."
+low      = "Low."
+
+[retention]
+history = true

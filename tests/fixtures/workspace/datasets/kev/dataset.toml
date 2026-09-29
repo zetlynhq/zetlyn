@@ -1,0 +1,20 @@
+name  = "test/kev"
+title = "Known exploited"
+kind  = "vulnerability"
+about = "Which vulnerabilities are being exploited."
+
+[source]
+type = "csv"
+path = "kev.csv"
+
+[records]
+id    = { scheme = "cve", from = "field:cveID" }
+title = "field:vulnerabilityName"
+known = "field:dateAdded"
+
+[records.fields]
+vendor    = { type = "text", from = "field:vendorProject" }
+exploited = { type = "code", from = "const:yes" }
+
+[retention]
+history = true

@@ -755,3 +755,49 @@ fn a_check_that_finds_something_untrue_fails() {
     let (ok, said) = run(&ws.root, &["source", "check", &empty.display().to_string()]);
     assert!(!ok && said.contains("holds no claims"), "{said}");
 }
+
+#[test]
+fn a_declaration_read_again_is_not_news() {
+    let ws = Workspace::new("reshaped");
+    ws.z(&["tracker", "refresh", &ws.scope()]);
+    // A property the source always had and the declaration never read: every claim now says
+    // something new, and nothing in the world has changed.
+    let file = ws.root.join("sources/vendor-a/source.yaml");
+    let text = std::fs::read_to_string(&file).unwrap();
+    let text = text.replacen("  properties:\n", "  properties:\n    headline:\n      type: text\n      from: field:title\n", 1);
+    std::fs::write(&file, text).unwrap();
+    ws.z(&["source", "update", &ws.dataset("vendor-a"), "--reread"]);
+    ws.z(&["tracker", "refresh", &ws.scope()]);
+    assert_eq!(signals(&ws), ["health - -"], "one health signal, and no change for every claim");
+    // The next real change is news again.
+    ws.update();
+    ws.z(&["tracker", "refresh", &ws.scope()]);
+    assert!(signals(&ws).contains(&"changed cve:cve-2026-0001 cvss".to_string()), "{:?}", signals(&ws));
+}
+
+#[test]
+fn a_relation_is_what_a_claim_states_or_a_person_signs() {
+    let ws = Workspace::new("relations");
+    // Exploit-DB's entries name their own number beside the CVE, so a claim states both.
+    let file = ws.root.join("trackers/cve/tracker.yaml");
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, format!("{text}relations:\n- name: listed_as\n  to: edb\n")).unwrap();
+    ws.z(&["tracker", "refresh", &ws.scope()]);
+    let ask = |q: &str| -> Vec<String> { ws.z(&["tracker", "things", &ws.scope(), q]).lines().map(str::to_string).collect() };
+    assert_eq!(ask("listed_as:*"), ["cve:cve-2026-0001", "cve:cve-2026-0002", "cve:cve-2026-0003"]);
+    assert_eq!(ask("listed_as:102"), ["cve:cve-2026-0003"]);
+
+    // Where no claim states it, a person may, and it counts as theirs.
+    let scope = ws.scope();
+    let (ok, said) = run(&ws.root, &["tracker", "match", &scope, "CVE-2026-0004", "listed_as", "999"]);
+    assert!(!ok && said.contains("say who with --by"), "{said}");
+    ws.z(&["tracker", "match", &scope, "CVE-2026-0004", "listed_as", "999", "--by", "a reviewer", "--why", "the advisory links it"]);
+    assert_eq!(ask("listed_as:999"), ["cve:cve-2026-0004"]);
+    ws.z(&["tracker", "match", &scope, "CVE-2026-0004", "listed_as", "999", "--by", "a reviewer", "--withdraw"]);
+    assert!(ask("listed_as:999").is_empty());
+    let record = std::fs::read_to_string(ws.root.join("trackers/cve/matches.jsonl")).unwrap();
+    assert_eq!(record.lines().count(), 2, "the match and its withdrawal both stay");
+
+    let (ok, said) = run(&ws.root, &["tracker", "match", &scope, "CVE-2026-0004", "fixes", "x", "--by", "a"]);
+    assert!(!ok && said.contains("this tracker's relations are listed_as"), "{said}");
+}

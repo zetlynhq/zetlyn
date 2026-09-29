@@ -1480,6 +1480,23 @@ impl Tracker {
         for m in &self.members {
             snap.states.insert(m.name().to_string(), m.state().to_string());
             snap.kinds.insert(m.name().to_string(), m.kind());
+            // The shape of what it says: its properties and their types, and the identifier
+            // schemes it names things by. Counts are not in it, so an update does not change it.
+            let mut props: Vec<String> = m.described["properties"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|p| format!("{}:{}", p["name"].as_str().unwrap_or(""), p["type"].as_str().unwrap_or("")))
+                .collect();
+            props.sort();
+            let mut schemes: Vec<String> = m.described["schemes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|s| s["scheme"].as_str().map(str::to_string))
+                .collect();
+            schemes.sort();
+            snap.shapes.insert(m.name().to_string(), format!("{} | {}", props.join(","), schemes.join(",")));
             let mut offset = 0usize;
             loop {
                 let q = Query {
@@ -1515,6 +1532,15 @@ impl Tracker {
                         .entry(m.name().to_string())
                         .or_default()
                         .insert(hit.record_id.clone());
+                    // What this claim says the thing is to something else: every other
+                    // identifier it states of a scheme a relation names.
+                    for r in &self.decl.relations {
+                        for other in hit.ids.iter().filter(|i| i.scheme == r.to) {
+                            if let Some(target) = r.target(&other.value) {
+                                thing.related.entry(r.name.clone()).or_default().entry(target).or_default().insert(m.name().to_string());
+                            }
+                        }
+                    }
                     let props = thing.by.entry(m.name().to_string()).or_default();
                     for (name, value) in &hit.fields {
                         let property = self.field_out(m.name(), name);
@@ -1557,6 +1583,12 @@ impl Tracker {
                 if hits.len() < 5000 {
                     break;
                 }
+            }
+        }
+        // And what a person has matched and signed, for a thing the tracker holds.
+        for m in crate::matches::standing(&self.dir) {
+            if let Some(t) = snap.things.get_mut(&m.key) {
+                t.related.entry(m.relation.clone()).or_default().entry(m.target.clone()).or_default().insert(format!("person:{}", m.by));
             }
         }
         snap

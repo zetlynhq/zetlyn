@@ -21,6 +21,9 @@ pub struct TrackerDecl {
     pub join: Vec<String>,
     #[serde(default, rename = "align", skip_serializing_if = "BTreeMap::is_empty")]
     pub normalise: BTreeMap<String, Align>,
+    /// What a thing is to something else, where one claim states both identifiers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relations: Vec<Relation>,
     #[serde(default, skip_serializing_if = "Views::is_empty")]
     pub view: Views,
     #[serde(default, skip_serializing_if = "Promise::is_empty")]
@@ -227,5 +230,63 @@ impl Align {
             .map(|t| t.trim().trim_end_matches('d'))
             .and_then(|t| t.parse::<i64>().ok())
             .unwrap_or(0)
+    }
+}
+
+/// A relation, as a result: a claim that names the thing and names something else of `to` says
+/// that the thing is `name` that. Nobody draws it; it is there where a source states it, or where
+/// a person has confirmed it and signed it (D9).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Relation {
+    /// The verb, read from the thing: `affects`, `made_by`, `quantises`.
+    pub name: String,
+    /// The other identifier's scheme.
+    pub to: String,
+    /// Which part of it: a CPE names a version of a product of a vendor, and `product` or
+    /// `vendor` says which of those this relation is about. Absent, the whole identifier.
+    #[serde(default, rename = "as", skip_serializing_if = "Option::is_none")]
+    pub part: Option<String>,
+    /// Where a source says the other side in words and not by identifier: the properties that
+    /// name it, joined into the same spelling, offered to a person to confirm and never used
+    /// on their own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggest_from: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub about: String,
+}
+
+impl Relation {
+    /// The other side as this relation compares it, from one identifier of `to`.
+    pub fn target(&self, value: &str) -> Option<String> {
+        let v = value.trim().to_lowercase();
+        if self.to != "cpe" || self.part.is_none() {
+            return Some(v).filter(|v| !v.is_empty());
+        }
+        // cpe:2.3:a:vendor:product:version:… and cpe:/a:vendor:product:version
+        let parts: Vec<&str> = match v.strip_prefix("cpe:2.3:") {
+            Some(rest) => rest.split(':').skip(1).collect(),
+            None => v.strip_prefix("cpe:/")?.split(':').skip(1).collect(),
+        };
+        let (vendor, product) = (parts.first().copied().unwrap_or(""), parts.get(1).copied().unwrap_or(""));
+        let named = |s: &str| !s.is_empty() && s != "*" && s != "-";
+        match self.part.as_deref() {
+            Some("vendor") if named(vendor) => Some(vendor.to_string()),
+            Some("product") if named(vendor) && named(product) => Some(format!("{vendor}/{product}")),
+            _ => None,
+        }
+    }
+
+    /// A spelling of words for the other side, the way a CPE spells it: `Microsoft`,
+    /// `Windows Server 2025` is `microsoft/windows_server_2025`.
+    pub fn spell(words: &[&str]) -> String {
+        words
+            .iter()
+            .map(|w| {
+                let s: String = w.trim().to_lowercase().chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect();
+                s.split('_').filter(|p| !p.is_empty()).collect::<Vec<_>>().join("_")
+            })
+            .collect::<Vec<_>>()
+            .join("/")
     }
 }

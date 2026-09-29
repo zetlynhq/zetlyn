@@ -33,6 +33,8 @@ pub enum Q {
     /// This property changed at a source within this many seconds.
     Changed(String, i64),
     Id(String),
+    /// `affects:linux/linux`, or `affects:microsoft/*` for everything of that vendor.
+    Related(String, String),
     /// `[source.]property op literal`.
     Cmp { source: Option<String>, property: String, op: Op, value: String },
     /// `source.property op source.property`, which is `=` or `!=` and compares what each says.
@@ -61,6 +63,8 @@ pub struct ThingView {
     pub conflicts: BTreeSet<String>,
     /// Property, every time a change to it was signalled.
     pub changed: BTreeMap<String, Vec<String>>,
+    /// Relation, the other side, who says so.
+    pub related: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
 }
 
 /// What a question is asked against: the tracker's declaration for its scales and the names of
@@ -228,6 +232,15 @@ fn unary(t: &[String], at: &mut usize, cx: &Context) -> Result<Q, String> {
 }
 
 fn atom(word: &str, cx: &Context) -> Result<Q, String> {
+    // A relation the tracker declares, by its name. One it does not is not a term.
+    if let Some((name, rest)) = word.split_once(':') {
+        if let Some(r) = cx.decl.relations.iter().find(|r| r.name == name) {
+            if rest.trim().is_empty() {
+                return Err(format!("{word}: say what, as {}:{}", r.name, if r.part.as_deref() == Some("product") { "vendor/product" } else { "value" }));
+            }
+            return Ok(Q::Related(r.name.clone(), rest.trim().to_string()));
+        }
+    }
     if let Some(p) = word.strip_prefix("conflict:") {
         // Only an aligned property is compared, so any other would quietly hold for nothing.
         let aligned = &cx.decl.normalise;
@@ -265,7 +278,8 @@ fn atom(word: &str, cx: &Context) -> Result<Q, String> {
         }
     }
     let (left, op, right) = split_op(word).ok_or_else(|| {
-        format!("{word}: not a term. conflict:, has:, only:, appeared:, changed:, or name=value")
+        let rel: Vec<String> = cx.decl.relations.iter().map(|r| format!("{}:", r.name)).collect();
+        format!("{word}: not a term. conflict:, has:, only:, appeared:, changed:, {}or name=value", rel.iter().map(|r| format!("{r}, ")).collect::<String>())
     })?;
     if left.eq_ignore_ascii_case("id") {
         return Ok(Q::Id(right.to_string()));
@@ -343,6 +357,13 @@ pub fn holds(q: &Q, t: &ThingView, cx: &Context) -> bool {
             .get(p)
             .is_some_and(|ats| ats.iter().any(|at| seconds(at).is_some_and(|s| cx.now - s <= *within))),
         Q::Id(v) => t.value.eq_ignore_ascii_case(v),
+        Q::Related(name, want) => t.related.get(name).is_some_and(|targets| {
+            let want = want.to_lowercase();
+            match want.strip_suffix('*') {
+                Some(prefix) => targets.keys().any(|k| k.starts_with(prefix)),
+                None => targets.contains_key(&want),
+            }
+        }),
         Q::Cmp { source, property, op, value } => t
             .by
             .iter()

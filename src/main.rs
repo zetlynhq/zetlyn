@@ -19,6 +19,7 @@ mod identity;
 mod key;
 mod place;
 mod platform;
+mod matches;
 mod migrate;
 mod claim;
 mod remote;
@@ -136,6 +137,10 @@ zetlyn
   zetlyn tracker describe <dir> [--sources <dir>]
   zetlyn tracker search <dir> <query> [--view <name>] [--kind <word>] [--limit <n>]
   zetlyn tracker measure <dir>
+  zetlyn tracker match <tracker> <thing> <relation> <target> --by <who> [--why …] [--withdraw]
+      A match a person makes where no claim states it: kept, signed, in matches.jsonl beside the
+      tracker, and withdrawn by a later line rather than deleted.
+
   zetlyn tracker refresh <dir> [--rebuild]
   zetlyn tracker things <dir> <question>
       conflict:severity and has:kev, nvd.severity=critical, only:nvd, appeared:exploit<7d
@@ -307,6 +312,39 @@ fn run(args: &[String]) -> Result<(), String> {
                 // Non-zero, so a check in CI stops the build that would publish it.
                 if wrong.is_empty() { Ok(()) } else { Err(format!("{} untrue", wrong.len())) }
             }
+            // A person's match: this thing is `relation` that, said by them.
+            Some("match") => {
+                let (dir, datasets) = scope_at(args, 2)?;
+                let p = positional(args, 2);
+                let (key, relation, target) = match (p.get(1), p.get(2), p.get(3)) {
+                    (Some(k), Some(r), Some(t)) => (k.to_string(), r.to_string(), t.to_lowercase()),
+                    _ => return Err("tracker match <tracker> <thing> <relation> <target> --by <who> [--why …] [--withdraw]".into()),
+                };
+                let scope = tracker::Tracker::open(&dir, &datasets)?;
+                if !scope.decl.relations.iter().any(|r| r.name == relation) {
+                    let names: Vec<&str> = scope.decl.relations.iter().map(|r| r.name.as_str()).collect();
+                    return Err(format!("{relation}: this tracker's relations are {}", if names.is_empty() { "none".to_string() } else { names.join(", ") }));
+                }
+                let scheme = scope.decl.join.first().cloned().unwrap_or_default();
+                // `cve:CVE-2026-1` names its scheme; `CVE-2026-1` is the tracker's own.
+                let key = match key.split_once(':') {
+                    Some((s, v)) => crate::schemes::key(s, v),
+                    None => crate::schemes::key(&scheme, &key),
+                };
+                let m = matches::Match {
+                    at: crate::iso_stamp(crate::now()),
+                    by: flag(args, "--by").unwrap_or("").to_string(),
+                    key,
+                    relation,
+                    target,
+                    why: flag(args, "--why").unwrap_or("").to_string(),
+                    withdrawn: args.iter().any(|a| a == "--withdraw"),
+                };
+                matches::record(&dir, &m)?;
+                scope.refresh(false)?;
+                println!("{} {} {} {}, by {}", m.key, m.relation, m.target, if m.withdrawn { "withdrawn" } else { "kept" }, m.by);
+                Ok(())
+            }
             // The tracker's own store: things, conflicts and what changed. `--rebuild` makes it
             // again from the sources and writes no signals.
             Some("refresh") => {
@@ -333,8 +371,13 @@ fn run(args: &[String]) -> Result<(), String> {
                 let cx = t.context();
                 let q = thingquery::parse(&question, &cx)?;
                 let store = thingstore::ThingStore::open(&dir)?;
+                // A reader that stops reading (`| head`) is an ending, not a failure.
+                use std::io::Write;
+                let mut out = std::io::stdout().lock();
                 for key in store.matching(&q, &cx)? {
-                    println!("{key}");
+                    if writeln!(out, "{key}").is_err() {
+                        break;
+                    }
                 }
                 Ok(())
             }

@@ -311,7 +311,7 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
     shell(&d.title, body)
 }
 
-fn entry_page(scope: &Tracker, scheme: &str, value: &str) -> Option<String> {
+fn entry_page(scope: &Tracker, scheme: &str, value: &str, operator: bool, said: Option<&str>) -> Option<String> {
     let entry = scope.entry(scheme, value)?;
     // What the tracker store judges, which is what the lists and the signals judge too. A thing
     // page that decided for itself could call a conflict what the conflicts page calls wording.
@@ -367,6 +367,7 @@ fn entry_page(scope: &Tracker, scheme: &str, value: &str) -> Option<String> {
             }
         }
 
+        (relations_section(scope, &key, scheme, value, operator, said))
         @if !entry.fields.is_empty() {
             h2 { "What each source says" }
             table {
@@ -1501,8 +1502,35 @@ impl TrackerSite {
                     None,
                 )
             }
+            // A person's match, signed and kept, and the store made to hold it.
+            _ if post && *operator && parts.len() == 4 && parts[0] == "thing" && parts[3] == "match" => {
+                let key = crate::schemes::key(&parts[1], &parts[2]);
+                let m = crate::matches::Match {
+                    at: crate::iso_stamp(crate::now()),
+                    by: form_field(&form, "by").trim().to_string(),
+                    key,
+                    relation: form_field(&form, "relation"),
+                    target: form_field(&form, "target").trim().to_lowercase(),
+                    why: form_field(&form, "why").trim().to_string(),
+                    withdrawn: form_field(&form, "withdraw") == "1",
+                };
+                let known = scope.decl.relations.iter().any(|r| r.name == m.relation);
+                let said = if !known {
+                    format!("{}: this tracker has no such relation", m.relation)
+                } else {
+                    match crate::matches::record(&scope.dir, &m).and_then(|_| scope.refresh(false).map(|_| ())) {
+                        Ok(()) if m.withdrawn => format!("Withdrawn. The match and its withdrawal both stay in {}.", crate::matches::FILE),
+                        Ok(()) => format!("Kept: {} {} {}, confirmed by {}.", parts[2], m.relation, m.target, m.by),
+                        Err(e) => e,
+                    }
+                };
+                match entry_page(&scope, &parts[1], &parts[2], true, Some(&said)) {
+                    Some(html) => (html, "text/html; charset=utf-8", None),
+                    None => (shell("Not here", html! { h1 { "No such thing" } }), "text/html; charset=utf-8", None),
+                }
+            }
             _ if parts.len() == 3 && parts[0] == "thing" => {
-                match entry_page(&scope, &parts[1], &parts[2]) {
+                match entry_page(&scope, &parts[1], &parts[2], *operator, None) {
                     Some(html) => (html, "text/html; charset=utf-8", None),
                     None => {
                         missing = true;
@@ -2173,4 +2201,107 @@ fn demo(scope: &Tracker) -> J {
         "today": today,
         "thing": thing,
     })
+}
+
+/// What a thing is to other things: every relation a source states, every match a person signed,
+/// and what a source says only in words, offered for a person to confirm and never counted.
+fn relations_section(scope: &Tracker, key: &str, scheme: &str, value: &str, operator: bool, said: Option<&str>) -> Markup {
+    if scope.decl.relations.is_empty() {
+        return html! {};
+    }
+    let Ok(store) = crate::thingstore::ThingStore::open(&scope.dir) else { return html! {} };
+    let related = store.related_of(key);
+    let signed: Vec<crate::matches::Match> = crate::matches::standing(&scope.dir).into_iter().filter(|m| m.key == key).collect();
+    let title_of = |source: &str| -> String {
+        match source.strip_prefix("person:") {
+            Some(p) => format!("confirmed by {p}"),
+            None => said_by(scope, source).0,
+        }
+    };
+    // Suggestions, per source and per relation: the words it uses, spelled as the relation spells
+    // an identifier, where no source or person already relates it so.
+    let words = store.said_of(key);
+    let mut suggested: Vec<(String, String, String)> = Vec::new();
+    for r in scope.decl.relations.iter().filter(|r| !r.suggest_from.is_empty()) {
+        let sources: BTreeSet<&String> = words.iter().map(|(s, ..)| s).collect();
+        for source in sources {
+            let lists: Vec<Vec<String>> = r
+                .suggest_from
+                .iter()
+                .map(|p| words.iter().filter(|(s, prop, ..)| s == source && prop == p).flat_map(|(_, _, raw, _)| raw.clone()).collect())
+                .collect();
+            if lists.iter().any(|l| l.is_empty()) {
+                continue;
+            }
+            // Every combination, a handful at most: which vendor goes with which product is the
+            // person's to say, not this page's.
+            let mut combos: Vec<Vec<String>> = vec![Vec::new()];
+            for l in &lists {
+                combos = combos.into_iter().flat_map(|c| l.iter().map(move |w| { let mut c = c.clone(); c.push(w.clone()); c })).take(6).collect();
+            }
+            for c in combos {
+                let refs: Vec<&str> = c.iter().map(String::as_str).collect();
+                let target = crate::trackerdecl::Relation::spell(&refs);
+                let held = related.get(&r.name).is_some_and(|t| t.contains_key(&target));
+                if !target.is_empty() && !held && !suggested.iter().any(|(n, t, _)| *n == r.name && *t == target) {
+                    suggested.push((r.name.clone(), target, format!("{} says “{}”", said_by(scope, source).0, c.join(" · "))));
+                }
+            }
+        }
+    }
+    if related.is_empty() && suggested.is_empty() {
+        return html! {};
+    }
+    let action = format!("{}/{}/match", urlencode(scheme), urlencode(value));
+    html! {
+        h2 { "What it is to other things" }
+        @if let Some(s) = said { div.note { (s) } }
+        table { tbody {
+            @for (name, targets) in &related {
+                @for (target, who) in targets {
+                    tr {
+                        td { (name) }
+                        td {
+                            a href={(at("/things?q=")) (urlencode(&format!("{name}:{target}")))} { (target) }
+                            div.why { (who.iter().map(|w| title_of(w)).collect::<Vec<_>>().join(", ")) }
+                            @for m in signed.iter().filter(|m| m.relation == *name && m.target == *target) {
+                                div.why { (m.at.get(..10).unwrap_or("")) @if !m.why.is_empty() { ": " (m.why) } }
+                                @if operator {
+                                    form method="post" action={(at("/thing/")) (action)} {
+                                        input type="hidden" name="relation" value=(name);
+                                        input type="hidden" name="target" value=(target);
+                                        input type="hidden" name="by" value=(m.by);
+                                        input type="hidden" name="withdraw" value="1";
+                                        button type="submit" { "Withdraw" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } }
+        @if !suggested.is_empty() {
+            p.dim { "In words only, so not counted until a person confirms one:" }
+            table { tbody {
+                @for (name, target, whence) in &suggested {
+                    tr {
+                        td { (name) }
+                        td {
+                            code { (target) } div.why { (whence) }
+                            @if operator {
+                                form.bar method="post" action={(at("/thing/")) (action)} {
+                                    input type="hidden" name="relation" value=(name);
+                                    input type="hidden" name="target" value=(target);
+                                    input type="text" name="by" placeholder="Your name" required;
+                                    input type="text" name="why" placeholder="Why, in a few words";
+                                    button type="submit" { "Confirm" }
+                                }
+                            }
+                        }
+                    }
+                }
+            } }
+        }
+    }
 }

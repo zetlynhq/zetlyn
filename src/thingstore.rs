@@ -40,6 +40,8 @@ pub struct Snap {
     pub by: BTreeMap<String, BTreeMap<String, Said>>,
     /// Source, the claims it holds about the thing.
     pub claims: BTreeMap<String, BTreeSet<String>>,
+    /// Relation, the other side, and who says so: a source, or `person:<who>` for a match.
+    pub related: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
 }
 
 /// Every thing a tracker knows, by `scheme:value` with the value's case folded.
@@ -50,6 +52,9 @@ pub struct Snapshot {
     pub states: BTreeMap<String, String>,
     /// Source, the kind of claim it makes.
     pub kinds: BTreeMap<String, String>,
+    /// Source, the shape of its claims: the properties it says, with their types, and the
+    /// identifier schemes. A source whose shape changed was read again under a new declaration.
+    pub shapes: BTreeMap<String, String>,
 }
 
 impl Snap {
@@ -198,6 +203,10 @@ create table if not exists speaks(
 create table if not exists conflict(
   key text not null, property text not null, since text not null, sources text not null,
   primary key(key, property));
+create table if not exists related(
+  key text not null, name text not null, target text not null, sources text not null,
+  primary key(key, name, target));
+create index if not exists related_target on related(name, target);
 create table if not exists signal(
   id integer primary key, at text not null, kind text not null, key text,
   property text, source text, was text, is_now text);
@@ -266,6 +275,19 @@ impl ThingStore {
                 key,
                 Snap { scheme, value, title, ..Snap::default() },
             );
+        }
+        let mut stmt = self
+            .db
+            .prepare("select key, name, target, sources from related")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?)))
+            .map_err(|e| e.to_string())?;
+        for (key, name, target, sources) in rows.flatten() {
+            if let Some(t) = snap.things.get_mut(&key) {
+                let who: BTreeSet<String> = serde_json::from_str(&sources).unwrap_or_default();
+                t.related.entry(name).or_default().insert(target, who);
+            }
         }
         let mut stmt = self
             .db
@@ -431,6 +453,28 @@ impl ThingStore {
             }
         }
 
+        // A source read again under a new declaration says new things about everything it holds,
+        // and none of that is news: its properties did not change in the world, the reading of
+        // them did. What it says of things is not signalled this once; one health signal says why.
+        // New things and disagreements between sources are signalled as ever.
+        let shaped_before: BTreeMap<String, String> =
+            self.meta("shapes").and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        let reshaped: BTreeSet<String> = now
+            .shapes
+            .iter()
+            .filter(|(s, shape)| shaped_before.get(*s).is_some_and(|was| was != *shape))
+            .map(|(s, _)| s.clone())
+            .collect();
+        if !reshaped.is_empty() {
+            signals.retain(|s| {
+                let own = matches!(s["kind"].as_str(), Some("changed" | "new_perspective" | "withdrawn"));
+                !(own && s["source"].as_str().is_some_and(|src| reshaped.contains(src)))
+            });
+            for source in &reshaped {
+                signals.push(json!({ "kind": "health", "key": null, "property": null, "source": source,
+                    "was": shaped_before.get(source), "is": format!("read again as {}", now.shapes[source]) }));
+            }
+        }
         // When each source first spoke of each thing, which a refresh keeps: `appeared:` asks it.
         let spoke: BTreeMap<(String, String), String> = self
             .db
@@ -441,7 +485,7 @@ impl ThingStore {
             })
             .unwrap_or_default();
         let tx = self.db.transaction().map_err(|e| e.to_string())?;
-        tx.execute_batch("delete from said; delete from speaks; delete from conflict;")
+        tx.execute_batch("delete from said; delete from speaks; delete from conflict; delete from related;")
             .map_err(|e| e.to_string())?;
         if rebuild {
             // A rebuild starts the log again but not its numbering: a watch or a reader holds the
@@ -468,6 +512,9 @@ impl ThingStore {
                      values(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 )
                 .map_err(|e| e.to_string())?;
+            let mut put_related = tx
+                .prepare("insert into related(key, name, target, sources) values(?1, ?2, ?3, ?4)")
+                .map_err(|e| e.to_string())?;
             let mut put_speaks = tx
                 .prepare("insert into speaks(key, source, claims, first_seen, kind) values(?1, ?2, ?3, ?4, ?5)")
                 .map_err(|e| e.to_string())?;
@@ -487,6 +534,13 @@ impl ThingStore {
                                 said.kind,
                                 said.understood,
                             ])
+                            .map_err(|e| e.to_string())?;
+                    }
+                }
+                for (name, targets) in &snap.related {
+                    for (target, sources) in targets {
+                        put_related
+                            .execute(rusqlite::params![key, name, target, json!(sources).to_string()])
                             .map_err(|e| e.to_string())?;
                     }
                 }
@@ -558,6 +612,11 @@ impl ThingStore {
             tx.execute(
                 "insert or replace into meta(key, value) values('states', ?1)",
                 [json!(now.states).to_string()],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.execute(
+                "insert or replace into meta(key, value) values('shapes', ?1)",
+                [json!(now.shapes).to_string()],
             )
             .map_err(|e| e.to_string())?;
         }
@@ -790,6 +849,7 @@ impl ThingStore {
                 speaks: speaks.remove(&key).unwrap_or_default(),
                 conflicts: conflicts.remove(&key).unwrap_or_default(),
                 changed: changed.remove(&key).unwrap_or_default(),
+                related: snap.related,
                 key,
             })
             .collect())
@@ -845,6 +905,19 @@ impl ThingStore {
         stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64)))
             .map(|rows| rows.flatten().collect())
             .unwrap_or_default()
+    }
+
+    /// What one thing is to other things: relation, the other side, and who says so.
+    pub fn related_of(&self, key: &str) -> BTreeMap<String, BTreeMap<String, BTreeSet<String>>> {
+        let mut out: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new();
+        let Ok(mut stmt) = self.db.prepare("select name, target, sources from related where key = ?1 order by name, target") else {
+            return out;
+        };
+        let rows = stmt.query_map([key], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)));
+        for (name, target, sources) in rows.into_iter().flatten().flatten() {
+            out.entry(name).or_default().insert(target, serde_json::from_str(&sources).unwrap_or_default());
+        }
+        out
     }
     /// The sources that speak about one thing.
     pub fn speakers(&self, key: &str) -> Vec<String> {

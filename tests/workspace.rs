@@ -839,3 +839,29 @@ fn a_public_tracker_needs_every_source_to_say_it_may_be() {
     let (ok, said) = publish();
     assert!(!ok && said.contains("test/exploits may not be republished"), "{said}");
 }
+
+#[test]
+fn a_licence_corrected_reaches_a_subscriber_without_a_new_version() {
+    let ws = Workspace::new("hub-licence");
+    let hub = ws.root.join("hub").display().to_string();
+    let held = ws.root.join("elsewhere").display().to_string();
+    let with_home = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_zetlyn")).args(args).env("ZETLYN_HOME", ws.root.join("home")).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    with_home(&["source", "publish", &ws.dataset("vendor-a"), "--to", &hub]);
+    with_home(&["source", "subscribe", "test/vendor-a", "--from", &hub, "--at", &held]);
+    let theirs = std::path::Path::new(&held).join("source.yaml");
+    assert!(!std::fs::read_to_string(&theirs).unwrap().contains("licence:"));
+
+    // The same claims, and now a word on showing them.
+    let file = ws.root.join("sources/vendor-a/source.yaml");
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, format!("{text}licence:\n  republish: summary\n  terms: https://example.org/terms\n")).unwrap();
+    with_home(&["source", "publish", &ws.dataset("vendor-a"), "--to", &hub]);
+    let pulled = with_home(&["source", "pull", &held]);
+    assert!(pulled.contains("licence and terms, taken") && pulled.contains("which is what you hold"), "{pulled}");
+    let now = std::fs::read_to_string(&theirs).unwrap();
+    assert!(now.contains("republish: summary") && now.contains("https://example.org/terms"), "{now}");
+}

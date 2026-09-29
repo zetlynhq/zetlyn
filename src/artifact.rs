@@ -1041,3 +1041,25 @@ pub fn new_key(dir: &Path) -> Result<String, String> {
 pub fn verify(pinned: &str, manifest: &[u8], signature: &str) -> Result<(), String> {
     crate::key::verify(pinned, manifest, signature)
 }
+
+/// What the publisher says about the claims, taken from a manifest into a subscriber's declaration
+/// whether or not the claims moved: a licence corrected is a statement, not a new version, and a
+/// subscriber republishing on the old one would be republishing on terms nobody states any more.
+/// True where anything changed.
+pub fn take_statement(dir: &Path, manifest: &J) -> Result<bool, String> {
+    let mut decl = crate::sourcedecl::SourceDecl::load(dir)?;
+    let licence: crate::sourcedecl::Licence = serde_json::from_value(manifest["licence"].clone()).unwrap_or_default();
+    let terms = manifest["terms"].as_str().unwrap_or("").to_string();
+    if decl.licence == licence && decl.terms == terms {
+        return Ok(false);
+    }
+    decl.licence = licence;
+    decl.terms = terms;
+    let text = format!(
+        "# Subscribed, not fetched. `zetlyn source update` on this asks the hub whether there is a\n\
+         # newer version and applies it; the source belongs to whoever published these claims.\n{}",
+        crate::yaml::to_string(&decl)?
+    );
+    std::fs::write(dir.join(crate::sourcedecl::FILE), text).map_err(|e| e.to_string())?;
+    Ok(true)
+}

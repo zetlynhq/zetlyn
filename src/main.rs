@@ -1220,6 +1220,9 @@ fn dataset_update(args: &[String]) -> Result<(), String> {
     let manifest = artifact::manifest_signed_by(place.as_ref(), &reference, "sources", pinned)?;
     let offered = manifest["version"].as_str().unwrap_or_default();
     let held = artifact::held_version(&dir).unwrap_or_default();
+    if artifact::take_statement(&dir, &manifest)? {
+        println!("{reference}: the publisher's licence and terms, taken");
+    }
     if offered == held {
         println!("{reference} is at {held}, which is what you hold");
         return Ok(());

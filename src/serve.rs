@@ -152,11 +152,32 @@ table.things td:first-child, table.things th:first-child { padding-left: .6rem; 
 .pager span.off { color: var(--dim); opacity: .5; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: .92em; }
 button.primary, .button.primary { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600; }
+a.button { display: inline-block; padding: .55rem .9rem; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); }
+a.button:hover { text-decoration: none; border-color: var(--fg); }
+a.button.primary:hover { color: #fff; }
 button:hover { border-color: var(--fg); }
 input[type=file] { font: inherit; font-size: .88rem; color: var(--dim); }
 input[type=file]::file-selector-button { font: inherit; padding: .45rem .9rem; margin-right: .7rem; cursor: pointer;
   border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); }
 input[type=file]::file-selector-button:hover { border-color: var(--fg); }
+#jobs { position: fixed; left: 0; right: 0; bottom: 0; background: var(--panel); border-top: 1px solid var(--line);
+  padding: .6rem 1rem calc(.6rem + env(safe-area-inset-bottom, 0px)); font-size: .9rem; }
+#jobs .job { display: flex; gap: .8rem; align-items: center; flex-wrap: wrap; max-width: 60rem; margin: 0 auto; }
+#jobs progress, main progress { flex: 1 1 10rem; min-width: 6rem; width: 100%; }
+body.busy main { padding-bottom: 6rem; }
+header.top .autoupdate { margin-left: auto; display: flex; align-items: center; gap: .45rem; font-size: .84rem;
+  color: var(--dim); border: 1px solid var(--line); border-radius: 999px; padding: .25rem .75rem; background: var(--panel); }
+header.top .autoupdate:hover { color: var(--fg); border-color: var(--fg); text-decoration: none; }
+header.top .autoupdate .dot { width: .5rem; height: .5rem; border-radius: 50%; background: var(--line-strong); }
+header.top .autoupdate.on .dot { background: #2e7d32; }
+header.top .autoupdate + nav.links { margin-left: 1.4rem; }
+label.choice { display: flex; gap: .7rem; align-items: baseline; max-width: 34rem; margin: .45rem 0; padding: .65rem .9rem;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--panel); cursor: pointer; }
+label.choice:has(input:checked) { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+details { margin: 2rem 0; } details > summary { cursor: pointer; font-weight: 600; margin-bottom: .6rem; }
+.offer { display: flex; gap: .8rem; align-items: center; flex-wrap: wrap; border: 1px solid var(--accent); border-radius: 10px;
+  padding: .9rem 1.1rem; background: var(--panel); margin: 1.2rem 0; }
+.offer p { margin: 0; flex: 1 1 18rem; } .offer form { margin: 0; }
 @media (max-width: 40rem) {
   header.top .wrap { height: 56px; gap: 1rem; }
   nav.links { gap: 1rem; font-size: .85rem; }
@@ -301,6 +322,11 @@ pub struct Frame {
     pub nav: Vec<(String, String)>,
     pub section: Option<(String, String)>,
     pub tabs: Vec<(String, String)>,
+    /// Where the app answers `/jobs`, for the bar of what runs in the background; `None` where
+    /// nothing runs for this reader (a hub, a visitor).
+    pub jobs: Option<String>,
+    /// The automatic-update switch at the right of the header: its words, where it leads, on.
+    pub status: Option<(String, String, bool)>,
 }
 
 thread_local! {
@@ -325,6 +351,15 @@ pub fn frame_section(section: Option<(String, String)>, tabs: Vec<(String, Strin
     });
 }
 
+
+/// The background bar and the automatic-update switch, for the person the app answers.
+pub fn frame_app(jobs: Option<String>, status: Option<(String, String, bool)>) {
+    FRAME.with(|f| {
+        let mut f = f.borrow_mut();
+        f.jobs = jobs;
+        f.status = status;
+    });
+}
 pub fn frame() -> Frame {
     FRAME.with(|f| f.borrow().clone())
 }
@@ -371,6 +406,9 @@ pub fn shell(title: &str, body: Markup) -> String {
                             img.brand-mark src={"data:image/png;base64," (MARK)} alt="";
                             span { "Zetlyn" }
                         }
+                        @if let Some((words, href, on)) = &f.status {
+                            a.autoupdate.on[*on] href=(href) title="Automatic updates" { span.dot {} (words) }
+                        }
                         @if !f.nav.is_empty() {
                             nav.links {
                                 @for (label, href) in &f.nav { a href=(href) { (label) } }
@@ -408,6 +446,10 @@ pub fn shell(title: &str, body: Markup) -> String {
                     }
                 }
                 main { (body) }
+                @if let Some(jobs) = &f.jobs {
+                    div #jobs data-at=(jobs) hidden {}
+                    (maud::PreEscaped(crate::app::BAR_SCRIPT))
+                }
             }
         }
     };

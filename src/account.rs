@@ -384,6 +384,9 @@ pub struct Site {
     /// Who the assist asks, if anyone. See assist.rs.
     #[serde(default)]
     pub assist: crate::assist::Config,
+    /// Updates in the background, and how often. See autoupdate.rs.
+    #[serde(default)]
+    pub update: crate::autoupdate::Config,
 }
 
 #[derive(Debug, Deserialize)]

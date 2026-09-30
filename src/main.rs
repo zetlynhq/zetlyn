@@ -4,6 +4,7 @@
 mod account;
 mod app;
 mod assist;
+mod autoupdate;
 mod examples;
 mod artifact;
 mod billing;
@@ -186,7 +187,9 @@ zetlyn
 
   zetlyn run <workspace>
   zetlyn watch [list | check [--deliver]] <workspace>
-      Every source that is due, updated, and every watch replayed.
+      Every source that is due, updated, and every watch replayed. A source without its own
+      schedule: every: follows workspace.yaml's update: { every: 1h }, which the app sets under
+      Auto-update; without either, it is updated only when asked.
 
   zetlyn migrate [<workspace>]
       A workspace written before 0.2, in the words and the format of 0.2.
@@ -725,25 +728,6 @@ fn changes(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// When this source is next due, from its declared cadence and when it last finished.
-fn due_at(ds: &Source) -> Option<i64> {
-    let every = ds
-        .decl
-        .schedule
-        .every
-        .as_deref()
-        .and_then(fetch::duration)?;
-    let last = ds
-        .store
-        .run_report(ds.store.last_run())
-        .and_then(|r| r.finished)
-        .map(|f| fetch::seconds_of(&f));
-    Some(match last {
-        Some(at) => at + every,
-        None => 0,
-    })
-}
-
 fn deployment(args: &[String], from: usize) -> Result<PathBuf, String> {
     let root = positional(args, from)
         .first()
@@ -792,16 +776,12 @@ pub fn schedule_pass(root: &Path, deliver: bool, limits: &Limits) -> Option<i64>
         // that is being throttled can take twenty minutes, and an hourly source behind it
         // would wait that out. Shortest cadence first, so what is asked for most often is
         // asked for first.
+        // A source without its own rhythm follows the workspace'"'"'s `update: { every }`, if it has one.
+        let workspace = autoupdate::every(&root);
         let mut due: Vec<(i64, String, PathBuf)> = tracker::registry(&root.join("sources"))
             .into_iter()
             .filter_map(|(name, dir)| {
-                let every = Source::open(&dir)
-                    .ok()?
-                    .decl
-                    .schedule
-                    .every
-                    .as_deref()
-                    .and_then(fetch::duration)?;
+                let every = autoupdate::source_every(&Source::open(&dir).ok()?, workspace)?;
                 Some((every, name, dir))
             })
             .collect();
@@ -821,7 +801,7 @@ pub fn schedule_pass(root: &Path, deliver: bool, limits: &Limits) -> Option<i64>
                     continue;
                 }
             };
-            let Some(due) = due_at(&ds) else { continue };
+            let Some(due) = autoupdate::next_at(&ds, workspace) else { continue };
             // And no more often than the plan allows, whatever the source asks for.
             let due = match last_finished(&ds) {
                 Some(at) if limits.every > 0 => due.max(at + limits.every),
@@ -854,7 +834,7 @@ pub fn schedule_pass(root: &Path, deliver: bool, limits: &Limits) -> Option<i64>
                 Err(e) => eprintln!("{name}: {e}"),
             }
             if let Ok(ds) = Source::open(&dir) {
-                if let Some(next) = due_at(&ds) {
+                if let Some(next) = autoupdate::next_at(&ds, workspace) {
                     soonest = Some(soonest.map_or(next, |s: i64| s.min(next)));
                 }
             }

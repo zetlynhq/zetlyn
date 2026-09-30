@@ -142,10 +142,22 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
                 @if holds { span { "fresh within " (f) } } @else { span { "the promise of " (f) " does not hold" } }
             }
             @if is_operator(v) {
+                @let settings = format!("{}settings", crate::serve::frame().home.1);
+                @match crate::autoupdate::every(&scope.root) {
+                    Some(s) => { a.dim href=(settings) { "checks " (crate::autoupdate::words(s)) @if let Some(at) = next_check(scope, s) { " · " @if at <= crate::now() { "due now" } @else { "next in " (crate::web::duration((at - crate::now()) as f64)) } } } }
+                    None => { span { "updated by hand · " a href=(settings) { "turn on automatic updates" } } }
+                }
+            }
+            @if is_operator(v) {
                 form.update method="post" action=(at("/update")) { button type="submit" { "Update now" } }
             }
         }
         (banner(v, scope, hidden))
+        @if is_operator(v) {
+            @for (title, why) in paused(scope) {
+                div.note { strong { (title) } " is " (why) ". " a href={(crate::serve::frame().home.1) "settings"} { "Try again" } }
+            }
+        }
         // Public, and a source that never said it may be: said on the page rather than hidden.
         // Not to the person at the machine: for them it is said where they publish.
         @let undeclared = if scope.private() || is_operator(v) { Vec::new() } else { scope.not_public() };
@@ -1157,7 +1169,15 @@ impl TrackerSite {
         let tabs = vec![
             ("Overview".to_string(), at("/")),
             ("Things".to_string(), at("/things")),
-            ("Changes".to_string(), at("/changes")),
+            // What the person at the machine has not seen yet, on the tab that shows it; not on
+            // that page itself, which is where it is being seen.
+            (match (self.operator, request.url().contains("/changes")) {
+                (true, false) => match crate::thingstore::ThingStore::open(&self.scope.dir).map(|s| s.unseen("you")) {
+                    Ok(n) if n > 0 => format!("Changes · {n}"),
+                    _ => "Changes".to_string(),
+                },
+                _ => "Changes".to_string(),
+            }, at("/changes")),
             ("Conflicts".to_string(), at("/conflicts")),
         ];
         crate::serve::frame_section(Some((self.scope.decl.title.clone(), at("/"))), tabs);
@@ -1439,7 +1459,16 @@ impl TrackerSite {
                 for m in &scope.decl.members {
                     let Some(path) = registry.get(&m.dataset) else { continue };
                     let title = scope.members.iter().find(|r| r.name() == m.dataset).map(|r| r.title()).unwrap_or_else(|| m.dataset.clone());
-                    match crate::source::Source::open(path).and_then(|s| s.run()) {
+                    // Beside an update in the background it would read the same files twice at once.
+                    if crate::autoupdate::running() {
+                        said.push("an automatic update is running right now; what it finds appears here".into());
+                        break;
+                    }
+                    let Ok(ds) = crate::source::Source::open(path) else { continue };
+                    let outcome = ds.run();
+                    // Update now is also try again: a source paused after failures is asked afresh.
+                    crate::autoupdate::record(&ds, &outcome);
+                    match outcome {
                         Ok(r) if r.added + r.changed + r.removed == 0 => said.push(format!("{title}: nothing changed")),
                         Ok(r) => said.push(format!("{title}: {} new, {} changed, {} gone", r.added, r.changed, r.removed)),
                         Err(e) => said.push(format!("{title}: {e}")),
@@ -2474,4 +2503,37 @@ fn yes_no(word: &str) -> &str {
 /// The person at the machine, in the local app: they own every source and may read them again.
 fn is_operator(v: &Viewer) -> bool {
     v.account.as_ref().is_some_and(|a| a.id == 0)
+}
+
+/// This tracker's sources that automatic updates stopped asking, and why.
+fn paused(scope: &Tracker) -> Vec<(String, String)> {
+    let registry = crate::tracker::registry(&scope.root.join("sources"));
+    scope
+        .decl
+        .members
+        .iter()
+        .filter_map(|m| {
+            let dir = registry.get(&m.dataset)?;
+            let ds = crate::source::Source::open(dir).ok()?;
+            (crate::autoupdate::failures(&ds) >= crate::autoupdate::PATIENCE).then(|| (ds.decl.title.clone(), crate::autoupdate::held(&ds, dir).unwrap_or_default()))
+        })
+        .collect()
+}
+
+/// When the next of this tracker's sources is due an automatic update.
+fn next_check(scope: &Tracker, every: i64) -> Option<i64> {
+    let registry = crate::tracker::registry(&scope.root.join("sources"));
+    scope
+        .decl
+        .members
+        .iter()
+        .filter_map(|m| {
+            let dir = registry.get(&m.dataset)?;
+            let ds = crate::source::Source::open(dir).ok()?;
+            if crate::autoupdate::held(&ds, dir).is_some() {
+                return None;
+            }
+            crate::autoupdate::next_at(&ds, Some(every))
+        })
+        .min()
 }

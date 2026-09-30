@@ -307,6 +307,7 @@ pub fn duration(seconds: f64) -> String {
         0..=59 => format!("{s} seconds"),
         60..=89 => "a minute".to_string(),
         90..=5399 => format!("{} minutes", (s + 30) / 60),
+        _ if s % 3600 < 180 || s % 3600 > 3420 => format!("{} hours", (s + 1800) / 3600),
         _ => format!("{:.1} hours", s as f64 / 3600.0),
     }
 }

@@ -751,6 +751,21 @@ impl ThingStore {
         }
         was
     }
+
+    /// How many signals a reader has not seen on the Changes page yet, without marking them seen.
+    pub fn unseen(&self, reader: &str) -> i64 {
+        let mark: i64 = self
+            .db
+            .query_row(
+                "select state from reader where reader = ?1 and key = '' and property = 'changes'",
+                [reader],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        self.db.query_row("select count(*) from signal where id > ?1", [mark], |r| r.get(0)).unwrap_or(0)
+    }
 }
 
 impl ThingStore {

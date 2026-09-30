@@ -58,6 +58,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
         open_browser(&url);
     }
     let mut app = App { root, addr, sites: BTreeMap::new(), jobs: Arc::new(Mutex::new(Jobs::default())), base: String::new(), hosted: None, visitor: false };
+    {
+        let (root, jobs) = (app.root.clone(), app.jobs.clone());
+        std::thread::spawn(move || background(&root, &jobs));
+    }
     for request in server.incoming_requests() {
         app.answer(request);
     }
@@ -65,6 +69,72 @@ pub fn run(args: &[String]) -> Result<(), String> {
 }
 
 /// The current directory if it is a workspace, and `~/zetlyn` otherwise, made on first use.
+
+/// The background pass, for a workspace that turned it on: once a minute it looks for sources
+/// that are due and updates them as one job, which the bar at the bottom of every page shows and
+/// can stop. Never beside a job a person started: theirs comes first, and this waits a minute.
+fn background(root: &Path, jobs: &Arc<Mutex<Jobs>>) {
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+        if crate::autoupdate::every(root).is_none() {
+            continue;
+        }
+        let busy = jobs.lock().map(|j| j.all.values().any(|job| !job.done)).unwrap_or(true);
+        if busy {
+            continue;
+        }
+        let due = crate::autoupdate::due(root, crate::now());
+        if due.is_empty() {
+            continue;
+        }
+        let id = {
+            let Ok(mut j) = jobs.lock() else { continue };
+            j.next += 1;
+            let id = j.next;
+            j.all.insert(id, Job::default());
+            id
+        };
+        let p = Progress { jobs: jobs.clone(), id };
+        crate::autoupdate::RUNNING.store(true, std::sync::atomic::Ordering::SeqCst);
+        let n = due.len();
+        p.label(format!("Checking {n} source{}", if n == 1 { "" } else { "s" }));
+        for (i, (_, title, dir)) in due.iter().enumerate() {
+            if p.stopping() {
+                p.say("Stopped: the rest wait for the next pass.");
+                break;
+            }
+            p.show(Some(i as f64 / n as f64), format!("{title} ({} of {n})", i + 1));
+            let Ok(ds) = Source::open(dir) else { continue };
+            let hook = p.clone();
+            crate::web::on_page(Some(Box::new(move |_| !hook.stopping())));
+            let outcome = ds.run();
+            crate::web::on_page(None);
+            crate::autoupdate::record(&ds, &outcome);
+            p.say(match &outcome {
+                Ok(r) if r.added + r.changed + r.removed == 0 => format!("{title}: nothing changed"),
+                Ok(r) => format!("{title}: {} new, {} changed, {} gone", r.added, r.changed, r.removed),
+                Err(e) => format!("{title}: {e}"),
+            });
+        }
+        // What changed becomes signals now, so the Changes tab and the counts say it.
+        for dir in crate::tracker::scope_registry(&root.join("trackers")).values() {
+            let _ = Tracker::open(dir, &root.join("sources")).and_then(|t| t.refresh_if_moved());
+        }
+        crate::autoupdate::RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+        p.finish(Ok(String::new()));
+    }
+}
+
+/// What the person at the machine has not seen yet on each tracker's Changes page.
+fn unseen(root: &Path) -> BTreeMap<String, i64> {
+    crate::tracker::scope_registry(&root.join("trackers"))
+        .values()
+        .filter_map(|dir| {
+            let n = crate::thingstore::ThingStore::open(dir).ok()?.unseen("you");
+            Some((dir.file_name()?.to_string_lossy().into_owned(), n))
+        })
+        .collect()
+}
 fn workspace(args: &[String]) -> Result<PathBuf, String> {
     if let Some(named) = crate::positional(args, 1).first() {
         return Ok(PathBuf::from(named.as_str()));
@@ -366,6 +436,16 @@ impl App {
             ]
         };
         serve::frame_home("Your trackers", &home, nav);
+        if self.visitor {
+            serve::frame_app(None, None);
+        } else {
+            let words = match crate::autoupdate::every(&self.root) {
+                Some(s) => format!("Auto-update: {}", crate::autoupdate::words(s)),
+                None => "Auto-update: off".to_string(),
+            };
+            let on = crate::autoupdate::every(&self.root).is_some();
+            serve::frame_app(Some(home.clone()), Some((words, format!("{}/settings", self.base), on)));
+        }
         serve::frame_section(None, Vec::new());
         if let [first, tracker, ..] = parts.as_slice() {
             if first != "t" && first != "job" {
@@ -470,7 +550,9 @@ impl App {
                         .map(|(id, job)| json!({ "id": id, "label": job.label, "progress": job.progress, "stop": job.stop }))
                         .collect()
                 }).unwrap_or_default();
-                (200, json_kind, json!({ "running": running }).to_string())
+                // And how much is new, for the count in the browser tab's title.
+                let unseen: i64 = if self.visitor { 0 } else { unseen(&self.root).values().sum() };
+                (200, json_kind, json!({ "running": running, "unseen": unseen }).to_string())
             }
             (true, ["readweb", tracker]) => {
                 let pick: usize = query.get("pick").and_then(|p| p.parse().ok()).unwrap_or(0);
@@ -499,6 +581,43 @@ impl App {
                     Ok(()) => return redirect(request, &serve::at(&format!("/review/{tracker}/{source}?title={}", urlencode(&form_title(&query))))),
                     Err(e) => (400, html_kind, page("Not changed", html! { div.note { (e) } })),
                 }
+            }
+            (false, ["settings"]) => (200, html_kind, self.settings_page(&query)),
+            (true, ["settings"]) => {
+                let every = form.get("every").map(String::as_str).filter(|e| matches!(*e, "1h" | "6h" | "1d"));
+                let said = match crate::autoupdate::set(&self.root, every, true) {
+                    Ok(()) => match every.and_then(crate::fetch::duration) {
+                        Some(s) => format!("Saved. Zetlyn now updates your sources {}.", crate::autoupdate::words(s)),
+                        None => "Saved. Automatic updates are off.".to_string(),
+                    },
+                    Err(e) => e,
+                };
+                let back = query.get("back").filter(|b| b.starts_with('/') && !b.starts_with("//")).cloned();
+                return redirect(request, &back.unwrap_or_else(|| serve::at(&format!("/settings?saved={}", urlencode(&said)))));
+            }
+            // The offer after a second source, answered "not now": it is not made again.
+            (true, ["settings", "offered"]) => {
+                let current = crate::account::Site::load(&self.root).update.every;
+                let _ = crate::autoupdate::set(&self.root, current.as_deref(), true);
+                let back = query.get("back").filter(|b| b.starts_with('/') && !b.starts_with("//")).cloned();
+                return redirect(request, &back.unwrap_or_else(|| serve::at("/")));
+            }
+            (true, ["settings", "source", slug]) => {
+                let dir = self.sources().join(slug);
+                let every = form.get("every").map(String::as_str).filter(|e| matches!(*e, "15m" | "1h" | "6h" | "1d" | "never"));
+                let said = (|| -> Result<String, String> {
+                    let mut decl = crate::sourcedecl::SourceDecl::load(&dir)?;
+                    decl.schedule.every = every.map(str::to_string);
+                    let path = dir.join(crate::sourcedecl::FILE);
+                    std::fs::write(&path, crate::yaml::to_string(&decl)?).map_err(|e| format!("{}: {e}", path.display()))?;
+                    Ok(format!("{}: {}.", decl.title, match every { Some("never") => "never updated by itself".to_string(), Some(e) => crate::fetch::duration(e).map(crate::autoupdate::words).unwrap_or_default(), None => "as above".to_string() }))
+                })()
+                .unwrap_or_else(|e| e);
+                return redirect(request, &serve::at(&format!("/settings?saved={}", urlencode(&said))));
+            }
+            (true, ["settings", "retry", slug]) => {
+                crate::autoupdate::forgive(&self.sources().join(slug));
+                return redirect(request, &serve::at(&format!("/settings?saved={}", urlencode("It will be asked again on the next pass."))));
             }
             (false, ["assist"]) => (200, html_kind, self.assist_status_page(None)),
             (true, ["assist"]) => {
@@ -1238,7 +1357,85 @@ impl App {
         })
     }
 
+
+    /// Automatic updates: the one switch, what it never does, and each source's own rhythm.
+    fn settings_page(&self, query: &BTreeMap<String, String>) -> String {
+        let every = crate::autoupdate::every(&self.root);
+        let current = crate::account::Site::load(&self.root).update.every.unwrap_or_default();
+        let choices = [("", "Off", "You update with Update now."), ("1h", "Every hour", ""), ("6h", "Every 6 hours", ""), ("1d", "Once a day", "")];
+        let sources: Vec<(String, PathBuf)> = crate::tracker::registry(&self.sources()).into_iter().collect();
+        let now = crate::now();
+        let body = html! {
+            h1 { "Automatic updates" }
+            p.lede { "Zetlyn can read your sources again by itself and tell you what changed. It is off until you turn it on." }
+            @if let Some(s) = query.get("saved") { div.note { (s) } }
+            form.settings method="post" action=(serve::at("/settings")) {
+                @for (value, label, hint) in choices {
+                    label.choice {
+                        input type="radio" name="every" value=(value) checked[current == value];
+                        span { strong { (label) } @if !hint.is_empty() { " " span.dim { (hint) } } }
+                    }
+                }
+                p { button.primary type="submit" { "Save" } }
+            }
+            div.note {
+                "It works for as long as Zetlyn runs, with or without a page open in the browser, and shows at the bottom of every page while it works. Quit Zetlyn and it stops. "
+                "On a machine that should keep watching without the app, " code { "zetlyn run " (self.root.display()) } " does the same, or use the hosted version."
+            }
+            h2 { "What it never does by itself" }
+            ul {
+                li { "Read a source for the first time, or a trial of one page: that is yours to start." }
+                li { "Go on with a read you stopped, or read a list further back." }
+                li { "Ask any source more often than every 15 minutes." }
+                li { "Keep asking a source that failed three times running: it waits, with the reason, until you say try again." }
+            }
+            details open[sources.iter().any(|(_, d)| Source::open(d).ok().is_some_and(|ds| ds.decl.schedule.every.is_some()))] {
+                summary { "Each source" }
+                p.dim { "A source follows the setting above unless it has its own." }
+                table {
+                    thead { tr { th { "Source" } th { "How often" } th { "Now" } } }
+                    tbody {
+                        @for (_, dir) in &sources {
+                            @if let Ok(ds) = Source::open(dir) {
+                                @let slug = dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                                @let own = ds.decl.schedule.every.clone().unwrap_or_default();
+                                @let held = crate::autoupdate::held(&ds, dir);
+                                tr {
+                                    td { strong { (ds.decl.title) } div.why.mono { (slug) } }
+                                    td {
+                                        form.bar method="post" action={(serve::at("/settings/source/")) (slug)} {
+                                            select name="every" {
+                                                @for (v, l) in [("", "As above"), ("15m", "Every 15 minutes"), ("1h", "Every hour"), ("6h", "Every 6 hours"), ("1d", "Once a day"), ("never", "Never")] {
+                                                    option value=(v) selected[own == v] { (l) }
+                                                }
+                                            }
+                                            button type="submit" { "Set" }
+                                        }
+                                    }
+                                    td {
+                                        @match (&held, crate::autoupdate::next_at(&ds, every)) {
+                                            (Some(why), _) => {
+                                                span.dim { (why) }
+                                                @if crate::autoupdate::failures(&ds) >= crate::autoupdate::PATIENCE {
+                                                    form method="post" action={(serve::at("/settings/retry/")) (slug)} { button type="submit" { "Try again" } }
+                                                }
+                                            }
+                                            (None, None) => span.dim { "not updated by itself" },
+                                            (None, Some(at)) if at <= now => span { "due now" },
+                                            (None, Some(at)) => span { "next in " (crate::web::duration((at - now) as f64)) },
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        page("Automatic updates", body)
+    }
     fn start_page(&self) -> String {
+        let unseen = unseen(&self.root);
         let trackers = listed(&self.trackers());
         let body = html! {
             @if trackers.is_empty() {
@@ -1252,10 +1449,10 @@ impl App {
             } @else {
                 h1 { "Your trackers" }
                 table { tbody {
-                    @for (name, decl, fresh) in &trackers {
+                    @for (name, decl, _fresh) in &trackers {
                         tr {
                             td { a href={(serve::at("/t/")) (name) "/"} { strong { (decl.title) } } div.why { (decl.members.len()) (if decl.members.len() == 1 { " source" } else { " sources" }) " · identified by " (decl.join.join(", ")) } }
-                            td.num { @if *fresh > 0 { span.chip.on { (fresh) " signals since yesterday" } } @else { span.dim { "nothing new since yesterday" } } }
+                            td.num { @match unseen.get(name).copied().unwrap_or(0) { 0 => span.dim { "nothing new since you looked" }, n => a.chip.on href={(serve::at("/t/")) (name) "/changes"} { (n) " new since you looked" } } }
                             td.num { a href={(serve::at("/new/")) (name) "?title=" (urlencode(&decl.title))} { "Add a source" } }
                             td.num { a href={(serve::at("/publish/")) (name)} { (if decl.visibility == "private" { "Private" } else { "Publish" }) } }
                         }
@@ -1348,6 +1545,27 @@ impl App {
         let body = html! {
             h1 { (ds.decl.title) }
             p.about { (total) " claims read from " code { (source_of(&ds)) } }
+            // Just connected: said first, where the eye lands, with the way on.
+            @if joined && added {
+                div.offer {
+                    p { strong { "Connected." } " " (ds.decl.title) " is part of " (title) "." }
+                    a.button href={(serve::at("/t/")) (tracker) "/"} { "Open the tracker" }
+                }
+            }
+            // The moment it is worth something: two sources joined. Asked once, and "not
+            // now" is an answer that is kept.
+            @if added && decl.as_ref().is_some_and(|d| d.members.len() >= 2) && crate::autoupdate::every(&self.root).is_none() && !crate::autoupdate::offered(&self.root) {
+                div.offer {
+                    p { strong { "Keep an eye on these for you?" } br; span.dim { "Zetlyn reads both sources again every hour while it runs, and Changes says what moved. You can change this at any time under Auto-update." } }
+                    form method="post" action={(serve::at("/settings?back=")) (urlencode(&serve::at(&format!("/t/{tracker}/"))))} {
+                        input type="hidden" name="every" value="1h";
+                        button.primary type="submit" { "Every hour" }
+                    }
+                    form method="post" action={(serve::at("/settings/offered?back=")) (urlencode(&serve::at(&format!("/review/{tracker}/{source}?title={}", urlencode(&title)))))} {
+                        button type="submit" { "Not now" }
+                    }
+                }
+            }
 
             @if let Some((trial, top, dated, since_default)) = &web {
                 h2 { "How much to read" }
@@ -1639,7 +1857,7 @@ fn parse_form(s: &str) -> BTreeMap<String, String> {
 }
 
 fn page(title: &str, body: Markup) -> String {
-    serve::shell(title, html! { (body) div #jobs data-at=(serve::at("/")) hidden {} (PreEscaped(BAR_SCRIPT)) })
+    serve::shell(title, body)
 }
 
 fn respond(request: tiny_http::Request, status: u16, kind: &str, body: &str) {
@@ -1667,20 +1885,15 @@ button.primary { background: var(--accent); color: var(--bg); border-color: var(
 pre#log { background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
   padding: .7rem .9rem; font-size: .85rem; white-space: pre-wrap; }
 .grid .card h4 { font-size: 1.6rem; margin: 0; }
-#jobs { position: fixed; left: 0; right: 0; bottom: 0; background: var(--panel); border-top: 1px solid var(--line);
-  padding: .6rem 1rem calc(.6rem + env(safe-area-inset-bottom, 0px)); font-size: .9rem; }
-#jobs .job { display: flex; gap: .8rem; align-items: center; flex-wrap: wrap; max-width: 60rem; margin: 0 auto; }
-#jobs progress, main progress { flex: 1 1 10rem; min-width: 6rem; width: 100%; }
-body.busy main { padding-bottom: 6rem; }
 "#;
 
 
 /// Whatever runs in the background, at the bottom of every page, with a way to stop it: a read of
 /// a thousand pages is not something to find out about afterwards.
-const BAR_SCRIPT: &str = r#"<script>
+pub const BAR_SCRIPT: &str = r#"<script>
 (function () {
   var box = document.getElementById('jobs'); if (!box) return;
-  var at = box.dataset.at;
+  var at = box.dataset.at, title = document.title.replace(/^\(\d+\) /, '');
   function draw(running) {
     box.hidden = running.length == 0;
     document.body.classList.toggle('busy', running.length > 0);
@@ -1703,7 +1916,10 @@ const BAR_SCRIPT: &str = r#"<script>
     });
   }
   function look() {
-    fetch(at + 'jobs').then(function (r) { return r.json(); }).then(function (j) { draw(j.running || []); })
+    fetch(at + 'jobs').then(function (r) { return r.json(); }).then(function (j) {
+      draw(j.running || []);
+      document.title = (j.unseen > 0 ? '(' + j.unseen + ') ' : '') + title;
+    })
       .catch(function () { box.hidden = true; });
   }
   look(); setInterval(look, 1500);

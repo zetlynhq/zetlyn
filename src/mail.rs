@@ -25,9 +25,12 @@ pub struct Smtp {
     pub tls: String,
     #[serde(default)]
     pub user: String,
-    /// A variable, `${SMTP_PASSWORD}`.
+    /// A variable, `${SMTP_PASSWORD}`, or empty where `password_file` names the file it is in.
     #[serde(default)]
     pub password: String,
+    /// A file holding the password and nothing else, readable by the services that send.
+    #[serde(default)]
+    pub password_file: String,
     /// The address mail is from: `Zetlyn <mail@zetlyn.com>`.
     pub from: String,
 }
@@ -114,7 +117,11 @@ pub fn send(s: &Smtp, to: &str, subject: &str, body: &str) -> Result<(), String>
         session.say("EHLO zetlyn", &[250])?;
     }
     if !s.user.is_empty() {
-        let password = crate::fetch::resolve(&s.password)?.unwrap_or_default();
+        let password = if s.password_file.is_empty() {
+            crate::fetch::resolve(&s.password)?.unwrap_or_default()
+        } else {
+            std::fs::read_to_string(&s.password_file).map_err(|e| format!("{}: {e}", s.password_file))?.trim().to_string()
+        };
         let token = base64(format!("\0{}\0{password}", s.user).as_bytes());
         session.say(&format!("AUTH PLAIN {token}"), &[235])?;
     }

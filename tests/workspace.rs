@@ -865,3 +865,26 @@ fn a_licence_corrected_reaches_a_subscriber_without_a_new_version() {
     let now = std::fs::read_to_string(&theirs).unwrap();
     assert!(now.contains("republish: summary") && now.contains("https://example.org/terms"), "{now}");
 }
+
+#[test]
+fn one_mailer_serves_every_workspace_that_names_none() {
+    let ws = Workspace::new("central-mail");
+    let root = ws.root.display().to_string();
+    std::fs::write(ws.root.join("watches/by-mail.yaml"), "name: by-mail\ntracker: test/cve\nthing: CVE-2026-0001\ndeliver:\n- to: mail\n  address: reader@example.org\n").unwrap();
+    ws.z(&["tracker", "refresh", &ws.scope()]);
+    ws.z(&["watch", "check", &root, "--deliver"]);
+    ws.update();
+    ws.z(&["tracker", "refresh", &ws.scope()]);
+    let check = |central: Option<&std::path::Path>| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_zetlyn"));
+        c.args(["watch", "check", &root, "--deliver"]).env("ZETLYN_MAIL", central.map(|p| p.display().to_string()).unwrap_or_else(|| "/nonexistent".into()));
+        let out = c.output().unwrap();
+        format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
+    };
+    assert!(check(None).contains("no mailer"), "without one, nothing is sent");
+    // A server on this machine that is not there: the attempt is the proof the file was read.
+    let file = ws.root.join("mail.yaml");
+    std::fs::write(&file, "smtp:\n  host: 127.0.0.1\n  port: 9\n  tls: none\n  from: Zetlyn <noreply@zetlyn.test>\n").unwrap();
+    let said = check(Some(&file));
+    assert!(said.contains("127.0.0.1:9"), "{said}");
+}

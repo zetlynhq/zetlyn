@@ -425,7 +425,20 @@ pub const WORKSPACE: &str = "workspace.yaml";
 
 impl Site {
     pub fn load(root: &Path) -> Site {
-        crate::yaml::read_or_default(&root.join(WORKSPACE))
+        let mut site: Site = crate::yaml::read_or_default(&root.join(WORKSPACE));
+        // One mailer for the machine: every workspace on it that names none of its own sends
+        // through /etc/zetlyn/mail.yaml (or the file ZETLYN_MAIL names), as noreply@ the host.
+        if site.mail.smtp.is_none() && site.mail.run.is_empty() {
+            let central = std::env::var("ZETLYN_MAIL").unwrap_or_else(|_| "/etc/zetlyn/mail.yaml".into());
+            let path = Path::new(&central);
+            if path.exists() {
+                match crate::yaml::read::<Mail>(path) {
+                    Ok(m) => site.mail = m,
+                    Err(e) => eprintln!("{central}: {e}"),
+                }
+            }
+        }
+        site
     }
 
     /// Hands the mailer the message on its standard input. Where none is named, the link goes to

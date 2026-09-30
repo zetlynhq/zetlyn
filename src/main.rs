@@ -478,7 +478,7 @@ fn run(args: &[String]) -> Result<(), String> {
         // A published artifact names the build that made it, so the build has to name itself.
         // Nothing asked for: the workspace, in a browser.
         None | Some("app") => app::run(args),
-        // `zetlyn ~/Zetlyn`: a directory on its own is a workspace to open.
+        // `zetlyn ~/zetlyn`: a directory on its own is a workspace to open.
         Some(p) if !p.starts_with('-') && std::path::Path::new(p).is_dir() => {
             let with: Vec<String> = std::iter::once("app".to_string()).chain(args.iter().cloned()).collect();
             app::run(&with)

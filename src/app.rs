@@ -58,7 +58,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// The current directory if it is a workspace, and `~/Zetlyn` otherwise, made on first use.
+/// The current directory if it is a workspace, and `~/zetlyn` otherwise, made on first use.
 fn workspace(args: &[String]) -> Result<PathBuf, String> {
     if let Some(named) = crate::positional(args, 1).first() {
         return Ok(PathBuf::from(named.as_str()));
@@ -67,8 +67,8 @@ fn workspace(args: &[String]) -> Result<PathBuf, String> {
     if here.join("workspace.yaml").exists() || here.join("trackers").is_dir() {
         return Ok(here);
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from).ok_or("no HOME to put ~/Zetlyn in")?;
-    let root = home.join("Zetlyn");
+    let home = std::env::var_os("HOME").map(PathBuf::from).ok_or("no HOME to put ~/zetlyn in")?;
+    let root = home.join("zetlyn");
     for d in ["sources", "trackers"] {
         std::fs::create_dir_all(root.join(d)).map_err(|e| format!("{}: {e}", root.display()))?;
     }

@@ -39,7 +39,7 @@ compiled in.
 zetlyn
 ```
 
-opens the workspace in a browser: the current directory if it is one, `~/Zetlyn` otherwise. The
+opens the workspace in a browser: the current directory if it is one, `~/zetlyn` otherwise. The
 page asks what you want to track, then for a first source, an address or a file. It reads the
 whole of it, says what names a claim (a CVE, a DOI, an ISBN: fifteen schemes are known by pattern
 and check digit, with no model involved), and shows the first claims. A second source is read the same

@@ -28,6 +28,8 @@ pub struct Spec<'a> {
     pub fields: &'a BTreeMap<String, String>,
     pub page: Option<&'a crate::sourcedecl::Page>,
     pub top: usize,
+    /// A trial: this many items and no more, and nothing left to resume.
+    pub limit: usize,
     pub since: Option<&'a str>,
     pub since_default: &'a str,
     pub user_agent: &'a str,
@@ -103,58 +105,122 @@ fn page_url(base: &str, page: Option<&crate::sourcedecl::Page>, n: usize, size: 
     format!("{head}?{}", params.join("&"))
 }
 
+/// How far a read is, told after every page.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct Step {
+    pub page: usize,
+    pub items: usize,
+    /// The date of the last item on the page, where the list is sorted by one.
+    pub reached: Option<String>,
+}
+
+type Hook = Box<dyn Fn(&Step) -> bool>;
+
 thread_local! {
-    static ON_PAGE: std::cell::RefCell<Option<Box<dyn Fn(String)>>> = const { std::cell::RefCell::new(None) };
+    static ON_PAGE: std::cell::RefCell<Option<Hook>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Where a long read says how far it is; without it, every tenth page goes to stderr.
-pub fn on_page(say: Option<Box<dyn Fn(String)>>) {
-    ON_PAGE.with(|h| *h.borrow_mut() = say);
+/// Who hears how far a read is, and may stop it by answering false. Without one, every tenth
+/// page goes to stderr.
+pub fn on_page(hook: Option<Hook>) {
+    ON_PAGE.with(|h| *h.borrow_mut() = hook);
 }
 
-fn tell(n: usize, taken: usize, reached: Option<&str>) {
-    let line = format!("page {n}: {taken} items{}", reached.map(|d| format!(", back to {d}")).unwrap_or_default());
+fn tell(step: &Step) -> bool {
     ON_PAGE.with(|h| match &*h.borrow() {
-        Some(say) => say(line),
-        None if n % 10 == 0 => eprintln!("{line}"),
-        None => {}
-    });
+        Some(hook) => hook(step),
+        None => {
+            if step.page % 10 == 0 {
+                eprintln!("page {}: {} items{}", step.page, step.items, step.reached.as_ref().map(|d| format!(", back to {d}")).unwrap_or_default());
+            }
+            true
+        }
+    })
 }
 
-pub fn rows(spec: &Spec, mark: Option<String>, root: &Path, on_row: &mut impl FnMut(Produced) -> Result<(), String>) -> Result<Option<String>, String> {
-    // Back to the newest date the last update read, or the first time to `since_default`.
-    let cutoff = spec.since.map(|_| mark.clone().unwrap_or_else(|| spec.since_default.to_string()));
+/// Where a read that did not finish stopped: the next update starts there instead of at the
+/// first page, so an hour of pages is not read twice because one of them timed out.
+pub const RESUME: &str = "resume.json";
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+pub struct Resume {
+    /// The page to read next, counted from 0.
+    pub page: usize,
+    pub items: usize,
+    /// The newest date read before it stopped: the mark once the rest is read.
+    pub high: Option<String>,
+    pub why: String,
+    /// A read further back than the mark: the date it goes to, instead of stopping at what was
+    /// read before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<String>,
+    /// Stopped by a person: it waits for them to say go on, and an update meanwhile reads only
+    /// what is new.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub paused: bool,
+}
+
+pub fn resume_of(dir: &Path) -> Option<Resume> {
+    std::fs::read_to_string(dir.join(RESUME)).ok().and_then(|t| serde_json::from_str(&t).ok())
+}
+
+pub fn rows(spec: &Spec, mark: Option<String>, dir: &Path, root: &Path, on_row: &mut impl FnMut(Produced) -> Result<(), String>) -> Result<Option<String>, String> {
     let date_of = |row: &J| -> Option<String> {
         let path = spec.since?.trim_start_matches("field:");
         crate::expr::walk(row, path).first().and_then(|v| crate::build::as_date(&crate::expr::as_string(v)))
     };
-    let mut high: Option<String> = mark.clone();
     let f = crate::fetch::Fetcher::new(spec.user_agent, &BTreeMap::new(), spec.pause_ms)?;
     let size = spec.page.map(|p| p.max).filter(|m| *m > 0).unwrap_or(50);
-    let mut taken = 0usize;
+    // A trial reads nothing of what an earlier read left to do; that is for the real one.
+    let waiting = resume_of(dir).filter(|r| r.paused);
+    let resumed = if spec.limit == 0 { resume_of(dir).filter(|r| !r.paused) } else { None };
+    // Meanwhile a stopped read is not started again from the top: it reads down to what it read.
+    let mark = mark.or_else(|| waiting.as_ref().and_then(|r| r.high.clone()));
+    let keep = spec.limit > 0 || waiting.is_some();
+    let first = resumed.as_ref().map(|r| r.page).unwrap_or(0);
+    let until = resumed.as_ref().and_then(|r| r.until.clone());
+    // Back to the newest date the last update read, or the first time to `since_default`, or
+    // further back than the mark when that is what was asked for.
+    let cutoff = spec.since.map(|_| until.clone().or_else(|| mark.clone()).unwrap_or_else(|| spec.since_default.to_string()));
+    let mut high: Option<String> = [mark.clone(), resumed.as_ref().and_then(|r| r.high.clone())].into_iter().flatten().max();
+    let mut taken = resumed.as_ref().map(|r| r.items).unwrap_or(0);
+    let cap = if spec.limit > 0 { spec.limit } else { spec.top };
     let mut seen_before: BTreeSet<String> = BTreeSet::new();
-    for n in 0.. {
+    let done = |high: Option<String>| -> Result<Option<String>, String> {
+        if !keep {
+            let _ = std::fs::remove_file(dir.join(RESUME));
+        }
+        Ok(if spec.since.is_some() { high } else { None })
+    };
+    for n in first.. {
         let url = page_url(spec.url, spec.page, n, size);
-        let body = f.get(&url)?;
+        let stopped = |why: String, high: &Option<String>, taken: usize| -> String {
+            if !keep {
+                let r = Resume { page: n, items: taken, high: high.clone(), why: why.clone(), until: until.clone(), paused: false };
+                let _ = std::fs::write(dir.join(RESUME), serde_json::to_string(&r).unwrap_or_default());
+            }
+            why
+        };
+        let body = f.get(&url).map_err(|e| stopped(e, &high, taken))?;
         let found = extract(&body, spec.items, spec.fields)?;
         // The same items again is a site that answers its last page for every number after it.
         let keys: BTreeSet<String> = found.iter().map(|r| r.to_string()).collect();
         if found.is_empty() || (!seen_before.is_empty() && keys.is_subset(&seen_before)) {
             break;
         }
-        let found_dates: Vec<String> = found.iter().filter_map(&date_of).collect();
+        let reached = found.iter().filter_map(&date_of).last();
         for (i, value) in found.into_iter().enumerate() {
             if let (Some(c), Some(d)) = (&cutoff, date_of(&value)) {
                 // Sorted newest first, so the first item older than the cutoff ends the list.
                 if d.as_str() < &c[..10.min(c.len())] {
-                    return Ok(high);
+                    return done(high);
                 }
                 if high.as_deref().map_or(true, |h| d.as_str() > h) {
                     high = Some(d);
                 }
             }
-            if spec.top > 0 && taken >= spec.top {
-                return Ok(if spec.since.is_some() { high } else { None });
+            if cap > 0 && taken >= cap {
+                return done(high);
             }
             taken += 1;
             on_row(Produced {
@@ -163,14 +229,166 @@ pub fn rows(spec: &Spec, mark: Option<String>, root: &Path, on_row: &mut impl Fn
                 origin: Origin { url: Some(format!("{url}#{}", i + 1)), ..Origin::default() },
             })?;
         }
-        let reached = found_dates.last().cloned();
-        tell(n + 1, taken, reached.as_deref());
         seen_before.extend(keys);
+        if !tell(&Step { page: n + 1, items: taken, reached }) {
+            // The next page is where it goes on.
+            let why = format!("stopped by you at page {}", n + 1);
+            let r = Resume { page: n + 1, items: taken, high: high.clone(), why: why.clone(), until: until.clone(), paused: true };
+            if !keep {
+                let _ = std::fs::write(dir.join(RESUME), serde_json::to_string(&r).unwrap_or_default());
+            }
+            return Err(why);
+        }
+        // Enough is enough before the next page is asked for, not after.
+        if cap > 0 && taken >= cap {
+            return done(high);
+        }
         if spec.page.map_or(true, |p| p.offset.is_empty()) {
             break;
         }
     }
-    Ok(if spec.since.is_some() { high } else { None })
+    done(high)
+}
+
+/// How long a list is, found by asking for a few of its pages rather than reading them all: its
+/// size per page, the page where it reaches `cutoff` (a date, for a list sorted by one) and its
+/// last page. Pages 2, 4, 8, … until one is past, then halved down to the page.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct Measure {
+    pub per_page: usize,
+    /// The first page with an item older than the cutoff.
+    pub to_cutoff: Option<usize>,
+    pub cutoff: Option<String>,
+    /// The last page with items; `None` where it was more than the pages asked for.
+    pub last: Option<usize>,
+    /// Newest and oldest dates the list has, where it has them.
+    pub newest: Option<String>,
+    pub oldest: Option<String>,
+    /// Seconds a page takes, pause included.
+    pub seconds_a_page: f64,
+}
+
+/// The reading of a declared web source, for what is done with it outside an update.
+pub fn with_spec<T>(fetch: &crate::sourcedecl::Fetch, go: impl FnOnce(&Spec) -> T) -> Option<T> {
+    let crate::sourcedecl::Fetch::Web { url, items, fields, page, top, limit, since, since_default, user_agent, pause_ms } = fetch else {
+        return None;
+    };
+    Some(go(&Spec { url, items, fields, page: page.as_ref(), top: *top, limit: *limit, since: since.as_deref(), since_default, user_agent, pause_ms: *pause_ms }))
+}
+
+pub const MEASURE: &str = "measure.json";
+
+pub fn measure_of(dir: &Path) -> Option<Measure> {
+    std::fs::read_to_string(dir.join(MEASURE)).ok().and_then(|t| serde_json::from_str(&t).ok())
+}
+
+impl Measure {
+    /// `about 868 pages, 21,700 items, 36 minutes`.
+    pub fn about(&self, pages: usize) -> String {
+        format!("about {} pages, {} items, {}", thousands(pages), thousands(pages * self.per_page.max(1)), duration(pages as f64 * self.seconds_a_page))
+    }
+}
+
+pub fn thousands(n: usize) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+pub fn duration(seconds: f64) -> String {
+    let s = seconds.round() as u64;
+    match s {
+        0..=59 => format!("{s} seconds"),
+        60..=89 => "a minute".to_string(),
+        90..=5399 => format!("{} minutes", (s + 30) / 60),
+        _ => format!("{:.1} hours", s as f64 / 3600.0),
+    }
+}
+
+pub fn measure(spec: &Spec, cutoff: Option<&str>, say: &dyn Fn(String)) -> Result<Measure, String> {
+    let date_of = |row: &J| -> Option<String> {
+        let path = spec.since?.trim_start_matches("field:");
+        crate::expr::walk(row, path).first().and_then(|v| crate::build::as_date(&crate::expr::as_string(v)))
+    };
+    let f = crate::fetch::Fetcher::new(spec.user_agent, &BTreeMap::new(), spec.pause_ms)?;
+    let size = spec.page.map(|p| p.max).filter(|m| *m > 0).unwrap_or(50);
+    let mut asked = 0usize;
+    let mut oldest_seen: Option<String> = None;
+    let started = std::time::Instant::now();
+    // A page's items and its dates, oldest last; the page numbers here count from 1.
+    let mut look = |n: usize| -> Result<(usize, Option<String>, Option<String>), String> {
+        asked += 1;
+        let rows = extract(&f.get(&page_url(spec.url, spec.page, n - 1, size))?, spec.items, spec.fields)?;
+        let dates: Vec<String> = rows.iter().filter_map(&date_of).collect();
+        let (newest, oldest) = (dates.iter().max().cloned(), dates.iter().min().cloned());
+        if let Some(o) = &oldest {
+            if oldest_seen.as_ref().map_or(true, |s| o < s) {
+                oldest_seen = Some(o.clone());
+            }
+        }
+        say(format!("page {n}: {} items{}", rows.len(), oldest.as_ref().map(|d| format!(", back to {d}")).unwrap_or_default()));
+        Ok((rows.len(), newest, oldest))
+    };
+    let (per_page, newest, first_oldest) = look(1)?;
+    let mut m = Measure { per_page, newest, oldest: first_oldest.clone(), cutoff: cutoff.map(str::to_string), ..Measure::default() };
+    if per_page == 0 || spec.page.map_or(true, |p| p.offset.is_empty()) {
+        m.last = Some(1);
+        m.seconds_a_page = started.elapsed().as_secs_f64();
+        return Ok(m);
+    }
+    let before = |d: &Option<String>| match (cutoff, d) {
+        (Some(c), Some(d)) => d.as_str() < &c[..10.min(c.len())],
+        _ => false,
+    };
+    if before(&first_oldest) {
+        m.to_cutoff = Some(1);
+    }
+    // Doubling until a page is empty, or past the cutoff when that is what is asked; a list of
+    // more than 32,768 pages is said to be that long.
+    const FAR: usize = 32_768;
+    let (mut good, mut n) = (1usize, 2usize);
+    let mut past_cutoff: Option<(usize, usize)> = m.to_cutoff.map(|_| (0, 1));
+    let mut empty: Option<usize> = None;
+    while n <= FAR {
+        let (count, _, oldest) = look(n)?;
+        if count == 0 {
+            empty = Some(n);
+            break;
+        }
+
+        if past_cutoff.is_none() && before(&oldest) {
+            past_cutoff = Some((good, n));
+        }
+        good = n;
+        n *= 2;
+    }
+    // Halving down to where the cutoff is.
+    if let Some((mut lo, mut hi)) = past_cutoff.filter(|(lo, hi)| hi > lo && *lo > 0) {
+        while hi - lo > 1 {
+            let mid = (lo + hi) / 2;
+            let (count, _, oldest) = look(mid)?;
+            if count == 0 || before(&oldest) { hi = mid } else { lo = mid }
+        }
+        m.to_cutoff = Some(hi);
+    }
+    // And to where the list ends.
+    if let Some(mut hi) = empty {
+        let mut lo = good;
+        while hi - lo > 1 {
+            let mid = (lo + hi) / 2;
+            if look(mid)?.0 == 0 { hi = mid } else { lo = mid }
+        }
+        m.last = Some(lo);
+    }
+    m.seconds_a_page = started.elapsed().as_secs_f64() / asked.max(1) as f64;
+    m.oldest = oldest_seen.or(m.oldest);
+    Ok(m)
 }
 
 #[cfg(test)]

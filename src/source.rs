@@ -78,7 +78,8 @@ impl Source {
         // of it. It may not remove: every claim it did not touch is one it never asked
         // for. Only a run that read from the beginning of the declared coverage sweeps.
         let mark = if from_start { None } else { self.store.meta("mark") };
-        let whole = mark.is_none();
+        // A read that goes on where one stopped did not start at the beginning either.
+        let whole = mark.is_none() && !self.dir.join(crate::web::RESUME).exists();
         let run = self.store.begin_run()?;
         let at = crate::iso_stamp(crate::now());
         let history = self.decl.retention.history;

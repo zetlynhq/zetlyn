@@ -977,6 +977,11 @@ pub fn propose_web(url: &str, body: &str, dir: &Path, name: Option<&str>, pick: 
             o.remove("top");
         }
     }
+    // The first read is a trial of one page: what the fields are is seen in seconds, and how much
+    // more to read is a choice made after that, knowing how long it is.
+    if fetch.get("page").is_some() {
+        fetch["limit"] = json!(rows.len().max(1));
+    }
     let mut built = write_blocks(&name, "item", fetch, &cols, &sh);
     built["about"] = json!(format!("The list on {url}, {} items to a page.", rows.len()));
     // An item's own address is where its claim is read in full, not text and not a property.
@@ -994,7 +999,7 @@ pub fn propose_web(url: &str, body: &str, dir: &Path, name: Option<&str>, pick: 
             p.remove(&slug(h));
         }
     }
-    // An identifier no scheme names is the site'"'"'s own: called after the site, not the attribute.
+    // An identifier no scheme names is the site's own: called after the site, not the attribute.
     if sh.id_scheme.is_none() {
         let host = url.split('/').nth(2).unwrap_or("site").trim_start_matches("www.").trim_start_matches("store.");
         let site = slug(host.split('.').next().unwrap_or(host)).replace('_', "-");

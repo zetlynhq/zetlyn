@@ -93,7 +93,12 @@ zetlyn
       Reads a folder, a .csv or an .xlsx, a feed, a JSON API or a list on a web page, guesses the
       identifier, the title, the text and the property types, writes <dir>/source.yaml, and prints
       the first three claims it would make. On a web page it names the lists it found; --pick
-      chooses another.
+      chooses another, and the first read is a trial of one page.
+
+  zetlyn source measure <dir>
+      How long a web list is, from a few of its pages: how many, back to which date, how long a
+      read of it takes. A read that failed goes on from its page on the next update; one that
+      was stopped waits for `zetlyn source update <dir> --go-on`.
 
   zetlyn source new --from github:advisories | github:<owner>/<repo>[/releases|/advisories]
       GitHub, written once: the Advisory Database, a repository's releases or advisories, or the
@@ -230,6 +235,28 @@ fn run(args: &[String]) -> Result<(), String> {
             Some("publish") => dataset_publish(args),
             Some("subscribe") => dataset_subscribe(args),
             Some("pull") => dataset_update(args),
+            // How long a web list is, from a few of its pages: what reading it would take.
+            Some("measure") => {
+                let dir = dir_at(args, 2)?;
+                let ds = Source::open(&dir)?;
+                let cutoff = match &ds.decl.source {
+                    sourcedecl::Fetch::Web { since: Some(_), since_default, .. } => Some(since_default.clone()),
+                    _ => None,
+                };
+                let say = |line: String| eprintln!("  {line}");
+                let m = web::with_spec(&ds.decl.source, |spec| web::measure(spec, cutoff.as_deref(), &say))
+                    .ok_or("only a web list is measured")??;
+                let _ = std::fs::write(dir.join(web::MEASURE), serde_json::to_string(&m).unwrap_or_default());
+                println!("{} items a page{}", m.per_page, match (&m.newest, &m.oldest) { (Some(n), Some(o)) => format!(", from {n} back to {o}"), _ => String::new() });
+                if let (Some(p), Some(c)) = (m.to_cutoff, &m.cutoff) {
+                    println!("back to {c}: {}", m.about(p));
+                }
+                match m.last {
+                    Some(p) => println!("all of it: {}", m.about(p)),
+                    None => println!("all of it: more than 32,768 pages"),
+                }
+                Ok(())
+            }
             Some("check") => {
                 let ds = Source::open(&dir_at(args, 2)?)?;
                 let wrong = ds.check();
@@ -543,7 +570,11 @@ fn dataset_new(args: &[String]) -> Result<(), String> {
                 if found.is_empty() {
                     return Err(format!("{from} is a web page, and no list was found on it"));
                 }
-                guess::propose_web(from, &body, &dir, flag(args, "--name"), pick)?
+                let proposed = guess::propose_web(from, &body, &dir, flag(args, "--name"), pick)?;
+                if proposed.contains("limit:") {
+                    eprintln!("\n`limit` makes an update a trial of one page. `zetlyn source measure {}` says how long the list is;\nremove `limit` to read it back to `since_default`, or set `top` for the newest so many.\n", dir.display());
+                }
+                proposed
             }
             other => other?,
         };
@@ -600,6 +631,15 @@ fn dataset_new(args: &[String]) -> Result<(), String> {
 fn dataset_run(args: &[String]) -> Result<(), String> {
     let dir = dir_at(args, 2)?;
     let ds = Source::open(&dir)?;
+    // A web read somebody stopped waits for them: --go-on is them saying so.
+    if let Some(mut r) = web::resume_of(&dir).filter(|r| r.paused) {
+        if args.iter().any(|a| a == "--go-on") {
+            r.paused = false;
+            let _ = std::fs::write(dir.join(web::RESUME), serde_json::to_string(&r).unwrap_or_default());
+        } else {
+            eprintln!("a read was stopped at page {} and waits; this update reads only what is new. --go-on goes on with it.", r.page);
+        }
+    }
     let started = std::time::Instant::now();
     let r = ds.run_with(
         args.iter().any(|a| a == "--reread"),

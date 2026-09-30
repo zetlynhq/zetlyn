@@ -104,7 +104,8 @@ impl Fetcher {
     /// A 429 or a 503 slows the whole run down and then retries. Retrying at the old pace is what
     /// gives up at 455 things out of 2,684 and calls a perfectly good source broken.
     pub fn fetch(&self, url: &str) -> Result<(String, Option<String>), String> {
-        for attempt in 0..6 {
+        let mut lost = 0usize;
+        for attempt in 0..9 {
             let pause = self.pause.get();
             if attempt > 0 || !pause.is_zero() {
                 std::thread::sleep(pause.max(Duration::from_millis(200)));
@@ -137,7 +138,15 @@ impl Fetcher {
                     }
                 }
                 Err(ureq::Error::StatusCode(code)) if code == 429 || code == 503 => true,
-                Err(e) => return Err(format!("{url}: {e}")),
+                // A 4xx is the source's answer. Anything else (a timeout, a connection that dropped)
+                // is the way there, and an hour of pages is not lost to one that timed out.
+                Err(e @ ureq::Error::StatusCode(_)) => return Err(format!("{url}: {e}")),
+                Err(_) if lost < 3 => {
+                    lost += 1;
+                    std::thread::sleep(Duration::from_secs([2, 5, 15][lost - 1]));
+                    false
+                }
+                Err(e) => return Err(format!("{url}: {e}, and again after three retries")),
             };
             if throttled {
                 self.harder();

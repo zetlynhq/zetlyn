@@ -110,6 +110,12 @@ struct Job {
     lines: Vec<String>,
     done: bool,
     error: Option<String>,
+    /// What it is doing, in words, for the bar every page shows while it runs.
+    label: String,
+    /// How far it is: `{ share, text }`, where it can tell.
+    progress: Option<serde_json::Value>,
+    /// Asked to stop; the work looks at this between pages.
+    stop: bool,
     /// Where the page goes when the job is done.
     then: String,
 }
@@ -141,6 +147,23 @@ impl Progress {
                 job.lines.push(line.into());
             }
         }
+    }
+    fn label(&self, label: impl Into<String>) {
+        if let Ok(mut j) = self.jobs.lock() {
+            if let Some(job) = j.all.get_mut(&self.id) {
+                job.label = label.into();
+            }
+        }
+    }
+    fn show(&self, share: Option<f64>, text: String) {
+        if let Ok(mut j) = self.jobs.lock() {
+            if let Some(job) = j.all.get_mut(&self.id) {
+                job.progress = Some(json!({ "share": share, "text": text }));
+            }
+        }
+    }
+    fn stopping(&self) -> bool {
+        self.jobs.lock().ok().and_then(|j| j.all.get(&self.id).map(|job| job.stop)).unwrap_or(true)
     }
     fn finish(&self, result: Result<String, String>) {
         if let Ok(mut j) = self.jobs.lock() {
@@ -387,6 +410,27 @@ impl App {
                 return redirect(request, &serve::at("/"));
             }
             (false, ["webpage", tracker]) => (200, html_kind, self.webpage_page(tracker, &query)),
+            (true, ["reach", tracker, source]) => {
+                let id = self.reach(tracker, source, query.get("choice").cloned().unwrap_or_default(), form_title(&query));
+                (200, json_kind, json!({ "job": id }).to_string())
+            }
+            (true, ["job", id, "stop"]) => {
+                if let (Ok(id), Ok(mut j)) = (id.parse::<u64>(), self.jobs.lock()) {
+                    if let Some(job) = j.all.get_mut(&id) {
+                        job.stop = true;
+                    }
+                }
+                (200, json_kind, json!({ "stopping": true }).to_string())
+            }
+            // What runs in the background, for the bar on every page.
+            (false, ["jobs"]) => {
+                let running: Vec<J> = self.jobs.lock().map(|j| {
+                    j.all.iter().filter(|(_, job)| !job.done && !job.label.is_empty())
+                        .map(|(id, job)| json!({ "id": id, "label": job.label, "progress": job.progress, "stop": job.stop }))
+                        .collect()
+                }).unwrap_or_default();
+                (200, json_kind, json!({ "running": running }).to_string())
+            }
             (true, ["readweb", tracker]) => {
                 let pick: usize = query.get("pick").and_then(|p| p.parse().ok()).unwrap_or(0);
                 let id = self.read_web(tracker, query.get("url").cloned().unwrap_or_default(), form_title(&query), pick);
@@ -496,7 +540,7 @@ impl App {
                     Some(j) => (
                         200,
                         json_kind,
-                        json!({ "lines": j.lines, "done": j.done, "error": j.error, "then": j.then }).to_string(),
+                        json!({ "lines": j.lines, "done": j.done, "error": j.error, "then": j.then, "label": j.label, "progress": j.progress, "stop": j.stop }).to_string(),
                     ),
                     None => (404, json_kind, json!({ "error": "no such job" }).to_string()),
                 }
@@ -537,6 +581,7 @@ impl App {
             .unwrap_or_default();
         let tracker = tracker.to_string();
         self.start(move |p| {
+            p.label(format!("Reading {}", if from.contains("://") { from.split('/').nth(2).unwrap_or(&from) } else { from.rsplit('/').next().unwrap_or(&from) }));
             let local = Path::new(&from).is_file();
             let github = from.starts_with("github:");
             // An upload already sits in its own directory; an address gets one named after it.
@@ -666,6 +711,7 @@ impl App {
         let (tracker, source) = (tracker.to_string(), source.to_string());
         self.start(move |p| {
             let assist = crate::assist::Assist::configured(&root);
+            p.label(format!("Asking {} about {url}", assist.who()));
             p.say(format!("Asking {} to read {url}", assist.who()));
             let taught = match crate::teach::api(&assist, &url, &dir, &format!("local/{source}"), true) {
                 Ok(crate::teach::Outcome::Done(t)) => t,
@@ -692,6 +738,7 @@ impl App {
         let (tracker, source) = (tracker.to_string(), source.to_string());
         self.start(move |p| {
             let assist = crate::assist::Assist::configured(&root);
+            p.label(format!("Asking {} why", assist.who()));
             p.say(format!("Asking {}", assist.who()));
             match crate::teach::why(&assist, &tdir, &sdir, true)? {
                 crate::teach::Outcome::Done(why) => Ok(serve::at(&format!("/review/{tracker}/{source}?title={}&why={}", urlencode(&title), urlencode(&why)))),
@@ -791,6 +838,7 @@ impl App {
     fn publish_to_hub(&self, tracker: &str) -> u64 {
         let (dir, sources) = (self.trackers().join(tracker), self.sources());
         self.start(move |p| {
+            p.label("Publishing to the hub");
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
             let t = Tracker::open(&dir, &sources)?;
             let registry = crate::tracker::registry(&sources);
@@ -996,14 +1044,18 @@ impl App {
         }
     }
 
-    /// A list on a web page, proposed as a source and read whole.
+    /// A list on a web page, proposed as a source: one page read as a trial, and the list measured
+    /// by asking for a few of its pages, so how much more to read is chosen knowing how long it is.
     fn read_web(&self, tracker: &str, url: String, title: String, pick: usize) -> u64 {
         let host = url.split('/').nth(2).unwrap_or("site").trim_start_matches("www.").to_string();
-        let source = self.free(&self.sources(), &crate::guess::slug(host.split('.').next().unwrap_or("site")));
+        // Named after the site, not its first label: store.steampowered.com is steampowered.
+        let site = host.split('.').rev().nth(1).unwrap_or("site").to_string();
+        let source = self.free(&self.sources(), &crate::guess::slug(&site));
         let dir = self.sources().join(&source);
         let tracker = tracker.to_string();
         self.start(move |p| {
-            p.say(format!("Reading {url}"));
+            p.label(format!("Trying {host}"));
+            p.say(format!("Reading the first page of {url}"));
             let body = crate::fetch::Fetcher::new(crate::sourcedecl::AGENT, &BTreeMap::new(), 0)?.get(&url)?;
             if let Err(e) = crate::guess::propose_web(&url, &body, &dir, Some(&format!("local/{source}")), pick) {
                 let _ = std::fs::remove_dir_all(&dir);
@@ -1011,12 +1063,113 @@ impl App {
             }
             let ds = Source::open(&dir)?;
             describe_ids(&ds, p);
-            p.say("Reading every page of the list");
-            let pages = p.clone();
-            crate::web::on_page(Some(Box::new(move |line| pages.say(line))));
-            let started = std::time::Instant::now();
             let report = ds.run()?;
-            p.say(format!("{} claims in {:.1}s", report.added + report.changed + report.unchanged, started.elapsed().as_secs_f64()));
+            p.say(format!("A trial: {} claims from the first page", report.added + report.changed + report.unchanged));
+            if matches!(&ds.decl.source, crate::sourcedecl::Fetch::Web { page: Some(_), .. }) {
+                p.say("How long is the list? Asking for a few of its pages, not reading them:");
+                let cutoff = match &ds.decl.source {
+                    crate::sourcedecl::Fetch::Web { since: Some(_), since_default, .. } => Some(since_default.clone()),
+                    _ => None,
+                };
+                let say = |line: String| p.say(format!("  {line}"));
+                let m = crate::web::with_spec(&ds.decl.source, |spec| crate::web::measure(spec, cutoff.as_deref(), &say)).transpose()?;
+                if let Some(m) = m {
+                    let _ = std::fs::write(dir.join(crate::web::MEASURE), serde_json::to_string(&m).unwrap_or_default());
+                }
+            }
+            Ok(serve::at(&format!("/review/{tracker}/{source}?title={}", urlencode(&title))))
+        })
+    }
+
+    /// How much of a web list to read, chosen after its trial: the newest 500, back to the date
+    /// the list is cut at, all of it, or on from where a read stopped. Said page by page.
+    fn reach(&self, tracker: &str, source: &str, choice: String, title: String) -> u64 {
+        let dir = self.sources().join(source);
+        let (tracker, source) = (tracker.to_string(), source.to_string());
+        self.start(move |p| {
+            let before = Source::open(&dir)?;
+            let (held, mark) = (before.store.count() as usize, before.store.meta("mark"));
+            drop(before);
+            let mut decl = crate::sourcedecl::SourceDecl::load(&dir)?;
+            let m = crate::web::measure_of(&dir);
+            let per = m.as_ref().map(|m| m.per_page.max(1)).unwrap_or(25);
+            let crate::sourcedecl::Fetch::Web { limit, top, since_default, .. } = &mut decl.source else {
+                return Err("only a web list is read this way".into());
+            };
+            let mut further: Option<String> = None;
+            let pages: Option<usize> = match choice.as_str() {
+                // Further back than a read that is done: on from the page it got to, down to a date.
+                "back" | "back-all" => {
+                    *limit = 0;
+                    *top = 0;
+                    if choice == "back-all" {
+                        *since_default = "1970-01-01".into();
+                    }
+                    further = Some(since_default.clone());
+                    if choice == "back" { m.as_ref().and_then(|m| m.to_cutoff) } else { m.as_ref().and_then(|m| m.last) }
+                }
+                "newest" => {
+                    *limit = 0;
+                    *top = 500;
+                    Some(500usize.div_ceil(per))
+                }
+                "since" => {
+                    *limit = 0;
+                    *top = 0;
+                    m.as_ref().and_then(|m| m.to_cutoff)
+                }
+                "all" => {
+                    *limit = 0;
+                    *top = 0;
+                    *since_default = "1970-01-01".into();
+                    m.as_ref().and_then(|m| m.last)
+                }
+                // Going on: as far as the read that stopped was going.
+                _ if *top > 0 => Some(top.div_ceil(per)),
+                _ => m.as_ref().and_then(|m| if since_default.as_str() <= "1970-01-01" { m.last } else { m.to_cutoff }),
+            };
+            let path = dir.join(crate::sourcedecl::FILE);
+            std::fs::write(&path, crate::yaml::to_string(&decl)?).map_err(|e| format!("{}: {e}", path.display()))?;
+            let ds = Source::open(&dir)?;
+            if let Some(until) = further {
+                let r = crate::web::Resume { page: held / per, items: held, high: mark, why: "reading further back".into(), until: Some(until), paused: false };
+                let _ = std::fs::write(dir.join(crate::web::RESUME), serde_json::to_string(&r).unwrap_or_default());
+            }
+            // Whoever stopped it says go on.
+            if let Some(mut r) = crate::web::resume_of(&dir).filter(|r| r.paused) {
+                r.paused = false;
+                let _ = std::fs::write(dir.join(crate::web::RESUME), serde_json::to_string(&r).unwrap_or_default());
+            }
+            let from = crate::web::resume_of(&dir).map(|r| r.page).unwrap_or(0);
+            let of = pages.map(|n| n.max(from + 1));
+            p.label(format!("Reading {}", ds.decl.title));
+            p.say(match of {
+                Some(n) => format!("Reading {} pages, one a second or so; you can leave this page, the bar at the bottom follows it", n - from),
+                None => "Reading every page".to_string(),
+            });
+            let started = std::time::Instant::now();
+            let hook = p.clone();
+            crate::web::on_page(Some(Box::new(move |step: &crate::web::Step| {
+                let done = step.page.saturating_sub(from);
+                let a_page = started.elapsed().as_secs_f64() / done.max(1) as f64;
+                let reached = step.reached.as_ref().map(|d| format!(" · back to {d}")).unwrap_or_default();
+                let text = match of {
+                    Some(n) => format!(
+                        "page {} of about {n} · {} items{reached} · {} left",
+                        step.page, crate::web::thousands(step.items), crate::web::duration(n.saturating_sub(step.page) as f64 * a_page)
+                    ),
+                    None => format!("page {} · {} items{reached}", step.page, crate::web::thousands(step.items)),
+                };
+                hook.show(of.map(|n| (step.page as f64 / n as f64).min(1.0)), text);
+                !hook.stopping()
+            })));
+            let report = ds.run();
+            crate::web::on_page(None);
+            report?;
+            match crate::web::resume_of(&dir) {
+                Some(r) => p.say(format!("Not finished ({}). {} claims are kept; it goes on from page {} when you ask.", r.why, crate::web::thousands(ds.store.count() as usize), r.page + 1)),
+                None => p.say(format!("{} claims in {}", ds.store.count(), crate::web::duration(started.elapsed().as_secs_f64()))),
+            }
             Ok(serve::at(&format!("/review/{tracker}/{source}?title={}", urlencode(&title))))
         })
     }
@@ -1119,10 +1272,82 @@ impl App {
             }
         }
 
+        // A web list: its trial, how long it is, and what of it to read.
+        let src_dir = self.sources().join(source);
+        let web = match &ds.decl.source {
+            crate::sourcedecl::Fetch::Web { limit, top, since, since_default, .. } => Some((*limit > 0, *top, since.is_some(), since_default.clone())),
+            _ => None,
+        };
+        let measured = crate::web::measure_of(&src_dir);
+        let resume = crate::web::resume_of(&src_dir);
+        let undecided = web.as_ref().is_some_and(|w| w.0);
+        let reach = |choice: &str| format!("{}{tracker}/{source}?choice={choice}&title={}", serve::at("/reach/"), urlencode(&title));
         let body = html! {
             p { a href=(serve::at("/")) { "← Zetlyn" } @if decl.is_some() { " · " a href={(serve::at("/t/")) (tracker) "/"} { (title) } } }
             h1 { (ds.decl.title) }
             p.about { (total) " claims read from " code { (source_of(&ds)) } }
+
+            @if let Some((trial, top, dated, since_default)) = &web {
+                h2 { "How much to read" }
+                @if let Some(r) = &resume {
+                    div.note { "Not finished (" (r.why) "). The " (crate::web::thousands(total as usize)) " claims read are kept." }
+                    form.bar data-job=(reach("continue")) { button.primary type="submit" { "Go on from page " (r.page + 1) } }
+                } @else if *trial {
+                    p { "That was a trial: the first page, " (total) " items. Nothing more is read until you choose." }
+                    @if let Some(m) = &measured {
+                        p.dim {
+                            (m.per_page) " items a page"
+                            @if let (Some(n), Some(o)) = (&m.newest, &m.oldest) { ", from " (n) " back to " (o) }
+                            @match m.last { Some(l) => { ", " (crate::web::thousands(l)) " pages in all." } None => { ", more than 32,768 pages." } }
+                        }
+                    }
+                    @let per = measured.as_ref().map(|m| m.per_page.max(1)).unwrap_or(25);
+                    table { tbody {
+                        tr {
+                            td { form data-job=(reach("newest")) { button.primary type="submit" { "The newest 500" } } }
+                            td.dim { @if let Some(m) = &measured { (m.about(500usize.div_ceil(per))) } }
+                        }
+                        @if *dated {
+                            tr {
+                                td { form data-job=(reach("since")) { button type="submit" { "Back to " (since_default) } } }
+                                td.dim { @match measured.as_ref().and_then(|m| m.to_cutoff.map(|p| m.about(p))) { Some(a) => (a), None => "how far that is was not found" } }
+                            }
+                        }
+                        tr {
+                            td { form data-job=(reach("all")) { button type="submit" { "All of it" } } }
+                            td.dim { @match measured.as_ref().and_then(|m| m.last.map(|p| m.about(p))) { Some(a) => (a), None => "longer than could be measured" } }
+                        }
+                    } }
+                    p.dim { "It reads one page a second or so, to be a polite reader. You can leave the page while it reads: the bar at the bottom follows it and can stop it, and a stopped read goes on where it stopped. After this, an update reads only what is new, a page or two." }
+                } @else {
+                    p.dim { (crate::web::thousands(total as usize)) " items read" @if *top > 0 { ", the newest " (top) } ". An update reads only what is new." }
+                    @if let Some(m) = &measured {
+                        @let done = total as usize / m.per_page.max(1);
+                        @let everything = since_default.as_str() <= "1970-01-01";
+                        table { tbody {
+                            @if *top > 0 && *dated {
+                                @if let Some(p) = m.to_cutoff.filter(|p| *p > done) {
+                                    tr {
+                                        td { form data-job=(reach("back")) { button type="submit" { "Further back, to " (since_default) } } }
+                                        td.dim { (m.about(p - done)) " more" }
+                                    }
+                                }
+                            }
+                            @if !everything || *top > 0 {
+                                @if let Some(p) = m.last.filter(|p| *p > done) {
+                                    tr {
+                                        td { form data-job=(reach("back-all")) { button type="submit" { "All of it" } } }
+                                        td.dim { (m.about(p - done)) " more" }
+                                    }
+                                }
+                            }
+                        } }
+                    }
+                }
+                pre #log data-jobs=(serve::at("/job/")) hidden {}
+                div #error .note hidden {}
+                (PreEscaped(JOB_SCRIPT))
+            }
 
             h2 { "What names a claim" }
             @if schemes.is_empty() {
@@ -1207,7 +1432,7 @@ impl App {
                     p { label { "Why this source, in one sentence" br;
                         input.wide type="text" name="why" value=(query.get("why").cloned().unwrap_or_else(|| example_why(&ds))) placeholder={"What " (ds.decl.title) " says that nothing else does."}; } }
                     p.bar {
-                        @if total > 0 { button.primary type="submit" { @if decl.is_none() { "Looks right" } @else { "Connect" } } }
+                        @if total > 0 && !undecided { button.primary type="submit" { @if decl.is_none() { "Looks right" } @else { "Connect" } } }
                         button type="submit" formaction={(serve::at("/discard/")) (tracker) "/" (source) "?title=" (urlencode(&title))} { "Not right" }
                     }
                 }
@@ -1349,7 +1574,7 @@ fn parse_form(s: &str) -> BTreeMap<String, String> {
 }
 
 fn page(title: &str, body: Markup) -> String {
-    serve::shell(title, body)
+    serve::shell(title, html! { (body) div #jobs data-at=(serve::at("/")) hidden {} (PreEscaped(BAR_SCRIPT)) })
 }
 
 fn respond(request: tiny_http::Request, status: u16, kind: &str, body: &str) {
@@ -1377,16 +1602,60 @@ button.primary { background: var(--accent); color: var(--bg); border-color: var(
 pre#log { background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
   padding: .7rem .9rem; font-size: .85rem; white-space: pre-wrap; }
 .grid .card h4 { font-size: 1.6rem; margin: 0; }
+#jobs { position: fixed; left: 0; right: 0; bottom: 0; background: var(--panel); border-top: 1px solid var(--line);
+  padding: .6rem 1rem calc(.6rem + env(safe-area-inset-bottom, 0px)); font-size: .9rem; }
+#jobs .job { display: flex; gap: .8rem; align-items: center; flex-wrap: wrap; max-width: 60rem; margin: 0 auto; }
+#jobs progress, main progress { flex: 1 1 10rem; min-width: 6rem; width: 100%; }
+body.busy main { padding-bottom: 6rem; }
 "#;
 
+
+/// Whatever runs in the background, at the bottom of every page, with a way to stop it: a read of
+/// a thousand pages is not something to find out about afterwards.
+const BAR_SCRIPT: &str = r#"<script>
+(function () {
+  var box = document.getElementById('jobs'); if (!box) return;
+  var at = box.dataset.at;
+  function draw(running) {
+    box.hidden = running.length == 0;
+    document.body.classList.toggle('busy', running.length > 0);
+    box.textContent = '';
+    running.forEach(function (j) {
+      var row = document.createElement('div'); row.className = 'job';
+      var what = document.createElement('strong'); what.textContent = j.label; row.appendChild(what);
+      var bar = document.createElement('progress'); bar.max = 1;
+      if (j.progress && j.progress.share != null) bar.value = j.progress.share;
+      row.appendChild(bar);
+      var said = document.createElement('span'); said.className = 'dim';
+      said.textContent = j.stop ? 'stopping after this page…' : (j.progress ? j.progress.text : 'working…');
+      row.appendChild(said);
+      if (!j.stop) {
+        var stop = document.createElement('button'); stop.textContent = 'Stop';
+        stop.onclick = function () { fetch(at + 'job/' + j.id + '/stop', { method: 'POST' }).then(look); };
+        row.appendChild(stop);
+      }
+      box.appendChild(row);
+    });
+  }
+  function look() {
+    fetch(at + 'jobs').then(function (r) { return r.json(); }).then(function (j) { draw(j.running || []); })
+      .catch(function () { box.hidden = true; });
+  }
+  look(); setInterval(look, 1500);
+})();
+</script>"#;
 /// The one script: send a form or a file, then follow the job until it says where to go.
 const JOB_SCRIPT: &str = r#"<script>
 (function () {
-  var log = document.getElementById('log'), error = document.getElementById('error');
+  if (window.zetlynJobs) return; window.zetlynJobs = true;
+  var log = document.getElementById('log'), error = document.getElementById('error'), bar = null;
   function follow(id) {
     fetch(((log && log.dataset.jobs) || '/job/') + id).then(function (r) { return r.json(); }).then(function (j) {
       log.hidden = false;
-      log.textContent = j.lines.join('\n') + (j.done ? '' : '\n…');
+      log.textContent = j.lines.join('\n') + (j.done ? '' : '\n' + (j.progress ? j.progress.text : '…'));
+      if (!bar) { bar = document.createElement('progress'); bar.max = 1; log.parentNode.insertBefore(bar, log); }
+      if (j.progress && j.progress.share != null) bar.value = j.progress.share; else bar.removeAttribute('value');
+      bar.hidden = j.done;
       if (!j.done) { setTimeout(function () { follow(id); }, 400); return; }
       if (j.error) { error.hidden = false; error.textContent = j.error; return; }
       location.href = j.then;

@@ -133,6 +133,10 @@ pub enum Fetch {
         fields: BTreeMap<String, String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         page: Option<Page>,
+        /// For trying a shape: this many items, one page or so. A truncated run has not seen the
+        /// list, so it never removes and never advances the mark.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        limit: usize,
         /// The first this many items, in the page's own order: a declared coverage.
         #[serde(default, skip_serializing_if = "is_zero")]
         top: usize,
@@ -240,7 +244,7 @@ impl Fetch {
     /// A run that stopped at a declared `limit` has not seen the source, so it never
     /// licenses a removal and never advances the mark. `limit` is for trying a shape.
     pub fn truncating(&self) -> bool {
-        matches!(self, Fetch::Http { limit, .. } if *limit > 0)
+        matches!(self, Fetch::Http { limit, .. } | Fetch::Web { limit, .. } if *limit > 0)
     }
 
     pub fn kind_name(&self) -> &'static str {

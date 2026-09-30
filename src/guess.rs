@@ -958,7 +958,30 @@ pub fn propose_web(url: &str, body: &str, dir: &Path, name: Option<&str>, pick: 
         .map(|r| headers.iter().map(|h| r[h].as_str().map(str::to_string).unwrap_or_default()).collect())
         .collect();
     let cols = columns_from_rows(&headers, &table);
-    let sh = shape(&cols);
+    let mut sh = shape(&cols);
+    // A page shows one item in several places (a front page's tabs, a list and its highlights).
+    // An attribute named as an id, on every item and the same only where the item is the same,
+    // still names it; the repeats are kept once.
+    if sh.id.is_none() {
+        sh.id = cols
+            .iter()
+            .filter(|c| c.filled().len() == c.values.len() && c.distinct() * 2 >= c.values.len() && c.mean_len() <= 64)
+            .filter(|c| c.name.ends_with("id") || hints(&c.name, &["id", "key"]))
+            .min_by_key(|c| c.name.len())
+            .map(|c| c.name.clone());
+    }
+    // A date on most items is the date of the list: a page says `Coming soon` of some.
+    if sh.known.is_none() {
+        sh.known = cols
+            .iter()
+            .filter(|c| {
+                let f = c.filled();
+                let dated = f.iter().filter(|v| as_date(v).is_some()).count();
+                !f.is_empty() && dated * 10 >= c.values.len() * 8
+            })
+            .min_by_key(|c| c.name.len())
+            .map(|c| c.name.clone());
+    }
     let mut fetch = json!({ "type": "web", "url": url, "items": c.items, "fields": fields });
     if let Some(param) = crate::web::paging_parameter(body, url) {
         fetch["page"] = json!({ "offset": param, "by": "page", "max": rows.len().max(1) });
@@ -966,7 +989,7 @@ pub fn propose_web(url: &str, body: &str, dir: &Path, name: Option<&str>, pick: 
     }
     let name = name.map(str::to_string).unwrap_or_else(|| {
         let host = url.split('/').nth(2).unwrap_or("site").trim_start_matches("www.");
-        format!("local/{}", slug(host.split('.').next().unwrap_or(host)))
+        format!("local/{}", slug(host.split('.').rev().nth(1).unwrap_or(host)))
     });
     // A list with a date and a next page is read back to the start of this year, and after that
     // only what is newer; with no date, the first thousand.

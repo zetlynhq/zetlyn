@@ -913,6 +913,9 @@ impl App {
             @if found.is_empty() {
                 p { "No list was found on it. The address of a list works best: search results, a category, a page of new releases." }
             } @else {
+                @if url.split('/').skip(3).all(|p| p.is_empty() || p.starts_with('?')) {
+                    div.note { "This is the front page of " (url.split('/').nth(2).unwrap_or("the site")) ": a mix of lists, each short, with the same item in several. For a topic, the address of a search or a category on the site works better (search there, and paste the address the search shows)." }
+                }
                 h2 { "Lists on this page" }
                 @for (i, c) in found.iter().enumerate().take(3) {
                     div.card style="margin-bottom:1rem" {
@@ -1352,7 +1355,9 @@ impl App {
             h2 { "What names a claim" }
             @if schemes.is_empty() {
                 div.note { "No identifier Zetlyn knows was found. A tracker joins its sources on one, so a source needs something that names each of its claims." }
-                @let unique = ds.store.unique_fields();
+                @let exact = ds.store.unique_fields();
+                @let repeated = exact.is_empty();
+                @let unique = if repeated { ds.store.nearly_unique_fields() } else { exact };
                 @if unique.is_empty() {
                     p.dim { @if total == 0 { "It read no claims at all, so there is nothing to choose from: the address may not be the data." } @else { "No property here is different on every claim either." } }
                 } @else {
@@ -1363,7 +1368,7 @@ impl App {
                         input type="text" name="scheme" placeholder="e.g. steam, isbn, sku" required;
                         button.primary type="submit" { "Read it again" }
                     }
-                    p.dim { "These properties have a different value on every claim. Choose the one that names an item the way another source would name it too: a second source meets this one on it." }
+                    p.dim { @if repeated { "These properties are on every claim and different on most: the page shows some items more than once, and each is kept once. " } @else { "These properties have a different value on every claim. " } "Choose the one that names an item the way another source would name it too: a second source meets this one on it." }
                 }
             } @else {
                 table { tbody {
@@ -1432,8 +1437,9 @@ impl App {
                     p { label { "Why this source, in one sentence" br;
                         input.wide type="text" name="why" value=(query.get("why").cloned().unwrap_or_else(|| example_why(&ds))) placeholder={"What " (ds.decl.title) " says that nothing else does."}; } }
                     p.bar {
-                        @if total > 0 && !undecided { button.primary type="submit" { @if decl.is_none() { "Looks right" } @else { "Connect" } } }
+                        @if total > 0 && !undecided && !schemes.is_empty() { button.primary type="submit" { @if decl.is_none() { "Looks right" } @else { "Connect" } } }
                         button type="submit" formaction={(serve::at("/discard/")) (tracker) "/" (source) "?title=" (urlencode(&title))} { "Not right" }
+                        @if schemes.is_empty() && total > 0 { span.dim { "Looks right comes once something names each claim: choose it above." } }
                     }
                 }
                 p.dim { "The declaration is " code { (self.sources().join(source).join(crate::sourcedecl::FILE).display()) } ", and can be edited." }

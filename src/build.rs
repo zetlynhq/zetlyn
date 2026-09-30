@@ -110,6 +110,12 @@ pub fn as_date(raw: &str) -> Option<String> {
     }
     // 30 Sep, 2026 · Sep 30, 2026 · 30. September 2026: what a web page shows a person, in
     // English and in German.
+    // And after a label: `Released: 30 Sep, 2026`.
+    if let Some((_, after)) = s.rsplit_once(": ") {
+        if let Some(d) = as_date(after) {
+            return Some(d);
+        }
+    }
     if let Some(d) = named_month(s) {
         return Some(d);
     }
@@ -460,7 +466,7 @@ mod date_tests {
     #[test]
     fn a_date_in_words_is_a_date() {
         for (raw, want) in [("30 Sep, 2026", "2026-09-30"), ("Sep 30, 2026", "2026-09-30"), ("30 September 2026", "2026-09-30"),
-                            ("30. September 2026", "2026-09-30"), ("2. Okt. 2026", "2026-10-02"), ("1 Mai 2026", "2026-05-01"), ("March 3, 2025", "2025-03-03")] {
+                            ("30. September 2026", "2026-09-30"), ("2. Okt. 2026", "2026-10-02"), ("1 Mai 2026", "2026-05-01"), ("March 3, 2025", "2025-03-03"), ("Released: 29 Sep, 2026", "2026-09-29")] {
             assert_eq!(super::as_date(raw).as_deref(), Some(want), "{raw}");
         }
         for not in ["Coming soon", "Q4 2026", "30 Foo 2026", "Sep 2026"] {

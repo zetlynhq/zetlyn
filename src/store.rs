@@ -1475,6 +1475,21 @@ impl Store {
         };
         stmt.query_map([total], |r| r.get(0)).map(|rows| rows.flatten().collect()).unwrap_or_default()
     }
+    /// Fields on every claim that are different on most of them: an item a page shows twice has
+    /// its id twice, and it is still what names the item.
+    pub fn nearly_unique_fields(&self) -> Vec<String> {
+        let total = self.count() as i64;
+        if total == 0 {
+            return Vec::new();
+        }
+        let Ok(mut stmt) = self.db.prepare(
+            "select name from field group by name
+             having count(distinct record_id) = ?1 and count(distinct coalesce(s, cast(n as text), d)) * 2 >= ?1 order by name",
+        ) else {
+            return Vec::new();
+        };
+        stmt.query_map([total], |r| r.get(0)).map(|rows| rows.flatten().collect()).unwrap_or_default()
+    }
     pub fn distinct_identifiers(&self) -> BTreeMap<String, u64> {
         let mut out = BTreeMap::new();
         let Ok(mut stmt) = self

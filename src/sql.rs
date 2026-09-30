@@ -46,7 +46,7 @@ pub fn rows(
             let path = path.trim_start_matches("field:");
             for v in crate::expr::walk(&value, path) {
                 let s = crate::expr::as_string(&v);
-                if !s.is_empty() && high.as_deref().is_none_or(|h| s.as_str() > h) {
+                if !s.is_empty() && high.as_deref().map_or(true, |h| s.as_str() > h) {
                     high = Some(s);
                 }
             }

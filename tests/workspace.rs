@@ -888,3 +888,47 @@ fn one_mailer_serves_every_workspace_that_names_none() {
     let said = check(Some(&file));
     assert!(said.contains("127.0.0.1:9"), "{said}");
 }
+
+/// A list on a web page, two pages of it, newest first, served here.
+fn a_list_site() -> String {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let at = format!("http://{}", server.server_addr().to_ip().unwrap());
+    let games = [
+        [("Alpha", "12 Mar, 2026"), ("Bravo", "10 Mar, 2026"), ("Charlie", "2 Feb, 2026"), ("Delta", "1 Feb, 2026"), ("Echo", "30 Jan, 2026")].as_slice(),
+        [("Foxtrot", "20 Jan, 2026"), ("Golf", "5 Jan, 2026"), ("Hotel", "20 Dec, 2025")].as_slice(),
+    ];
+    std::thread::spawn(move || {
+        for request in server.incoming_requests() {
+            let n: usize = request.url().split("page=").nth(1).and_then(|p| p.parse().ok()).unwrap_or(1);
+            let rows: String = games.get(n - 1).copied().unwrap_or_default().iter().enumerate().map(|(i, (title, date))| {
+                let id = n * 10 + i;
+                format!("<a class=\"game_row\" href=\"/game/{id}\" data-id=\"{id}\"><span class=\"title\">{title}</span><span class=\"released\">{date}</span></a>\n")
+            }).collect();
+            let page = format!("<!doctype html><html><head><title>Games</title></head><body><div class=\"filters\"><span class=\"tag\">All</span></div>{rows}<a href=\"/games?page=2\">2</a></body></html>");
+            let _ = request.respond(tiny_http::Response::from_string(page).with_header("Content-Type: text/html".parse::<tiny_http::Header>().unwrap()));
+        }
+    });
+    format!("{at}/games")
+}
+
+#[test]
+fn a_list_on_a_web_page_is_read_back_to_the_first_of_the_year() {
+    let root = std::env::temp_dir().join(format!("zetlyn-test-{}-web", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("home")).unwrap();
+    let url = a_list_site();
+    let at = root.join("games").display().to_string();
+    let (ok, said) = run(&root, &["source", "new", "--from", &url, "--at", &at, "--name", "test/games"]);
+    assert!(ok, "{said}");
+    assert!(said.contains("a.game_row"), "the list is found by its items: {said}");
+    let decl = std::fs::read_to_string(root.join("games/source.yaml")).unwrap();
+    assert!(decl.contains("type: web") && decl.contains("since: field:released") && decl.contains("by: page"), "{decl}");
+    let (ok, said) = run(&root, &["source", "update", &at]);
+    assert!(ok, "{said}");
+    for (id, title) in [("10", "Alpha"), ("14", "Echo"), ("20", "Foxtrot"), ("21", "Golf")] {
+        let (_, said) = run(&root, &["claim", &at, id]);
+        assert!(said.contains(title), "{title} is of this year: {said}");
+    }
+    let (_, said) = run(&root, &["claim", &at, "22"]);
+    assert!(!said.contains("Hotel"), "the first of last year ends the read: {said}");
+}

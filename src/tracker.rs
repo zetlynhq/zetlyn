@@ -1684,6 +1684,6 @@ impl Tracker {
     /// Whether the text of this source's claims may be shown, or only their titles, values and
     /// where to read them.
     pub fn text_shown(&self, source: &str) -> bool {
-        self.licences().iter().find(|(s, _)| s == source).is_none_or(|(_, r)| r != "summary")
+        self.licences().iter().find(|(s, _)| s == source).map_or(true, |(_, r)| r != "summary")
     }
 }

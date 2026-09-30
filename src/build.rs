@@ -108,7 +108,40 @@ pub fn as_date(raw: &str) -> Option<String> {
             return Some(format!("{y:04}-{m:02}-{d:02}"));
         }
     }
+    // 30 Sep, 2026 · Sep 30, 2026 · 30. September 2026: what a web page shows a person, in
+    // English and in German.
+    if let Some(d) = named_month(s) {
+        return Some(d);
+    }
     None
+}
+
+fn named_month(s: &str) -> Option<String> {
+    let words: Vec<String> = s
+        .replace([',', '.'], " ")
+        .split_whitespace()
+        .map(|w| w.to_lowercase())
+        .collect();
+    if words.len() != 3 {
+        return None;
+    }
+    const MONTHS: [&[&str]; 12] = [
+        &["jan", "januar", "jänner"], &["feb", "februar"], &["mar", "mär", "märz", "maerz"], &["apr"],
+        &["may", "mai"], &["jun"], &["jul"], &["aug"], &["sep", "sept"], &["oct", "okt"], &["nov"], &["dec", "dez"],
+    ];
+    let month_of = |w: &str| -> Option<u32> {
+        MONTHS.iter().position(|names| names.iter().any(|n| w == *n || (w.len() > 3 && w.starts_with(&n[..3.min(n.len())]) && n.len() == 3))).map(|i| i as u32 + 1)
+    };
+    let (m, rest): (u32, Vec<&String>) = words.iter().enumerate().find_map(|(i, w)| {
+        month_of(w).map(|m| (m, words.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, w)| w).collect()))
+    })?;
+    let nums: Vec<i64> = rest.iter().filter_map(|w| w.parse().ok()).collect();
+    let (d, y) = match nums.as_slice() {
+        [a, b] if *b > 1000 && (1..=31).contains(a) => (*a, *b),
+        [a, b] if *a > 1000 && (1..=31).contains(b) => (*b, *a),
+        _ => return None,
+    };
+    Some(format!("{y:04}-{m:02}-{d:02}"))
 }
 
 fn as_bool(raw: &str) -> Option<bool> {
@@ -420,4 +453,18 @@ fn excerpt(row: &J, said: serde_json::Map<String, J>) -> J {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod date_tests {
+    #[test]
+    fn a_date_in_words_is_a_date() {
+        for (raw, want) in [("30 Sep, 2026", "2026-09-30"), ("Sep 30, 2026", "2026-09-30"), ("30 September 2026", "2026-09-30"),
+                            ("30. September 2026", "2026-09-30"), ("2. Okt. 2026", "2026-10-02"), ("1 Mai 2026", "2026-05-01"), ("March 3, 2025", "2025-03-03")] {
+            assert_eq!(super::as_date(raw).as_deref(), Some(want), "{raw}");
+        }
+        for not in ["Coming soon", "Q4 2026", "30 Foo 2026", "Sep 2026"] {
+            assert_eq!(super::as_date(not), None, "{not}");
+        }
+    }
 }

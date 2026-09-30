@@ -10,6 +10,7 @@ mod build;
 mod console;
 mod source;
 mod sql;
+mod web;
 mod sourcedecl;
 mod expr;
 mod fetch;
@@ -88,9 +89,11 @@ zetlyn
       The workspace in a browser, for the person at the machine: a tracker from a first source
       and a second, with what they share shown before they are connected.
 
-  zetlyn source new --from <path or URL> [--at <dir>] [--name owner/name] [--kind <word>]
-      Reads a folder, a .csv or an .xlsx, guesses the identifier, the title, the text and the
-      property types, writes <dir>/source.yaml, and prints the first three claims it would make.
+  zetlyn source new --from <path or URL> [--at <dir>] [--name owner/name] [--kind <word>] [--pick N]
+      Reads a folder, a .csv or an .xlsx, a feed, a JSON API or a list on a web page, guesses the
+      identifier, the title, the text and the property types, writes <dir>/source.yaml, and prints
+      the first three claims it would make. On a web page it names the lists it found; --pick
+      chooses another.
 
   zetlyn source new --from github:advisories | github:<owner>/<repo>[/releases|/advisories]
       GitHub, written once: the Advisory Database, a repository's releases or advisories, or the
@@ -527,7 +530,23 @@ fn dataset_new(args: &[String]) -> Result<(), String> {
                 .map(str::to_string)
                 .unwrap_or(format!("./{stem}")),
         );
-        let proposed = guess::propose_url(from, &dir, flag(args, "--name"), flag(args, "--kind"))?;
+        let proposed = match guess::propose_url(from, &dir, flag(args, "--name"), flag(args, "--kind")) {
+            // A web page: the best list on it, or the one --pick names, said before it is written.
+            Err(e) if e.starts_with(guess::WEB_PAGE) => {
+                let body = fetch::Fetcher::new(sourcedecl::AGENT, &std::collections::BTreeMap::new(), 0)?.get(from)?;
+                let found = web::candidates(&body);
+                let pick: usize = flag(args, "--pick").and_then(|p| p.parse().ok()).unwrap_or(0);
+                for (i, c) in found.iter().enumerate() {
+                    eprintln!("{} {i}: {} ({} on the page) — {}", if i == pick { "→" } else { " " }, c.items, c.count,
+                        c.fields.iter().map(|(n, _, said)| format!("{n}: {}", said.first().cloned().unwrap_or_default())).collect::<Vec<_>>().join(", "));
+                }
+                if found.is_empty() {
+                    return Err(format!("{from} is a web page, and no list was found on it"));
+                }
+                guess::propose_web(from, &body, &dir, flag(args, "--name"), pick)?
+            }
+            other => other?,
+        };
         println!("{}\n", dir.join(crate::sourcedecl::FILE).display());
         print!("{proposed}");
         return Ok(());

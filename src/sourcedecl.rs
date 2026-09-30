@@ -122,6 +122,32 @@ pub enum Fetch {
         #[serde(default = "thousand", skip_serializing_if = "is_thousand")]
         pause_ms: u64,
     },
+    /// A web page, read as people see it: each element `items` selects is a claim, and `fields`
+    /// says what of it becomes a value, so the rest of the declaration reads it as it reads an
+    /// API's answer. `.title` is the text of the first element that selector finds in the item,
+    /// `.price@data-final` an attribute of it, `@href` the item's own.
+    Web {
+        url: String,
+        items: String,
+        #[serde(default)]
+        fields: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        page: Option<Page>,
+        /// The first this many items, in the page's own order: a declared coverage.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        top: usize,
+        /// A list sorted newest first, read back to this: the path of an item's date, and where to
+        /// stop the first time. After that the newest date read is the mark, and an update reads
+        /// only what is newer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        since: Option<String>,
+        #[serde(default = "epoch", skip_serializing_if = "is_epoch")]
+        since_default: String,
+        #[serde(default = "agent", skip_serializing_if = "is_agent")]
+        user_agent: String,
+        #[serde(default = "thousand", skip_serializing_if = "is_thousand")]
+        pause_ms: u64,
+    },
     /// Pushed to rather than fetched: every signed POST to the workspace's `/hook/<source>` is kept
     /// as a file in `inbox/`, and an update reads those as it reads an API's answers.
     Webhook {
@@ -227,6 +253,7 @@ impl Fetch {
             Fetch::Hub { .. } => "hub",
             Fetch::Sql { .. } => "sql",
             Fetch::Webhook { .. } => "webhook",
+            Fetch::Web { .. } => "web",
         }
     }
 
@@ -250,6 +277,7 @@ impl Fetch {
             // Never the connection string: it is a password, however it was written.
             Fetch::Sql { .. } => "a PostgreSQL database".into(),
             Fetch::Webhook { .. } => "what its sender pushes to it".into(),
+            Fetch::Web { url, .. } => url.clone(),
         }
     }
 
@@ -260,7 +288,7 @@ impl Fetch {
         match self {
             Fetch::Feed { text_is, .. } => text_is,
             Fetch::Folder { .. } | Fetch::Csv { .. } | Fetch::Xlsx { .. } => "whole",
-            Fetch::Http { .. } | Fetch::Sql { .. } | Fetch::Webhook { .. } => "whole",
+            Fetch::Http { .. } | Fetch::Sql { .. } | Fetch::Webhook { .. } | Fetch::Web { .. } => "whole",
             Fetch::Hub { text_is, .. } => text_is,
         }
     }
@@ -279,7 +307,7 @@ impl Fetch {
             }
             Fetch::Csv { path, .. } => path,
             Fetch::Xlsx { path, .. } => path,
-            Fetch::Http { .. } | Fetch::Feed { .. } | Fetch::Hub { .. } | Fetch::Sql { .. } | Fetch::Webhook { .. } => {
+            Fetch::Http { .. } | Fetch::Feed { .. } | Fetch::Hub { .. } | Fetch::Sql { .. } | Fetch::Webhook { .. } | Fetch::Web { .. } => {
                 return base.to_path_buf()
             }
         };
@@ -683,7 +711,7 @@ impl Fetch {
     /// What to call itself when asking. A source that declares one is asked under it.
     pub fn agent(&self) -> &str {
         match self {
-            Fetch::Http { user_agent, .. } | Fetch::Feed { user_agent, .. } => user_agent,
+            Fetch::Http { user_agent, .. } | Fetch::Feed { user_agent, .. } | Fetch::Web { user_agent, .. } => user_agent,
             _ => AGENT,
         }
     }

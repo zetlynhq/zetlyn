@@ -62,7 +62,7 @@ impl Customer {
     /// Paid for today: active, or cancelled and not yet past what was paid for.
     pub fn in_good_standing(&self) -> bool {
         let today = crate::iso_date(crate::now());
-        let paid = self.paid_until.as_deref().is_none_or(|u| u >= today.as_str());
+        let paid = self.paid_until.as_deref().map_or(true, |u| u >= today.as_str());
         matches!(self.state.as_str(), "active" | "cancelled") && paid
     }
 }

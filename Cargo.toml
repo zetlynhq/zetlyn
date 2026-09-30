@@ -1,6 +1,6 @@
 [package]
 name = "zetlyn"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 rust-version = "1.80"
 publish = false
@@ -39,6 +39,8 @@ postgres = { version = "0.19", default-features = false }
 tokio-postgres-rustls = { version = "0.14", default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "1"
+# A source that is a web page: its items by CSS selector. html5ever underneath, as browsers parse.
+scraper = "0.23"
 
 [profile.release]
 strip = true

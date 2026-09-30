@@ -229,7 +229,7 @@ fn identifiers(cols: &[Column]) -> Vec<Found> {
                     continue;
                 }
                 // A separator earns its place only by finding more.
-                if best.as_ref().is_none_or(|b| share > b.share + 1e-9) {
+                if best.as_ref().map_or(true, |b| share > b.share + 1e-9) {
                     best = Some(Found { column: c.name.clone(), scheme, separator: sep, several, share });
                 }
             }
@@ -268,6 +268,8 @@ fn shape(cols: &[Column]) -> Shape {
         .iter()
         .filter(|c| matches!(c.kind(), PropertyType::Text) && c.mean_len() >= 4)
         .min_by_key(|c| {
+            // A column called exactly that before one that merely has the word in it.
+            let exact = matches!(c.name.to_ascii_lowercase().as_str(), "title" | "name" | "subject");
             let named = hints(
                 &c.name,
                 &[
@@ -280,6 +282,8 @@ fn shape(cols: &[Column]) -> Shape {
                 ],
             );
             let length = (c.mean_len() as i64 - 48).abs();
+            let named = named || exact;
+            let length = if exact { -1 } else { length };
             (if named { 0 } else { 1 }, length)
         })
         .or_else(|| cols.iter().find(|c| c.mean_len() > 0))
@@ -938,4 +942,65 @@ mod web_tests {
         assert!(!super::is_web_page(r#"<?xml version="1.0"?><rss version="2.0"><channel></channel></rss>"#));
         assert_eq!(super::linked_feeds(page, "https://example.org/games"), [("https://example.org/feeds/news.xml".to_string(), "News".to_string())]);
     }
+}
+
+/// A web page as a source: the items found on it (the `pick`th candidate, best first), their
+/// fields as the columns of a table, and from those the identifier, the title, the date and the
+/// types, the same as for a spreadsheet. Paging where the page links its own second page.
+pub fn propose_web(url: &str, body: &str, dir: &Path, name: Option<&str>, pick: usize) -> Result<String, String> {
+    let found = crate::web::candidates(body);
+    let c = found.get(pick).ok_or_else(|| format!("{WEB_PAGE}[]"))?;
+    let fields: BTreeMap<String, String> = c.fields.iter().map(|(n, s, _)| (n.clone(), s.clone())).collect();
+    let rows = crate::web::extract(body, &c.items, &fields)?;
+    let headers: Vec<String> = fields.keys().cloned().collect();
+    let table: Vec<Vec<String>> = rows
+        .iter()
+        .map(|r| headers.iter().map(|h| r[h].as_str().map(str::to_string).unwrap_or_default()).collect())
+        .collect();
+    let cols = columns_from_rows(&headers, &table);
+    let sh = shape(&cols);
+    let mut fetch = json!({ "type": "web", "url": url, "items": c.items, "fields": fields });
+    if let Some(param) = crate::web::paging_parameter(body, url) {
+        fetch["page"] = json!({ "offset": param, "by": "page", "max": rows.len().max(1) });
+        fetch["top"] = json!(1000);
+    }
+    let name = name.map(str::to_string).unwrap_or_else(|| {
+        let host = url.split('/').nth(2).unwrap_or("site").trim_start_matches("www.");
+        format!("local/{}", slug(host.split('.').next().unwrap_or(host)))
+    });
+    // A list with a date and a next page is read back to the start of this year, and after that
+    // only what is newer; with no date, the first thousand.
+    if let (Some(known), true) = (&sh.known, fetch.get("page").is_some()) {
+        fetch["since"] = json!(format!("field:{known}"));
+        fetch["since_default"] = json!(format!("{}-01-01", &crate::iso_date(crate::now())[..4]));
+        if let Some(o) = fetch.as_object_mut() {
+            o.remove("top");
+        }
+    }
+    let mut built = write_blocks(&name, "item", fetch, &cols, &sh);
+    built["about"] = json!(format!("The list on {url}, {} items to a page.", rows.len()));
+    // An item's own address is where its claim is read in full, not text and not a property.
+    let linked = headers.iter().find(|h| {
+        let v: Vec<&str> = rows.iter().filter_map(|r| r[h.as_str()].as_str()).collect();
+        !v.is_empty() && v.iter().all(|x| x.starts_with("http"))
+    });
+    if let Some(h) = linked {
+        let f = format!("field:{h}");
+        built["claims"]["url"] = json!(f);
+        if let Some(t) = built["claims"]["text"].as_array_mut() {
+            t.retain(|x| x.as_str() != Some(f.as_str()));
+        }
+        if let Some(p) = built["claims"]["properties"].as_object_mut() {
+            p.remove(&slug(h));
+        }
+    }
+    // An identifier no scheme names is the site'"'"'s own: called after the site, not the attribute.
+    if sh.id_scheme.is_none() {
+        let host = url.split('/').nth(2).unwrap_or("site").trim_start_matches("www.").trim_start_matches("store.");
+        let site = slug(host.split('.').next().unwrap_or(host)).replace('_', "-");
+        if built["claims"]["id"].is_object() {
+            built["claims"]["id"]["scheme"] = json!(site);
+        }
+    }
+    finish(built, dir)
 }

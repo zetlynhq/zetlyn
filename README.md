@@ -8,7 +8,7 @@ thing you can search, browse and be notified about.
 
 Two words carry the whole idea.
 
-A **source** is one place that publishes: a file, a feed, an API. A file describes it; after that it
+A **source** is one place that publishes: a file, a feed, an API, a list on a web page. A file describes it; after that it
 fetches itself on its own clock, indexes itself, notices what changed since last time, and says what
 it holds and how to ask.
 

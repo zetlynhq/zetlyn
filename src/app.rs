@@ -39,6 +39,10 @@ const EXAMPLE_TITLE: &str = "Exploited vulnerabilities";
 const DRAFT: &str = "draft.yaml";
 
 pub fn run(args: &[String]) -> Result<(), String> {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("zetlyn app [WORKSPACE] [--port N] [--no-open]\n\nThe app in the browser, on 127.0.0.1:4747 or the next free port.\nWORKSPACE is the folder it keeps everything in: the current one if it is a workspace, else ~/zetlyn.");
+        return Ok(());
+    }
     let root = workspace(args)?;
     let first_port: u16 = crate::flag(args, "--port").and_then(|p| p.parse().ok()).unwrap_or(4747);
     // The next free port, so a second copy started by accident says where it is rather than dying.
@@ -383,6 +387,11 @@ impl App {
                 return redirect(request, &serve::at("/"));
             }
             (false, ["webpage", tracker]) => (200, html_kind, self.webpage_page(tracker, &query)),
+            (true, ["readweb", tracker]) => {
+                let pick: usize = query.get("pick").and_then(|p| p.parse().ok()).unwrap_or(0);
+                let id = self.read_web(tracker, query.get("url").cloned().unwrap_or_default(), form_title(&query), pick);
+                (200, json_kind, json!({ "job": id }).to_string())
+            }
             // A property chosen as the identifier, the declaration changed to say so, the source
             // read again from the start, and back to what it is now.
             (true, ["identify", tracker, source]) => {
@@ -851,7 +860,26 @@ impl App {
         let body = html! {
             p { a href={(serve::at("/new/")) (tracker) "?title=" (urlencode(&title))} { "← another address" } }
             h1 { "That is a web page" }
-            p.about { code { (url) } " is a page for people to read in a browser. Zetlyn reads the data behind pages: a table (CSV or Excel), a feed (RSS or Atom), or an API that answers JSON. It does not read web pages themselves yet." }
+            p.about { code { (url) } " is a page for people to read in a browser. Zetlyn can read a list on it: every item one claim, what is in it the values." }
+            @let found = crate::fetch::Fetcher::new(crate::sourcedecl::AGENT, &BTreeMap::new(), 0).and_then(|f| f.get(&url)).map(|b| crate::web::candidates(&b)).unwrap_or_default();
+            @if found.is_empty() {
+                p { "No list was found on it. The address of a list works best: search results, a category, a page of new releases." }
+            } @else {
+                h2 { "Lists on this page" }
+                @for (i, c) in found.iter().enumerate().take(3) {
+                    div.card style="margin-bottom:1rem" {
+                        h4 { (c.count) " items " span.dim { code { (c.items) } } }
+                        p.dim { @for (n, _, said) in first_said(&c.fields) { strong { (n) } " " (said.first().cloned().unwrap_or_default().chars().take(40).collect::<String>()) " · " } }
+                        form data-job={(serve::at("/readweb/")) (tracker) "?title=" (urlencode(&title)) "&pick=" (i) "&url=" (urlencode(&url))} {
+                            button.primary[i == 0] type="submit" { "Read this list" }
+                        }
+                    }
+                }
+                pre #log data-jobs=(serve::at("/job/")) hidden {}
+                div #error .note hidden {}
+                (PreEscaped(JOB_SCRIPT))
+                p.dim { "A list sorted by date is read back to the first of January, and after that only what is new. Reading many pages takes minutes; the page follows it." }
+            }
             @if feeds.is_empty() {
                 p { "This page names no feed of its own." }
             } @else {
@@ -966,6 +994,31 @@ impl App {
             }
             _ => Err("claude, a model of your own, or off".into()),
         }
+    }
+
+    /// A list on a web page, proposed as a source and read whole.
+    fn read_web(&self, tracker: &str, url: String, title: String, pick: usize) -> u64 {
+        let host = url.split('/').nth(2).unwrap_or("site").trim_start_matches("www.").to_string();
+        let source = self.free(&self.sources(), &crate::guess::slug(host.split('.').next().unwrap_or("site")));
+        let dir = self.sources().join(&source);
+        let tracker = tracker.to_string();
+        self.start(move |p| {
+            p.say(format!("Reading {url}"));
+            let body = crate::fetch::Fetcher::new(crate::sourcedecl::AGENT, &BTreeMap::new(), 0)?.get(&url)?;
+            if let Err(e) = crate::guess::propose_web(&url, &body, &dir, Some(&format!("local/{source}")), pick) {
+                let _ = std::fs::remove_dir_all(&dir);
+                return Err(e);
+            }
+            let ds = Source::open(&dir)?;
+            describe_ids(&ds, p);
+            p.say("Reading every page of the list");
+            let pages = p.clone();
+            crate::web::on_page(Some(Box::new(move |line| pages.say(line))));
+            let started = std::time::Instant::now();
+            let report = ds.run()?;
+            p.say(format!("{} claims in {:.1}s", report.added + report.changed + report.unchanged, started.elapsed().as_secs_f64()));
+            Ok(serve::at(&format!("/review/{tracker}/{source}?title={}", urlencode(&title))))
+        })
     }
 
     fn start_page(&self) -> String {
@@ -1435,4 +1488,13 @@ fn draft_title(dir: &Path) -> Option<String> {
     let text = std::fs::read_to_string(dir.join(DRAFT)).ok()?;
     let line = text.lines().find_map(|l| l.strip_prefix("title: "))?;
     serde_json::from_str::<String>(line).ok().or_else(|| Some(line.to_string()))
+}
+
+/// The fields a person recognises a list by come first: its title or name, its date, then the rest.
+fn first_said<A, B: Clone + Default>(fields: &[(String, A, Vec<B>)]) -> Vec<&(String, A, Vec<B>)> {
+    let rank = |n: &str| ["title", "name", "date", "released", "href"].iter().position(|w| n.contains(w)).unwrap_or(9);
+    let mut them: Vec<_> = fields.iter().collect();
+    them.sort_by_key(|f| rank(&f.0));
+    them.truncate(6);
+    them
 }

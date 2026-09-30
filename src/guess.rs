@@ -684,6 +684,12 @@ pub fn propose_url(
 
     // The directory is made once the shape is known. Refusing a JSON API after making it
     // leaves an empty source directory that every later update trips over.
+    // A web page is not a feed because both begin with `<`: a page someone reads in a browser is
+    // said to be one, with the feeds it names itself, rather than read as a feed of nothing.
+    if is_web_page(&body) {
+        let feeds = linked_feeds(&body, url);
+        return Err(format!("{WEB_PAGE}{}", serde_json::to_string(&feeds).unwrap_or_default()));
+    }
     let looks_like = if body.trim_start().starts_with('<') {
         "feed"
     } else if body.trim_start().starts_with('{') || body.trim_start().starts_with('[') {
@@ -888,4 +894,48 @@ pub fn propose_github(spec: &str, dir: &Path, name: Option<&str>) -> Result<Stri
         }
     };
     finish(built, dir)
+}
+
+/// What an error begins with when an address is a web page, followed by the feeds it links as JSON.
+pub const WEB_PAGE: &str = "is a web page: ";
+
+fn is_web_page(body: &str) -> bool {
+    let head: String = body.chars().take(2048).collect::<String>().to_lowercase();
+    (head.contains("<!doctype html") || head.contains("<html")) && !head.contains("<rss") && !head.contains("<feed")
+}
+
+/// The feeds a page says it has: `<link rel="alternate" type="application/rss+xml" href="…">`.
+fn linked_feeds(body: &str, base: &str) -> Vec<(String, String)> {
+    let re = regex::Regex::new(r#"(?is)<link\b[^>]*>"#).expect("a pattern");
+    let attr = |tag: &str, name: &str| -> Option<String> {
+        let r = regex::Regex::new(&format!(r#"(?i)\b{name}\s*=\s*["']([^"']*)["']"#)).ok()?;
+        r.captures(tag).map(|c| c[1].to_string())
+    };
+    let origin: String = base.splitn(4, '/').take(3).collect::<Vec<_>>().join("/");
+    let mut out = Vec::new();
+    for m in re.find_iter(body) {
+        let tag = m.as_str();
+        let (Some(rel), Some(kind), Some(href)) = (attr(tag, "rel"), attr(tag, "type"), attr(tag, "href")) else { continue };
+        if !rel.to_lowercase().contains("alternate") || !(kind.contains("rss") || kind.contains("atom") || kind.contains("json")) {
+            continue;
+        }
+        let href = href.replace("&amp;", "&");
+        let full = if href.starts_with("http") { href } else if href.starts_with("//") { format!("https:{href}") } else if href.starts_with('/') { format!("{origin}{href}") } else { format!("{}/{href}", base.trim_end_matches('/')) };
+        let title = attr(tag, "title").unwrap_or_else(|| kind.clone());
+        if !out.iter().any(|(u, _): &(String, String)| *u == full) {
+            out.push((full, title));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod web_tests {
+    #[test]
+    fn a_page_is_told_from_a_feed_and_says_its_feeds() {
+        let page = r#"<!DOCTYPE html><html><head><link rel="alternate" type="application/rss+xml" title="News" href="/feeds/news.xml"><link rel="stylesheet" href="/s.css"></head></html>"#;
+        assert!(super::is_web_page(page));
+        assert!(!super::is_web_page(r#"<?xml version="1.0"?><rss version="2.0"><channel></channel></rss>"#));
+        assert_eq!(super::linked_feeds(page, "https://example.org/games"), [("https://example.org/feeds/news.xml".to_string(), "News".to_string())]);
+    }
 }

@@ -1459,6 +1459,22 @@ impl Store {
             .unwrap_or_default()
     }
 
+
+    /// The properties whose every claim has a value and no two claims the same one: what could
+    /// name a claim where no identifier was found.
+    pub fn unique_fields(&self) -> Vec<String> {
+        let total = self.count() as i64;
+        if total == 0 {
+            return Vec::new();
+        }
+        let Ok(mut stmt) = self.db.prepare(
+            "select name from field group by name
+             having count(distinct record_id) = ?1 and count(distinct coalesce(s, cast(n as text), d)) = ?1 order by name",
+        ) else {
+            return Vec::new();
+        };
+        stmt.query_map([total], |r| r.get(0)).map(|rows| rows.flatten().collect()).unwrap_or_default()
+    }
     pub fn distinct_identifiers(&self) -> BTreeMap<String, u64> {
         let mut out = BTreeMap::new();
         let Ok(mut stmt) = self

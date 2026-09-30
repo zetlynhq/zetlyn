@@ -339,3 +339,26 @@ mod tests {
         assert_eq!(json_in("no json"), None);
     }
 }
+
+/// A key given on a page rather than on standard input, kept the same way.
+pub fn keep_key(provider: &str, key: &str) -> Result<PathBuf, String> {
+    if !matches!(provider, "anthropic" | "openai") {
+        return Err(format!("{provider}: a key is for anthropic or openai"));
+    }
+    let key = key.trim();
+    if key.is_empty() || key.contains(char::is_whitespace) {
+        return Err("that is not a key".into());
+    }
+    let path = key_path(provider);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    std::fs::write(&path, format!("{key}\n")).map_err(|e| format!("{}: {e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(path)
+}
+

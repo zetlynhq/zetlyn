@@ -35,6 +35,8 @@ const EXAMPLE: [(&str, &str, &str); 2] = [
     ),
 ];
 const EXAMPLE_TITLE: &str = "Exploited vulnerabilities";
+/// Beside a tracker that has a name and no source yet.
+const DRAFT: &str = "draft.yaml";
 
 pub fn run(args: &[String]) -> Result<(), String> {
     let root = workspace(args)?;
@@ -348,6 +350,11 @@ impl App {
                 let title = form.get("title").cloned().unwrap_or_default();
                 let title = if title.trim().is_empty() { "My tracker".to_string() } else { title.trim().to_string() };
                 let slug = self.free(&self.trackers(), &crate::guess::slug(&title));
+                // The topic is kept from the moment it is named, so a first source that comes to
+                // nothing does not take the topic with it.
+                let dir = self.trackers().join(&slug);
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::fs::write(dir.join(DRAFT), format!("# A topic with no source yet.\ntitle: {}\n", serde_json::to_string(&title).unwrap_or_default()));
                 return redirect(request, &serve::at(&format!("/new/{slug}?title={}", urlencode(&title))));
             }
             (true, ["example"]) => {
@@ -356,6 +363,53 @@ impl App {
                     request,
                     &format!("/new/{slug}?title={}&url={}", urlencode(EXAMPLE_TITLE), urlencode(EXAMPLE[0].0)),
                 );
+            }
+            // Only a topic with no source, and only a source no tracker names.
+            (true, ["forget", slug]) => {
+                let dir = self.trackers().join(slug);
+                if dir.join(DRAFT).exists() && !dir.join(crate::trackerdecl::FILE).exists() {
+                    let _ = std::fs::remove_dir_all(&dir);
+                }
+                return redirect(request, &serve::at("/"));
+            }
+            (true, ["drop", dir]) => {
+                let named: BTreeSet<String> = listed(&self.trackers()).into_iter().flat_map(|(_, d, _)| d.members.into_iter().map(|m| m.dataset)).collect();
+                let path = self.sources().join(dir);
+                if let Ok(ds) = Source::open(&path) {
+                    if !named.contains(&ds.decl.name) {
+                        let _ = std::fs::remove_dir_all(&path);
+                    }
+                }
+                return redirect(request, &serve::at("/"));
+            }
+            (false, ["webpage", tracker]) => (200, html_kind, self.webpage_page(tracker, &query)),
+            // A property chosen as the identifier, the declaration changed to say so, the source
+            // read again from the start, and back to what it is now.
+            (true, ["identify", tracker, source]) => {
+                let dir = self.sources().join(source);
+                let field = form.get("field").cloned().unwrap_or_default();
+                let scheme = crate::guess::slug(form.get("scheme").map(String::as_str).unwrap_or("")).replace('_', "-");
+                let done = (|| -> Result<(), String> {
+                    if scheme.is_empty() {
+                        return Err("a name for the identifier".into());
+                    }
+                    let decl = crate::sourcedecl::SourceDecl::load(&dir)?;
+                    let mut j = serde_json::to_value(&decl).map_err(|e| e.to_string())?;
+                    let from = j["claims"]["properties"][&field]["from"].as_str().ok_or_else(|| format!("{field}: no such property"))?.to_string();
+                    j["claims"]["id"] = json!({ "scheme": scheme, "from": from });
+                    let decl: crate::sourcedecl::SourceDecl = serde_json::from_value(j).map_err(|e| e.to_string())?;
+                    std::fs::write(dir.join(crate::sourcedecl::FILE), crate::yaml::to_string(&decl)?).map_err(|e| e.to_string())?;
+                    Source::open(&dir)?.run_with(true, true).map(|_| ())
+                })();
+                match done {
+                    Ok(()) => return redirect(request, &serve::at(&format!("/review/{tracker}/{source}?title={}", urlencode(&form_title(&query))))),
+                    Err(e) => (400, html_kind, page("Not changed", html! { div.note { (e) } })),
+                }
+            }
+            (false, ["assist"]) => (200, html_kind, self.assist_status_page(None)),
+            (true, ["assist"]) => {
+                let said = self.keep_assist(&form).unwrap_or_else(|e| e);
+                (200, html_kind, self.assist_status_page(Some(&said)))
             }
             (false, ["new", tracker]) => (200, html_kind, self.source_page(tracker, &query)),
             // A file from the person's machine, kept in the source's own directory.
@@ -506,6 +560,10 @@ impl App {
             // A JSON API has no shape to guess from a table. The assist can read it, once the
             // person has seen what that sends: the page that says so is where the job goes.
             if let Err(e) = &proposed {
+                if let Some(feeds) = e.strip_prefix(crate::guess::WEB_PAGE) {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    return Ok(serve::at(&format!("/webpage/{tracker}?url={}&title={}&feeds={}", urlencode(&from), urlencode(&title), urlencode(feeds))));
+                }
                 if e.contains("answers JSON") {
                     let _ = std::fs::remove_dir_all(&dir);
                     return Ok(serve::at(&format!("/assist/{tracker}/{source}?url={}&title={}", urlencode(&from), urlencode(&title))));
@@ -549,6 +607,7 @@ impl App {
                 "identified_by": [scheme],
             });
             write_tracker(&dir, decl)?;
+            let _ = std::fs::remove_file(dir.join(DRAFT));
             return Ok(serve::at(&format!("/review/{tracker}/{source}?added=1")));
         }
         let mut decl = serde_json::to_value(TrackerDecl::load(&dir)?).map_err(|e| e.to_string())?;
@@ -583,7 +642,7 @@ impl App {
                     button.primary type="submit" { "Send it and read the API" }
                 }
             } @else {
-                div.note { "There is no assist here: " (crate::assist::Assist::missing()) "." }
+                div.note { "No model is set up to read it. " a href=(serve::at("/assist")) { "Set one up" } ": Claude with a key, or a model of your own. Then come back to this address." }
             }
             pre #log data-jobs=(serve::at("/job/")) hidden {}
             div #error .note hidden {}
@@ -742,6 +801,173 @@ impl App {
         })
     }
 
+    /// What was begun and not finished: a topic with no source yet, and sources read that no
+    /// tracker names. Said on the start page, so nothing a person began disappears.
+    fn unfinished(&self) -> Markup {
+        let drafts: Vec<(String, String)> = std::fs::read_dir(self.trackers())
+            .map(|d| d.flatten().map(|e| e.path()).collect::<Vec<_>>())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|p| p.join(DRAFT).exists() && !p.join(crate::trackerdecl::FILE).exists())
+            .map(|p| (p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), draft_title(&p).unwrap_or_default()))
+            .collect();
+        let named: BTreeSet<String> = listed(&self.trackers()).into_iter().flat_map(|(_, d, _)| d.members.into_iter().map(|m| m.dataset)).collect();
+        let orphans: Vec<(String, String, u64)> = crate::tracker::registry(&self.sources())
+            .into_iter()
+            .filter(|(name, _)| !named.contains(name))
+            .filter_map(|(_, dir)| {
+                let ds = Source::open(&dir).ok()?;
+                Some((dir.file_name()?.to_string_lossy().into_owned(), ds.decl.title.clone(), ds.store.count()))
+            })
+            .collect();
+        html! {
+            @if !drafts.is_empty() || !orphans.is_empty() { h2 { "Begun, not finished" } }
+            @if !drafts.is_empty() {
+                table { tbody { @for (slug, title) in &drafts {
+                    tr {
+                        td { strong { (title) } div.why { "a topic with no source yet" } }
+                        td.num { a href={(serve::at("/new/")) (slug) "?title=" (urlencode(title))} { "Continue" } }
+                        td.num { form method="post" action={(serve::at("/forget/")) (slug)} { button type="submit" { "Forget it" } } }
+                    }
+                } } }
+            }
+            @if !orphans.is_empty() {
+                table { tbody { @for (dir, title, n) in &orphans {
+                    tr {
+                        td { strong { (title) } div.why { (n) " claims · a source no tracker names · " code { "sources/" (dir) } } }
+                        td.num { form method="post" action={(serve::at("/drop/")) (dir)} { button type="submit" { "Delete it" } } }
+                    }
+                } } }
+            }
+        }
+    }
+
+    /// An address that is a page people read, not data: what Zetlyn reads instead, the feeds the
+    /// page names itself, and where the data behind a page usually is.
+    fn webpage_page(&self, tracker: &str, query: &BTreeMap<String, String>) -> String {
+        let url = query.get("url").cloned().unwrap_or_default();
+        let title = form_title(query);
+        let feeds: Vec<(String, String)> = query.get("feeds").and_then(|f| serde_json::from_str(f).ok()).unwrap_or_default();
+        let body = html! {
+            p { a href={(serve::at("/new/")) (tracker) "?title=" (urlencode(&title))} { "← another address" } }
+            h1 { "That is a web page" }
+            p.about { code { (url) } " is a page for people to read in a browser. Zetlyn reads the data behind pages: a table (CSV or Excel), a feed (RSS or Atom), or an API that answers JSON. It does not read web pages themselves yet." }
+            @if feeds.is_empty() {
+                p { "This page names no feed of its own." }
+            } @else {
+                h2 { "Feeds this page names" }
+                @for (f, name) in &feeds {
+                    form.bar data-job={(serve::at("/analyse/")) (tracker) "?title=" (urlencode(&title))} {
+                        input type="hidden" name="url" value=(f);
+                        button.primary type="submit" { "Read " (name) }
+                        span.dim { code { (f) } }
+                    }
+                }
+                pre #log data-jobs=(serve::at("/job/")) hidden {}
+                div #error .note hidden {}
+                (PreEscaped(JOB_SCRIPT))
+            }
+            h2 { "Where the data usually is" }
+            ul {
+                li { "A link on the page that says " em { "RSS" } ", " em { "Atom" } ", " em { "export" } ", " em { "download" } " or " em { "CSV" } "." }
+                li { "An API: search for the site's name and " em { "API" } ". An address that answers JSON can be read with the assist (" a href=(serve::at("/assist")) { "is one set up?" } ")." }
+                li { "Somebody who already publishes the same data as a table or an API. For games on Steam, SteamSpy answers JSON by tag: " code { "https://steamspy.com/api.php?request=tag&tag=Indie" } "." }
+                li { "A file you have: upload it on the page before." }
+            }
+        };
+        page("A web page", body)
+    }
+
+    /// Whether a model is asked, which, for what, and how to set one up. Tables and feeds need
+    /// none; this is where a person finds that out rather than guessing.
+    fn assist_status_page(&self, said: Option<&str>) -> String {
+        let a = crate::assist::Assist::configured(&self.root);
+        let body = html! {
+            p { a href=(serve::at("/")) { "← Zetlyn" } }
+            h1 { "The assist" }
+            @if let Some(s) = said { div.note { (s) } }
+            @if a.available() {
+                p.state.current { "Set up: it asks " strong { (a.who()) } "." }
+            } @else {
+                p.state.empty { "Not set up. Nothing is sent to any model." }
+            }
+            p.about { "Zetlyn reads tables, feeds, folders and files without a model. A model helps where a pattern cannot: reading a JSON API it has not seen, turning a question in words into filters, saying which words of two sources mean the same thing, proposing why a source is in a tracker. It proposes; what it proposes is tried against the source before you see it, and you decide." }
+            p.dim { "Before anything is sent, the page says to whom and what, once per source, and what was sent is written in that source's " code { "assist.yaml" } "." }
+            h2 { "Claude" }
+            form.bar method="post" action=(serve::at("/assist")) {
+                input type="hidden" name="provider" value="anthropic";
+                input.wide type="password" name="key" placeholder="An Anthropic API key, sk-ant-…" autocomplete="off";
+                button.primary type="submit" { "Keep the key" }
+            }
+            p.dim { "Kept in " code { "~/.zetlyn/assist/anthropic.key" } ", readable by you alone. " code { "ANTHROPIC_API_KEY" } " works as well." }
+            h2 { "A model of your own" }
+            form method="post" action=(serve::at("/assist")) {
+                input type="hidden" name="provider" value="openai";
+                p { input.wide type="url" name="url" placeholder="http://127.0.0.1:11434/v1" ; }
+                p.bar { input.wide type="text" name="model" placeholder="a model it serves: gemma3, llama3.1, …";
+                    button type="submit" { "Use it" } }
+            }
+            p.dim { "Anything that speaks the OpenAI chat API: Ollama, llama.cpp, vLLM, or a hosted one. Written into " code { "workspace.yaml" } " as " code { "assist: { provider, url, model }" } ". A large model needs a machine with the memory for it." }
+            @if a.available() {
+                form method="post" action=(serve::at("/assist")) {
+                    input type="hidden" name="provider" value="off";
+                    button type="submit" { "Turn it off" }
+                }
+            }
+        };
+        page("The assist", body)
+    }
+
+    /// The choice made on the assist page, kept where the program reads it.
+    fn keep_assist(&self, form: &BTreeMap<String, String>) -> Result<String, String> {
+        let path = self.root.join("workspace.yaml");
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        // The workspace's own `assist:` block, replaced as text so the rest of the file stays as
+        // it was written.
+        let without: Vec<&str> = {
+            let mut out = Vec::new();
+            let mut skipping = false;
+            for l in text.lines() {
+                if l.starts_with("assist:") {
+                    skipping = true;
+                    continue;
+                }
+                if skipping && (l.starts_with(' ') || l.is_empty()) {
+                    continue;
+                }
+                skipping = false;
+                out.push(l);
+            }
+            out
+        };
+        let write = |block: &str| -> Result<(), String> {
+            let t = format!("{}\n{block}", without.join("\n").trim_end());
+            let _: crate::account::Site = crate::yaml::parse(&t)?;
+            std::fs::write(&path, format!("{}\n", t.trim_end())).map_err(|e| e.to_string())
+        };
+        match form.get("provider").map(String::as_str) {
+            Some("anthropic") => {
+                crate::assist::keep_key("anthropic", form.get("key").map(String::as_str).unwrap_or(""))?;
+                write("assist:\n  provider: anthropic\n")?;
+                Ok("The key is kept. The assist asks Claude from now on.".into())
+            }
+            Some("openai") => {
+                let url = form.get("url").map(|s| s.trim()).unwrap_or("");
+                let model = form.get("model").map(|s| s.trim()).unwrap_or("");
+                if !url.starts_with("http") || model.is_empty() {
+                    return Err("an address, http… ending in /v1, and the name of a model it serves".into());
+                }
+                write(&format!("assist:\n  provider: openai\n  url: {}\n  model: {}\n", serde_json::to_string(url).unwrap_or_default(), serde_json::to_string(model).unwrap_or_default()))?;
+                Ok(format!("The assist asks {model} at {url} from now on."))
+            }
+            Some("off") => {
+                write("assist:\n  off: true\n")?;
+                Ok("Off. Nothing is sent to any model.".into())
+            }
+            _ => Err("claude, a model of your own, or off".into()),
+        }
+    }
+
     fn start_page(&self) -> String {
         let trackers = listed(&self.trackers());
         let body = html! {
@@ -772,7 +998,8 @@ impl App {
                 }
                 (example_card())
             }
-            p.dim { "The workspace is " code { (self.root.display()) } ". Everything here is a file in it." }
+            (self.unfinished())
+            p.dim { "The workspace is " code { (self.root.display()) } ". Everything here is a file in it. " a href=(serve::at("/assist")) { @if crate::assist::Assist::configured(&self.root).available() { "The assist asks " (crate::assist::Assist::configured(&self.root).who()) } @else { "No model is set up, and none is needed to begin" } } "." }
         };
         page("Zetlyn", body)
     }
@@ -780,6 +1007,7 @@ impl App {
     /// The first source, or another perspective on what the tracker already follows.
     fn source_page(&self, tracker: &str, query: &BTreeMap<String, String>) -> String {
         let title = form_title(query);
+        let title = if title.is_empty() { draft_title(&self.trackers().join(tracker)).unwrap_or_default() } else { title };
         let existing = TrackerDecl::load(&self.trackers().join(tracker)).ok();
         let first = existing.is_none();
         let prefill = query.get("url").cloned().unwrap_or_default();
@@ -845,7 +1073,20 @@ impl App {
 
             h2 { "What names a claim" }
             @if schemes.is_empty() {
-                div.note { "No identifier found. A second source could only meet this one on an identifier, so this one would stand alone." }
+                div.note { "No identifier Zetlyn knows was found. A tracker joins its sources on one, so a source needs something that names each of its claims." }
+                @let unique = ds.store.unique_fields();
+                @if unique.is_empty() {
+                    p.dim { @if total == 0 { "It read no claims at all, so there is nothing to choose from: the address may not be the data." } @else { "No property here is different on every claim either." } }
+                } @else {
+                    form.bar method="post" action={(serve::at("/identify/")) (tracker) "/" (source) "?title=" (urlencode(&title))} {
+                        span { "Use" }
+                        select name="field" { @for f in &unique { option value=(f) { (f) } } }
+                        span { "as its identifier, called" }
+                        input type="text" name="scheme" placeholder="e.g. steam, isbn, sku" required;
+                        button.primary type="submit" { "Read it again" }
+                    }
+                    p.dim { "These properties have a different value on every claim. Choose the one that names an item the way another source would name it too: a second source meets this one on it." }
+                }
             } @else {
                 table { tbody {
                     @for (scheme, n) in &schemes {
@@ -913,7 +1154,7 @@ impl App {
                     p { label { "Why this source, in one sentence" br;
                         input.wide type="text" name="why" value=(query.get("why").cloned().unwrap_or_else(|| example_why(&ds))) placeholder={"What " (ds.decl.title) " says that nothing else does."}; } }
                     p.bar {
-                        button.primary type="submit" { @if decl.is_none() { "Looks right" } @else { "Connect" } }
+                        @if total > 0 { button.primary type="submit" { @if decl.is_none() { "Looks right" } @else { "Connect" } } }
                         button type="submit" formaction={(serve::at("/discard/")) (tracker) "/" (source) "?title=" (urlencode(&title))} { "Not right" }
                     }
                 }
@@ -1000,10 +1241,12 @@ fn example_why(ds: &Source) -> String {
 }
 
 fn source_of(ds: &Source) -> String {
-    serde_json::to_value(&ds.decl.source)
-        .ok()
-        .and_then(|j| j["path"].as_str().map(str::to_string))
-        .unwrap_or_default()
+    let j = serde_json::to_value(&ds.decl.source).unwrap_or_default();
+    // A table or a file names a path, a feed its addresses, an API its list.
+    j["path"].as_str().map(str::to_string)
+        .or_else(|| j["urls"].as_array().map(|u| u.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", ")))
+        .or_else(|| j["list"].as_str().map(str::to_string))
+        .unwrap_or_else(|| ds.decl.source.address())
 }
 
 fn write_tracker(dir: &Path, decl: J) -> Result<(), String> {
@@ -1185,4 +1428,11 @@ pub fn host(args: &[String]) -> Result<(), String> {
         app.answer(request);
     }
     Ok(())
+}
+
+/// The name a topic was given before it had a source.
+fn draft_title(dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join(DRAFT)).ok()?;
+    let line = text.lines().find_map(|l| l.strip_prefix("title: "))?;
+    serde_json::from_str::<String>(line).ok().or_else(|| Some(line.to_string()))
 }

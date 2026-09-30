@@ -123,39 +123,45 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
         .filter(|s| s.meta("refreshed").is_some())
         .map(|s| s.coverage());
 
+    let one_kind = scope.kinds().len() <= 1;
+    let columns: Vec<String> = columns.into_iter().filter(|c| !(one_kind && c == "kind")).collect();
+    let several_sources = scope.members.len() > 1;
+    let things_n = coverage.as_ref().and_then(|c| c["things"].as_i64()).unwrap_or(scope.records() as i64);
+    let first_shown = (page - 1) * limit + 1;
+    let last_shown = (page - 1) * limit + answer.entries.len();
+    let pages = (answer.total as usize).div_ceil(limit).max(1);
+
     let body = html! {
         h1 { (d.title) }
-        (banner(v, scope, hidden))
-        @if !d.about.is_empty() { p.about { (d.about) } }
-        // Public, and a source that never said it may be: said on the page rather than hidden.
-        @let undeclared = if scope.private() { Vec::new() } else { scope.not_public() };
-        @if !undeclared.is_empty() { div.note { "Not every source here has said it may be shown in public: " (undeclared.join("; ")) "." } }
-        p.state.(if stale { "partial" } else { "current" }) {
-            (scope.records()) " claims · " (scope.members.len()) " sources · "
-            @for (k, n) in scope.kinds() { (k) " " (n) " · " }
+        @if !d.about.is_empty() { p.lede { (d.about) } }
+        div.meta {
+            span.(if stale { "partial" } else { "current" }) { @if stale { "Behind" } @else { "Current" } }
+            span { (plural(scope.members.len(), "source")) }
+            @if let Some(age) = scope.oldest_finish() { span { "updated " (crate::tracker::human(age)) " ago" } }
             @if let Some(f) = &d.promise.fresh_within {
-                @if holds {
-                    "fresh within " (f)
-                    @if let Some(age) = scope.oldest_finish() {
-                        ", the source updated longest ago " (crate::tracker::human(age)) " ago"
-                    }
-                }
-                @else { "the promise of " (f) " does not hold" }
+                @if holds { span { "fresh within " (f) } } @else { span { "the promise of " (f) " does not hold" } }
             }
         }
+        (banner(v, scope, hidden))
+        // Public, and a source that never said it may be: said on the page rather than hidden.
+        @let undeclared = if scope.private() { Vec::new() } else { scope.not_public() };
+        @if !undeclared.is_empty() { div.note { "Not every source here has said it may be shown in public: " (with_titles(scope, &undeclared.join("; "))) "." } }
         @if let Some(c) = &coverage {
             @let by = c["by_sources"].as_object().cloned().unwrap_or_default();
             @let several: i64 = by.iter().filter(|(n, _)| n.parse::<i64>().unwrap_or(0) > 1).map(|(_, v)| v.as_i64().unwrap_or(0)).sum();
-            p.bar {
-                span.chip { (c["things"].as_i64().unwrap_or(0)) " things" } " "
-                span.chip { (several) " named by two sources or more" } " "
-                a.chip href=(at("/conflicts")) { (c["conflicts"].as_i64().unwrap_or(0)) " conflicts" } " "
-                a.chip href=(at("/changes")) { "what changed" }
+            @let conflicts = c["conflicts"].as_i64().unwrap_or(0);
+            div.stats {
+                a href=(at("/things")) { b { (thousands(things_n)) } span { "things" } }
+                div { b { (thousands(several)) } span { "named by two sources or more" } }
+                a.(if conflicts > 0 { "hot" } else { "" }) href=(at("/conflicts")) { b { (thousands(conflicts)) } span { "conflicts" } }
+                div { b { (scope.members.len()) } span { (if scope.members.len() == 1 { "source" } else { "sources" }) } }
             }
-            @if let Some(only) = c["only"].as_object() {
-                p.dim { "Only one source knows: "
-                    @for (i, (source, n)) in only.iter().enumerate() {
-                        @if i > 0 { " · " } (source) " " (n)
+            @if several_sources {
+                @if let Some(only) = c["only"].as_object() {
+                    p.dim { "Only one source knows: "
+                        @for (i, (source, n)) in only.iter().enumerate() {
+                            @if i > 0 { " · " } (title_of(scope, source)) " " (n)
+                        }
                     }
                 }
             }
@@ -207,25 +213,30 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
             }
         }
 
-        p.bar {
-            @if view.is_empty() && kind.is_empty() { span.chip.on { "Everything" } }
-            @else { a.chip href=(link(&q, "", "", 1)) { "Everything" } }
-            @for v in &d.view.named {
-                @let t = if v.title.is_empty() { v.name.clone() } else { v.title.clone() };
-                @if v.name == view { span.chip.on { (t) } }
-                @else { a.chip href=(link(&q, &v.name, "", 1)) { (t) } }
-            }
-            @for (k, n) in scope.kinds() {
-                @if k == kind { span.chip.on { (k) " " (n) } }
-                @else { a.chip href=(link(&q, &view, &k, 1)) { (k) " " (n) } }
+        @if !one_kind || !d.view.named.is_empty() {
+            p.bar {
+                @if view.is_empty() && kind.is_empty() { span.chip.on { "Everything" } }
+                @else { a.chip href=(link(&q, "", "", 1)) { "Everything" } }
+                @for v in &d.view.named {
+                    @let t = if v.title.is_empty() { v.name.clone() } else { v.title.clone() };
+                    @if v.name == view { span.chip.on { (t) } }
+                    @else { a.chip href=(link(&q, &v.name, "", 1)) { (t) } }
+                }
+                @if !one_kind {
+                    @for (k, n) in scope.kinds() {
+                        @if k == kind { span.chip.on { (k) " " (n) } }
+                        @else { a.chip href=(link(&q, &view, &k, 1)) { (k) " " (n) } }
+                    }
+                }
             }
         }
 
-        h2 {
-            (answer.entries.len()) " shown of "
-            @if answer.truncated { "at least " }
-            (answer.total)
-            @if answer.subjects { " things" } @else { " claims" }
+        div.list-head {
+            h2 { @if q.is_empty() { "Things" } @else { "Found" } }
+            span.dim {
+                @if answer.entries.is_empty() { "none" }
+                @else { (thousands(first_shown as i64)) "–" (thousands(last_shown as i64)) " of " @if answer.truncated { "at least " } (thousands(answer.total as i64)) }
+            }
         }
         @if answer.truncated {
             div.note {
@@ -234,35 +245,38 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
                 "floor. Narrow the query to get an exact one."
             }
         }
-        table {
-            thead { tr {
-                th { "Thing" }
-                @for c in &columns { th { (c) } }
-            } }
-            tbody {
-                @for e in &answer.entries {
-                    tr {
-                        td {
-                            @match entry_link(e) {
-                                Some(href) => a href=(href) { (e.title) },
-                                None => span { (e.title) },
+        div.scroll {
+            table.things {
+                thead { tr {
+                    th { "Thing" }
+                    @for c in &columns { th { (label(c)) } }
+                } }
+                tbody {
+                    @for e in &answer.entries {
+                        tr {
+                            td.thing {
+                                @match entry_link(e) {
+                                    Some(href) => a href=(href) { (e.title) },
+                                    None => span { (e.title) },
+                                }
+                                div.why {
+                                    @if let Some(k) = &e.key { span.mono { (k.value) } }
+                                    @if several_sources { " · " (e.members().iter().map(|m| title_of(scope, m)).collect::<Vec<_>>().join(", ")) }
+                                    @if !e.why.is_empty() { " · matched " (e.why.join(", ")) }
+                                }
                             }
-                            div.why {
-                                @if let Some(k) = &e.key { (k.scheme) " " (k.value) " · " }
-                                (e.members().join(", "))
-                                @if !e.why.is_empty() { " · matched " (e.why.join(", ")) }
-                            }
+                            @for c in &columns { td { (cell(e, c)) } }
                         }
-                        @for c in &columns { td { (cell(e, c)) } }
                     }
                 }
             }
         }
         @if answer.entries.is_empty() { p.dim { "Nothing here." } }
-        @if answer.total as usize > limit * page {
-            p.bar {
-                @if page > 1 { a href=(link(&q, &view, &kind, page - 1)) { "← previous" } }
-                a href=(link(&q, &view, &kind, page + 1)) { "next →" }
+        @if pages > 1 {
+            div.pager {
+                @if page > 1 { a href=(link(&q, &view, &kind, page - 1)) { "← Previous" } } @else { span.off { "← Previous" } }
+                span.dim { "Page " (page) " of " (pages) }
+                @if page < pages { a href=(link(&q, &view, &kind, page + 1)) { "Next →" } } @else { span.off { "Next →" } }
             }
         }
 
@@ -273,7 +287,7 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
                 @if !counts.is_empty() {
                     div.card {
                         h4 {
-                            (name) " "
+                            (label(name)) " "
                             span.cover { (coverage) " of " (scope.records()) " claims" }
                         }
                         @for (v, n) in &counts {
@@ -291,7 +305,7 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
         div.grid {
             @for m in &scope.members {
                 div.card {
-                    h4 { (m.name()) " " span.cover { (m.decl.priority.name()) } }
+                    h4 { (m.title()) " " span.cover { (m.decl.priority.name()) } }
                     p.dim { (m.decl.why) }
                     div.facet {
                         span { (m.kind()) " · " span.state.(m.state()) { (m.state()) } }
@@ -357,10 +371,9 @@ fn entry_page(scope: &Tracker, scheme: &str, value: &str, operator: bool, said: 
             .and_then(|p| held.get(&(p.member.clone(), p.record_id.clone())))
     };
     let body = html! {
-        p { a href=(at("/")) { "← " (d.title) } }
         h1 { (entry.title) }
         p.state { span.chip { (scheme) " " (value) } " "
-            span.dim { (entry.members().len()) " sources, " (entry.parts.len()) " claims · " }
+            span.dim { (plural(entry.members().len(), "source")) ", " (plural(entry.parts.len(), "claim")) " · " }
             a href={(at("/thing/")) (urlencode(scheme)) "/" (urlencode(value)) ".atom"} { "Watch" } }
         @if let Some((source, c)) = &summary {
             div.note {
@@ -382,14 +395,14 @@ fn entry_page(scope: &Tracker, scheme: &str, value: &str, operator: bool, said: 
                             @let mapped = f.means.get(member).cloned().unwrap_or_default();
                             @for (i, raw) in said.iter().enumerate() {
                                 tr {
-                                    td { (name)
+                                    td { (label(name)) div.why.mono { (name) }
                                         @if judged.as_ref().map(|j| j.contains(name)).unwrap_or(f.divergent && f.by.len() > 1 && d.normalise_for(name).is_some()) { " " span.chip.on { "conflict" } }
                                         @else if f.divergent && f.by.len() > 1 && d.normalise_for(name).is_none() { " " span.chip { "not compared" } }
                                         @else if f.divergent && f.by.len() > 1 {
                                             @if f.means.values().flatten().all(|v| v.parse::<f64>().is_ok()) { " " span.chip { "within tolerance" } }
                                             @else { " " span.chip { "different words" } }
                                         } }
-                                    td.dim { @if i == 0 { (member) } }
+                                    td.dim { @if i == 0 { (title_of(scope, member)) } }
                                     td { (raw)
                                         @if let Some(means) = definition(scope, member, raw) {
                                             div.why { (means) }
@@ -465,7 +478,6 @@ fn record_page(scope: &Tracker, member: &str, id: &str, operator: bool) -> Optio
         .next()?;
     let (source, answered) = said_by(scope, member);
     let body = html! {
-        p { a href=(at("/")) { "← " (scope.decl.title) } }
         h1 { (rec.title) }
         p.state { span.chip { (member) } " " span.chip { (rec.kind) } " "
             @for i in &rec.ids { span.chip { (i.scheme) " " (i.value) } " " }
@@ -618,6 +630,10 @@ fn entry_json(e: &crate::tracker::Thing) -> J {
 // Who is asking, and what they are paying for.
 
 fn banner(v: &Viewer, scope: &Tracker, hidden: u64) -> Markup {
+    // The person at the machine owns all of it: nothing to sign in to, nothing to buy.
+    if v.account.as_ref().is_some_and(|a| a.id == 0) && hidden == 0 {
+        return html! {};
+    }
     html! {
         p.bar {
             @match v.email() {
@@ -670,7 +686,6 @@ fn account_page(scope: &Tracker, accounts: &Accounts, site: &Site, v: &Viewer) -
     let keys = accounts.keys(a.id);
     let entitled = a.entitled(&scope.decl.name);
     let body = html! {
-        p { a href=(at("/")) { "← " (scope.decl.title) } }
         h1 { (a.email) }
         p.state.(if entitled { "current" } else { "empty" }) {
             (a.state)
@@ -740,10 +755,9 @@ fn key_made(key: &str) -> String {
     shell("Your key", body)
 }
 
-fn pricing_page(scope: &Tracker, site: &Site, v: &Viewer) -> String {
+fn pricing_page(_scope: &Tracker, site: &Site, v: &Viewer) -> String {
     let p = &site.price;
     let body = html! {
-        p { a href=(at("/")) { "← " (scope.decl.title) } }
         h1 { "What it costs" }
         p.about {
             "Free is the whole of this tracker, " (account::FREE_DELAY_DAYS) " days behind. "
@@ -799,7 +813,6 @@ fn terms_page(scope: &Tracker, site: &Site) -> String {
         &site.contact
     };
     let body = html! {
-        p { a href=(at("/")) { "← " (scope.decl.title) } }
         h1 { "Terms" }
         div.note {
             "A draft. It says what this workspace actually does, and it has not been read by a "
@@ -995,7 +1008,6 @@ fn changes_page(scope: &Tracker, url: &str, v: &Viewer) -> String {
         }
     };
     let body = html! {
-        p { a href=(at("/")) { "← " (scope.decl.title) } }
         h1 { "Changes" }
         p.bar {
             a.chip href=(at("/conflicts")) { "Conflicts" }
@@ -1129,9 +1141,18 @@ impl TrackerSite {
     /// One request. A failure is that request's, answered 500 as it is dropped, and never the
     /// end of the server.
     pub fn answer(&mut self, request: tiny_http::Request) {
+        // Every page of it is in this tracker, with its tabs. Standing alone, the tracker is home.
+        let tabs = vec![
+            ("Overview".to_string(), at("/")),
+            ("Things".to_string(), at("/things")),
+            ("Changes".to_string(), at("/changes")),
+            ("Conflicts".to_string(), at("/conflicts")),
+        ];
+        crate::serve::frame_section(Some((self.scope.decl.title.clone(), at("/"))), tabs);
         if let Err(e) = self.answer_or_fail(request) {
             eprintln!("{}: {e}", self.dir.display());
         }
+        crate::serve::frame_section(None, Vec::new());
     }
 
     fn answer_or_fail(&mut self, mut request: tiny_http::Request) -> Result<(), String> {
@@ -1585,7 +1606,6 @@ impl TrackerSite {
                     shell(
                         "Nothing here",
                         html! {
-                            p { a href=(at("/")) { "← " (scope.decl.title) } }
                             h1 { "Nothing here at that address" }
                         },
                     ),
@@ -1666,7 +1686,6 @@ fn catalogue(scope: &Tracker, v: &Viewer, message: Option<&str>) -> String {
         .collect();
 
     let body = html! {
-        p { a href=(at("/")) { "← " (scope.decl.title) } }
         h1 { "The catalogue" }
         p.about {
             "Every source and tracker this workspace holds. A source belongs to no tracker: several "
@@ -1862,7 +1881,6 @@ fn conflicts_page(scope: &Tracker, url: &str, v: &Viewer, said: Option<&str>) ->
         .collect();
     let new = all.iter().filter(|c| c["state"] == "new").count();
     let body = html! {
-        p { a href=(at("/")) { "← " (scope.decl.title) } }
         h1 { "Conflicts" }
         @if let Some(m) = said { div.note { (m) } }
         p.state {
@@ -1998,16 +2016,31 @@ fn things_page(scope: &Tracker, url: &str, operator: bool) -> String {
     let store = crate::thingstore::ThingStore::open(&scope.dir).ok();
     let answer = if question.trim().is_empty() { None } else { Some(view_of(scope, &question)) };
     let assist = operator.then(|| crate::assist::Assist::configured(&scope.root)).filter(|a| a.available());
-    let examples = [
-        "conflict:severity",
-        "conflict:cvss and has:kev",
-        "only:kev",
-        "appeared:exploit<7d",
-        "changed:severity<24h",
-    ];
+    // Examples in this tracker's own words: its sources, a property they carry, its kind.
+    let short = |name: &str| name.rsplit('/').next().unwrap_or(name).to_string();
+    let sources: Vec<String> = scope.members.iter().map(|m| short(m.name())).collect();
+    let property = scope
+        .columns(&TrackerQuery::default())
+        .into_iter()
+        .find(|c| c != "kind" && c != "known");
+    let kind = scope.kinds().first().map(|(k, _)| k.clone()).unwrap_or_else(|| "claim".into());
+    let mut examples: Vec<String> = Vec::new();
+    if let Some(p) = &property {
+        if sources.len() > 1 {
+            examples.push(format!("conflict:{p}"));
+        }
+        examples.push(format!("changed:{p}<24h"));
+    }
+    examples.push(format!("appeared:{kind}<7d"));
+    if let Some(s) = sources.first() {
+        examples.push(if sources.len() > 1 { format!("only:{s}") } else { format!("has:{s}") });
+    }
+    if let (Some(a), Some(b)) = (sources.first(), sources.get(1)) {
+        examples.push(format!("has:{a} and not has:{b}"));
+    }
+    let placeholder = examples.first().cloned().unwrap_or_default();
     let terms = top_terms(&question);
     let body = html! {
-        p { a href=(at("/")) { "← " (scope.decl.title) } }
         h1 { "Things" }
         @if let Some(a) = &assist {
             form.bar method="post" action=(at("/things/ask")) {
@@ -2026,7 +2059,7 @@ fn things_page(scope: &Tracker, url: &str, operator: bool) -> String {
         }
         form.bar method="get" action=(at("/things")) {
             input type="search" name="q" value=(question)
-                placeholder="conflict:severity and has:kev";
+                placeholder=(placeholder);
             button type="submit" { "Filter" }
         }
         // Each part of the filter a chip, and the × takes that part away.
@@ -2042,7 +2075,7 @@ fn things_page(scope: &Tracker, url: &str, operator: bool) -> String {
             p.bar {
                 span.dim { "Try:" }
                 @for ex in examples {
-                    " " a.chip href={(at("/things?q=")) (urlencode(ex))} { (ex) }
+                    " " a.chip href={(at("/things?q=")) (urlencode(&ex))} { (ex) }
                 }
             }
         }
@@ -2125,7 +2158,6 @@ fn top_terms(q: &str) -> Vec<String> {
 /// What the assist would be sent to translate a question, and the button that sends it (D10).
 fn consent_page(words: &str, d: &crate::assist::Disclosure) -> String {
     shell("Ask in words", html! {
-        p { a href=(at("/things")) { "← Things" } }
         h1 { "Before it is asked" }
         div.note {
             "Translating “" (words) "” sends " strong { (d.to) } ":"
@@ -2348,4 +2380,48 @@ impl TrackerSite {
     pub fn set_operator(&mut self, yes: bool) {
         self.operator = yes;
     }
+}
+
+/// A field's name as a person reads it: `data_ds_appid` is `Appid`, `search_released` is
+/// `Released`. The prefixes are a page's markup, not what the value is.
+fn label(name: &str) -> String {
+    if name == "known" {
+        return "Date".into();
+    }
+    let mut s = name;
+    for prefix in ["data_ds_", "data_", "tab_item_", "search_", "item_", "field_"] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            if !rest.is_empty() {
+                s = rest;
+            }
+        }
+    }
+    let words = s.replace(['_', '-'], " ");
+    let mut c = words.chars();
+    match c.next() {
+        Some(first) => first.to_uppercase().chain(c).collect(),
+        None => name.to_string(),
+    }
+}
+
+fn plural(n: usize, word: &str) -> String {
+    format!("{n} {word}{}", if n == 1 { "" } else { "s" })
+}
+
+fn thousands(n: i64) -> String {
+    crate::web::thousands(n.max(0) as usize)
+}
+
+/// A source by the name a person gave it rather than its handle.
+fn title_of(scope: &Tracker, name: &str) -> String {
+    scope.members.iter().find(|m| m.name() == name).map(|m| m.title()).unwrap_or_else(|| name.to_string())
+}
+
+/// Handles in a sentence, each put as its title.
+fn with_titles(scope: &Tracker, text: &str) -> String {
+    let mut out = text.to_string();
+    for m in &scope.members {
+        out = out.replace(m.name(), &m.title());
+    }
+    out
 }

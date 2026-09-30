@@ -22,6 +22,10 @@ impl Resolved {
     pub fn name(&self) -> &str {
         self.member.name()
     }
+    /// The name a person gave it, or its handle.
+    pub fn title(&self) -> String {
+        self.described["title"].as_str().filter(|t| !t.is_empty()).unwrap_or(self.member.name()).to_string()
+    }
     pub fn kind(&self) -> String {
         self.described["kind"]
             .as_str()
@@ -366,10 +370,29 @@ impl Tracker {
                 }
             }
         }
+        // What a reader looks at first: shared by the most sources, and then what says something
+        // about the thing (its price, its tags, its date) before what names it again (an id, a
+        // key; the thing's own name is under its title already). One column per sort of thing.
+        const TELLING: [&str; 11] = ["price", "tag", "genre", "status", "severity", "score", "version", "category", "rating", "platform", "type"];
+        // A date is the date column already.
+        let naming = |n: &str| n.ends_with("id") || n.ends_with("ids") || n.contains("key") || n.ends_with("_url") || n == "href" || n.contains("date") || n.contains("released");
+        let telling = |n: &str| TELLING.iter().position(|w| n.contains(w));
         let mut shared: Vec<(String, usize)> = tally.into_iter().collect();
-        shared.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        shared.sort_by_key(|(n, count)| (std::cmp::Reverse(*count), naming(n), telling(n).is_none(), n.len(), n.clone()));
         let mut cols = vec!["kind".to_string()];
-        cols.extend(shared.into_iter().take(3).map(|(n, _)| n));
+        let mut sorts: Vec<usize> = Vec::new();
+        for (n, _) in shared {
+            if cols.len() >= 4 {
+                break;
+            }
+            if let Some(t) = telling(&n) {
+                if sorts.contains(&t) {
+                    continue;
+                }
+                sorts.push(t);
+            }
+            cols.push(n);
+        }
         cols.push("known".into());
         cols
     }

@@ -18,6 +18,7 @@ pub const STYLE: &str = r#"
 :root {
   --bg: #f2efe7; --fg: #14202a; --dim: #667078; --line: #cfd1ca;
   --panel: #fbfaf6; --accent: #dc4a20; --chip: #dfe2db;
+  --line-strong: #afb5af; --wash: rgba(20,32,42,.04); --mark-filter: none;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
@@ -25,22 +26,24 @@ pub const STYLE: &str = r#"
     color-scheme: dark;
     --bg: #11181d; --fg: #e9e6de; --dim: #98a3ab; --line: #2b353c;
     --panel: #161e24; --accent: #ff6a3d; --chip: #1c252b;
+    --line-strong: #3a444b; --wash: rgba(233,230,222,.05); --mark-filter: invert(1);
   }
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
   --bg: #11181d; --fg: #e9e6de; --dim: #98a3ab; --line: #2b353c;
   --panel: #161e24; --accent: #ff6a3d; --chip: #1c252b;
+  --line-strong: #3a444b; --wash: rgba(233,230,222,.05); --mark-filter: invert(1);
 }
 :root[data-theme="light"] { color-scheme: light; }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--fg);
        font: 15px/1.55 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
              "Segoe UI", sans-serif; -webkit-font-smoothing: antialiased; }
-main { max-width: 68rem; margin: 0 auto; padding: 2rem 1rem 5rem; }
+main { max-width: 72rem; margin: 0 auto; padding: 2.2rem 1.25rem 5rem; }
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
-h1 { font-size: 1.5rem; margin: 0 0 .2rem; letter-spacing: -.02em; font-weight: 750; }
+h1 { font-size: 2.1rem; line-height: 1.15; margin: 0 0 .2rem; letter-spacing: -.035em; font-weight: 750; }
 h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .12em;
      color: var(--dim); margin: 2.2rem 0 .7rem; font-weight: 600;
      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
@@ -92,6 +95,71 @@ details.receipt[open] { background: var(--panel); border-left: 3px solid var(--a
 .receipt pre { max-height: 18rem; overflow: auto; font-size: .78rem; background: var(--bg);
                padding: .5rem; border: 1px solid var(--line); }
 .receipt table { font-size: .82rem; }
+/* The frame: the website's header, then where the reader is. */
+.wrap { max-width: 72rem; margin: 0 auto; padding: 0 1.25rem; }
+header.top { border-bottom: 1px solid var(--line); background: var(--bg); }
+header.top .wrap { height: 64px; display: flex; align-items: center; gap: 1.5rem; }
+.brand { display: flex; align-items: center; gap: .6rem; color: var(--fg); font-weight: 750;
+  letter-spacing: -.03em; font-size: 1.15rem; }
+.brand:hover { text-decoration: none; }
+.brand-mark { width: 24px; height: 24px; filter: var(--mark-filter); }
+nav.links { margin-left: auto; display: flex; gap: 1.6rem; font-size: .9rem; }
+nav.links a { color: var(--dim); }
+nav.links a:hover { color: var(--fg); text-decoration: none; }
+.subbar { border-bottom: 1px solid var(--line); background: var(--panel); }
+.subbar .wrap { display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+  flex-wrap: wrap; min-height: 46px; }
+nav.crumbs ol { list-style: none; margin: 0; padding: .7rem 0; display: flex; flex-wrap: wrap;
+  gap: .35rem; font-size: .86rem; }
+nav.crumbs li { display: flex; gap: .35rem; align-items: center; color: var(--dim); }
+nav.crumbs li + li::before { content: "/"; color: var(--line-strong); }
+nav.crumbs a { color: var(--dim); }
+nav.crumbs a:hover { color: var(--fg); }
+nav.crumbs [aria-current] { color: var(--fg); font-weight: 600; }
+nav.tabs { display: flex; gap: .25rem; align-self: stretch; }
+nav.tabs a { display: flex; align-items: center; padding: 0 .8rem; color: var(--dim); font-size: .88rem;
+  border-bottom: 2px solid transparent; margin-bottom: -1px; }
+nav.tabs a:hover { color: var(--fg); text-decoration: none; }
+nav.tabs a.on { color: var(--fg); border-bottom-color: var(--accent); font-weight: 600; }
+/* The head of a page: its name, what it is, and the numbers that say how it stands. */
+.lede { font-size: 1.05rem; color: var(--dim); max-width: 46rem; margin: .4rem 0 0; }
+.meta { font-size: .85rem; color: var(--dim); margin: .8rem 0 0; display: flex; gap: .4rem 1rem; flex-wrap: wrap; }
+.meta .current::before, .meta .partial::before { content: ""; display: inline-block; width: .5rem; height: .5rem;
+  border-radius: 50%; margin-right: .4rem; background: #2e7d32; vertical-align: .05em; }
+.meta .partial::before { background: #c0392b; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: 1px; background: var(--line);
+  margin: 1.8rem 0 1.4rem; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.stats > * { padding: 1rem 1.2rem; background: var(--panel); color: var(--fg); display: block; }
+.stats a:hover { background: var(--bg); text-decoration: none; }
+.stats b { display: block; font-size: 1.9rem; font-weight: 750; letter-spacing: -.03em; line-height: 1.1;
+  font-variant-numeric: tabular-nums; }
+.stats span { color: var(--dim); font-size: .82rem; }
+.stats .hot b { color: var(--accent); }
+/* The list of things. */
+.list-head { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
+.list-head h2 { margin-bottom: .5rem; }
+.scroll { overflow-x: auto; }
+table.things td.thing a { color: var(--fg); font-weight: 600; }
+table.things td.thing a:hover { color: var(--accent); text-decoration: none; }
+table.things tbody tr:hover { background: var(--wash); }
+table.things td:first-child, table.things th:first-child { padding-left: .6rem; }
+.pager { display: flex; justify-content: space-between; align-items: center; gap: 1rem; margin: 1.2rem 0; font-size: .9rem; }
+.pager a, .pager span.off { padding: .45rem .9rem; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--fg); }
+.pager a:hover { border-color: var(--fg); text-decoration: none; }
+.pager span.off { color: var(--dim); opacity: .5; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: .92em; }
+button.primary, .button.primary { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600; }
+button:hover { border-color: var(--fg); }
+input[type=file] { font: inherit; font-size: .88rem; color: var(--dim); }
+input[type=file]::file-selector-button { font: inherit; padding: .45rem .9rem; margin-right: .7rem; cursor: pointer;
+  border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); }
+input[type=file]::file-selector-button:hover { border-color: var(--fg); }
+@media (max-width: 40rem) {
+  header.top .wrap { height: 56px; gap: 1rem; }
+  nav.links { gap: 1rem; font-size: .85rem; }
+  nav.tabs { width: 100%; overflow-x: auto; }
+  .stats b { font-size: 1.5rem; }
+}
 @media (max-width: 40rem) { main { padding: 1.2rem .9rem 4rem; } }
 "#;
 
@@ -221,17 +289,123 @@ pub fn unmount(url: &str) -> String {
     }
 }
 
+/// What every page sits in: whose home the mark leads to, the links beside it, and the part of
+/// it this page is in (a tracker, with its own tabs). Set per request, like the mount, so a page
+/// needs to say nothing but its title for its header and its breadcrumb to be right.
+#[derive(Clone, Default)]
+pub struct Frame {
+    pub home: (String, String),
+    pub nav: Vec<(String, String)>,
+    pub section: Option<(String, String)>,
+    pub tabs: Vec<(String, String)>,
+}
+
+thread_local! {
+    static FRAME: std::cell::RefCell<Frame> = std::cell::RefCell::new(Frame::default());
+}
+
+/// The home the mark and the first crumb lead to, and the links at the right of the header.
+pub fn frame_home(label: &str, href: &str, nav: Vec<(String, String)>) {
+    FRAME.with(|f| {
+        let mut f = f.borrow_mut();
+        f.home = (label.to_string(), href.to_string());
+        f.nav = nav;
+    });
+}
+
+/// The part of the site this request is in, and its tabs; `None` when it is in none.
+pub fn frame_section(section: Option<(String, String)>, tabs: Vec<(String, String)>) {
+    FRAME.with(|f| {
+        let mut f = f.borrow_mut();
+        f.section = section;
+        f.tabs = tabs;
+    });
+}
+
+pub fn frame() -> Frame {
+    FRAME.with(|f| f.borrow().clone())
+}
+
+const MARK: &str = include_str!("mark.b64");
+const FAVICON: &str = include_str!("favicon.b64");
+
 pub fn shell(title: &str, body: Markup) -> String {
+    let f = frame();
+    // Standing alone (a tracker served by itself, a hub), the part it is in is its home.
+    let home_href = if !f.home.1.is_empty() { f.home.1.clone() } else { f.section.as_ref().map(|s| s.1.clone()).unwrap_or_else(|| "/".into()) };
+    // Home, the part this is in, and this page: each named once.
+    let mut crumbs: Vec<(String, Option<String>)> = Vec::new();
+    if !f.home.1.is_empty() {
+        crumbs.push((f.home.0.clone(), Some(f.home.1.clone())));
+    }
+    if let Some((label, href)) = &f.section {
+        crumbs.push((label.clone(), Some(href.clone())));
+    }
+    // The home page is where the crumbs start, not one of them.
+    if title != "Zetlyn" && crumbs.iter().all(|(l, _)| l != title) {
+        crumbs.push((title.to_string(), None));
+    }
+    // The last is where the reader is.
+    if let Some(last) = crumbs.last_mut() {
+        if last.0 == title {
+            last.1 = None;
+        }
+    }
     let page = html! {
         (DOCTYPE)
         html lang="en" {
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
-                title { (title) }
+                title { (title) @if title != "Zetlyn" { " · Zetlyn" } }
+                link rel="icon" type="image/png" href={"data:image/png;base64," (FAVICON)};
                 link rel="stylesheet" href=(at("/style.css"));
             }
-            body { main { (body) } }
+            body {
+                header.top {
+                    div.wrap {
+                        a.brand href=(home_href) aria-label="Zetlyn home" {
+                            img.brand-mark src={"data:image/png;base64," (MARK)} alt="";
+                            span { "Zetlyn" }
+                        }
+                        @if !f.nav.is_empty() {
+                            nav.links {
+                                @for (label, href) in &f.nav { a href=(href) { (label) } }
+                            }
+                        }
+                    }
+                }
+                @if crumbs.len() > 1 || !f.tabs.is_empty() {
+                    div.subbar {
+                        div.wrap {
+                            nav.crumbs aria-label="Breadcrumb" {
+                                ol {
+                                    @for (label, href) in &crumbs {
+                                        li {
+                                            @match href {
+                                                Some(h) => a href=(h) { (label) },
+                                                None => span aria-current="page" { (label) },
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            @if !f.tabs.is_empty() {
+                                nav.tabs {
+                                    @for (label, href) in &f.tabs {
+                                        @if label == title || (f.section.as_ref().is_some_and(|s| &s.0 == title) && Some(href) == f.section.as_ref().map(|s| &s.1)) {
+                                            a.on href=(href) aria-current="page" { (label) }
+                                        } @else {
+                                            a href=(href) { (label) }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                main { (body) }
+            }
         }
     };
     page.into_string()

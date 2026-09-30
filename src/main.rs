@@ -476,6 +476,11 @@ fn run(args: &[String]) -> Result<(), String> {
             // Several trackers can sit on one host, one process each, so a surface is told where
             // it hangs and writes every address it gives out under that.
             serve::mount(flag(args, "--base").unwrap_or(""));
+            // Under a hub, the hub is home: the mark and the first crumb go there.
+            if !serve::mounted().is_empty() {
+                let nav = vec![("Hub".to_string(), "/".to_string()), ("Docs".to_string(), "https://zetlyn.com/docs".to_string())];
+                serve::frame_home("Hub", "/", nav);
+            }
             // Loopback unless asked otherwise: a tracker reachable from the network is a decision
             // an operator makes, not a default they discover.
             let addr = flag(args, "--addr")

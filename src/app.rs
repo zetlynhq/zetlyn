@@ -336,6 +336,29 @@ impl App {
     }
 
     fn answer_as_owner(&mut self, mut request: tiny_http::Request, url: String, _path: String, parts: Vec<String>) {
+        // The header every page has: home is the workspace, and a page about one tracker is in it.
+        let home = format!("{}/", self.base);
+        let nav = if self.visitor {
+            Vec::new()
+        } else {
+            vec![
+                ("Trackers".to_string(), home.clone()),
+                ("Assist".to_string(), format!("{}/assist", self.base)),
+                ("Docs".to_string(), "https://zetlyn.com/docs".to_string()),
+            ]
+        };
+        serve::frame_home("Your trackers", &home, nav);
+        serve::frame_section(None, Vec::new());
+        if let [first, tracker, ..] = parts.as_slice() {
+            if first != "t" && first != "job" {
+                let dir = self.trackers().join(tracker);
+                let title = TrackerDecl::load(&dir).ok().map(|d| d.title).or_else(|| draft_title(&dir));
+                if let Some(title) = title {
+                    let href = if dir.join("tracker.yaml").exists() { format!("{}/t/{tracker}/", self.base) } else { format!("{}/new/{tracker}?title={}", self.base, urlencode(&title)) };
+                    serve::frame_section(Some((title, href)), Vec::new());
+                }
+            }
+        }
 
         // A tracker's own pages, as a reader would see them published.
         if parts.first().map(String::as_str) == Some("t") && parts.len() >= 2 {
@@ -762,7 +785,6 @@ impl App {
                     String::new()
                 };
                 html! {
-                    p { a href=(serve::at("/")) { "← Zetlyn" } " · " a href=(serve::at(&format!("/t/{tracker}/"))) { (t.decl.title) } }
                     h1 { "Who may see " (t.decl.title) }
                     @if let Some(s) = said { div.note { (s) } }
                     p.about {
@@ -962,7 +984,6 @@ impl App {
     fn assist_status_page(&self, said: Option<&str>) -> String {
         let a = crate::assist::Assist::configured(&self.root);
         let body = html! {
-            p { a href=(serve::at("/")) { "← Zetlyn" } }
             h1 { "The assist" }
             @if let Some(s) = said { div.note { (s) } }
             @if a.available() {
@@ -1193,7 +1214,7 @@ impl App {
                 table { tbody {
                     @for (name, decl, fresh) in &trackers {
                         tr {
-                            td { a href={(serve::at("/t/")) (name) "/"} { strong { (decl.title) } } div.why { (decl.members.len()) " sources · identified by " (decl.join.join(", ")) } }
+                            td { a href={(serve::at("/t/")) (name) "/"} { strong { (decl.title) } } div.why { (decl.members.len()) (if decl.members.len() == 1 { " source" } else { " sources" }) " · identified by " (decl.join.join(", ")) } }
                             td.num { @if *fresh > 0 { span.chip.on { (fresh) " signals since yesterday" } } @else { span.dim { "nothing new since yesterday" } } }
                             td.num { a href={(serve::at("/new/")) (name) "?title=" (urlencode(&decl.title))} { "Add a source" } }
                             td.num { a href={(serve::at("/publish/")) (name)} { (if decl.visibility == "private" { "Private" } else { "Publish" }) } }
@@ -1224,7 +1245,6 @@ impl App {
         let example_next = existing.as_ref().is_some_and(|d| d.title == EXAMPLE_TITLE && d.members.len() == 1);
         let prefill = if prefill.is_empty() && example_next { EXAMPLE[1].0.to_string() } else { prefill };
         let body = html! {
-            p { a href=(serve::at("/")) { "← Zetlyn" } }
             h1 { (if title.is_empty() { tracker.to_string() } else { title.clone() }) }
             @if first {
                 p.about { "The first source. Paste the address of a CSV file or a feed, or choose a file on this machine." }
@@ -1286,7 +1306,6 @@ impl App {
         let undecided = web.as_ref().is_some_and(|w| w.0);
         let reach = |choice: &str| format!("{}{tracker}/{source}?choice={choice}&title={}", serve::at("/reach/"), urlencode(&title));
         let body = html! {
-            p { a href=(serve::at("/")) { "← Zetlyn" } @if decl.is_some() { " · " a href={(serve::at("/t/")) (tracker) "/"} { (title) } } }
             h1 { (ds.decl.title) }
             p.about { (total) " claims read from " code { (source_of(&ds)) } }
 

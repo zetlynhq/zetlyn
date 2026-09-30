@@ -56,9 +56,9 @@ fn cell(e: &Thing, name: &str) -> Markup {
                     v
                 };
                 html! {
-                    @if f.divergent { span.chip.on { (distinct.iter().map(|s| s.as_str())
+                    @if f.divergent { span.chip.on { (distinct.iter().map(|s| yes_no(s.as_str()))
                         .collect::<Vec<_>>().join(" / ")) } }
-                    @else { (distinct.first().map(|s| s.as_str()).unwrap_or("")) }
+                    @else { (distinct.first().map(|s| yes_no(s.as_str())).unwrap_or("")) }
                 }
             }
             None => html! { span.dim { "—" } },
@@ -141,10 +141,14 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
             @if let Some(f) = &d.promise.fresh_within {
                 @if holds { span { "fresh within " (f) } } @else { span { "the promise of " (f) " does not hold" } }
             }
+            @if is_operator(v) {
+                form.update method="post" action=(at("/update")) { button type="submit" { "Update now" } }
+            }
         }
         (banner(v, scope, hidden))
         // Public, and a source that never said it may be: said on the page rather than hidden.
-        @let undeclared = if scope.private() { Vec::new() } else { scope.not_public() };
+        // Not to the person at the machine: for them it is said where they publish.
+        @let undeclared = if scope.private() || is_operator(v) { Vec::new() } else { scope.not_public() };
         @if !undeclared.is_empty() { div.note { "Not every source here has said it may be shown in public: " (with_titles(scope, &undeclared.join("; "))) "." } }
         @if let Some(c) = &coverage {
             @let by = c["by_sources"].as_object().cloned().unwrap_or_default();
@@ -235,7 +239,8 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
             h2 { @if q.is_empty() { "Things" } @else { "Found" } }
             span.dim {
                 @if answer.entries.is_empty() { "none" }
-                @else { (thousands(first_shown as i64)) "–" (thousands(last_shown as i64)) " of " @if answer.truncated { "at least " } (thousands(answer.total as i64)) }
+                @else if answer.subjects { (thousands(first_shown as i64)) "–" (thousands(last_shown as i64)) " of " @if answer.truncated { "at least " } (thousands(answer.total as i64)) }
+                @else { (plural(answer.entries.len(), "thing")) ", from " @if answer.truncated { "at least " } (thousands(answer.total as i64)) " claims" }
             }
         }
         @if answer.truncated {
@@ -631,7 +636,7 @@ fn entry_json(e: &crate::tracker::Thing) -> J {
 
 fn banner(v: &Viewer, scope: &Tracker, hidden: u64) -> Markup {
     // The person at the machine owns all of it: nothing to sign in to, nothing to buy.
-    if v.account.as_ref().is_some_and(|a| a.id == 0) && hidden == 0 {
+    if is_operator(v) && hidden == 0 {
         return html! {};
     }
     html! {
@@ -965,7 +970,7 @@ fn changes_page(scope: &Tracker, url: &str, v: &Viewer) -> String {
             _ => days.push((day, vec![s])),
         }
     }
-    let label = |day: &str| -> String {
+    let day_name = |day: &str| -> String {
         if day == today {
             "Today".into()
         } else if day == yesterday {
@@ -997,18 +1002,25 @@ fn changes_page(scope: &Tracker, url: &str, v: &Viewer) -> String {
     };
     let list = |v: &J| -> String {
         match v {
-            J::Array(a) => a.iter().filter_map(J::as_str).collect::<Vec<_>>().join(", "),
+            J::Array(a) => a.iter().filter_map(J::as_str).map(yes_no).collect::<Vec<_>>().join(", "),
             J::Object(o) => o
                 .iter()
-                .map(|(k, v)| format!("{k} {}", v.as_array().map(|a| a.iter().filter_map(J::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default()))
+                .map(|(k, v)| format!("{} {}", title_of(scope, k), v.as_array().map(|a| a.iter().filter_map(J::as_str).map(yes_no).collect::<Vec<_>>().join(", ")).unwrap_or_default()))
                 .collect::<Vec<_>>()
                 .join(" · "),
-            J::String(s) => s.clone(),
+            J::String(s) => yes_no(s).to_string(),
             _ => "—".into(),
         }
     };
     let body = html! {
         h1 { "Changes" }
+        @if let Some(u) = p.get("updated") { div.note { strong { "Read again just now. " } (u) } }
+        @if is_operator(v) {
+            form.bar method="post" action=(at("/update")) {
+                button.primary type="submit" { "Update now" }
+                span.dim { "Reads every source of this tracker again, and shows here what changed." }
+            }
+        }
         p.bar {
             a.chip href=(at("/conflicts")) { "Conflicts" }
             a.chip href=(at("/changes.atom")) { "Atom" }
@@ -1021,15 +1033,15 @@ fn changes_page(scope: &Tracker, url: &str, v: &Viewer) -> String {
             p.dim { "Nothing has changed since this tracker first looked at its sources. What changes from now on is kept here." }
         }
         @for (day, list_of) in &days {
-            h2 { (label(day)) }
+            h2 { (day_name(day)) }
             @let mut kinds: BTreeMap<&str, usize> = BTreeMap::new();
             @for s in list_of { @let _ = { *kinds.entry(s["kind"].as_str().unwrap_or("")).or_default() += 1; }; }
             p.bar { @for (k, n) in &kinds { span.chip { (words(k, *n)) } " " } }
             table { tbody {
                 @for s in list_of {
                     @let kind = s["kind"].as_str().unwrap_or("");
-                    @let source = s["source"].as_str().unwrap_or("");
-                    @let property = s["property"].as_str().unwrap_or("");
+                    @let source = title_of(scope, s["source"].as_str().unwrap_or(""));
+                    @let property = label(s["property"].as_str().unwrap_or(""));
                     tr {
                         td.dim style="width: 5rem" {
                             (s["at"].as_str().unwrap_or("").get(11..16).unwrap_or(""))
@@ -1419,6 +1431,30 @@ impl TrackerSite {
                 "text/html; charset=utf-8",
                 None,
             ),
+            // Every source read again now, for the person at the machine: what changed since the
+            // last look is then on the Changes page, without waiting for a cadence.
+            "/update" if post && *operator => {
+                let registry = crate::tracker::registry(datasets);
+                let mut said: Vec<String> = Vec::new();
+                for m in &scope.decl.members {
+                    let Some(path) = registry.get(&m.dataset) else { continue };
+                    let title = scope.members.iter().find(|r| r.name() == m.dataset).map(|r| r.title()).unwrap_or_else(|| m.dataset.clone());
+                    match crate::source::Source::open(path).and_then(|s| s.run()) {
+                        Ok(r) if r.added + r.changed + r.removed == 0 => said.push(format!("{title}: nothing changed")),
+                        Ok(r) => said.push(format!("{title}: {} new, {} changed, {} gone", r.added, r.changed, r.removed)),
+                        Err(e) => said.push(format!("{title}: {e}")),
+                    }
+                }
+                if let Ok(fresh) = Tracker::open(dir, datasets) {
+                    *scope = fresh;
+                    if let Err(e) = scope.refresh_if_moved() {
+                        said.push(format!("the tracker was not refreshed: {e}"));
+                    }
+                    *read_at = crate::now();
+                }
+                let url = format!("/changes?updated={}", urlencode(&said.join(" · ")));
+                (changes_page(scope, &url, &v), "text/html; charset=utf-8", None)
+            }
             "/changes" => (changes_page(&scope, &url, &v), "text/html; charset=utf-8", None),
             "/changes.atom" => {
                 let signals = crate::thingstore::ThingStore::open(&scope.dir)
@@ -1893,7 +1929,7 @@ fn conflicts_page(scope: &Tracker, url: &str, v: &Viewer, said: Option<&str>) ->
             a.chip.on[property.is_none()] href=(at("/conflicts")) { "every property" }
             @for (name, n) in &counts {
                 " " a.chip.on[property.as_deref() == Some(name.as_str())]
-                    href={(at("/conflicts?property=")) (urlencode(name))} { (name) " " (n) }
+                    href={(at("/conflicts?property=")) (urlencode(name))} { (label(name)) " " (n) }
             }
             " · "
             @for s in ["open", "new", "seen", "muted", "all"] {
@@ -1916,14 +1952,14 @@ fn conflicts_page(scope: &Tracker, url: &str, v: &Viewer, said: Option<&str>) ->
                             a href={(at("/thing/")) (urlencode(scheme)) "/" (urlencode(value))} {
                                 (c["title"].as_str().unwrap_or(value))
                             }
-                            div.why { (scheme) " " (value) }
+                            div.why.mono { (value) }
                         }
-                        td { (c["property"].as_str().unwrap_or("")) }
+                        td { (label(c["property"].as_str().unwrap_or(""))) }
                         td {
                             @if let Some(o) = c["sources"].as_object() {
                                 @for (source, words) in o {
-                                    div { span.dim { (source) } " "
-                                        strong { (words.as_array().map(|a| a.iter().filter_map(J::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default()) } }
+                                    div { span.dim { (title_of(scope, source)) } " "
+                                        strong { (words.as_array().map(|a| a.iter().filter_map(J::as_str).map(yes_no).collect::<Vec<_>>().join(", ")).unwrap_or_default()) } }
                                 }
                             }
                         }
@@ -2424,4 +2460,18 @@ fn with_titles(scope: &Tracker, text: &str) -> String {
         out = out.replace(m.name(), &m.title());
     }
     out
+}
+
+/// A yes or no as a person says it.
+fn yes_no(word: &str) -> &str {
+    match word {
+        "true" => "yes",
+        "false" => "no",
+        w => w,
+    }
+}
+
+/// The person at the machine, in the local app: they own every source and may read them again.
+fn is_operator(v: &Viewer) -> bool {
+    v.account.as_ref().is_some_and(|a| a.id == 0)
 }

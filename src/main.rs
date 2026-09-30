@@ -4,6 +4,7 @@
 mod account;
 mod app;
 mod assist;
+mod examples;
 mod artifact;
 mod billing;
 mod build;

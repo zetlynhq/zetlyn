@@ -20,21 +20,21 @@ use crate::source::{Query, Source};
 use crate::tracker::Tracker;
 use crate::trackerdecl::TrackerDecl;
 
-/// The example the start page offers: two files, both CSV, both carrying the CVE number, one
-/// saying a vulnerability is exploited and the other that code for it exists.
+/// Two bookshops that sell mostly the same books and say so differently: the example the app and
+/// the docs begin with (see `examples.rs`). The second list changes every two minutes.
 const EXAMPLE: [(&str, &str, &str); 2] = [
     (
-        "https://www.cisa.gov/sites/default/files/csv/known_exploited_vulnerabilities.csv",
-        "CISA Known Exploited Vulnerabilities",
-        "Which vulnerabilities are being exploited right now, by CISA's evidence.",
+        "https://hub.zetlyn.com/examples/bookshop-a.csv",
+        "Bookshop A",
+        "What Bookshop A charges for a book, and whether it has it.",
     ),
     (
-        "https://gitlab.com/exploit-database/exploitdb/-/raw/main/files_exploits.csv",
-        "Exploit-DB",
-        "Whether working code exists for a vulnerability.",
+        "https://hub.zetlyn.com/examples/bookshop-b.csv",
+        "Bookshop B",
+        "What Bookshop B charges for a book, and whether it has it.",
     ),
 ];
-const EXAMPLE_TITLE: &str = "Exploited vulnerabilities";
+const EXAMPLE_TITLE: &str = "Two bookshops";
 /// Beside a tracker that has a name and no source yet.
 const DRAFT: &str = "draft.yaml";
 
@@ -207,6 +207,24 @@ impl App {
         let url = serve::unmount(request.url());
         let path = url.split('?').next().unwrap_or("/").to_string();
         let parts: Vec<String> = path.split('/').filter(|s| !s.is_empty()).map(serve::urldecode).collect();
+        // A name in an address is one name: never a way out of the directory it names something
+        // in. `..%2F..` decodes after the split, so it is looked at here, once, for every route.
+        let unsafe_name = |s: &String| s == "." || s == ".." || s.contains(['/', '\\', '\0']);
+        let named = if parts.first().map(String::as_str) == Some("t") { &parts[1.min(parts.len())..2.min(parts.len())] } else { &parts[..] };
+        if named.iter().any(unsafe_name) {
+            return respond(request, 400, "text/plain; charset=utf-8", "not a name");
+        }
+        // Another site's page cannot act here: a browser says where a form came from, and a POST
+        // from anywhere but this app's own pages is refused. Programs (a webhook) say nothing.
+        if request.method() == &tiny_http::Method::Post {
+            let header = |name: &'static str| request.headers().iter().find(|h| h.field.equiv(name)).map(|h| h.value.as_str().to_string());
+            let host = header("Host").unwrap_or_default();
+            let cross = header("Sec-Fetch-Site").is_some_and(|s| s == "cross-site")
+                || header("Origin").is_some_and(|o| o == "null" || o.split("://").nth(1).unwrap_or("") != host);
+            if cross {
+                return respond(request, 403, "text/plain; charset=utf-8", "a form from another site");
+            }
+        }
         if self.hosted.is_some() {
             if let Some(request) = self.hosted_gate(request, &url, &path, &parts) {
                 return self.answer_as_owner(request, url, path, parts);
@@ -607,8 +625,11 @@ impl App {
             p.label(format!("Reading {}", if from.contains("://") { from.split('/').nth(2).unwrap_or(&from) } else { from.rsplit('/').next().unwrap_or(&from) }));
             let local = Path::new(&from).is_file();
             let github = from.starts_with("github:");
-            // An upload already sits in its own directory; an address gets one named after it.
-            let dir = if local {
+            // An upload already sits in its own directory under sources/; anything else, an address or
+            // a file somewhere on the machine, gets one there named after it. A file elsewhere is
+            // read where it is, and its folder is never written to, let alone removed.
+            let upload = local && Path::new(&from).parent().is_some_and(|p| p.parent() == Some(sources.as_path()));
+            let dir = if upload {
                 Path::new(&from).parent().map(Path::to_path_buf).unwrap_or_else(|| sources.clone())
             } else {
                 let stem = from.trim_end_matches('/').rsplit('/').next().unwrap_or("source");
@@ -638,16 +659,16 @@ impl App {
             // person has seen what that sends: the page that says so is where the job goes.
             if let Err(e) = &proposed {
                 if let Some(feeds) = e.strip_prefix(crate::guess::WEB_PAGE) {
-                    let _ = std::fs::remove_dir_all(&dir);
+                    if dir.starts_with(&sources) { let _ = std::fs::remove_dir_all(&dir); }
                     return Ok(serve::at(&format!("/webpage/{tracker}?url={}&title={}&feeds={}", urlencode(&from), urlencode(&title), urlencode(feeds))));
                 }
                 if e.contains("answers JSON") {
-                    let _ = std::fs::remove_dir_all(&dir);
+                    if dir.starts_with(&sources) { let _ = std::fs::remove_dir_all(&dir); }
                     return Ok(serve::at(&format!("/assist/{tracker}/{source}?url={}&title={}", urlencode(&from), urlencode(&title))));
                 }
             }
             if let Err(e) = proposed {
-                let _ = std::fs::remove_dir_all(&dir);
+                if dir.starts_with(&sources) { let _ = std::fs::remove_dir_all(&dir); }
                 return Err(e);
             }
             // The sample `propose_url` read to guess from; the source reads its address itself.
@@ -691,6 +712,25 @@ impl App {
         if let Some(list) = decl["sources"].as_array_mut() {
             if !list.iter().any(|m| m["source"] == ds.decl.name.as_str()) {
                 list.push(member);
+            }
+        }
+        // What both sources carry under one name, as a number, a yes or no, or a date, is
+        // compared from the start: two shops' `price` is the same question, and a different
+        // answer is what a tracker is for. Words are left to a person, who knows which mean one
+        // thing (the assist can propose them).
+        let registry = crate::tracker::registry(&self.sources());
+        let comparable = |kind: &str| matches!(kind, "number" | "bool" | "date");
+        let mine: BTreeMap<String, String> = ds.decl.records.fields.iter().map(|(n, p)| (n.clone(), p.kind.name().to_string())).collect();
+        let others: Vec<String> = decl["sources"].as_array().map(|l| l.iter().filter_map(|m| m["source"].as_str().map(str::to_string)).collect()).unwrap_or_default();
+        for other in others.iter().filter(|o| **o != ds.decl.name) {
+            let Some(theirs) = registry.get(other).and_then(|p| Source::open(p).ok()) else { continue };
+            for (name, p) in &theirs.decl.records.fields {
+                if mine.get(name).is_some_and(|k| k == p.kind.name() && comparable(k)) && decl["align"].get(name).is_none() {
+                    if !decl["align"].is_object() {
+                        decl["align"] = json!({});
+                    }
+                    decl["align"][name] = json!({});
+                }
             }
         }
         write_tracker(&dir, decl)?;
@@ -1581,8 +1621,8 @@ fn example_card() -> Markup {
     html! {
         div.card.example {
             h4 { "Or start from an example" }
-            p.dim { "CISA's list of exploited vulnerabilities and Exploit-DB: two CSV files that both carry the CVE number. Two pastes, and you see which exploited vulnerabilities have public code." }
-            form method="post" action=(serve::at("/example")) { button type="submit" { "Start from the CVE example" } }
+            p.dim { "Two bookshops sell mostly the same books and write them down differently. Two clicks, and you see where they disagree on price and stock; two minutes later, what one of them changed." }
+            form method="post" action=(serve::at("/example")) { button type="submit" { "Start from the bookshop example" } }
         }
     }
 }

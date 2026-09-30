@@ -127,6 +127,9 @@ nav.tabs a.on { color: var(--fg); border-bottom-color: var(--accent); font-weigh
 .meta .current::before, .meta .partial::before { content: ""; display: inline-block; width: .5rem; height: .5rem;
   border-radius: 50%; margin-right: .4rem; background: #2e7d32; vertical-align: .05em; }
 .meta .partial::before { background: #c0392b; }
+.meta { align-items: center; }
+.meta form.update { margin-left: auto; }
+.meta form.update button { padding: .3rem .8rem; font-size: .85rem; }
 .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: 1px; background: var(--line);
   margin: 1.8rem 0 1.4rem; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
 .stats > * { padding: 1rem 1.2rem; background: var(--panel); color: var(--fg); display: block; }

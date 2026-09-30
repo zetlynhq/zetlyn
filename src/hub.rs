@@ -532,6 +532,7 @@ pub fn serve(dir: &Path, addr: &str, serving: &[String]) -> Result<(), String> {
         let (status, body) = match method.as_str() {
             "GET" | "HEAD" if path.is_empty() => (200, index_page(dir, serving)),
             "GET" | "HEAD" if path == "index.json" => (200, index_json(dir)),
+            "GET" | "HEAD" if crate::examples::file(&path).is_some() => (200, crate::examples::file(&path).unwrap_or_default().into_bytes()),
             "GET" | "HEAD" => match crate::place::Place::get(&place, &path) {
                 Ok(bytes) => (200, bytes),
                 // A hub with no stylesheet of its own still has to be readable, so that one
@@ -562,6 +563,8 @@ pub fn serve(dir: &Path, addr: &str, serving: &[String]) -> Result<(), String> {
         // layout names. The rest is what a person's browser asked for on the way to reading this.
         let kind = if path.is_empty() {
             "text/html; charset=utf-8"
+        } else if path.ends_with(".csv") {
+            "text/csv; charset=utf-8"
         } else if path.ends_with(".json") {
             "application/json"
         } else if path.ends_with(".jsonl") {

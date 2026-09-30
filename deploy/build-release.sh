@@ -45,7 +45,8 @@ cargo build --release -q --target x86_64-apple-darwin
 R="$ROOT/dist/release"
 pack() {
 	d=$(mktemp -d); cp "$2" "$d/zetlyn"; cp LICENSE "$d/" 2>/dev/null || true
-	tar -czf "$R/zetlyn-$1.tar.gz" -C "$d" .; rm -rf "$d"
+	# Without macOS's extended attributes, which a Linux tar warns about on every extract.
+	COPYFILE_DISABLE=1 tar --no-xattrs -czf "$R/zetlyn-$1.tar.gz" -C "$d" .; rm -rf "$d"
 }
 pack linux-x86_64 "$OUT/zetlyn"
 pack macos-arm64 target/aarch64-apple-darwin/release/zetlyn

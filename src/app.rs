@@ -20,18 +20,19 @@ use crate::source::{Query, Source};
 use crate::tracker::Tracker;
 use crate::trackerdecl::TrackerDecl;
 
-/// Two bookshops that sell mostly the same books and say so differently: the example the app and
-/// the docs begin with (see `examples.rs`). The second list changes every two minutes.
+/// Two bookshops that sell mostly the same books and keep their lists their own way: Leafline
+/// Books publishes a CSV, Bücherstube Lindenhof only has its shop's page. The example the app
+/// and the docs begin with (see `examples.rs`); Lindenhof's page changes every two minutes.
 const EXAMPLE: [(&str, &str, &str); 2] = [
     (
-        "https://hub.zetlyn.com/examples/bookshop-a.csv",
-        "Bookshop A",
-        "What Bookshop A charges for a book, and whether it has it.",
+        "https://hub.zetlyn.com/examples/leafline-books.csv",
+        "Leafline Books",
+        "What Leafline Books charges for a book, and whether it has it.",
     ),
     (
-        "https://hub.zetlyn.com/examples/bookshop-b.csv",
-        "Bookshop B",
-        "What Bookshop B charges for a book, and whether it has it.",
+        "https://hub.zetlyn.com/examples/lindenhof/",
+        "Bücherstube Lindenhof",
+        "What Bücherstube Lindenhof charges for a book, and whether it has it.",
     ),
 ];
 const EXAMPLE_TITLE: &str = "Two bookshops";
@@ -1381,9 +1382,9 @@ impl App {
     /// by asking for a few of its pages, so how much more to read is chosen knowing how long it is.
     fn read_web(&self, tracker: &str, url: String, title: String, pick: usize) -> u64 {
         let host = url.split('/').nth(2).unwrap_or("site").trim_start_matches("www.").to_string();
-        // Named after the site, not its first label: store.steampowered.com is steampowered.
-        let site = host.split('.').rev().nth(1).unwrap_or("site").to_string();
-        let source = self.free(&self.sources(), &crate::guess::slug(&site));
+        // Named after what the address says: …/examples/lindenhof/ is lindenhof, and
+        // store.steampowered.com/search is steampowered.
+        let source = self.free(&self.sources(), &crate::guess::page_name(&url));
         let dir = self.sources().join(&source);
         let tracker = tracker.to_string();
         self.start(move |p| {
@@ -2005,7 +2006,7 @@ fn example_card() -> Markup {
     html! {
         div.card.example {
             h4 { "Or start from an example" }
-            p.dim { "Two bookshops sell mostly the same books and write them down differently. Two clicks, and you see where they disagree on price and stock; two minutes later, what one of them changed." }
+            p.dim { "Leafline Books publishes a price list; Bücherstube Lindenhof only has its shop's page. A few clicks, and you see where the two disagree on price and stock; two minutes later, what one of them changed." }
             form method="post" action=(serve::at("/example")) { button type="submit" { "Start from the bookshop example" } }
         }
     }

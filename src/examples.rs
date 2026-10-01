@@ -24,38 +24,64 @@ const SHOP_A: &str = "isbn,title,author,price,in_stock
 978-0-553-41802-6,The Martian,Andy Weir,10.99,yes
 ";
 
-/// The shop's list in the two minutes that contain `now`, in seconds. A shop that keeps its list
-/// in a German spreadsheet: semicolons, its own column names, a decimal comma, ja and nein, and
-/// a column the other shop has not got.
-fn shop_b(now: i64) -> String {
+/// The second shop's books in the two minutes that contain `now`, in seconds: its EAN, the title
+/// as it lists it, its price with a decimal comma, whether it has it, and the publisher.
+fn shop_b_rows(now: i64) -> Vec<(&'static str, &'static str, &'static str, bool, &'static str)> {
     let later = (now / 120) % 2 == 1;
     let mut rows = vec![
-        ("9780451524935", "Nineteen Eighty-Four", "9,99", "ja", "Signet"),
-        ("9780743273565", "The Great Gatsby", "10,99", "ja", "Scribner"),
-        ("9780061120084", "To Kill a Mockingbird", "17,99", "ja", "Harper Perennial"),
-        ("9780141439518", "Pride & Prejudice", "7,99", "ja", "Penguin Classics"),
-        ("9780316769488", "The Catcher in the Rye", "9,49", "ja", "Little, Brown"),
-        ("9780441172719", "Dune", if later { "13,49" } else { "11,99" }, "ja", "Ace"),
-        ("9780062316097", "Sapiens: A Brief History of Humankind", "22,00", "ja", "Harper"),
-        ("9780374533557", "Thinking, Fast and Slow", "14,99", if later { "ja" } else { "nein" }, "Farrar, Straus and Giroux"),
-        ("9780747532699", "Harry Potter and the Philosopher's Stone", "8,99", "ja", "Bloomsbury"),
-        ("9780307474278", "The Da Vinci Code", "9,99", "ja", "Anchor"),
+        ("9780451524935", "Nineteen Eighty-Four", "9,99", true, "Signet"),
+        ("9780743273565", "The Great Gatsby", "10,99", true, "Scribner"),
+        ("9780061120084", "To Kill a Mockingbird", "17,99", true, "Harper Perennial"),
+        ("9780141439518", "Pride & Prejudice", "7,99", true, "Penguin Classics"),
+        ("9780316769488", "The Catcher in the Rye", "9,49", true, "Little, Brown"),
+        ("9780441172719", "Dune", if later { "13,49" } else { "11,99" }, true, "Ace"),
+        ("9780062316097", "Sapiens: A Brief History of Humankind", "22,00", true, "Harper"),
+        ("9780374533557", "Thinking, Fast and Slow", "14,99", later, "Farrar, Straus and Giroux"),
+        ("9780747532699", "Harry Potter and the Philosopher's Stone", "8,99", true, "Bloomsbury"),
+        ("9780307474278", "The Da Vinci Code", "9,99", false, "Anchor"),
     ];
     if later {
-        rows.push(("9780553418026", "The Martian", "12,99", "ja", "Crown"));
+        rows.push(("9780553418026", "The Martian", "12,99", true, "Crown"));
     }
+    rows
+}
+
+/// The second shop as a German spreadsheet, at the address the example had before it had a site.
+fn shop_b(now: i64) -> String {
     let field = |s: &str| if s.contains([';', '"']) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s.to_string() };
     let mut out = String::from("EAN;Titel;Preis (EUR);Lieferbar;Verlag\n");
-    for (ean, title, price, available, publisher) in rows {
-        out.push_str(&format!("{ean};{};{price};{available};{}\n", field(title), field(publisher)));
+    for (ean, title, price, available, publisher) in shop_b_rows(now) {
+        out.push_str(&format!("{ean};{};{price};{};{}\n", field(title), if available { "ja" } else { "nein" }, field(publisher)));
     }
     out
 }
 
-/// `examples/bookshop-a.csv` and `examples/bookshop-b.csv`.
+/// Bücherstube Lindenhof's shop page: no export, only the page its customers see, with a header,
+/// a menu and a footer around the list, the way a shop's site is. Each book's EAN and whether it
+/// is in stock are attributes for the page's own scripts; its price is written as a person reads
+/// it, 13,49 €.
+fn lindenhof(now: i64) -> String {
+    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
+    let mut books = String::new();
+    for (ean, title, price, available, publisher) in shop_b_rows(now) {
+        books.push_str(&format!(
+            "      <article class=\"book\" data-ean=\"{ean}\" data-available=\"{available}\">\n        <h3 class=\"title\">{}</h3>\n        <p class=\"publisher\">{}</p>\n        <span class=\"price\">{price} €</span>\n        <span class=\"stock\">{}</span>\n      </article>\n",
+            esc(title),
+            esc(publisher),
+            if available { "Lieferbar" } else { "Ausverkauft" }
+        ));
+    }
+    format!(
+        "<!doctype html>\n<html lang=\"de\">\n<head><meta charset=\"utf-8\"><title>Bücherstube Lindenhof — Englische Bücher</title></head>\n<body>\n  <header><a class=\"logo\" href=\"/examples/lindenhof/\">Bücherstube Lindenhof</a>\n    <nav><a class=\"nav-link\" href=\"/examples/lindenhof/\">Englische Bücher</a> <a class=\"nav-link\" href=\"/examples/lindenhof/\">Über uns</a> <a class=\"nav-link\" href=\"/examples/lindenhof/\">Kontakt</a></nav>\n  </header>\n  <main>\n    <h1>Englische Bücher</h1>\n    <p class=\"intro\">Alle Preise inkl. MwSt. Bestellungen bis 14 Uhr werden am selben Tag verschickt.</p>\n    <section class=\"books\">\n{books}    </section>\n  </main>\n  <footer><p class=\"small\">Bücherstube Lindenhof · Ein erfundener Laden, das Beispiel von Zetlyn.</p></footer>\n</body>\n</html>\n"
+    )
+}
+
+/// The examples: Leafline Books' CSV, Bücherstube Lindenhof's page, and the two addresses the
+/// example had before, which a workspace made then still reads.
 pub fn file(path: &str) -> Option<String> {
     match path {
-        "examples/bookshop-a.csv" => Some(SHOP_A.to_string()),
+        "examples/leafline-books.csv" | "examples/bookshop-a.csv" => Some(SHOP_A.to_string()),
+        "examples/lindenhof" | "examples/lindenhof/" | "examples/lindenhof/index.html" => Some(lindenhof(crate::now())),
         "examples/bookshop-b.csv" => Some(shop_b(crate::now())),
         _ => None,
     }

@@ -150,6 +150,35 @@ fn named_month(s: &str) -> Option<String> {
     Some(format!("{y:04}-{m:02}-{d:02}"))
 }
 
+/// A number as people write it: `13.49`, `13,49`, `13,49 €`, `€ 13.49`, `$1,299.00`,
+/// `1.299,00 EUR`. A currency sign or code around it is not part of it; where both a point and a
+/// comma are used, the later one is the decimal separator, and one comma alone is one too.
+pub fn as_number(raw: &str) -> Option<f64> {
+    let mut s = raw.trim().replace('\u{a0}', " ");
+    for code in ["EUR", "USD", "GBP", "CHF"] {
+        for (pre, post) in [(format!("{code} "), String::new()), (String::new(), format!(" {code}"))] {
+            if !pre.is_empty() && s.to_ascii_uppercase().starts_with(&pre) {
+                s = s[pre.len()..].to_string();
+            }
+            if !post.is_empty() && s.to_ascii_uppercase().ends_with(&post) {
+                s = s[..s.len() - post.len()].to_string();
+            }
+        }
+    }
+    let s = s.trim().trim_matches(|c: char| "€$£¥".contains(c)).trim();
+    if s.is_empty() || !s.chars().all(|c| c.is_ascii_digit() || ".,-+eE".contains(c)) {
+        return None;
+    }
+    let normal = match (s.rfind('.'), s.rfind(',')) {
+        (Some(d), Some(c)) if c > d => s.replace('.', "").replace(',', "."),
+        (Some(_), Some(_)) => s.replace(',', ""),
+        (None, Some(_)) if s.matches(',').count() == 1 => s.replace(',', "."),
+        (None, Some(_)) => s.replace(',', ""),
+        _ => s.to_string(),
+    };
+    normal.parse::<f64>().ok().filter(|n| n.is_finite())
+}
+
 fn as_bool(raw: &str) -> Option<bool> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "true" | "1" | "yes" | "y" | "ja" | "wahr" => Some(true),
@@ -165,7 +194,7 @@ fn typed(kind: PropertyType, vocabulary: Option<&str>, raw: &str) -> Option<Valu
             code: raw.to_string(),
             vocabulary: vocabulary.map(str::to_string),
         },
-        PropertyType::Number => Value::Number(raw.trim().replace(',', ".").parse::<f64>().ok()?),
+        PropertyType::Number => Value::Number(as_number(raw)?),
         PropertyType::Bool => Value::Bool(as_bool(raw)?),
         PropertyType::Date => Value::Date(as_date(raw)?),
         PropertyType::Interval => {
@@ -469,6 +498,22 @@ mod date_tests {
         }
         for not in ["Coming soon", "Q4 2026", "30 Foo 2026", "Sep 2026"] {
             assert_eq!(super::as_date(not), None, "{not}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod numbers {
+    #[test]
+    fn a_number_is_read_as_it_is_written() {
+        for (raw, want) in [
+            ("13.49", 13.49), ("13,49", 13.49), ("13,49 €", 13.49), ("€ 13.49", 13.49), ("€13.49", 13.49),
+            ("$1,299.00", 1299.0), ("1.299,00 EUR", 1299.0), ("EUR 22,00", 22.0), ("-3", -3.0), ("1,299,000", 1299000.0),
+        ] {
+            assert_eq!(super::as_number(raw), Some(want), "{raw}");
+        }
+        for not in ["", "€", "13 Euro", "abc", "2026-10-01", "9780441172719x"] {
+            assert_eq!(super::as_number(not), None, "{not}");
         }
     }
 }

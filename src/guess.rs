@@ -52,7 +52,7 @@ impl Column {
             return PropertyType::Bool;
         }
         if f.iter()
-            .all(|v| v.trim().replace(',', ".").parse::<f64>().is_ok())
+            .all(|v| crate::build::as_number(v).is_some())
         {
             return PropertyType::Number;
         }
@@ -1009,10 +1009,7 @@ pub fn propose_web(url: &str, body: &str, dir: &Path, name: Option<&str>, pick: 
         fetch["page"] = json!({ "offset": param, "by": "page", "max": rows.len().max(1) });
         fetch["top"] = json!(1000);
     }
-    let name = name.map(str::to_string).unwrap_or_else(|| {
-        let host = url.split('/').nth(2).unwrap_or("site").trim_start_matches("www.");
-        format!("local/{}", slug(host.split('.').rev().nth(1).unwrap_or(host)))
-    });
+    let name = name.map(str::to_string).unwrap_or_else(|| format!("local/{}", page_name(url)));
     // A list with a date and a next page is read back to the start of this year, and after that
     // only what is newer; with no date, the first thousand.
     if let (Some(known), true) = (&sh.known, fetch.get("page").is_some()) {
@@ -1072,5 +1069,38 @@ mod separators {
             assert_eq!(super::sniff_delimiter(&path), want, "{text}");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// A short name for a list on a page: the last part of its path that says something
+/// (`…/examples/lindenhof/` is lindenhof), else the site (`store.steampowered.com/search` is
+/// steampowered), never an address's number.
+pub fn page_name(url: &str) -> String {
+    const SAYS_NOTHING: [&str; 10] = ["search", "index", "list", "lists", "products", "shop", "items", "de", "en", "www"];
+    let rest = url.splitn(4, '/').nth(3).unwrap_or("");
+    let path = rest.split(['?', '#']).next().unwrap_or("");
+    let last = path
+        .split('/')
+        .filter(|p| !p.is_empty())
+        .map(|p| p.split('.').next().unwrap_or(p))
+        .filter(|p| !SAYS_NOTHING.contains(&p.to_ascii_lowercase().as_str()) && !p.chars().all(|c| c.is_ascii_digit()))
+        .last();
+    if let Some(p) = last {
+        return slug(p).replace('_', "-");
+    }
+    let host = url.split('/').nth(2).unwrap_or("site").split(':').next().unwrap_or("site");
+    let labels: Vec<&str> = host.split('.').filter(|l| !l.chars().all(|c| c.is_ascii_digit())).collect();
+    let site = if labels.len() >= 2 { labels[labels.len() - 2] } else { labels.first().copied().unwrap_or("site") };
+    slug(site).replace('_', "-")
+}
+
+#[cfg(test)]
+mod page_names {
+    #[test]
+    fn a_page_is_named_by_what_its_address_says() {
+        assert_eq!(super::page_name("https://hub.zetlyn.com/examples/lindenhof/"), "lindenhof");
+        assert_eq!(super::page_name("https://store.steampowered.com/search/?tags=492"), "steampowered");
+        assert_eq!(super::page_name("http://127.0.0.1:4791/examples/lindenhof/"), "lindenhof");
+        assert_eq!(super::page_name("http://127.0.0.1:4791/"), "site");
     }
 }

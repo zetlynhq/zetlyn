@@ -561,7 +561,7 @@ pub fn serve(dir: &Path, addr: &str, serving: &[String]) -> Result<(), String> {
         };
         // A tag and a payload are the two things a program fetches, and they are the two the
         // layout names. The rest is what a person's browser asked for on the way to reading this.
-        let kind = if path.is_empty() {
+        let kind = if path.is_empty() || path.ends_with(".html") || body.starts_with(b"<!doctype html") {
             "text/html; charset=utf-8"
         } else if path.ends_with(".csv") {
             "text/csv; charset=utf-8"

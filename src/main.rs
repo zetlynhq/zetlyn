@@ -185,11 +185,12 @@ zetlyn
       hub.zetlyn.com; a reference that carries a host means that host. What travels is the
       claims, so a subscriber needs none of the publisher's credentials.
 
-  zetlyn run <workspace>
-  zetlyn watch [list | check [--deliver]] <workspace>
+  zetlyn run [<workspace>]
+  zetlyn watch [list | check [--deliver]] [<workspace>]
       Every source that is due, updated, and every watch replayed. A source without its own
       schedule: every: follows workspace.yaml's update: { every: 1h }, which the app sets under
-      Auto-update; without either, it is updated only when asked.
+      Auto-update; without either, it is updated only when asked. Without a workspace named, the
+      one the current directory is in, else ~/zetlyn: the one `zetlyn` opens.
 
   zetlyn migrate [<workspace>]
       A workspace written before 0.2, in the words and the format of 0.2.
@@ -728,15 +729,30 @@ fn changes(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// The workspace a command is about: the one named, else the one the current directory is in
+/// (itself or a parent of it holding `workspace.yaml` or `sources/`), else `~/zetlyn`, the one
+/// `zetlyn` opens. The same answer the app gives, so `zetlyn run` needs no path where the app
+/// needs none.
 fn deployment(args: &[String], from: usize) -> Result<PathBuf, String> {
-    let root = positional(args, from)
-        .first()
-        .map(|s| PathBuf::from(s.as_str()))
-        .unwrap_or_else(|| PathBuf::from("."));
-    if !root.join("sources").is_dir() {
-        return Err(format!("{}: no sources here", root.display()));
+    if let Some(named) = positional(args, from).first() {
+        let root = PathBuf::from(named.as_str());
+        if !root.join("sources").is_dir() {
+            return Err(format!("{}: no sources here", root.display()));
+        }
+        return Ok(root);
     }
-    Ok(root)
+    let here = std::env::current_dir().map_err(|e| e.to_string())?;
+    if let Some(found) = here.ancestors().find(|p| p.join("workspace.yaml").exists() || p.join("sources").is_dir()) {
+        return Ok(found.to_path_buf());
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from).map(|h| h.join("zetlyn"));
+    match home {
+        Some(h) if h.join("sources").is_dir() || h.join("workspace.yaml").exists() => Ok(h),
+        _ => Err(format!(
+            "{}: not in a workspace, and there is no ~/zetlyn. Run `zetlyn` to make one, or name the workspace",
+            here.display()
+        )),
+    }
 }
 
 /// The scheduler. Runs what is due, then replays every watch.

@@ -196,6 +196,28 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
                 @if !d.promise.excludes.is_empty() { " " strong { "Excludes. " } (d.promise.excludes) } }
         }
 
+        @let compared = compared(scope);
+        @if !compared.is_empty() {
+            details.compared open {
+                summary { "Compared" span.dim { " · what is held against what, and from which column of each source" } }
+                div.scroll {
+                    table.compared-table {
+                        thead { tr { th { "Property" } @for (title, _) in &compared[0].1 { th { (title) } } } }
+                        tbody {
+                            @for (name, per) in &compared {
+                                tr {
+                                    td { strong { (label(name)) } }
+                                    @for (_, column) in per {
+                                        td { @match column { Some(c) => code { (c) }, None => span.dim { "not said" } } }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                p.dim { "Everything else the sources say is shown side by side, and not compared." }
+            }
+        }
         form.bar method="get" action=(at("/")) {
             input type="search" name="q" value=(q) placeholder="Search, or filter with name=value";
             @if !view.is_empty() { input type="hidden" name="view" value=(view); }
@@ -2536,4 +2558,39 @@ fn next_check(scope: &Tracker, every: i64) -> Option<i64> {
             crate::autoupdate::next_at(&ds, Some(every))
         })
         .min()
+}
+
+/// What this tracker compares, and from which column of each source: a property, and for every
+/// source its column as the source writes it, or nothing where the source does not say it.
+fn compared(scope: &Tracker) -> Vec<(String, Vec<(String, Option<String>)>)> {
+    let registry = crate::tracker::registry(&scope.root.join("sources"));
+    let decls: Vec<(String, String, Option<crate::sourcedecl::SourceDecl>)> = scope
+        .decl
+        .members
+        .iter()
+        .map(|m| {
+            let title = title_of(scope, &m.dataset);
+            let decl = registry.get(&m.dataset).and_then(|p| crate::sourcedecl::SourceDecl::load(p).ok());
+            (m.dataset.clone(), title, decl)
+        })
+        .collect();
+    scope
+        .decl
+        .normalise
+        .iter()
+        .map(|(name, align)| {
+            let per = decls
+                .iter()
+                .map(|(member, title, decl)| {
+                    let field = align.field_in(member, name);
+                    let column = decl
+                        .as_ref()
+                        .and_then(|d| d.records.fields.get(&field))
+                        .map(|p| p.from.trim_start_matches("field:").to_string());
+                    (title.clone(), column)
+                })
+                .collect();
+            (name.clone(), per)
+        })
+        .collect()
 }

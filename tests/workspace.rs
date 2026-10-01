@@ -956,3 +956,67 @@ fn a_list_on_a_web_page_is_tried_measured_and_read_back_to_the_first_of_the_year
     }
     assert!(!has("22", "Hotel"), "the first of last year ends the read");
 }
+
+/// Three shops' lists, each in its own words, served here.
+fn three_shops() -> String {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let at = format!("http://{}", server.server_addr().to_ip().unwrap());
+    std::thread::spawn(move || {
+        for request in server.incoming_requests() {
+            let body = match request.url() {
+                "/a.csv" => "isbn,title,price,in_stock\n978-0-451-52493-5,1984,9.99,yes\n978-0-7432-7356-5,Gatsby,10.99,yes\n978-0-06-112008-4,Mockingbird,12.49,yes\n978-0-441-17271-9,Dune,11.99,yes\n",
+                "/b.csv" => "EAN;Titel;Preis (EUR);Lieferbar\n9780451524935;Nineteen Eighty-Four;9,99;ja\n9780743273565;The Great Gatsby;10,99;ja\n9780061120084;To Kill a Mockingbird;17,99;ja\n9780441172719;Dune;11,99;nein\n",
+                "/c.csv" => "isbn13,name,cost,available\n9780451524935,1984,9.99,true\n9780743273565,Gatsby,10.99,true\n9780061120084,Mockingbird,12.49,true\n9780441172719,Dune,13.49,true\n",
+                _ => "",
+            };
+            let _ = request.respond(tiny_http::Response::from_string(body).with_header("Content-Type: text/csv".parse::<tiny_http::Header>().unwrap()));
+        }
+    });
+    at
+}
+
+#[test]
+fn a_third_source_joins_what_two_already_compare_under_its_own_names() {
+    use std::io::BufRead;
+    let root = std::env::temp_dir().join(format!("zetlyn-test-{}-three", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("ws")).unwrap();
+    let shops = three_shops();
+    // Ended however the test ends, so a failure leaves no app running.
+    struct Ends(std::process::Child);
+    impl Drop for Ends {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut app = Ends(Command::new(env!("CARGO_BIN_EXE_zetlyn"))
+        .args(["app", &root.join("ws").display().to_string(), "--port", "4870", "--no-open"])
+        .env("ZETLYN_HOME", root.join("home"))
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap());
+    let mut line = String::new();
+    std::io::BufReader::new(app.0.stdout.take().unwrap()).read_line(&mut line).unwrap();
+    let base = line.split(" on ").nth(1).unwrap().trim().trim_end_matches('/').to_string();
+    let text = |r: Result<ureq::http::Response<ureq::Body>, ureq::Error>| r.unwrap().body_mut().read_to_string().unwrap();
+    text(ureq::post(&format!("{base}/new")).send_form([("title", "Shops")]));
+    for (file, slug) in [("a", "a"), ("b", "b"), ("c", "c")] {
+        let started = text(ureq::post(&format!("{base}/analyse/shops?title=Shops")).send_form([("url", format!("{shops}/{file}.csv").as_str())]));
+        let job: u64 = started.trim_matches(|c: char| !c.is_ascii_digit()).parse().unwrap();
+        for _ in 0..50 {
+            if text(ureq::get(&format!("{base}/job/{job}")).call()).contains("\"done\":true") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        text(ureq::post(&format!("{base}/accept/shops/{slug}?title=Shops")).send_form([("name", slug)]));
+    }
+    let tracker = std::fs::read_to_string(root.join("ws/trackers/shops/tracker.yaml")).unwrap();
+    for (source, field) in [("local/a", "price"), ("local/b", "preis_eur"), ("local/c", "cost")] {
+        assert!(tracker.contains(&format!("{source}: {field}")), "price from {field} at {source}:\n{tracker}");
+    }
+    for (source, field) in [("local/a", "in_stock"), ("local/b", "lieferbar"), ("local/c", "available")] {
+        assert!(tracker.contains(&format!("{source}: {field}")), "in_stock from {field} at {source}:\n{tracker}");
+    }
+}

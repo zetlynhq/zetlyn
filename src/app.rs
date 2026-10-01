@@ -130,6 +130,156 @@ fn background(root: &Path, jobs: &Arc<Mutex<Jobs>>) {
 }
 
 
+
+/// What a tracker compares, once a source joins it. A number, a yes or no, or a date is compared
+/// where the sources say the same thing, and every source's field for it is written out under
+/// `from:`, so tracker.yaml says which column of each source a property is read from. Words are
+/// left to a person, who knows which mean one thing (the assist can propose them).
+///
+/// Three steps. Every comparison already there is made explicit for every source that has the
+/// field under that name. Then each field of the joining source is held against what the tracker
+/// already compares: a number or a date that agrees with the other sources' values for at least
+/// half the things they share (and at least three) joins that property. What is left is paired
+/// with the other sources' fields nothing compares yet, by name or by the same agreement. A yes
+/// or no says too little to tell two fields apart by its values, so it is paired by value only
+/// where each side has exactly one left.
+fn connect_properties(decl: &mut J, ds: &Source, registry: &BTreeMap<String, PathBuf>) {
+    let scheme = decl["identified_by"][0].as_str().unwrap_or("").to_string();
+    let me = ds.decl.name.clone();
+    let comparable = |kind: &str| matches!(kind, "number" | "bool" | "date");
+    let members: Vec<String> = decl["sources"].as_array().map(|l| l.iter().filter_map(|m| m["source"].as_str().map(str::to_string)).collect()).unwrap_or_default();
+    let mut sources: BTreeMap<String, Source> = BTreeMap::new();
+    for m in &members {
+        if *m == me {
+            continue;
+        }
+        if let Some(s) = registry.get(m).and_then(|p| Source::open(p).ok()) {
+            sources.insert(m.clone(), s);
+        }
+    }
+    let source_of = |m: &str| -> Option<&Source> { if m == me { Some(ds) } else { sources.get(m) } };
+    let kind_of = |m: &str, field: &str| -> Option<String> {
+        source_of(m)?.decl.records.fields.get(field).map(|p| p.kind.name().to_string())
+    };
+    if !decl["align"].is_object() {
+        decl["align"] = json!({});
+    }
+
+    // 1. Explicit: the field each source gives a compared property, written out.
+    let keys: Vec<String> = decl["align"].as_object().map(|a| a.keys().cloned().collect()).unwrap_or_default();
+    for key in &keys {
+        for m in &members {
+            let mapped = decl["align"][key]["from"].get(m).and_then(J::as_str).is_some();
+            if !mapped && kind_of(m, key).is_some_and(|k| comparable(&k)) {
+                if !decl["align"][key]["from"].is_object() {
+                    decl["align"][key]["from"] = json!({});
+                }
+                decl["align"][key]["from"][m] = json!(key);
+            }
+        }
+    }
+
+    if scheme.is_empty() {
+        return;
+    }
+    let same = |x: &str, y: &str| match (x.parse::<f64>(), y.parse::<f64>()) {
+        (Ok(p), Ok(q)) => (p - q).abs() < 1e-9,
+        _ => x == y,
+    };
+    // How far one field of mine agrees with a set of (source, field): agreeing, and both known.
+    let agreement = |mine: &BTreeMap<String, String>, theirs: &[(String, String)]| -> (usize, usize) {
+        let (mut agree, mut both) = (0, 0);
+        for (m, f) in theirs {
+            let Some(src) = source_of(m) else { continue };
+            let values = src.store.values_by_identifier(&scheme, f);
+            for (k, v) in mine {
+                if let Some(w) = values.get(k) {
+                    both += 1;
+                    if same(v, w) {
+                        agree += 1;
+                    }
+                }
+            }
+        }
+        (agree, both)
+    };
+    let used_by_me = |decl: &J, field: &str| -> bool {
+        decl["align"].as_object().is_some_and(|a| a.values().any(|v| v["from"].get(&me).and_then(J::as_str) == Some(field)))
+    };
+    let mine_left = |decl: &J, kind: &str| -> Vec<String> {
+        ds.decl.records.fields.iter()
+            .filter(|(n, p)| p.kind.name() == kind && !used_by_me(decl, n))
+            .map(|(n, _)| n.clone())
+            .collect()
+    };
+
+    for kind in ["number", "date", "bool"] {
+        // 2. Against what the tracker compares already.
+        let props: Vec<(String, Vec<(String, String)>)> = decl["align"].as_object().map(|a| a.iter().filter_map(|(k, v)| {
+            if v["from"].get(&me).is_some() {
+                return None;
+            }
+            let theirs: Vec<(String, String)> = v["from"].as_object()?.iter()
+                .filter(|(m, f)| **m != me && f.as_str().is_some_and(|f| kind_of(m, f).as_deref() == Some(kind)))
+                .map(|(m, f)| (m.clone(), f.as_str().unwrap_or("").to_string()))
+                .collect();
+            (!theirs.is_empty()).then(|| (k.clone(), theirs))
+        }).collect()).unwrap_or_default();
+        let left = mine_left(decl, kind);
+        if kind != "bool" || (left.len() == 1 && props.len() == 1) {
+            for field in &left {
+                let mine = ds.store.values_by_identifier(&scheme, field);
+                let best = props.iter().filter(|(k, _)| decl["align"][k]["from"].get(&me).is_none()).filter_map(|(k, theirs)| {
+                    let (agree, both) = agreement(&mine, theirs);
+                    (both >= 3 && agree * 2 >= both).then(|| (agree * 1000 / both, k.clone()))
+                }).max();
+                if let Some((_, key)) = best {
+                    decl["align"][&key]["from"][&me] = json!(field);
+                }
+            }
+        }
+
+        // 3. With what nothing compares yet: by name first, then by the values.
+        for (m, src) in &sources {
+            let taken = |decl: &J, f: &str| decl["align"].as_object().is_some_and(|a| a.iter().any(|(k, v)| {
+                v["from"].get(m).and_then(J::as_str).map_or(k == f, |g| g == f)
+            }));
+            let theirs_left: Vec<String> = src.decl.records.fields.iter()
+                .filter(|(n, p)| p.kind.name() == kind && !taken(decl, n))
+                .map(|(n, _)| n.clone())
+                .collect();
+            for field in mine_left(decl, kind) {
+                let by_name = theirs_left.iter().find(|t| **t == field).cloned();
+                let by_value = || -> Option<String> {
+                    if kind == "bool" && (mine_left(decl, kind).len() != 1 || theirs_left.len() != 1) {
+                        return None;
+                    }
+                    let mine = ds.store.values_by_identifier(&scheme, &field);
+                    theirs_left.iter().filter_map(|t| {
+                        let (agree, both) = agreement(&mine, &[(m.clone(), t.clone())]);
+                        (both >= 3 && agree * 2 >= both).then(|| (agree * 1000 / both, t.clone()))
+                    }).max().map(|(_, t)| t)
+                };
+                let Some(theirs) = by_name.or_else(by_value) else { continue };
+                if decl["align"][&theirs].is_object() && decl["align"][&theirs]["from"].get(m).is_some() {
+                    continue;
+                }
+                // Added to what is there under that name (a scale, a tolerance), never in place of it.
+                if !decl["align"][&theirs].is_object() {
+                    decl["align"][&theirs] = json!({});
+                }
+                if !decl["align"][&theirs]["from"].is_object() {
+                    decl["align"][&theirs]["from"] = json!({});
+                }
+                decl["align"][&theirs]["from"][m] = json!(theirs.clone());
+                decl["align"][&theirs]["from"][&me] = json!(field);
+            }
+        }
+    }
+    if decl["align"].as_object().is_some_and(|a| a.is_empty()) {
+        decl.as_object_mut().map(|o| o.remove("align"));
+    }
+}
 /// What every watch has to tell, delivered. A delivery that fails moves nothing, and the next
 /// pass says it again.
 fn deliver_watches(root: &Path) {
@@ -848,80 +998,7 @@ impl App {
                 list.push(member);
             }
         }
-        // What both sources carry under one name, as a number, a yes or no, or a date, is
-        // compared from the start: two shops' `price` is the same question, and a different
-        // answer is what a tracker is for. Words are left to a person, who knows which mean one
-        // thing (the assist can propose them).
-        let registry = crate::tracker::registry(&self.sources());
-        let comparable = |kind: &str| matches!(kind, "number" | "bool" | "date");
-        let mine: BTreeMap<String, String> = ds.decl.records.fields.iter().map(|(n, p)| (n.clone(), p.kind.name().to_string())).collect();
-        let others: Vec<String> = decl["sources"].as_array().map(|l| l.iter().filter_map(|m| m["source"].as_str().map(str::to_string)).collect()).unwrap_or_default();
-        for other in others.iter().filter(|o| **o != ds.decl.name) {
-            let Some(theirs) = registry.get(other).and_then(|p| Source::open(p).ok()) else { continue };
-            for (name, p) in &theirs.decl.records.fields {
-                if mine.get(name).is_some_and(|k| k == p.kind.name() && comparable(k)) && decl["align"].get(name).is_none() {
-                    if !decl["align"].is_object() {
-                        decl["align"] = json!({});
-                    }
-                    decl["align"][name] = json!({});
-                }
-            }
-        }
-        // And what they carry under different names, where the values say it is the same
-        // question: a number or a date that agrees on at least half the things both sources
-        // know (at least three), compared under the name the tracker already has. A yes or no
-        // says too little to tell two fields apart, so it is paired only where each side has
-        // exactly one left. The pairing is in tracker.yaml as `from:`, for a person to undo.
-        let scheme = decl["identified_by"][0].as_str().unwrap_or("").to_string();
-        if !scheme.is_empty() {
-            let aligned_for = |decl: &J, member: &str, field: &str| -> bool {
-                decl["align"].as_object().is_some_and(|a| a.iter().any(|(k, v)| {
-                    v["from"].get(member).and_then(J::as_str).map_or(k == field, |f| f == field)
-                }))
-            };
-            for other in others.iter().filter(|o| **o != ds.decl.name) {
-                let Some(theirs) = registry.get(other).and_then(|p| Source::open(p).ok()) else { continue };
-                let left = |src: &Source, member: &str, kind: &str, d: &J| -> Vec<String> {
-                    src.decl.records.fields.iter()
-                        .filter(|(n, p)| p.kind.name() == kind && !aligned_for(d, member, n))
-                        .map(|(n, _)| n.clone())
-                        .collect()
-                };
-                for kind in ["number", "date", "bool"] {
-                    let mine_left = left(&ds, &ds.decl.name, kind, &decl);
-                    let theirs_left = left(&theirs, other, kind, &decl);
-                    if kind == "bool" && (mine_left.len() != 1 || theirs_left.len() != 1) {
-                        continue;
-                    }
-                    for name in &mine_left {
-                        let a = ds.store.values_by_identifier(&scheme, name);
-                        let same = |x: &str, y: &str| match (x.parse::<f64>(), y.parse::<f64>()) {
-                            (Ok(p), Ok(q)) => (p - q).abs() < 1e-9,
-                            _ => x == y,
-                        };
-                        let best = theirs_left.iter().filter_map(|theirs_name| {
-                            let b = theirs.store.values_by_identifier(&scheme, theirs_name);
-                            let both: Vec<(&String, &String)> = a.iter().filter_map(|(k, v)| b.get(k).map(|w| (v, w))).collect();
-                            let agree = both.iter().filter(|(v, w)| same(v, w)).count();
-                            (both.len() >= 3 && agree * 2 >= both.len()).then(|| (agree * 1000 / both.len(), theirs_name.clone()))
-                        }).max();
-                        if let Some((_, theirs_name)) = best {
-                            if !decl["align"].is_object() {
-                                decl["align"] = json!({});
-                            }
-                            if !decl["align"][&theirs_name].is_object() {
-                                decl["align"][&theirs_name] = json!({});
-                            }
-                            // Their field keeps its name for them; mine is said to be the same.
-                            if !decl["align"][&theirs_name]["from"].is_object() {
-                                decl["align"][&theirs_name]["from"] = json!({});
-                            }
-                            decl["align"][&theirs_name]["from"][&ds.decl.name] = json!(name);
-                        }
-                    }
-                }
-            }
-        }
+        connect_properties(&mut decl, &ds, &crate::tracker::registry(&self.sources()));
         write_tracker(&dir, decl)?;
         Ok(serve::at(&format!("/review/{tracker}/{source}?added=1")))
     }

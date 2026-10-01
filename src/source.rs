@@ -88,6 +88,9 @@ impl Source {
         let mut seen_fields: std::collections::BTreeSet<String> = Default::default();
         let mut written: std::collections::BTreeSet<String> = Default::default();
         let (mut added, mut changed, mut unchanged) = (0u64, 0u64, 0u64);
+        // The identifier that names a claim, where the declaration has one that does.
+        let naming: Option<String> = self.decl.ids().filter(|i| i.names_record()).and_then(|i| i.each().first().and_then(|s| s.scheme.clone()));
+        let mut named = 0u64;
         let mut failure: Option<String> = None;
 
         self.store
@@ -114,6 +117,10 @@ impl Source {
                         continue;
                     }
                     seen_fields.extend(rec.fields.keys().cloned());
+                    // How many claims the identifier that names them actually named.
+                    if naming.as_deref().is_some_and(|s| rec.ids.iter().any(|i| i.scheme == s)) {
+                        named += 1;
+                    }
                     match self.store.put(&rec, run, &at, history)? {
                         "added" => added += 1,
                         "changed" => changed += 1,
@@ -147,7 +154,9 @@ impl Source {
         let read = added + changed + unchanged;
         let after = if whole { read } else { self.store.count() };
         let refusal = if complete {
-            self.store.shape_refusal(run, after, read, &seen_fields, whole)
+            self.store
+                .shape_refusal(run, after, read, &seen_fields, whole)
+                .or_else(|| self.naming_refusal(naming.as_deref(), named, read))
         } else {
             None
         };
@@ -178,6 +187,10 @@ impl Source {
             if let Some(v) = &fresh {
                 self.store.set_meta("validators", v)?;
             }
+            // What share the identifier named, for the next update to be held to.
+            if let (Some(scheme), true) = (&naming, read > 0) {
+                self.store.set_meta("named", &format!("{scheme} {}", named as f64 / read as f64))?;
+            }
             if let Some(h) = &high {
                 self.store.set_meta("mark", h)?;
             }
@@ -201,6 +214,29 @@ impl Source {
         self.store
             .run_report(run)
             .ok_or_else(|| "the update left no report".to_string())
+    }
+
+    /// An update that names far fewer of its claims by the identifier than the last complete one
+    /// did is refused, as one with far fewer claims is: a column renamed under the identifier
+    /// leaves every row named by its place in the file, and the update would otherwise replace
+    /// every claim with one no other source can meet.
+    fn naming_refusal(&self, naming: Option<&str>, named: u64, read: u64) -> Option<String> {
+        let scheme = naming?;
+        if read < 3 {
+            return None;
+        }
+        let kept = self.store.meta("named")?;
+        let (was_scheme, share) = kept.rsplit_once(' ')?;
+        let before: f64 = share.parse().ok()?;
+        let now = named as f64 / read as f64;
+        if was_scheme != scheme || before == 0.0 || now >= before * 0.6 {
+            return None;
+        }
+        Some(format!(
+            "the last complete update named {:.0}% of its claims by {scheme}, this one names {:.0}% ({named} of {read}): is the column that held them still where the declaration says?",
+            before * 100.0,
+            now * 100.0
+        ))
     }
 
     // -- describe -----------------------------------------------------------------------------

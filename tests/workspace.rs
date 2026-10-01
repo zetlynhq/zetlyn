@@ -1020,3 +1020,32 @@ fn a_third_source_joins_what_two_already_compare_under_its_own_names() {
         assert!(tracker.contains(&format!("{source}: {field}")), "in_stock from {field} at {source}:\n{tracker}");
     }
 }
+
+#[test]
+fn an_update_that_loses_the_column_naming_its_claims_is_refused() {
+    let root = std::env::temp_dir().join(format!("zetlyn-test-{}-naming", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("home")).unwrap();
+    let list = root.join("list.csv");
+    let books = "978-0-451-52493-5,1984,9.99\n978-0-7432-7356-5,Gatsby,10.99\n978-0-441-17271-9,Dune,11.99\n978-0-06-112008-4,Mockingbird,12.49\n";
+    std::fs::write(&list, format!("isbn,title,price\n{books}")).unwrap();
+    let at = root.join("src").display().to_string();
+    let (ok, said) = run(&root, &["source", "new", "--from", &list.display().to_string(), "--at", &at, "--name", "test/books"]);
+    assert!(ok, "{said}");
+    let (ok, said) = run(&root, &["source", "update", &at]);
+    assert!(ok && said.contains("complete"), "{said}");
+
+    // The same books, the identifier's column called something else: every row would be named
+    // by its place in the file, and the tracker would lose every one of them.
+    std::fs::write(&list, format!("code,title,price\n{books}")).unwrap();
+    let (_, said) = run(&root, &["source", "update", &at]);
+    assert!(said.contains("not replaced") && said.contains("by isbn"), "{said}");
+    let (_, claim) = run(&root, &["claim", &at, "978-0-441-17271-9"]);
+    assert!(claim.contains("Dune"), "the book is still there under its ISBN: {claim}");
+
+    // Put back, an ordinary update goes through.
+    std::fs::write(&list, format!("isbn,title,price\n{}", books.replace("11.99", "12.99"))).unwrap();
+    let (ok, said) = run(&root, &["source", "update", &at]);
+    assert!(ok && said.contains("complete") && said.contains("~1"), "{said}");
+    let _ = std::fs::remove_dir_all(&root);
+}

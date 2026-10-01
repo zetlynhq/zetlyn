@@ -1442,7 +1442,9 @@ impl Tracker {
             }
         }
 
-        if self.decl.promise.covers.trim().is_empty() {
+        // No promise claims nothing. One that says how fresh it is has to say of what.
+        let promised = self.decl.promise.fresh_within.is_some() || !self.decl.promise.excludes.trim().is_empty();
+        if promised && self.decl.promise.covers.trim().is_empty() {
             wrong.push("the promise says nothing about what is covered".into());
         }
         let (holds, late) = self.promise();

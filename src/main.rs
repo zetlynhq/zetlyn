@@ -210,12 +210,18 @@ fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
         .map(String::as_str)
 }
 
+/// The options that stand alone: every other `--option` takes the argument after it as its value.
+const SWITCHES: &[&str] = &[
+    "--apply", "--deliver", "--from-start", "--go-on", "--help", "--no-deliver", "--no-open", "--once",
+    "--rebuild", "--reread", "--revoke", "--send", "--withdraw",
+];
+
 fn positional(args: &[String], from: usize) -> Vec<&String> {
     let mut out = Vec::new();
     let mut i = from;
     while i < args.len() {
         if args[i].starts_with("--") {
-            i += 2;
+            i += if SWITCHES.contains(&args[i].as_str()) { 1 } else { 2 };
             continue;
         }
         out.push(&args[i]);
@@ -519,7 +525,8 @@ fn run(args: &[String]) -> Result<(), String> {
         // Nothing asked for: the workspace, in a browser.
         None | Some("app") => app::run(args),
         // `zetlyn ~/zetlyn`: a directory on its own is a workspace to open.
-        Some(p) if !p.starts_with('-') && std::path::Path::new(p).is_dir() => {
+        // `zetlyn --no-open`, `zetlyn --port 4800`: the app's own options, with nothing before them.
+        Some(p) if (!p.starts_with('-') && std::path::Path::new(p).is_dir()) || p == "--no-open" || p == "--port" => {
             let with: Vec<String> = std::iter::once("app".to_string()).chain(args.iter().cloned()).collect();
             app::run(&with)
         }
@@ -948,7 +955,10 @@ fn watch_cmd(args: &[String]) -> Result<(), String> {
                 // Delivered, or at least remembered: a look that told nothing still moves the mark
                 // and keeps what a view held.
                 if deliver {
-                    println!("  → {}", w.deliver(&report, &mark)?.join(", "));
+                    let to = w.deliver(&report, &mark)?;
+                    if !to.is_empty() {
+                        println!("  → {}", to.join(", "));
+                    }
                 } else if n > 0 {
                     println!(
                         "{}",
@@ -1939,4 +1949,19 @@ fn consent_needed(d: &assist::Disclosure, dir: &Path) -> String {
 
 fn last_finished(ds: &Source) -> Option<i64> {
     ds.store.run_report(ds.store.last_run()).and_then(|r| r.finished).map(|f| fetch::seconds_of(&f))
+}
+
+#[cfg(test)]
+mod tests {
+    fn words(s: &str) -> Vec<String> {
+        s.split(' ').map(String::from).collect()
+    }
+
+    #[test]
+    fn an_option_that_stands_alone_does_not_take_the_next_word_with_it() {
+        let a = words("app --no-open bookshops --port 4800");
+        assert_eq!(super::positional(&a, 1), vec!["bookshops"]);
+        let a = words("watch check --deliver bookshops");
+        assert_eq!(super::positional(&a, 2), vec!["bookshops"]);
+    }
 }

@@ -41,7 +41,7 @@ const DRAFT: &str = "draft.yaml";
 
 pub fn run(args: &[String]) -> Result<(), String> {
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("zetlyn app [WORKSPACE] [--port N] [--no-open]\n\nThe app in the browser, on 127.0.0.1:4747 or the next free port.\nWORKSPACE is the folder it keeps everything in: the current one if it is a workspace, else ~/zetlyn.");
+        println!("zetlyn app [WORKSPACE] [--port N] [--no-open]\n\nThe app in the browser, on 127.0.0.1:4747 or the next free port.\nWORKSPACE is the folder it keeps everything in, made a workspace if it is not one yet (`zetlyn .`). Without it: the workspace you are in, else ~/zetlyn.");
         return Ok(());
     }
     let root = workspace(args)?;
@@ -302,15 +302,20 @@ fn unseen(root: &Path) -> BTreeMap<String, i64> {
         .collect()
 }
 fn workspace(args: &[String]) -> Result<PathBuf, String> {
+    // A folder named is made a workspace, if it is not one yet: `zetlyn .` in an empty folder.
     if let Some(named) = crate::positional(args, 1).first() {
-        return Ok(PathBuf::from(named.as_str()));
+        return made(PathBuf::from(named.as_str()));
     }
     let here = std::env::current_dir().map_err(|e| e.to_string())?;
-    if here.join("workspace.yaml").exists() || here.join("trackers").is_dir() {
-        return Ok(here);
+    let is_one = |p: &Path| p.join("workspace.yaml").exists() || p.join("sources").is_dir() || p.join("trackers").is_dir();
+    if let Some(found) = here.ancestors().find(|p| is_one(p)) {
+        return Ok(found.to_path_buf());
     }
     let home = std::env::var_os("HOME").map(PathBuf::from).ok_or("no HOME to put ~/zetlyn in")?;
-    let root = home.join("zetlyn");
+    made(home.join("zetlyn"))
+}
+
+fn made(root: PathBuf) -> Result<PathBuf, String> {
     for d in ["sources", "trackers"] {
         std::fs::create_dir_all(root.join(d)).map_err(|e| format!("{}: {e}", root.display()))?;
     }
@@ -318,7 +323,7 @@ fn workspace(args: &[String]) -> Result<PathBuf, String> {
     if !file.exists() {
         std::fs::write(&file, "title: Zetlyn\n").map_err(|e| format!("{}: {e}", file.display()))?;
     }
-    Ok(root)
+    Ok(root.canonicalize().unwrap_or(root))
 }
 
 fn open_browser(url: &str) {

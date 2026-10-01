@@ -12,6 +12,8 @@ pub struct SourceDecl {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub title: String,
     /// The kind of claim this source makes: an advisory, an exploit, an article.
+    /// Left out, every claim is an `item`.
+    #[serde(default = "an_item")]
     pub kind: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub about: String,
@@ -849,4 +851,8 @@ impl SourceDecl {
         self.refers_to = to;
         self.records.id_before = None;
     }
+}
+
+fn an_item() -> String {
+    "item".into()
 }

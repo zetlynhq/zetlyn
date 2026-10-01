@@ -324,7 +324,7 @@ fn migrate_keeps_what_a_workspace_answers() {
 
     // Once is enough, and a second time says so rather than doing something.
     let (ok, said) = run(&root, &["migrate", &ws.display().to_string()]);
-    assert!(!ok && said.contains("nothing here is from before 0.2"), "{said}");
+    assert!(!ok && said.contains("nothing here to rewrite"), "{said}");
     let _ = std::fs::remove_dir_all(&root);
 }
 

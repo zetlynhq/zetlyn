@@ -309,7 +309,7 @@ impl Source {
             can.push("property");
             can.push("facet");
         }
-        if self.decl.records.id.is_some() {
+        if self.decl.ids().is_some() {
             can.push("ids");
         }
         if self.decl.retention.history {

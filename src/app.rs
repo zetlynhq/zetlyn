@@ -737,7 +737,10 @@ impl App {
                     let decl = crate::sourcedecl::SourceDecl::load(&dir)?;
                     let mut j = serde_json::to_value(&decl).map_err(|e| e.to_string())?;
                     let from = j["claims"]["properties"][&field]["from"].as_str().ok_or_else(|| format!("{field}: no such property"))?.to_string();
-                    j["claims"]["id"] = json!({ "scheme": scheme, "from": from });
+                    j["identified_by"] = json!({ scheme.clone(): from });
+                    if let Some(c) = j["claims"].as_object_mut() {
+                        c.remove("id");
+                    }
                     let decl: crate::sourcedecl::SourceDecl = serde_json::from_value(j).map_err(|e| e.to_string())?;
                     std::fs::write(dir.join(crate::sourcedecl::FILE), crate::yaml::to_string(&decl)?).map_err(|e| e.to_string())?;
                     Source::open(&dir)?.run_with(true, true).map(|_| ())
@@ -1927,9 +1930,7 @@ fn primary_scheme(ds: &Source) -> Option<String> {
 fn describe_ids(ds: &Source, p: &Progress) {
     let ids: Vec<(String, String)> = ds
         .decl
-        .records
-        .id
-        .as_ref()
+        .ids()
         .map(|i| i.each().iter().map(|s| (s.scheme.clone().unwrap_or_default(), s.from.clone())).collect())
         .unwrap_or_default();
     if ids.is_empty() {

@@ -404,8 +404,9 @@ fn examples(cols: &[Column], sh: &Shape) -> Vec<String> {
 /// What a proposal becomes: read back as a declaration before it is written, so a proposal is a
 /// file this program opens, and written by the same code as every other declaration.
 fn finish(built: J, dir: &Path) -> Result<String, String> {
-    let decl: crate::sourcedecl::SourceDecl = serde_json::from_value(built)
+    let mut decl: crate::sourcedecl::SourceDecl = serde_json::from_value(built)
         .map_err(|e| format!("the proposal does not make a declaration: {e}"))?;
+    decl.settle_ids();
     let text = crate::yaml::to_string(&decl)?;
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let path = dir.join(crate::sourcedecl::FILE);

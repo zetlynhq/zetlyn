@@ -45,6 +45,16 @@ pub fn workspace(root: &Path) -> Result<Done, String> {
             done.push(watch(&path)?);
         }
     }
+    // Sources of 0.2 that name their identifier under `claims: id:`, in the form that says it on
+    // its own line: `identified_by:` and `refers_to:`. The record ids do not move, because the
+    // identifiers are the same ones.
+    if root.join("sources").is_dir() {
+        for dir in children(&root.join("sources"))? {
+            if let Some(line) = identified_by(&dir)? {
+                done.push(line);
+            }
+        }
+    }
     for (old, new) in [("zetlyn.toml", "workspace.yaml"), ("owners.toml", "owners.yaml")] {
         let path = root.join(old);
         if path.exists() {
@@ -71,7 +81,7 @@ pub fn workspace(root: &Path) -> Result<Done, String> {
         ));
     }
     if done.is_empty() {
-        return Err(format!("{}: nothing here is from before 0.2", root.display()));
+        return Err(format!("{}: nothing here to rewrite: it is from 0.2, with identified_by", root.display()));
     }
     Ok(Done(done))
 }
@@ -272,4 +282,29 @@ fn files(dir: &Path, ext: &str) -> Result<Vec<PathBuf>, String> {
         .collect();
     out.sort();
     Ok(out)
+}
+
+/// One source's `claims: id:` written as `identified_by:` and `refers_to:`, where it fits; read
+/// back as a declaration before it is written, and nothing written where it does not.
+fn identified_by(dir: &Path) -> Result<Option<String>, String> {
+    let path = dir.join(crate::sourcedecl::FILE);
+    let Ok(text) = std::fs::read_to_string(&path) else { return Ok(None) };
+    let raw: J = crate::yaml::parse(&text)?;
+    if raw["claims"].get("id").is_none() || raw.get("identified_by").is_some() {
+        return Ok(None);
+    }
+    let decl = crate::sourcedecl::SourceDecl::load(dir)?;
+    if decl.identified_by.is_empty() {
+        return Ok(Some(format!("{}: its identifiers do not fit identified_by, and stay as they were", path.display())));
+    }
+    let new = crate::yaml::to_string(&decl)?;
+    let _: crate::sourcedecl::SourceDecl = crate::yaml::parse(&new)?;
+    std::fs::write(&path, &new).map_err(|e| format!("{}: {e}", path.display()))?;
+    let comments = text.lines().filter(|l| l.trim_start().starts_with('#')).count();
+    Ok(Some(format!(
+        "{}: identified_by {}{}",
+        path.display(),
+        decl.identified_by.keys().cloned().collect::<Vec<_>>().join(", "),
+        if comments > 0 { format!(", {comments} comments not carried across") } else { String::new() }
+    )))
 }

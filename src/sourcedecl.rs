@@ -20,6 +20,13 @@ pub struct SourceDecl {
     pub source: Fetch,
     #[serde(default, skip_serializing_if = "Schedule::is_empty")]
     pub schedule: Schedule,
+    /// What names each record, and the column it is in: `isbn: field:EAN`. The same word a
+    /// tracker uses for what its sources meet on, so the two files say it the same way.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub identified_by: BTreeMap<String, IdWhere>,
+    /// What else each record is about, several each: an exploit names the CVEs it is for.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub refers_to: BTreeMap<String, IdWhere>,
     #[serde(rename = "claims")]
     pub records: ClaimsDecl,
     /// Each publisher's own words, defined in each publisher's own sentence.
@@ -390,8 +397,8 @@ pub struct ClaimsDecl {
     pub filter: Option<String>,
     /// One, or several. A GitHub advisory issues a GHSA and names the CVE it is about,
     /// and that cross-reference is what lets two sources meet.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub id: Option<Ids>,
+    #[serde(rename = "id", skip_serializing_if = "Option::is_none")]
+    pub id_before: Option<Ids>,
     pub title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
@@ -418,7 +425,7 @@ pub struct Spec {
     pub default: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct IdSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -581,6 +588,7 @@ impl SourceDecl {
     pub fn load(dir: &Path) -> Result<SourceDecl, String> {
         let path = dir.join(FILE);
         let mut d: SourceDecl = crate::yaml::read(&path)?;
+        d.settle_ids();
         if d.title.is_empty() {
             d.title = d.name.clone();
         }
@@ -597,7 +605,7 @@ impl SourceDecl {
                     missing.push(name.clone());
                 }
             }
-            if let Some(ids) = &d.records.id {
+            if let Some(ids) = &d.ids() {
                 for (i, one) in ids.each().iter().enumerate() {
                     if one.from.trim().is_empty() {
                         missing.push(format!("id[{i}]"));
@@ -665,8 +673,9 @@ fn hundred() -> usize {
     100
 }
 
-/// A declaration writes one table or a list of them, and both mean the same thing.
-#[derive(Debug, Deserialize, Serialize)]
+/// A declaration writes one table or a list of them, and both mean the same thing. The form
+/// before `identified_by`: read still, and written as `identified_by` and `refers_to`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum Ids {
     One(IdSpec),
@@ -767,5 +776,77 @@ pub struct Licence {
 impl Licence {
     pub fn is_empty(&self) -> bool {
         self.republish.is_empty() && self.terms.is_empty() && self.note.is_empty()
+    }
+}
+
+/// Where an identifier is written: a column alone (`field:EAN`), or with how to find it in there.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum IdWhere {
+    At(String),
+    Found {
+        from: String,
+        #[serde(rename = "match", default, skip_serializing_if = "Option::is_none")]
+        matches: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        separator: Option<String>,
+    },
+}
+
+impl IdWhere {
+    fn spec(&self, scheme: &str, all: bool) -> IdSpec {
+        let (from, matches, separator) = match self {
+            IdWhere::At(from) => (from.clone(), None, None),
+            IdWhere::Found { from, matches, separator } => (from.clone(), matches.clone(), separator.clone()),
+        };
+        IdSpec { scheme: Some(scheme.to_string()), from, matches, separator, all }
+    }
+    fn of(spec: &IdSpec) -> IdWhere {
+        if spec.matches.is_none() && spec.separator.is_none() {
+            IdWhere::At(spec.from.clone())
+        } else {
+            IdWhere::Found { from: spec.from.clone(), matches: spec.matches.clone(), separator: spec.separator.clone() }
+        }
+    }
+}
+
+impl SourceDecl {
+    /// The identifiers, however the file wrote them: what names the record first, then what it
+    /// refers to.
+    pub fn ids(&self) -> Option<Ids> {
+        if self.identified_by.is_empty() && self.refers_to.is_empty() {
+            return self.records.id_before.clone();
+        }
+        let mut all: Vec<IdSpec> = self.identified_by.iter().map(|(s, w)| w.spec(s, false)).collect();
+        all.extend(self.refers_to.iter().map(|(s, w)| w.spec(s, true)));
+        Some(if all.len() == 1 { Ids::One(all.remove(0)) } else { Ids::Many(all) })
+    }
+
+    /// The form before `identified_by`, written in the new one where it says the same: the first
+    /// identifier names the record, and every one after it is several each. One that does not fit
+    /// (no scheme, or a second that names the record) stays as it was written.
+    pub fn settle_ids(&mut self) {
+        let Some(ids) = &self.records.id_before else { return };
+        if !self.identified_by.is_empty() || !self.refers_to.is_empty() {
+            return;
+        }
+        let each = ids.each();
+        let fits = each.iter().all(|s| s.scheme.is_some())
+            && each.iter().enumerate().all(|(i, s)| (i == 0) || s.all);
+        if !fits {
+            return;
+        }
+        let (mut by, mut to) = (BTreeMap::new(), BTreeMap::new());
+        for (i, s) in each.iter().enumerate() {
+            let scheme = s.scheme.clone().unwrap_or_default();
+            if i == 0 && !s.all {
+                by.insert(scheme, IdWhere::of(s));
+            } else {
+                to.insert(scheme, IdWhere::of(s));
+            }
+        }
+        self.identified_by = by;
+        self.refers_to = to;
+        self.records.id_before = None;
     }
 }

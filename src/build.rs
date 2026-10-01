@@ -332,7 +332,7 @@ pub fn build(
     };
     row.text = text;
 
-    let ids: Vec<Id> = match &decl.records.id {
+    let ids: Vec<Id> = match &decl.ids() {
         Some(ids) => {
             let mut seen: Vec<Id> = Vec::new();
             for spec in ids.each() {
@@ -408,9 +408,7 @@ pub fn build(
 
     // An identifier names the claim only where the declaration says there is one of them.
     let one_identifier = decl
-        .records
-        .id
-        .as_ref()
+        .ids()
         .map(|s| s.names_record())
         .unwrap_or(false);
     let names_it = match ids.first() {

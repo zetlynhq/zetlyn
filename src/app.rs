@@ -83,6 +83,9 @@ fn background(root: &Path, jobs: &Arc<Mutex<Jobs>>) {
         if busy {
             continue;
         }
+        // Every watch says what is new since it last spoke: to its feed, by mail, to a webhook.
+        // Each pass, not only after an update here, so an Update now is told about too.
+        deliver_watches(root);
         let due = crate::autoupdate::due(root, crate::now());
         if due.is_empty() {
             continue;
@@ -120,11 +123,23 @@ fn background(root: &Path, jobs: &Arc<Mutex<Jobs>>) {
         for dir in crate::tracker::scope_registry(&root.join("trackers")).values() {
             let _ = Tracker::open(dir, &root.join("sources")).and_then(|t| t.refresh_if_moved());
         }
+        deliver_watches(root);
         crate::autoupdate::RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
         p.finish(Ok(String::new()));
     }
 }
 
+
+/// What every watch has to tell, delivered. A delivery that fails moves nothing, and the next
+/// pass says it again.
+fn deliver_watches(root: &Path) {
+    for w in crate::watch::all(root) {
+        match w.check(root).and_then(|(report, mark)| w.deliver(&report, &mark)) {
+            Ok(_) => {}
+            Err(e) => eprintln!("{}: {e}", w.decl.name),
+        }
+    }
+}
 /// What the person at the machine has not seen yet on each tracker's Changes page.
 fn unseen(root: &Path) -> BTreeMap<String, i64> {
     crate::tracker::scope_registry(&root.join("trackers"))

@@ -45,7 +45,7 @@ impl Column {
         if f.is_empty() {
             return PropertyType::Text;
         }
-        let bools = ["true", "false", "yes", "no", "y", "n"];
+        let bools = ["true", "false", "yes", "no", "y", "n", "ja", "nein", "wahr", "falsch"];
         if f.iter()
             .all(|v| bools.contains(&v.trim().to_ascii_lowercase().as_str()))
         {
@@ -86,8 +86,29 @@ fn columns_from_rows(headers: &[String], rows: &[Vec<String>]) -> Vec<Column> {
         .collect()
 }
 
+/// The separator a table uses, from its first line: a comma, a semicolon (what a spreadsheet in
+/// German, French or Dutch writes) or a tab, whichever splits it most outside quotes.
+fn sniff_delimiter(path: &Path) -> u8 {
+    let Ok(text) = std::fs::read_to_string(path) else { return b',' };
+    let line = text.lines().next().unwrap_or("");
+    let mut quoted = false;
+    let mut counts = [0usize; 3];
+    for c in line.chars() {
+        match c {
+            '"' => quoted = !quoted,
+            ',' if !quoted => counts[0] += 1,
+            ';' if !quoted => counts[1] += 1,
+            '\t' if !quoted => counts[2] += 1,
+            _ => {}
+        }
+    }
+    let best = (0..3).max_by_key(|&i| (counts[i], i == 0)).unwrap_or(0);
+    if counts[best] == 0 { b',' } else { [b',', b';', b'\t'][best] }
+}
+
 fn read_csv(path: &Path) -> Result<(Vec<String>, Vec<Vec<String>>), String> {
     let mut rdr = csv::ReaderBuilder::new()
+        .delimiter(sniff_delimiter(path))
         .flexible(true)
         .from_path(path)
         .map_err(|e| format!("{}: {e}", path.display()))?;
@@ -613,7 +634,7 @@ pub fn propose(
         let (headers, rows) = read_csv(&from)?;
         let cols = columns_from_rows(&headers, &rows);
         let sh = shape(&cols);
-        let delim = if ext == "tsv" { "\t" } else { "," };
+        let delim = (sniff_delimiter(&from) as char).to_string();
         let fetch = json!({ "type": "csv", "path": shown, "delimiter": delim });
         write_blocks(&name, kind.unwrap_or("row"), fetch, &cols, &sh)
     } else if ext == "xlsx" || ext == "xls" || ext == "xlsm" {
@@ -729,7 +750,7 @@ pub fn propose_url(
             let (headers, rows) = read_csv(&scratch)?;
             let cols = columns_from_rows(&headers, &rows);
             let sh = shape(&cols);
-            let fetch = json!({ "type": "csv", "path": url });
+            let fetch = json!({ "type": "csv", "path": url, "delimiter": (sniff_delimiter(&scratch) as char).to_string() });
             write_blocks(&name, kind.unwrap_or("row"), fetch, &cols, &sh)
         }
     };
@@ -1031,4 +1052,24 @@ pub fn propose_web(url: &str, body: &str, dir: &Path, name: Option<&str>, pick: 
         }
     }
     finish(built, dir)
+}
+
+#[cfg(test)]
+mod separators {
+    #[test]
+    fn a_table_is_split_by_what_its_first_line_uses() {
+        let dir = std::env::temp_dir().join(format!("zetlyn-sep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (text, want) in [
+            ("a,b,c\n1,2,3\n", b','),
+            ("EAN;Titel;Preis (EUR)\n1;x;9,99\n", b';'),
+            ("a\tb\n1\t2\n", b'\t'),
+            ("\"a;b\",c\n1,2\n", b','),
+        ] {
+            let path = dir.join("t.csv");
+            std::fs::write(&path, text).unwrap();
+            assert_eq!(super::sniff_delimiter(&path), want, "{text}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

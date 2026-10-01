@@ -152,8 +152,8 @@ fn named_month(s: &str) -> Option<String> {
 
 fn as_bool(raw: &str) -> Option<bool> {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "true" | "1" | "yes" | "y" => Some(true),
-        "false" | "0" | "no" | "n" | "" => Some(false),
+        "true" | "1" | "yes" | "y" | "ja" | "wahr" => Some(true),
+        "false" | "0" | "no" | "n" | "nein" | "falsch" | "" => Some(false),
         _ => None,
     }
 }

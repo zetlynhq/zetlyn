@@ -867,6 +867,61 @@ impl App {
                 }
             }
         }
+        // And what they carry under different names, where the values say it is the same
+        // question: a number or a date that agrees on at least half the things both sources
+        // know (at least three), compared under the name the tracker already has. A yes or no
+        // says too little to tell two fields apart, so it is paired only where each side has
+        // exactly one left. The pairing is in tracker.yaml as `from:`, for a person to undo.
+        let scheme = decl["identified_by"][0].as_str().unwrap_or("").to_string();
+        if !scheme.is_empty() {
+            let aligned_for = |decl: &J, member: &str, field: &str| -> bool {
+                decl["align"].as_object().is_some_and(|a| a.iter().any(|(k, v)| {
+                    v["from"].get(member).and_then(J::as_str).map_or(k == field, |f| f == field)
+                }))
+            };
+            for other in others.iter().filter(|o| **o != ds.decl.name) {
+                let Some(theirs) = registry.get(other).and_then(|p| Source::open(p).ok()) else { continue };
+                let left = |src: &Source, member: &str, kind: &str, d: &J| -> Vec<String> {
+                    src.decl.records.fields.iter()
+                        .filter(|(n, p)| p.kind.name() == kind && !aligned_for(d, member, n))
+                        .map(|(n, _)| n.clone())
+                        .collect()
+                };
+                for kind in ["number", "date", "bool"] {
+                    let mine_left = left(&ds, &ds.decl.name, kind, &decl);
+                    let theirs_left = left(&theirs, other, kind, &decl);
+                    if kind == "bool" && (mine_left.len() != 1 || theirs_left.len() != 1) {
+                        continue;
+                    }
+                    for name in &mine_left {
+                        let a = ds.store.values_by_identifier(&scheme, name);
+                        let same = |x: &str, y: &str| match (x.parse::<f64>(), y.parse::<f64>()) {
+                            (Ok(p), Ok(q)) => (p - q).abs() < 1e-9,
+                            _ => x == y,
+                        };
+                        let best = theirs_left.iter().filter_map(|theirs_name| {
+                            let b = theirs.store.values_by_identifier(&scheme, theirs_name);
+                            let both: Vec<(&String, &String)> = a.iter().filter_map(|(k, v)| b.get(k).map(|w| (v, w))).collect();
+                            let agree = both.iter().filter(|(v, w)| same(v, w)).count();
+                            (both.len() >= 3 && agree * 2 >= both.len()).then(|| (agree * 1000 / both.len(), theirs_name.clone()))
+                        }).max();
+                        if let Some((_, theirs_name)) = best {
+                            if !decl["align"].is_object() {
+                                decl["align"] = json!({});
+                            }
+                            if !decl["align"][&theirs_name].is_object() {
+                                decl["align"][&theirs_name] = json!({});
+                            }
+                            // Their field keeps its name for them; mine is said to be the same.
+                            if !decl["align"][&theirs_name]["from"].is_object() {
+                                decl["align"][&theirs_name]["from"] = json!({});
+                            }
+                            decl["align"][&theirs_name]["from"][&ds.decl.name] = json!(name);
+                        }
+                    }
+                }
+            }
+        }
         write_tracker(&dir, decl)?;
         Ok(serve::at(&format!("/review/{tracker}/{source}?added=1")))
     }
@@ -1565,6 +1620,24 @@ impl App {
                 div.offer {
                     p { strong { "Connected." } " " (ds.decl.title) " is part of " (title) "." }
                     a.button href={(serve::at("/t/")) (tracker) "/"} { "Open the tracker" }
+                // What Zetlyn compares from here on, and under which of this source's columns:
+                // a pairing it made by the values is said, so it can be checked.
+                @let compared: Vec<(String, String)> = decl.as_ref().map(|d| d.normalise.iter().map(|(name, a)| {
+                    let field = a.field_in(&ds.decl.name, name);
+                    let column = ds.decl.records.fields.get(&field).map(|p| p.from.trim_start_matches("field:").to_string()).unwrap_or(field);
+                    (name.clone(), column)
+                }).filter(|(n, c)| ds.decl.records.fields.values().any(|p| p.from.trim_start_matches("field:") == c) || n == c).collect()).unwrap_or_default();
+                @if !compared.is_empty() {
+                    p.dim style="flex-basis:100%" {
+                        "Compared from now on: "
+                        @for (i, (name, column)) in compared.iter().enumerate() {
+                            @if i > 0 { ", " }
+                            strong { (name) }
+                            @if column != name { " (here " code { (column) } ")" }
+                        }
+                        ". Where the names differ, Zetlyn paired them because the values agree on most things both know; it is written in tracker.yaml, and can be changed there."
+                    }
+                }
                 }
             }
             // The moment it is worth something: two sources joined. Asked once, and "not

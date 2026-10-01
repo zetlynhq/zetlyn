@@ -1450,6 +1450,25 @@ impl Store {
     /// it can. `schemes` counts claims instead, which is the number a reader wants on a page.
     /// Every value of one scheme this source holds, as a tracker keys it. What two sources would
     /// meet on, counted before either is joined to the other.
+    /// What this source says in one field, by the thing it is about: the identifier's key (so
+    /// `978-0-441-17271-9` and `9780441172719` are one book) and the value as text.
+    pub fn values_by_identifier(&self, scheme: &str, field: &str) -> BTreeMap<String, String> {
+        let Ok(mut stmt) = self.db.prepare(
+            "select i.value, coalesce(f.s, cast(f.n as text), cast(f.b as text), f.d)
+             from ident i join field f on f.record_id = i.record_id
+             where i.scheme = ?1 and f.name = ?2",
+        ) else {
+            return BTreeMap::new();
+        };
+        stmt.query_map([scheme, field], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))
+            .map(|rows| {
+                rows.flatten()
+                    .filter_map(|(id, v)| Some((crate::schemes::key(scheme, &id), v?)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn identifiers(&self, scheme: &str) -> BTreeSet<String> {
         let Ok(mut stmt) = self.db.prepare("select distinct value from ident where scheme = ?1") else {
             return BTreeSet::new();

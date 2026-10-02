@@ -183,7 +183,6 @@ fn frame(place: &dyn Place, title: &str, description: &str, body: Markup) -> Str
                     }
                 }
                 main { (body) }
-                p.shell.hub-note { "A hub serves files: " a href="/index.json" { "index.json" } " lists them." }
                 footer.site-footer.shell {
                     span { "© Zetlyn" }
                     div {
@@ -247,7 +246,7 @@ pub fn catalog(place: &dyn Place, rows: &[Row], opens: Opens) -> String {
                             @if r.built_at() > 0 { " · published " (ago(r.built_at())) }
                         }
                         div.hub-actions {
-                            @if let Some(open) = opens(r) { a.primary href=(open) { "Open" } }
+                            @if let Some(open) = opens(r) { a.primary href=(open) target="_blank" rel="noopener" { "Open" } }
                             a.secondary href=(r.page()) { "Details" }
                         }
                     }
@@ -364,7 +363,7 @@ fn source_page(place: &dyn Place, r: &Row, rows: &[Row], opens: Opens) -> String
             h2 { "In trackers" }
             @if within.is_empty() { p.caption { "None on this hub: it is taken on its own, or into a tracker of yours." } }
             @else {
-                ul.hub-links { @for t in &within { li { a href=(t.page()) { (t.title()) } @if let Some(o) = opens(t) { " · " a href=(o) { "open it" } } } } }
+                ul.hub-links { @for t in &within { li { a href=(t.page()) { (t.title()) } @if let Some(o) = opens(t) { " · " a href=(o) target="_blank" rel="noopener" { "open it" } } } } }
             }
         }
         section.hub-list.shell {
@@ -400,7 +399,7 @@ fn tracker_page(place: &dyn Place, r: &Row, rows: &[Row], opens: Opens) -> Strin
                 span { "published " (ago(r.built_at())) }
             }
             @if let Some(open) = opens(r) {
-                div.hero-actions { a.primary href=(open) { "Open it" } }
+                div.hero-actions { a.primary href=(open) target="_blank" rel="noopener" { "Open it" } }
             }
         }
         section.hub-list.shell {

@@ -139,6 +139,10 @@ body.area-app { --accent: #2f7d4f; }
 @media (max-width: 40rem) { header.top nav.areas { display: none; } header.top .org-name, header.top .org-switch summary { display: none; } }
 /* The switch between the three parts: the same control, in the same place, in each. */
 .switcher { position: relative; }
+/* Controls built on <details> are not the sections the page's own <details> rule spaces out. */
+details.switcher, details.org-switch { margin: 0; }
+details.dash-org { margin: 0 0 10px; }
+details.switcher > summary, details.org-switch > summary, details.dash-org > summary { margin: 0; font-weight: inherit; }
 .switcher summary { list-style: none; cursor: pointer; width: 30px; height: 30px; display: grid; place-items: center;
   border: 1px solid currentColor; opacity: .7; }
 .switcher summary::-webkit-details-marker { display: none; }

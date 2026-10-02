@@ -234,293 +234,8 @@ impl Owners {
 /// holds what.
 
 // ---------------------------------------------------------------------------------------------
-// What this hub carries.
-//
-// A list of what is here, not an index of what is in it. The hub reads no claims and answers no
-// query: it walks its own directory, reads the tag and the manifest each tag names, and prints
-// what those say. A subscriber that wants more fetches the manifest itself.
+// What this hub carries, and its pages: in `hubpages`, so a hub that is only storage has the same.
 
-/// One thing the hub carries, as the front page and `/index.json` say it.
-struct Carried {
-    tree: &'static str,
-    owner: String,
-    name: String,
-    tag: String,
-    version: String,
-    title: String,
-    about: String,
-    built_at: u64,
-    records: u64,
-    members: usize,
-    bytes: u64,
-    /// A tracker's or a package's sources, by name.
-    includes: Vec<String>,
-    /// A source's own word on being shown: `yes`, `summary`, `no`, or nothing said.
-    republish: String,
-    /// A package that carries what a tracker answers with and not how it was made.
-    sealed: bool,
-    /// A tracker for the accounts it gives access to, and not for anyone.
-    private: bool,
-}
-
-impl Carried {
-    fn reference(&self) -> String {
-        format!("{}/{}", self.owner, self.name)
-    }
-}
-
-fn read_dir_names(dir: &Path) -> Vec<String> {
-    let mut out: Vec<String> = std::fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|e| e.file_name().to_string_lossy().starts_with('.') == false)
-        .map(|e| e.file_name().to_string_lossy().to_string())
-        .collect();
-    out.sort();
-    out
-}
-
-/// Everything under `sources/` and `trackers/`, one row per tag.
-fn carried(dir: &Path) -> Vec<Carried> {
-    let mut out = Vec::new();
-    for tree in ["sources", "trackers", "packages"] {
-        let root = dir.join(tree);
-        for owner in read_dir_names(&root) {
-            for name in read_dir_names(&root.join(&owner)) {
-                let tags = root.join(&owner).join(&name).join("tags");
-                for tag in read_dir_names(&tags) {
-                    let version = match std::fs::read_to_string(tags.join(&tag)) {
-                        Ok(v) => v.trim().to_string(),
-                        Err(_) => continue,
-                    };
-                    let versions = root.join(&owner).join(&name).join("versions").join(&version);
-                    let manifest: serde_json::Value =
-                        match std::fs::read(versions.join("manifest.json"))
-                            .ok()
-                            .and_then(|b| serde_json::from_slice(&b).ok())
-                        {
-                            Some(m) => m,
-                            None => continue,
-                        };
-                    let s = |k: &str| manifest[k].as_str().unwrap_or_default().to_string();
-                    // A tracker names its sources; a package lists them with what each holds.
-                    let listed = manifest["sources"].as_array().cloned().unwrap_or_default();
-                    let includes: Vec<String> = listed
-                        .iter()
-                        .filter_map(|m| m.as_str().or_else(|| m["name"].as_str()).map(str::to_string))
-                        .collect();
-                    let packaged: u64 = listed.iter().filter_map(|m| m["claims"].as_u64()).sum();
-                    out.push(Carried {
-                        includes,
-                        republish: manifest["licence"]["republish"].as_str().unwrap_or_default().to_string(),
-                        sealed: manifest["sealed"].as_bool().unwrap_or(false),
-                        private: manifest["declaration"]
-                            .as_str()
-                            .and_then(|d| crate::yaml::parse::<crate::trackerdecl::TrackerDecl>(d).ok())
-                            .is_some_and(|d| d.visibility == "private"),
-                        tree,
-                        owner: owner.clone(),
-                        name: name.clone(),
-                        tag: tag.clone(),
-                        version,
-                        title: if s("title").is_empty() {
-                            format!("{owner}/{name}")
-                        } else {
-                            s("title")
-                        },
-                        about: s("about"),
-                        built_at: manifest["built_at"].as_u64().unwrap_or(0),
-                        records: manifest["claims"].as_u64().unwrap_or(packaged),
-                        members: manifest["sources"].as_array().map(Vec::len).unwrap_or(0),
-                        bytes: crate::artifact::declared_bytes(&manifest, "claims.jsonl")
-                            .unwrap_or(0),
-                    });
-                }
-            }
-        }
-    }
-    out
-}
-
-fn index_json(dir: &Path) -> Vec<u8> {
-    let rows: Vec<serde_json::Value> = carried(dir)
-        .iter()
-        .map(|c| {
-            serde_json::json!({
-                "tree": c.tree, "reference": c.reference(), "tag": c.tag,
-                "version": c.version, "title": c.title, "about": c.about,
-                "built_at": c.built_at, "claims": c.records,
-                "sources": c.members, "bytes": c.bytes,
-            })
-        })
-        .collect();
-    let body = serde_json::json!({ "spec_version": crate::artifact::SPEC_VERSION, "carries": rows });
-    serde_json::to_vec_pretty(&body).unwrap_or_default()
-}
-
-fn thousands(n: u64) -> String {
-    let s = n.to_string();
-    let mut out = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
-}
-
-/// The front page. Served where a person asks for the hub itself.
-///
-/// The design is not in this binary. The page names `/style.css`, `/mark.png` and `/favicon.png`,
-/// which the hub serves out of its own directory like anything else, so whoever runs a hub puts
-/// their own there. Where there is no stylesheet the hub answers that address with the product's
-/// own, which is plain and legible and nobody's brand.
-fn index_page(dir: &Path, serving: &[String]) -> Vec<u8> {
-    use maud::html;
-    let rows = carried(dir);
-    // A tracker published open and one published sealed are both a tracker to whoever takes it.
-    let (trackers, sources): (Vec<&Carried>, Vec<&Carried>) =
-        rows.iter().partition(|c| c.tree != "sources");
-    let has = |name: &str| dir.join(name).exists();
-    // Named by what they hold, so a browser that kept the operator's old design asks for the new.
-    let stamp = |name: &str| {
-        std::fs::read(dir.join(name)).map(|b| crate::place::sha256(&b)[..8].to_string()).unwrap_or_default()
-    };
-    let page = html! {
-        (maud::DOCTYPE)
-        html lang="en" {
-            head {
-                meta charset="utf-8";
-                meta name="viewport" content="width=device-width, initial-scale=1";
-                meta name="theme-color" content="#f2efe7";
-                // The same one the website carries: a choice already made is honoured before the
-                // first paint, and a reader who made none gets their system's.
-                script { (maud::PreEscaped("document.documentElement.className+=\" js\";try{var t=localStorage.getItem(\"theme\");if(t)document.documentElement.dataset.theme=t}catch(e){}")) }
-                title { "The hub — Zetlyn" }
-                meta name="description" content="Trackers and sources you can subscribe to, and the ones answering here.";
-                @if has("favicon.png") { link rel="icon" href="/favicon.png" type="image/png"; }
-                link rel="stylesheet" href={"/style.css?v=" (stamp("style.css"))};
-            }
-            body {
-                header.site-header.shell {
-                    a.brand href="https://zetlyn.com" {
-                        @if has("mark.png") { img src="/mark.png" alt="" class="brand-mark"; }
-                        span { "Zetlyn" }
-                    }
-                    // The website's header, link for link, with the hub where the reader is.
-                    nav {
-                        @for (label, href) in crate::serve::SITE_NAV {
-                            @if *label == "Hub" {
-                                a href=(href) aria-current="page" { (label) }
-                            } @else {
-                                a href=(href) { (label) }
-                            }
-                        }
-                    }
-                }
-
-                main {
-                    section.hero.shell {
-                        p.overline { "THE HUB · PUBLIC" }
-                        h1 { "Trackers anyone " span { "can use." } }
-                        p.intro {
-                            "Every tracker and source here is public and free to use. Open one in the "
-                            "browser, or subscribe and keep a copy on your own machine that stays current."
-                        }
-                        p.hub-stats {
-                            span { (trackers.len()) @if trackers.len() == 1 { " tracker" } @else { " trackers" } }
-                            span { (sources.len()) @if sources.len() == 1 { " source" } @else { " sources" } }
-                            span { (thousands(sources.iter().map(|c| c.records).sum())) " claims" }
-                        }
-                    }
-
-                    section.hub-list.shell #trackers {
-                        h2 { "Trackers" }
-                        p.caption { "A topic, and the sources it is made of, joined on what they share." }
-                        @if trackers.is_empty() { p { "None yet." } }
-                        div.hub-cards {
-                            @for c in &trackers {
-                                @let reference = c.reference();
-                                @let served = serving.iter().any(|s| *s == reference);
-                                @let claims: u64 = if c.tree == "packages" { c.records } else {
-                                    c.includes.iter().filter_map(|n| sources.iter().find(|s| s.reference() == *n)).map(|s| s.records).sum()
-                                };
-                                article.hub-card {
-                                    div.hub-card-head {
-                                        h3 { @if served { a href=(format!("/{reference}")) { (c.title) } } @else { (c.title) } }
-                                        span.badge { @if c.private { "Private" } @else if c.sealed { "Sealed" } @else { "Public" } }
-                                    }
-                                    @if !c.about.is_empty() { p { (c.about) } }
-                                    p.hub-meta {
-                                        (c.members) @if c.members == 1 { " source" } @else { " sources" }
-                                        " · " (thousands(claims)) " claims"
-                                        @if c.built_at > 0 { " · published " (crate::tracker::human(crate::now() - c.built_at as i64)) " ago" }
-                                    }
-                                    div.hub-actions {
-                                        @if served { a.primary href=(format!("/{reference}")) { "Open" } }
-                                        code { "zetlyn tracker subscribe " (reference) }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    section.hub-list.shell #sources {
-                        h2 { "Sources" }
-                        p.caption { "Each one can be taken on its own: " code { "zetlyn source subscribe owner/name" } }
-                        @if sources.is_empty() { p { "None yet." } }
-                        @else {
-                            div.hub-scroll {
-                                table.hub-table {
-                                    thead { tr { th { "Source" } th { "In" } th.n { "Claims" } th { "May be shown" } th { "Published" } } }
-                                    tbody {
-                                        @for c in &sources {
-                                            @let reference = c.reference();
-                                            @let within: Vec<&str> = trackers.iter().filter(|t| t.includes.iter().any(|n| *n == reference)).map(|t| t.title.as_str()).collect();
-                                            tr {
-                                                td { (c.title) small { (reference) " · " (c.version.get(..8).unwrap_or(&c.version)) } }
-                                                td { @if within.is_empty() { span.dim { "on its own" } } @else { (within.join(", ")) } }
-                                                td.n { (thousands(c.records)) }
-                                                td { @match c.republish.as_str() {
-                                                    "yes" => "in full",
-                                                    "summary" => "titles, values and a link",
-                                                    "no" => "not in public",
-                                                    _ => "has not said",
-                                                } }
-                                                td { @if c.built_at > 0 { (crate::tracker::human(crate::now() - c.built_at as i64)) " ago" } }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // What the hub says about itself beneath its list: the operator's, in the
-                    // operator's design, from its own directory. A hub without one is its list.
-                    @if let Ok(about) = std::fs::read_to_string(dir.join("hub-about.html")) {
-                        (maud::PreEscaped(about))
-                    }
-                }
-
-                p.shell.hub-note { "A hub serves files: " a href="/index.json" { "index.json" } " lists them." }
-                footer.site-footer.shell {
-                    span { "© Zetlyn" }
-                    div {
-                        @for (label, href) in crate::serve::SITE_FOOTER { a href=(href) { (label) } }
-                        @if has("app.js") {
-                            button.theme-toggle type="button" id="theme-toggle" { "Theme" }
-                        }
-                    }
-                }
-                @if has("app.js") { script src={"/app.js?v=" (stamp("app.js"))} {} }
-            }
-        }
-    };
-    page.into_string().into_bytes()
-}
 
 pub fn serve(dir: &Path, addr: &str, serving: &[String]) -> Result<(), String> {
     let server = tiny_http::Server::http(addr).map_err(|e| e.to_string())?;
@@ -555,8 +270,18 @@ pub fn serve(dir: &Path, addr: &str, serving: &[String]) -> Result<(), String> {
         );
 
         let (status, body) = match method.as_str() {
-            "GET" | "HEAD" if path.is_empty() => (200, index_page(dir, serving)),
-            "GET" | "HEAD" if path == "index.json" => (200, index_json(dir)),
+            // The front page and a page per thing, rendered as they are asked for, from the same
+            // manifests a rendered hub writes them from.
+            "GET" | "HEAD" if path.is_empty() || is_page(&path) => {
+                let opens = |r: &crate::hubpages::Row| serving.iter().any(|s| *s == r.reference()).then(|| format!("/{}", r.reference()));
+                match crate::hubpages::page_at(&place, &path, &opens) {
+                    Some(p) => (200, p.into_bytes()),
+                    None => (404, b"nothing at that address\n".to_vec()),
+                }
+            }
+            "GET" | "HEAD" if path == "index.json" => {
+                (200, crate::hubpages::index_json(&crate::hubpages::shelf(&place).unwrap_or_default()))
+            }
             "GET" | "HEAD" if crate::examples::file(&path).is_some() => (200, crate::examples::file(&path).unwrap_or_default().into_bytes()),
             "GET" | "HEAD" => match crate::place::Place::get(&place, &path) {
                 Ok(bytes) => (200, bytes),
@@ -586,7 +311,9 @@ pub fn serve(dir: &Path, addr: &str, serving: &[String]) -> Result<(), String> {
         };
         // A tag and a payload are the two things a program fetches, and they are the two the
         // layout names. The rest is what a person's browser asked for on the way to reading this.
-        let kind = if path.is_empty() || path.ends_with(".html") || body.starts_with(b"<!doctype html") {
+        let kind = if path.is_empty() || is_page(&path) || path.ends_with(".html")
+            || body.get(..14).is_some_and(|b| b.eq_ignore_ascii_case(b"<!doctype html"))
+        {
             "text/html; charset=utf-8"
         } else if path.ends_with(".csv") {
             "text/csv; charset=utf-8"
@@ -613,4 +340,10 @@ pub fn serve(dir: &Path, addr: &str, serving: &[String]) -> Result<(), String> {
         let _ = request.respond(response);
     }
     Ok(())
+}
+
+/// `sources/owner/name`, `trackers/owner/name/`, `packages/owner/name`: the page about one thing.
+fn is_page(path: &str) -> bool {
+    let parts: Vec<&str> = path.trim_end_matches('/').split('/').collect();
+    parts.len() == 3 && matches!(parts[0], "sources" | "trackers" | "packages") && parts.iter().all(|p| !p.is_empty())
 }

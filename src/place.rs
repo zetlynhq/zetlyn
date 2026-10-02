@@ -24,6 +24,27 @@ pub trait Place {
     fn exists(&self, path: &str) -> bool {
         self.get(path).is_ok()
     }
+    /// Every path under `prefix`, for whoever renders what a place holds. A place that cannot say,
+    /// a web server, says so.
+    fn list(&self, prefix: &str) -> Result<Vec<String>, String> {
+        let _ = prefix;
+        Err(format!("{}: cannot list what it holds", self.describe()))
+    }
+}
+
+/// What a browser is told a file is, by its name: a hub's pages are read straight out of where
+/// they are kept, and a page served as bytes is a download.
+pub fn content_type(path: &str) -> &'static str {
+    match path.rsplit('.').next().unwrap_or("") {
+        "html" => "text/html; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "js" => "text/javascript; charset=utf-8",
+        "json" => "application/json",
+        "png" => "image/png",
+        "svg" => "image/svg+xml",
+        "txt" | "sig" => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
 }
 
 /// Pick the place a location names. A location with a scheme is remote, anything else is a path
@@ -82,6 +103,25 @@ impl Place for Folder {
     }
     fn exists(&self, path: &str) -> bool {
         self.resolve(path).map(|p| p.exists()).unwrap_or(false)
+    }
+    fn list(&self, prefix: &str) -> Result<Vec<String>, String> {
+        let mut out = Vec::new();
+        let mut stack = vec![self.root.clone()];
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if let Ok(rel) = p.strip_prefix(&self.root) {
+                    let rel = rel.to_string_lossy().replace('\\', "/");
+                    if rel.starts_with(prefix) {
+                        out.push(rel);
+                    }
+                }
+            }
+        }
+        out.sort();
+        Ok(out)
     }
 }
 
@@ -231,6 +271,20 @@ impl S3 {
         body: &[u8],
         now: (String, String),
     ) -> BTreeMap<String, String> {
+        let uri = format!("/{}/{}", self.bucket, self.key_for(path));
+        self.signed_at(method, &uri, "", body, now)
+    }
+
+    /// The same signature for any address on the endpoint, with its query already in canonical
+    /// form: names sorted, every value encoded.
+    fn signed_at(
+        &self,
+        method: &str,
+        canonical_uri: &str,
+        query: &str,
+        body: &[u8],
+        now: (String, String),
+    ) -> BTreeMap<String, String> {
         let (date, stamp) = now;
         let payload = sha256(body);
         let mut headers = BTreeMap::new();
@@ -241,10 +295,9 @@ impl S3 {
             return headers;
         }
 
-        let canonical_uri = format!("/{}/{}", self.bucket, self.key_for(path));
         let signed_headers = "host;x-amz-content-sha256;x-amz-date";
         let canonical = format!(
-            "{method}\n{canonical_uri}\n\nhost:{}\nx-amz-content-sha256:{payload}\nx-amz-date:{stamp}\n\n{signed_headers}\n{payload}",
+            "{method}\n{canonical_uri}\n{query}\nhost:{}\nx-amz-content-sha256:{payload}\nx-amz-date:{stamp}\n\n{signed_headers}\n{payload}",
             self.host()
         );
         let scope = format!("{date}/{}/s3/aws4_request", self.region);
@@ -326,7 +379,7 @@ impl Place for S3 {
             return Err("ZETLYN_S3_KEY and ZETLYN_S3_SECRET are not set".into());
         }
         let url = self.url(path);
-        let mut request = self.agent.put(&url);
+        let mut request = self.agent.put(&url).header("content-type", content_type(path));
         for (k, v) in self.signed("PUT", path, bytes, amz_now()) {
             request = request.header(k.as_str(), v.as_str());
         }
@@ -335,6 +388,66 @@ impl Place for S3 {
             .map(|_| ())
             .map_err(|e| format!("{url}: {e}"))
     }
+    /// ListObjectsV2, a thousand keys a page, following the continuation until there is none.
+    fn list(&self, prefix: &str) -> Result<Vec<String>, String> {
+        let full = self.key_for(prefix);
+        let strip = if self.prefix.is_empty() { String::new() } else { format!("{}/", self.prefix) };
+        let mut out = Vec::new();
+        let mut token: Option<String> = None;
+        loop {
+            let mut params: Vec<(String, String)> = vec![("list-type".into(), "2".into()), ("prefix".into(), full.clone())];
+            if let Some(t) = &token {
+                params.push(("continuation-token".into(), t.clone()));
+            }
+            params.sort();
+            let query: String = params.iter().map(|(k, v)| format!("{}={}", uri_encode(k), uri_encode(v))).collect::<Vec<_>>().join("&");
+            let url = format!("{}/{}?{query}", self.endpoint, self.bucket);
+            let mut request = self.agent.get(&url);
+            for (k, v) in self.signed_at("GET", &format!("/{}", self.bucket), &query, b"", amz_now()) {
+                request = request.header(k.as_str(), v.as_str());
+            }
+            let mut response = request.call().map_err(|e| format!("{url}: {e}"))?;
+            let body = response.body_mut().read_to_string().map_err(|e| format!("{url}: {e}"))?;
+            for key in between(&body, "<Key>", "</Key>") {
+                let key = unescape(&key);
+                out.push(key.strip_prefix(&strip).unwrap_or(&key).to_string());
+            }
+            token = between(&body, "<NextContinuationToken>", "</NextContinuationToken>").into_iter().next().map(|t| unescape(&t));
+            if !body.contains("<IsTruncated>true</IsTruncated>") || token.is_none() {
+                break;
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
+}
+
+/// Every unreserved character as it is and everything else as `%XX`, which is what a signed
+/// query asks for.
+fn uri_encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+/// The text between each `open` and the `close` after it, in a listing that has no nesting.
+fn between(text: &str, open: &str, close: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(i) = rest.find(open) {
+        let after = &rest[i + open.len()..];
+        let Some(j) = after.find(close) else { break };
+        out.push(after[..j].to_string());
+        rest = &after[j + close.len()..];
+    }
+    out
+}
+
+fn unescape(s: &str) -> String {
+    s.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'").replace("&amp;", "&")
 }
 
 #[cfg(test)]

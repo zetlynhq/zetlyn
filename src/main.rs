@@ -19,6 +19,7 @@ mod fetch;
 mod grant;
 pub mod guess;
 mod hub;
+mod hubpages;
 mod hook;
 mod identity;
 mod key;
@@ -1485,6 +1486,44 @@ fn scope_subscribe(args: &[String]) -> Result<(), String> {
 
 fn hub_command(args: &[String]) -> Result<(), String> {
     match args.get(1).map(String::as_str) {
+        // The pages, written into the hub beside what they describe: a hub that is a bucket
+        // behind a web server reads like one that is served.
+        Some("render") => {
+            let at = positional(args, 2).first().map(|s| s.to_string()).ok_or("which hub? a folder or s3://bucket/prefix")?;
+            let place = place::at(&at)?;
+            let app = flag(args, "--app").map(|a| a.trim_end_matches('/').to_string());
+            let serving: Vec<String> = flag(args, "--serving").map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()).unwrap_or_default();
+            let opens = |r: &hubpages::Row| match &app {
+                Some(a) if serving.iter().any(|s| *s == r.reference()) => Some(format!("{a}/{}/", r.reference())),
+                _ => None,
+            };
+            let n = hubpages::render(place.as_ref(), &opens)?;
+            println!("{n} pages in {}", place.describe());
+            Ok(())
+        }
+        // One hub into another, file for file: a folder into a bucket, the day a hub becomes one.
+        // What is there already with the same bytes is left alone, so it can be run again.
+        Some("copy") => {
+            let from = positional(args, 2).first().map(|s| s.to_string()).ok_or("from which hub?")?;
+            let to = positional(args, 2).get(1).map(|s| s.to_string()).ok_or("to which hub?")?;
+            let (src, dst) = (place::at(&from)?, place::at(&to)?);
+            let (mut put, mut kept) = (0usize, 0usize);
+            for path in src.list("")? {
+                // The owners of a hub that checks signatures are not data, and not for a bucket.
+                if path == "owners.yaml" || path.ends_with(".arriving") {
+                    continue;
+                }
+                let bytes = src.get(&path)?;
+                if dst.get(&path).is_ok_and(|held| held == bytes) {
+                    kept += 1;
+                    continue;
+                }
+                dst.put(&path, &bytes)?;
+                put += 1;
+            }
+            println!("{put} files written to {}, {kept} already there", dst.describe());
+            Ok(())
+        }
         Some("register") => {
             let dir = PathBuf::from(flag(args, "--at").unwrap_or("."));
             let name = flag(args, "--owner").ok_or("--owner which name?")?;
@@ -1583,6 +1622,15 @@ const HUB_USAGE: &str = "\
   zetlyn hub serve <dir> [--port 8090] [--addr 127.0.0.1:8090] [--serving owner/name,…]
       GET for anybody. PUT signed by a key that holds the owner named in the path.
       A folder, a mount and a private bucket need none of this.
+
+  zetlyn hub copy <from> <to>
+      One hub into another, file for file, a folder into a bucket say. Run again, it writes
+      only what differs.
+
+  zetlyn hub render <dir | s3://bucket/prefix> [--app <url> --serving owner/name,…]
+      The hub's pages, written into it: its catalog, and a page per source, tracker and
+      package beside what each describes. A hub that is only storage then reads like a served
+      one. --app is where the trackers named in --serving can be opened.
 ";
 
 // ---------------------------------------------------------------------------------------------

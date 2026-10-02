@@ -137,6 +137,86 @@ body.area-app { --accent: #2f7d4f; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) body.area-app { --accent: #52c486; } }
 :root[data-theme="dark"] body.area-app { --accent: #52c486; }
 @media (max-width: 40rem) { header.top nav.areas { display: none; } header.top .org-name, header.top .org-switch summary { display: none; } }
+/* The switch between the three parts: the same control, in the same place, in each. */
+.switcher { position: relative; }
+.switcher summary { list-style: none; cursor: pointer; width: 30px; height: 30px; display: grid; place-items: center;
+  border: 1px solid currentColor; opacity: .7; }
+.switcher summary::-webkit-details-marker { display: none; }
+.switcher summary:hover, .switcher[open] summary { opacity: 1; }
+.switcher svg rect { fill: currentColor; }
+.switcher-panel { position: absolute; top: 38px; left: 0; z-index: 30; width: 300px; background: var(--panel); color: var(--fg);
+  border: 1px solid var(--fg); box-shadow: 8px 8px 0 rgba(0,0,0,.12); }
+.switcher-panel a { display: block; padding: 12px 14px; border-bottom: 1px solid var(--line); color: var(--fg); }
+.switcher-panel a:last-child { border-bottom: 0; }
+.switcher-panel a:hover { background: var(--wash); text-decoration: none; }
+.switcher-panel a.on { box-shadow: inset 3px 0 0 var(--accent); }
+.switcher-panel b { display: block; font-size: 14px; }
+.switcher-panel span { display: block; font-size: 12.5px; color: var(--dim); margin-top: 2px; }
+
+/* app.zetlyn.com: software, not a page. A dark sidebar, and a light place to work beside it. */
+body.dash { background: var(--panel); }
+.dash-grid { display: grid; grid-template-columns: 248px minmax(0, 1fr); min-height: 100vh; }
+.dash-side { background: #10171c; color: #d5dce0; display: flex; flex-direction: column; gap: 4px; padding: 16px 14px;
+  position: sticky; top: 0; height: 100vh; overflow-y: auto; }
+.dash-side a { color: #d5dce0; }
+.dash-head { display: flex; align-items: center; gap: 12px; padding: 2px 4px 18px; }
+.dash-head .switcher summary { color: #d5dce0; }
+.dash-brand { display: flex; align-items: center; gap: 8px; font-weight: 750; letter-spacing: -.03em; font-size: 18px; }
+.dash-brand:hover { text-decoration: none; }
+.dash-brand .brand-mark { width: 22px; height: 22px; filter: invert(1); }
+.dash-brand .brand-area { color: #52c486; font-weight: 400; }
+.dash-org { display: flex; align-items: center; gap: 10px; padding: 9px 10px; margin-bottom: 10px; border: 1px solid #26323a;
+  font-weight: 600; font-size: 14px; position: relative; }
+details.dash-org summary { list-style: none; display: flex; align-items: center; gap: 10px; cursor: pointer; width: 100%; }
+details.dash-org summary::after { content: "▾"; margin-left: auto; color: #8b98a1; }
+details.dash-org ul { position: absolute; top: 100%; left: -1px; right: -1px; z-index: 20; list-style: none; margin: 0; padding: 4px 0;
+  background: #172128; border: 1px solid #26323a; }
+details.dash-org li a { display: block; padding: 7px 12px; }
+.dash-org-mark { width: 22px; height: 22px; display: grid; place-items: center; background: #52c486; color: #10171c;
+  font-size: 12px; font-weight: 750; }
+.dash-label { margin: 14px 10px 4px; font: 11px/normal ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  text-transform: uppercase; letter-spacing: .1em; color: #7f8c95; }
+.dash-nav { display: flex; flex-direction: column; }
+.dash-nav a { padding: 8px 10px; font-size: 14px; border-left: 2px solid transparent; }
+.dash-nav a:hover { background: rgba(255,255,255,.05); text-decoration: none; }
+.dash-nav a[aria-current] { background: rgba(255,255,255,.07); border-left-color: #52c486; color: #fff; }
+.dash-foot { margin-top: auto; padding-top: 16px; border-top: 1px solid #26323a; display: flex; flex-direction: column; gap: 12px; }
+.dash-me { display: flex; flex-direction: column; gap: 8px; padding: 0 10px; }
+.dash-email { font-size: 13px; color: #aab6bd; overflow: hidden; text-overflow: ellipsis; }
+.dash-me button, a.dash-signin { font: inherit; font-size: 13px; background: none; color: #d5dce0; border: 1px solid #3a4851;
+  padding: 7px 10px; cursor: pointer; text-align: center; }
+a.dash-signin { margin: 0 10px; }
+.dash-me button:hover, a.dash-signin:hover { border-color: #d5dce0; text-decoration: none; }
+.dash-small { display: flex; align-items: center; justify-content: space-between; padding: 0 10px; font-size: 12.5px; }
+.dash-small .theme-toggle { color: #aab6bd; border-color: #3a4851; }
+.dash-main { min-width: 0; display: flex; flex-direction: column; }
+.dash-top { display: flex; align-items: center; gap: 16px; min-height: 56px; padding: 0 36px; border-bottom: 1px solid var(--line);
+  background: var(--bg); }
+.dash-top nav.crumbs ol { padding: 0; }
+.dash-top .autoupdate { margin-left: auto; display: flex; align-items: center; gap: .45rem; font-size: .84rem; color: var(--dim);
+  border: 1px solid var(--line); border-radius: 999px; padding: .25rem .75rem; background: var(--panel); }
+.dash-top .autoupdate .dot { width: .5rem; height: .5rem; border-radius: 50%; background: var(--line-strong); }
+.dash-top .autoupdate.on .dot { background: #2e7d32; }
+.dash-tabs { display: flex; gap: .25rem; padding: 0 28px; border-bottom: 1px solid var(--line); background: var(--bg); }
+.dash-tabs a { padding: 12px .8rem 10px; color: var(--dim); font-size: .9rem; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.dash-tabs a:hover { color: var(--fg); text-decoration: none; }
+.dash-tabs a.on { color: var(--fg); border-bottom-color: var(--accent); font-weight: 600; }
+.dash main.dash-body { width: auto; max-width: 1180px; margin: 0; padding: 30px 36px 72px; }
+@media (max-width: 52rem) {
+  .dash-grid { grid-template-columns: 1fr; }
+  .dash-side { position: static; height: auto; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 14px; }
+  .dash-head { padding: 0; }
+  .dash-org { margin: 0; }
+  .dash-label { display: none; }
+  .dash-nav { flex-direction: row; overflow-x: auto; }
+  .dash-nav a { border-left: 0; border-bottom: 2px solid transparent; }
+  .dash-nav a[aria-current] { border-bottom-color: #52c486; }
+  .dash-foot { margin: 0 0 0 auto; padding: 0; border: 0; flex-direction: row; }
+  .dash-small { display: none; }
+  .dash-top { padding: 0 16px; }
+  .dash-tabs { padding: 0 8px; overflow-x: auto; }
+  .dash main.dash-body { padding: 20px 16px 56px; }
+}
 footer.site-footer { width: min(1180px, calc(100% - 48px)); margin: 0 auto; padding: 0; height: 90px;
   border-top: 1px solid var(--line); display: flex; align-items: center; color: var(--dim);
   font: 11px/normal ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
@@ -389,6 +469,40 @@ pub struct Frame {
     /// The organisation a page is in, and the others whoever is signed in belongs to.
     pub org: Option<String>,
     pub orgs: Vec<(String, String)>,
+    /// In the app's sidebar, what the links under the organisation are: its pages, or what anybody
+    /// may read.
+    pub side_title: String,
+}
+
+/// What each part is for, one line each, in the switch every part carries.
+pub const AREA_ABOUT: &[(&str, &str)] = &[
+    ("site", "What Zetlyn is, and how it works"),
+    ("hub", "Public trackers and sources to take"),
+    ("app", "Your organisation's trackers, run for you"),
+];
+
+/// The switch between the three parts: the same control, in the same place, in each.
+pub fn switcher(current: &str) -> Markup {
+    html! {
+        details.switcher {
+            summary aria-label="Zetlyn, its hub and its app" title="Zetlyn, its hub and its app" {
+                svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" {
+                    @for y in [2, 7, 12] { @for x in [2, 7, 12] { rect x=(x) y=(y) width="3" height="3" {} } }
+                }
+            }
+            div.switcher-panel {
+                @for (key, name, href) in AREAS {
+                    @let about = AREA_ABOUT.iter().find(|(k, _)| k == key).map(|(_, a)| *a).unwrap_or("");
+                    a.on[*key == current] href=(href) { b { @if *key == "site" { "Zetlyn" } @else { "Zetlyn " (name) } } span { (about) } }
+                }
+            }
+        }
+    }
+}
+
+/// The sidebar's heading above its links.
+pub fn frame_side(title: &str) {
+    FRAME.with(|f| f.borrow_mut().side_title = title.to_string());
 }
 
 /// The three parts of Zetlyn, each a site of its own: what it is called beside the logo, where it is.
@@ -567,6 +681,10 @@ pub fn shell(title: &str, body: Markup) -> String {
             last.1 = None;
         }
     }
+    // The app is software, not a page: a sidebar and a place to work, and nothing of the website.
+    if f.area == "app" {
+        return dashboard(title, body, &f, &crumbs, &brand_href);
+    }
     let page = html! {
         (DOCTYPE)
         html lang="en" {
@@ -670,6 +788,110 @@ pub fn shell(title: &str, body: Markup) -> String {
                     div {
                         @for (label, href) in &f.footer { a href=(href) { (label) } }
                         button.theme-toggle type="button" id="theme-toggle" { "Theme" }
+                    }
+                }
+                script { (maud::PreEscaped(THEME_TOGGLE)) }
+                @if let Some(jobs) = &f.jobs {
+                    div #jobs data-at=(jobs) hidden {}
+                    (maud::PreEscaped(crate::app::BAR_SCRIPT))
+                }
+            }
+        }
+    };
+    page.into_string()
+}
+
+
+/// app.zetlyn.com: a dark sidebar with the switch, the organisation and its pages, and beside it a
+/// slim bar with where the reader is, the tabs of what they are in, and the work.
+fn dashboard(title: &str, body: Markup, f: &Frame, crumbs: &[(String, Option<String>)], brand_href: &str) -> String {
+    let tab_on = |label: &String, href: &String| {
+        label == title || (f.section.as_ref().is_some_and(|s| s.0 == title) && Some(href) == f.section.as_ref().map(|s| &s.1))
+    };
+    let page = html! {
+        (DOCTYPE)
+        html lang="en" {
+            head {
+                meta charset="utf-8";
+                meta name="viewport" content="width=device-width, initial-scale=1";
+                meta name="theme-color" content="#10171c";
+                script { (maud::PreEscaped(THEME_EARLY)) }
+                title { (title) @if title != "Zetlyn" { " · " } "Zetlyn App" }
+                link rel="icon" type="image/png" href={"data:image/png;base64," (FAVICON)};
+                link rel="stylesheet" href={(at("/style.css")) "?v=" (env!("CARGO_PKG_VERSION"))};
+            }
+            body.area-app.dash {
+                div.dash-grid {
+                    aside.dash-side {
+                        div.dash-head {
+                            (switcher("app"))
+                            a.dash-brand href=(brand_href) aria-label="Zetlyn App" {
+                                img.brand-mark src={"data:image/png;base64," (MARK)} alt="";
+                                span { "Zetlyn" } span.brand-area { "App" }
+                            }
+                        }
+                        @if let Some(org) = &f.org {
+                            @if f.orgs.len() > 1 {
+                                details.dash-org {
+                                    summary { span.dash-org-mark { (org.chars().next().unwrap_or('·').to_uppercase().to_string()) } (org) }
+                                    ul { @for (label, href) in &f.orgs { li { a href=(href) { (label) } } } }
+                                }
+                            } @else {
+                                div.dash-org { span.dash-org-mark { (org.chars().next().unwrap_or('·').to_uppercase().to_string()) } (org) }
+                            }
+                        }
+                        @if !f.side_title.is_empty() { p.dash-label { (f.side_title) } }
+                        nav.dash-nav {
+                            @for (label, href) in &f.nav {
+                                @if f.current.as_deref() == Some(label.as_str()) {
+                                    a href=(href) aria-current="page" { (label) }
+                                } @else {
+                                    a href=(href) { (label) }
+                                }
+                            }
+                        }
+                        // At the machine's front page, somebody signed in sees where they belong.
+                        @if f.org.is_none() && !f.orgs.is_empty() {
+                            p.dash-label { "Your organisations" }
+                            nav.dash-nav { @for (label, href) in &f.orgs { a href=(href) { (label) } } }
+                        }
+                        div.dash-foot {
+                            @match &f.account {
+                                Some(Some(email)) => {
+                                    div.dash-me {
+                                        span.dash-email { (email) }
+                                        form method="post" action="/signout" { button type="submit" { "Sign out" } }
+                                    }
+                                }
+                                _ => { a.dash-signin href="/signin" { "Sign in" } }
+                            }
+                            div.dash-small {
+                                a href="https://zetlyn.com/docs" { "Docs" }
+                                button.theme-toggle type="button" id="theme-toggle" { "Theme" }
+                            }
+                        }
+                    }
+                    div.dash-main {
+                        header.dash-top {
+                            nav.crumbs aria-label="Breadcrumb" {
+                                ol {
+                                    @for (label, href) in crumbs {
+                                        li { @match href { Some(h) => a href=(h) { (label) }, None => span aria-current="page" { (label) } } }
+                                    }
+                                }
+                            }
+                            @if let Some((words, href, on)) = &f.status {
+                                a.autoupdate.on[*on] href=(href) title="Automatic updates" { span.dot {} (words) }
+                            }
+                        }
+                        @if !f.tabs.is_empty() {
+                            nav.dash-tabs {
+                                @for (label, href) in &f.tabs {
+                                    @if tab_on(label, href) { a.on href=(href) aria-current="page" { (label) } } @else { a href=(href) { (label) } }
+                                }
+                            }
+                        }
+                        main.dash-body { (body) }
                     }
                 }
                 script { (maud::PreEscaped(THEME_TOGGLE)) }

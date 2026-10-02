@@ -820,7 +820,7 @@ fn dashboard(title: &str, body: Markup, f: &Frame, crumbs: &[(String, Option<Str
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 meta name="theme-color" content="#10171c";
                 script { (maud::PreEscaped(THEME_EARLY)) }
-                title { (title) @if title != "Zetlyn" { " · " } "Zetlyn App" }
+                title { @if title == "Zetlyn" { "Zetlyn App" } @else { (title) " · Zetlyn App" } }
                 link rel="icon" type="image/png" href={"data:image/png;base64," (FAVICON)};
                 link rel="stylesheet" href={(at("/style.css")) "?v=" (env!("CARGO_PKG_VERSION"))};
             }
@@ -1533,5 +1533,19 @@ fn stamp(at: &str) -> String {
     match (at.get(..10), at.get(11..16)) {
         (Some(d), Some(t)) => format!("{d} {t} UTC"),
         _ => at.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_app_says_its_name_once_in_a_title() {
+        let f = super::Frame::default();
+        let title = |t: &str| {
+            let page = super::dashboard(t, maud::html! {}, &f, &[], "/");
+            page.split("<title>").nth(1).and_then(|s| s.split("</title>").next()).unwrap_or("").to_string()
+        };
+        assert_eq!(title("Zetlyn"), "Zetlyn App");
+        assert_eq!(title("Proposals"), "Proposals · Zetlyn App");
     }
 }

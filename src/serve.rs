@@ -113,6 +113,11 @@ nav.links a:hover, nav.links a[aria-current] { color: var(--fg); text-decoration
 header.top nav.links { align-self: stretch; }
 header.top nav.links a { display: flex; align-items: center; border-bottom: 2px solid transparent; margin-bottom: -1px; }
 header.top nav.links a[aria-current] { border-bottom-color: var(--accent); }
+/* Who is signed in, at the right of the header, where somebody can be. */
+header.top .account { margin-left: 28px; display: flex; align-items: center; gap: .6rem; font-size: 13px; }
+header.top a.account { border: 1px solid var(--fg); color: var(--fg); padding: 6px 12px; }
+header.top a.account:hover { background: var(--fg); color: var(--bg); text-decoration: none; }
+header.top form.account button { font: inherit; font-size: 13px; padding: 5px 10px; }
 footer.site-footer { width: min(1180px, calc(100% - 48px)); margin: 0 auto; padding: 0; height: 90px;
   border-top: 1px solid var(--line); display: flex; align-items: center; color: var(--dim);
   font: 11px/normal ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
@@ -354,6 +359,20 @@ pub struct Frame {
     pub footer: Vec<(String, String)>,
     /// Where the mark leads, where it is not this frame's home.
     pub brand: Option<String>,
+    /// A crumb before the home one: the machine an organisation's workspace is part of.
+    pub above: Option<(String, String)>,
+    /// Who is signed in, at the right of the header, where somebody can be: `None` where nobody
+    /// signs in (this machine's own app), `Some(None)` for a visitor, `Some(Some(email))` signed in.
+    pub account: Option<Option<String>>,
+}
+
+/// The crumb above home, and who is signed in. Both are set by `zetlyn hosting` and by nothing else.
+pub fn frame_hosted(above: Option<(String, String)>, account: Option<Option<String>>) {
+    FRAME.with(|f| {
+        let mut f = f.borrow_mut();
+        f.above = above;
+        f.account = account;
+    });
 }
 
 /// The website's header links and footer links, as zetlyn.com carries them (its `page.html` and
@@ -365,6 +384,7 @@ pub const SITE_NAV: &[(&str, &str)] = &[
     ("Sources", "https://zetlyn.com/sources"),
     ("Interface", "https://zetlyn.com/api"),
     ("Hub", "https://hub.zetlyn.com/"),
+    ("App", "https://app.zetlyn.com/"),
 ];
 pub const SITE_FOOTER: &[(&str, &str)] = &[
     ("Contact", "mailto:hello@zetlyn.com"),
@@ -477,6 +497,9 @@ pub fn shell(title: &str, body: Markup) -> String {
     let brand_href = f.brand.clone().unwrap_or_else(|| home_href.clone());
     // Home, the part this is in, and this page: each named once.
     let mut crumbs: Vec<(String, Option<String>)> = Vec::new();
+    if let Some((label, href)) = &f.above {
+        crumbs.push((label.clone(), Some(href.clone())));
+    }
     if !f.home.1.is_empty() {
         crumbs.push((f.home.0.clone(), Some(f.home.1.clone())));
     }
@@ -526,6 +549,16 @@ pub fn shell(title: &str, body: Markup) -> String {
                                     }
                                 }
                             }
+                        }
+                        @match &f.account {
+                            Some(Some(email)) => {
+                                form.account method="post" action="/signout" {
+                                    span.dim { (email) }
+                                    button type="submit" { "Sign out" }
+                                }
+                            }
+                            Some(None) => { a.account href="/signin" { "Sign in" } }
+                            None => {}
                         }
                     }
                 }

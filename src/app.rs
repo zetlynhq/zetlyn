@@ -58,7 +58,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     if !args.iter().any(|a| a == "--no-open") {
         open_browser(&url);
     }
-    let mut app = App { root, addr, sites: BTreeMap::new(), jobs: Arc::new(Mutex::new(Jobs::default())), base: String::new(), hosted: None, visitor: false };
+    let mut app = App { root, addr, sites: BTreeMap::new(), jobs: Arc::new(Mutex::new(Jobs::default())), base: String::new(), hosted: None, visitor: false, who: None };
     {
         let (root, jobs) = (app.root.clone(), app.jobs.clone());
         std::thread::spawn(move || background(&root, &jobs));
@@ -372,6 +372,8 @@ struct App {
     hosted: Option<Hosted>,
     /// This request is not the owner's: the trackers answer it as they would a reader.
     visitor: bool,
+    /// Who is signed in, hosted: shown in the header, member or not.
+    who: Option<String>,
 }
 
 /// A job's handle, for the thread doing it.
@@ -482,7 +484,9 @@ impl App {
         let header = |name: &'static str| request.headers().iter().find(|x| x.field.equiv(name)).map(|x| x.value.as_str().to_string());
         let (cookie, signature) = (header("Cookie"), header("X-Hub-Signature-256").or_else(|| header("X-Zetlyn-Signature")));
         let session = cookie.and_then(|c| c.split(';').filter_map(|p| p.trim().split_once('=')).find(|(k, _)| *k == "zs").map(|(_, v)| v.to_string()));
-        let owner = session.and_then(|s| h.accounts.by_session(&s)).is_some_and(|a| h.is_member(&a.email));
+        let signed_in = session.and_then(|s| h.accounts.by_session(&s)).map(|a| a.email);
+        let owner = signed_in.as_deref().is_some_and(|e| h.is_member(e));
+        self.who = signed_in;
         let post = request.method() == &tiny_http::Method::Post;
         let html_kind = "text/html; charset=utf-8";
         // One sign-in for every workspace on the machine: it is at the root, not here.
@@ -613,6 +617,15 @@ impl App {
             ]
         };
         serve::frame_home("Your trackers", &home, nav);
+        serve::frame_hosted(None, None);
+        // On app.zetlyn.com an organisation's pages wear the website's header and footer, under
+        // the machine they are part of, with who is signed in at the right.
+        if self.hosted.as_ref().is_some_and(|h| h.shared) {
+            let title = crate::account::Site::load(&self.root).title;
+            serve::frame_home(if title.is_empty() { "Organisation" } else { &title }, &home, Vec::new());
+            serve::frame_site("App");
+            serve::frame_hosted(Some(("App".into(), "/".into())), Some(self.who.clone()));
+        }
         if self.visitor {
             serve::frame_app(None, None);
         } else {
@@ -2236,6 +2249,7 @@ pub fn host(args: &[String]) -> Result<(), String> {
         base,
         hosted: Some(Hosted { members: vec![owner], accounts, shared: false }),
         visitor: false,
+        who: None,
     };
     for request in server.incoming_requests() {
         serve::mount(&app.base);
@@ -2446,6 +2460,7 @@ fn hosting_serve(args: &[String]) -> Result<(), String> {
                     base: format!("/{first}"),
                     hosted: Some(Hosted { members: Vec::new(), accounts, shared: true }),
                     visitor: false,
+                    who: None,
                 });
             }
             let Some(app) = apps.get_mut(&first) else { continue };
@@ -2471,7 +2486,10 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
     let session = cookie.and_then(|c| c.split(';').filter_map(|p| p.trim().split_once('=')).find(|(k, _)| *k == "zs").map(|(_, v)| v.to_string()));
     let who = session.as_deref().and_then(|s| accounts.by_session(s));
     let membership = Membership::load(dir);
-    serve::frame_home("Zetlyn", "/", vec![("Hub".into(), "https://hub.zetlyn.com/".into()), ("Docs".into(), "https://zetlyn.com/docs".into())]);
+    // The website's header and footer, with the app where the reader is.
+    serve::frame_home("App", "/", Vec::new());
+    serve::frame_site("App");
+    serve::frame_hosted(None, Some(who.as_ref().map(|a| a.email.clone())));
     serve::frame_section(None, Vec::new());
     serve::frame_app(None, None);
     match parts.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {

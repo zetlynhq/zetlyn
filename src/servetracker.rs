@@ -896,7 +896,7 @@ fn terms_page(scope: &Tracker, site: &Site) -> String {
 
 /// Paid, because an export is the whole of what a subscriber holds.
 fn export(scope: &Tracker, url: &str, v: &Viewer, as_csv: bool) -> Option<(String, &'static str)> {
-    if !v.entitled(&scope.decl.name) {
+    if !v.reads(&scope.decl.name) {
         return None;
     }
     let p = params(url);
@@ -1462,7 +1462,7 @@ impl TrackerSite {
                 }
             }
 
-            "/conflicts" | "/conflicts/mark" if !v.entitled(&scope.decl.name) => (
+            "/conflicts" | "/conflicts/mark" if !v.reads(&scope.decl.name) => (
                 pricing_page(&scope, &site, &v),
                 "text/html; charset=utf-8",
                 None,
@@ -1479,7 +1479,7 @@ impl TrackerSite {
                 };
                 (conflicts_page(&scope, &url, &v, Some(&said)), "text/html; charset=utf-8", None)
             }
-            "/changes" | "/changes.atom" if !v.entitled(&scope.decl.name) => (
+            "/changes" | "/changes.atom" if !v.reads(&scope.decl.name) => (
                 pricing_page(&scope, &site, &v),
                 "text/html; charset=utf-8",
                 None,
@@ -1534,7 +1534,7 @@ impl TrackerSite {
                     None,
                 )
             }
-            "/things" | "/things.atom" if !v.entitled(&scope.decl.name) => (
+            "/things" | "/things.atom" if !v.reads(&scope.decl.name) => (
                 pricing_page(&scope, &site, &v),
                 "text/html; charset=utf-8",
                 None,
@@ -1608,7 +1608,7 @@ impl TrackerSite {
                 ),
             },
             _ if parts.len() == 2 && parts[0] == "watch" => {
-                if !v.entitled(&scope.decl.name) {
+                if !v.reads(&scope.decl.name) {
                     (
                         pricing_page(&scope, &site, &v),
                         "text/html; charset=utf-8",
@@ -1733,7 +1733,7 @@ impl TrackerSite {
             || path.starts_with("/conflicts")
             || path.starts_with("/things")
             || path.starts_with("/watch/");
-        if gated && !v.free && !v.entitled(&scope.decl.name) {
+        if gated && !v.reads(&scope.decl.name) {
             status = 402;
         }
         if missing {

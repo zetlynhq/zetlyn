@@ -126,6 +126,11 @@ pub struct Viewer {
 }
 
 impl Viewer {
+    /// May read all of it, now: because nothing here costs anything, or because they pay. Not
+    /// whether they may see a private tracker, which is `entitled` alone.
+    pub fn reads(&self, scope: &str) -> bool {
+        self.free || self.entitled(scope)
+    }
     pub fn entitled(&self, scope: &str) -> bool {
         self.account.as_ref().is_some_and(|a| a.entitled(scope))
     }

@@ -387,6 +387,20 @@ pub struct Site {
     /// Updates in the background, and how often. See autoupdate.rs.
     #[serde(default)]
     pub update: crate::autoupdate::Config,
+    /// Where what this workspace reads is published after an update moved it, and its hub's pages
+    /// written again: `publish: { to: s3://bucket/prefix, app: https://app.zetlyn.com }`.
+    #[serde(default)]
+    pub publish: Option<Publish>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Publish {
+    /// A hub: a folder, `s3://bucket/prefix`, or an address that takes signed writes.
+    pub to: String,
+    /// Where its trackers can be opened, for the hub's pages: `<app>/<org>/t/<tracker>/`.
+    #[serde(default)]
+    pub app: String,
 }
 
 #[derive(Debug, Deserialize)]

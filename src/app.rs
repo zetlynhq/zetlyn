@@ -2413,6 +2413,9 @@ fn hosting_serve(args: &[String]) -> Result<(), String> {
                 if let Some(s) = crate::schedule_pass(&root, true, &crate::Limits::default()) {
                     soonest = Some(soonest.map_or(s, |x| x.min(s)));
                 }
+                if let Err(e) = publish_moved(&dir, &org) {
+                    eprintln!("{org}: not published: {e}");
+                }
             }
             let wait = soonest.map(|s| (s - crate::now()).clamp(60, 900)).unwrap_or(900);
             std::thread::sleep(std::time::Duration::from_secs(wait as u64));
@@ -2555,4 +2558,77 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
         }
         _ => respond(request, 404, html_kind, &page("Not here", html! { h1 { "Not here" } p { a href="/" { "Every tracker on this machine" } } })),
     }
+}
+
+/// What an organisation's update moved, published where its workspace says, and the hub's pages
+/// written again. A source is published when it has run since it last was; a tracker when one of
+/// its sources was, or its statement is not the one it published.
+fn publish_moved(dir: &Path, org: &str) -> Result<usize, String> {
+    let root = dir.join("orgs").join(org);
+    let Some(to) = crate::account::Site::load(&root).publish else { return Ok(0) };
+    let place = crate::place::at(&to.to)?;
+    let mut published: BTreeSet<String> = BTreeSet::new();
+    let mut moved = 0;
+    for (name, sdir) in crate::tracker::registry(&root.join("sources")) {
+        let Ok(ds) = Source::open(&sdir) else { continue };
+        // What arrived built belongs to whoever built it.
+        if matches!(ds.decl.source, crate::sourcedecl::Fetch::Hub { .. } | crate::sourcedecl::Fetch::Package { .. }) {
+            continue;
+        }
+        let last = ds.store.last_run().to_string();
+        if ds.store.meta("published_run").as_deref() == Some(last.as_str()) {
+            continue;
+        }
+        let wrong = ds.check();
+        if !wrong.is_empty() {
+            eprintln!("{org}: {name} is not published: {}", wrong.join("; "));
+            continue;
+        }
+        match crate::artifact::publish(&ds, place.as_ref(), "latest", None) {
+            Ok(v) => {
+                ds.store.set_meta("published_run", &last)?;
+                println!("{org}: {name}@latest is {v}");
+                published.insert(name);
+                moved += 1;
+            }
+            Err(e) => eprintln!("{org}: {name}: {e}"),
+        }
+    }
+    for tdir in crate::tracker::scope_registry(&root.join("trackers")).values() {
+        let Ok(decl) = TrackerDecl::load(tdir) else { continue };
+        if decl.package.is_some() {
+            continue;
+        }
+        let text = std::fs::read_to_string(tdir.join(crate::trackerdecl::FILE)).unwrap_or_default();
+        let said = crate::place::sha256(text.as_bytes());
+        let held = std::fs::read_to_string(tdir.join(".published")).unwrap_or_default();
+        if held.trim() == said && !decl.members.iter().any(|m| published.contains(&m.dataset)) {
+            continue;
+        }
+        match crate::artifact::publish_scope(tdir, &root.join("sources"), place.as_ref(), "latest", None) {
+            Ok(v) => {
+                let _ = std::fs::write(tdir.join(".published"), &said);
+                println!("{org}: {}@latest is {v}", decl.name);
+                moved += 1;
+            }
+            Err(e) => eprintln!("{org}: {}: {e}", decl.name),
+        }
+    }
+    if moved > 0 {
+        // Every tracker on the machine opens where it answers: its organisation, in the app.
+        let mut answers: BTreeMap<String, String> = BTreeMap::new();
+        if !to.app.is_empty() {
+            for o in orgs_in(dir) {
+                for (name, path) in crate::tracker::scope_registry(&dir.join("orgs").join(&o).join("trackers")) {
+                    if let Some(d) = path.file_name() {
+                        answers.insert(name, format!("{}/{o}/t/{}/", to.app.trim_end_matches('/'), d.to_string_lossy()));
+                    }
+                }
+            }
+        }
+        let opens = |r: &crate::hubpages::Row| answers.get(&r.reference()).cloned();
+        let n = crate::hubpages::render(place.as_ref(), &opens)?;
+        println!("{org}: {n} pages in {}", place.describe());
+    }
+    Ok(moved)
 }

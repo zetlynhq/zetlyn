@@ -118,6 +118,25 @@ header.top .account { margin-left: 28px; display: flex; align-items: center; gap
 header.top a.account { border: 1px solid var(--fg); color: var(--fg); padding: 6px 12px; }
 header.top a.account:hover { background: var(--fg); color: var(--bg); text-decoration: none; }
 header.top form.account button { font: inherit; font-size: 13px; padding: 5px 10px; }
+/* Three parts, one brand: the website, the hub and the app. Each names itself beside the logo,
+   has an accent of its own, and keeps the other two a click away. */
+.brand-area { font-weight: 400; color: var(--accent); margin-left: 1px; }
+header.top .org-name, header.top .org-switch summary { font-size: 14px; color: var(--fg); border-left: 1px solid var(--line);
+  padding-left: 1rem; cursor: default; }
+header.top .org-switch { position: relative; }
+header.top .org-switch summary { cursor: pointer; list-style: none; }
+header.top .org-switch summary::after { content: " ▾"; color: var(--dim); }
+header.top .org-switch ul { position: absolute; top: 2rem; left: .6rem; z-index: 5; list-style: none; margin: 0; padding: .4rem 0;
+  background: var(--panel); border: 1px solid var(--line); min-width: 12rem; }
+header.top .org-switch li a { display: block; padding: .35rem .9rem; color: var(--fg); }
+header.top nav.areas { display: flex; gap: 8px; margin-left: 22px; }
+header.top a.area-link { font: 11px/normal ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; text-transform: uppercase;
+  letter-spacing: .08em; color: var(--dim); border: 1px solid var(--line-strong); padding: 6px 10px; }
+header.top a.area-link:hover { color: var(--fg); border-color: var(--fg); text-decoration: none; }
+body.area-app { --accent: #2f7d4f; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) body.area-app { --accent: #52c486; } }
+:root[data-theme="dark"] body.area-app { --accent: #52c486; }
+@media (max-width: 40rem) { header.top nav.areas { display: none; } header.top .org-name, header.top .org-switch summary { display: none; } }
 footer.site-footer { width: min(1180px, calc(100% - 48px)); margin: 0 auto; padding: 0; height: 90px;
   border-top: 1px solid var(--line); display: flex; align-items: center; color: var(--dim);
   font: 11px/normal ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
@@ -364,6 +383,38 @@ pub struct Frame {
     /// Who is signed in, at the right of the header, where somebody can be: `None` where nobody
     /// signs in (this machine's own app), `Some(None)` for a visitor, `Some(Some(email))` signed in.
     pub account: Option<Option<String>>,
+    /// Which of the three this page is part of: `app` on app.zetlyn.com, empty everywhere else.
+    /// It names the logo, colours the page and says where the other two are.
+    pub area: String,
+    /// The organisation a page is in, and the others whoever is signed in belongs to.
+    pub org: Option<String>,
+    pub orgs: Vec<(String, String)>,
+}
+
+/// The three parts of Zetlyn, each a site of its own: what it is called beside the logo, where it is.
+pub const AREAS: &[(&str, &str, &str)] = &[
+    ("site", "Zetlyn", "https://zetlyn.com/"),
+    ("hub", "Hub", "https://hub.zetlyn.com/"),
+    ("app", "App", "https://app.zetlyn.com/"),
+];
+
+/// This page is part of `area`, in `org`, whose reader belongs to `orgs` too. In the app the mark
+/// leads to the app's own front page, as the hub's leads to the hub's.
+pub fn frame_area(area: &str, org: Option<String>, orgs: Vec<(String, String)>) {
+    FRAME.with(|f| {
+        let mut f = f.borrow_mut();
+        f.area = area.to_string();
+        f.org = org;
+        f.orgs = orgs;
+        if area == "app" {
+            f.brand = Some("/".into());
+        }
+    });
+}
+
+/// Which of the header's links is where the reader is, where it is not the one `frame_site` named.
+pub fn frame_current(current: Option<String>) {
+    FRAME.with(|f| f.borrow_mut().current = current);
 }
 
 /// The crumb above home, and who is signed in. Both are set by `zetlyn hosting` and by nothing else.
@@ -525,16 +576,30 @@ pub fn shell(title: &str, body: Markup) -> String {
                 meta name="theme-color" content="#f2efe7";
                 // As the website does: a theme already chosen is applied before the first paint.
                 script { (maud::PreEscaped(THEME_EARLY)) }
-                title { (title) @if title != "Zetlyn" { " · Zetlyn" } }
+                title { (title) @if title != "Zetlyn" { " · Zetlyn" @if f.area == "app" { " App" } } }
                 link rel="icon" type="image/png" href={"data:image/png;base64," (FAVICON)};
                 link rel="stylesheet" href={(at("/style.css")) "?v=" (env!("CARGO_PKG_VERSION"))};
             }
-            body {
+            body class=(if f.area.is_empty() { String::new() } else { format!("area-{}", f.area) }) {
                 header.top {
                     div.wrap {
                         a.brand href=(brand_href) aria-label="Zetlyn home" {
                             img.brand-mark src={"data:image/png;base64," (MARK)} alt="";
                             span { "Zetlyn" }
+                            @if let Some((_, name, _)) = AREAS.iter().find(|(a, _, _)| *a == f.area && *a != "site") {
+                                span.brand-area { (name) }
+                            }
+                        }
+                        // Which organisation this is, and the others whoever is signed in belongs to.
+                        @if let Some(org) = &f.org {
+                            @if f.orgs.len() > 1 {
+                                details.org-switch {
+                                    summary { (org) }
+                                    ul { @for (label, href) in &f.orgs { li { a href=(href) { (label) } } } }
+                                }
+                            } @else {
+                                span.org-name { (org) }
+                            }
                         }
                         @if let Some((words, href, on)) = &f.status {
                             a.autoupdate.on[*on] href=(href) title="Automatic updates" { span.dot {} (words) }
@@ -559,6 +624,14 @@ pub fn shell(title: &str, body: Markup) -> String {
                             }
                             Some(None) => { a.account href="/signin" { "Sign in" } }
                             None => {}
+                        }
+                        // The other two parts of Zetlyn, a click away from wherever one is.
+                        @if !f.area.is_empty() {
+                            nav.areas aria-label="Zetlyn" {
+                                @for (key, name, href) in AREAS.iter().filter(|(a, _, _)| *a != f.area) {
+                                    a.area-link.{"to-" (key)} href=(href) { (name) }
+                                }
+                            }
                         }
                     }
                 }

@@ -58,7 +58,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     if !args.iter().any(|a| a == "--no-open") {
         open_browser(&url);
     }
-    let mut app = App { root, addr, sites: BTreeMap::new(), jobs: Arc::new(Mutex::new(Jobs::default())), base: String::new(), hosted: None, visitor: false, who: None };
+    let mut app = App { root, addr, sites: BTreeMap::new(), jobs: Arc::new(Mutex::new(Jobs::default())), base: String::new(), hosted: None, visitor: false, who: None, orgs_of_who: Vec::new() };
     {
         let (root, jobs) = (app.root.clone(), app.jobs.clone());
         std::thread::spawn(move || background(&root, &jobs));
@@ -374,6 +374,8 @@ struct App {
     visitor: bool,
     /// Who is signed in, hosted: shown in the header, member or not.
     who: Option<String>,
+    /// The organisations whoever is signed in belongs to, for the switch in the header.
+    orgs_of_who: Vec<(String, String)>,
 }
 
 /// A job's handle, for the thread doing it.
@@ -622,9 +624,34 @@ impl App {
         // the machine they are part of, with who is signed in at the right.
         if self.hosted.as_ref().is_some_and(|h| h.shared) {
             let title = crate::account::Site::load(&self.root).title;
-            serve::frame_home(if title.is_empty() { "Organisation" } else { &title }, &home, Vec::new());
+            let title = if title.is_empty() { "Organisation".to_string() } else { title };
+            // A member's links are the organisation's own; a reader's are what anybody may read.
+            let (links, current) = if self.visitor {
+                (vec![("Trackers you can read".to_string(), "/".to_string()), ("Docs".to_string(), "https://zetlyn.com/docs".to_string())], None)
+            } else {
+                let here = match parts.first().map(String::as_str) {
+                    Some("assist") => "Assist",
+                    Some("settings") => "Settings",
+                    None => "Trackers",
+                    _ => "",
+                };
+                (
+                    vec![
+                        ("Trackers".to_string(), home.clone()),
+                        ("Assist".to_string(), format!("{}/assist", self.base)),
+                        ("Settings".to_string(), format!("{}/settings", self.base)),
+                        ("Docs".to_string(), "https://zetlyn.com/docs".to_string()),
+                    ],
+                    Some(here.to_string()).filter(|h| !h.is_empty()),
+                )
+            };
             serve::frame_site("App");
+            serve::frame_home(&title, &home, links);
+            serve::frame_current(current);
             serve::frame_hosted(Some(("App".into(), "/".into())), Some(self.who.clone()));
+            serve::frame_area("app", Some(title.clone()), self.orgs_of_who.clone());
+        } else {
+            serve::frame_area("", None, Vec::new());
         }
         if self.visitor {
             serve::frame_app(None, None);
@@ -2250,6 +2277,7 @@ pub fn host(args: &[String]) -> Result<(), String> {
         hosted: Some(Hosted { members: vec![owner], accounts, shared: false }),
         visitor: false,
         who: None,
+        orgs_of_who: Vec::new(),
     };
     for request in server.incoming_requests() {
         serve::mount(&app.base);
@@ -2461,6 +2489,7 @@ fn hosting_serve(args: &[String]) -> Result<(), String> {
                     hosted: Some(Hosted { members: Vec::new(), accounts, shared: true }),
                     visitor: false,
                     who: None,
+                    orgs_of_who: Vec::new(),
                 });
             }
             let Some(app) = apps.get_mut(&first) else { continue };
@@ -2468,6 +2497,19 @@ fn hosting_serve(args: &[String]) -> Result<(), String> {
             if let Some(h) = app.hosted.as_mut() {
                 h.members = members;
             }
+            // Every organisation whoever is signed in belongs to, by its title, for the header.
+            app.orgs_of_who = signed_in(&request, &accounts)
+                .map(|email| {
+                    Membership::load(&dir)
+                        .orgs_of(&email)
+                        .into_iter()
+                        .map(|(org, _)| {
+                            let t = crate::account::Site::load(&dir.join("orgs").join(&org)).title;
+                            (if t.is_empty() { org.clone() } else { t }, format!("/{org}/"))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             serve::mount(&app.base);
             app.answer(request);
             continue;
@@ -2487,9 +2529,11 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
     let who = session.as_deref().and_then(|s| accounts.by_session(s));
     let membership = Membership::load(dir);
     // The website's header and footer, with the app where the reader is.
-    serve::frame_home("App", "/", Vec::new());
     serve::frame_site("App");
+    serve::frame_home("App", "/", vec![("Trackers you can read".into(), "/".into()), ("Docs".into(), "https://zetlyn.com/docs".into())]);
+    serve::frame_current(Some("Trackers you can read".into()));
     serve::frame_hosted(None, Some(who.as_ref().map(|a| a.email.clone())));
+    serve::frame_area("app", None, Vec::new());
     serve::frame_section(None, Vec::new());
     serve::frame_app(None, None);
     match parts.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
@@ -2649,4 +2693,11 @@ fn publish_moved(dir: &Path, org: &str) -> Result<usize, String> {
         println!("{org}: {n} pages in {}", place.describe());
     }
     Ok(moved)
+}
+
+/// Who a request is signed in as, on a machine where everybody signs in once.
+fn signed_in(request: &tiny_http::Request, accounts: &crate::account::Accounts) -> Option<String> {
+    let cookie = request.headers().iter().find(|h| h.field.equiv("Cookie"))?.value.as_str().to_string();
+    let session = cookie.split(';').filter_map(|p| p.trim().split_once('=')).find(|(k, _)| *k == "zs").map(|(_, v)| v.to_string())?;
+    accounts.by_session(&session).map(|a| a.email)
 }

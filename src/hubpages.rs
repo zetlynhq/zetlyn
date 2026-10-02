@@ -169,16 +169,25 @@ fn frame(place: &dyn Place, title: &str, description: &str, body: Markup) -> Str
                 @if has("favicon.png") { link rel="icon" href="/favicon.png" type="image/png"; }
                 link rel="stylesheet" href={"/style.css?v=" (stamp("style.css"))};
             }
-            body {
+            body.area-hub {
                 header.site-header.shell {
-                    a.brand href="https://zetlyn.com" {
+                    a.brand href="/" aria-label="Zetlyn Hub" {
                         @if has("mark.png") { img src="/mark.png" alt="" class="brand-mark"; }
-                        span { "Zetlyn" }
+                        span { "Zetlyn" } span.brand-area { "Hub" }
                     }
-                    // The website's header, link for link, with the hub where the reader is.
+                    // Searched in the browser, over the list the hub keeps of itself: the hub
+                    // still answers no query.
+                    form.hub-search role="search" action="/" onsubmit="return false" {
+                        input #hub-q type="search" placeholder="Search trackers and sources…" aria-label="Search trackers and sources" autocomplete="off";
+                        div #hub-results hidden {}
+                    }
                     nav {
-                        @for (label, href) in crate::serve::SITE_NAV {
-                            @if *label == "Hub" { a href=(href) aria-current="page" { (label) } } @else { a href=(href) { (label) } }
+                        a href="/#trackers" { "Trackers" }
+                        a href="/#sources" { "Sources" }
+                        a href="/#publish" { "Publish" }
+                        a href="https://zetlyn.com/docs" { "Docs" }
+                        @for (key, name, href) in crate::serve::AREAS.iter().filter(|(a, _, _)| *a != "hub") {
+                            a.area-link.{"to-" (key)} href=(href) { (name) }
                         }
                     }
                 }
@@ -191,6 +200,7 @@ fn frame(place: &dyn Place, title: &str, description: &str, body: Markup) -> Str
                     }
                 }
                 @if has("app.js") { script src={"/app.js?v=" (stamp("app.js"))} {} }
+                script { (PreEscaped(SEARCH)) }
             }
         }
     };
@@ -279,7 +289,7 @@ pub fn catalog(place: &dyn Place, rows: &[Row], opens: Opens) -> String {
         }
         @if let Some(about) = about { (PreEscaped(about)) }
     };
-    frame(place, "The hub — Zetlyn", "Trackers and sources anyone can use: open one, or subscribe and keep a copy that stays current.", body)
+    frame(place, "Zetlyn Hub", "Trackers and sources anyone can use: open one, or subscribe and keep a copy that stays current.", body)
 }
 
 fn take(command: &str, note: &str) -> Markup {
@@ -375,7 +385,7 @@ fn source_page(place: &dyn Place, r: &Row, rows: &[Row], opens: Opens) -> String
             p.caption { "Version " code { (r.version) } " · " a href={"/sources/" (reference) "/versions/" (r.version) "/manifest.json"} { "manifest.json" } }
         }
     };
-    frame(place, &format!("{} — the hub — Zetlyn", r.title()), &r.about(), body)
+    frame(place, &format!("{} · Zetlyn Hub", r.title()), &r.about(), body)
 }
 
 /// A tracker or a package: what it is about, its sources, what it promises, and how to take it.
@@ -452,7 +462,7 @@ fn tracker_page(place: &dyn Place, r: &Row, rows: &[Row], opens: Opens) -> Strin
             }
         }
     };
-    frame(place, &format!("{} — the hub — Zetlyn", r.title()), &r.about(), body)
+    frame(place, &format!("{} · Zetlyn Hub", r.title()), &r.about(), body)
 }
 
 /// The page for one row.
@@ -495,3 +505,46 @@ pub fn render(place: &dyn Place, opens: Opens) -> Result<usize, String> {
     }
     Ok(written)
 }
+
+/// The search in the hub's header. It reads `/index.json` once, the first time somebody types, and
+/// looks through the titles, names and sentences there: what a hub lists about itself, and no more.
+const SEARCH: &str = r##"(function () {
+  var q = document.getElementById("hub-q"), box = document.getElementById("hub-results");
+  if (!q || !box) return;
+  var rows = null, asked = false;
+  function kind(t) { return t === "sources" ? "source" : t === "packages" ? "package" : "tracker"; }
+  function show() {
+    var words = q.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    box.innerHTML = "";
+    if (!words.length || !rows) { box.hidden = true; return; }
+    var hits = rows.filter(function (r) {
+      var hay = (r.title + " " + r.reference + " " + (r.about || "")).toLowerCase();
+      return words.every(function (w) { return hay.indexOf(w) >= 0; });
+    }).slice(0, 8);
+    if (!hits.length) {
+      var none = document.createElement("p"); none.textContent = "Nothing here by that name."; box.appendChild(none);
+    }
+    hits.forEach(function (r) {
+      var a = document.createElement("a"); a.href = r.page;
+      var t = document.createElement("b"); t.textContent = r.title;
+      var k = document.createElement("small"); k.textContent = kind(r.tree) + " · " + r.reference;
+      a.appendChild(t); a.appendChild(k); box.appendChild(a);
+    });
+    box.hidden = false;
+  }
+  q.addEventListener("input", function () {
+    if (!asked) {
+      asked = true;
+      fetch("/index.json").then(function (r) { return r.json(); })
+        .then(function (j) { rows = (j.carries || []).filter(function (r, i, all) {
+          return all.findIndex(function (x) { return x.page === r.page; }) === i; }); show(); })
+        .catch(function () { rows = []; });
+    }
+    show();
+  });
+  q.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") { var first = box.querySelector("a"); if (first) location.href = first.href; }
+    if (e.key === "Escape") { q.value = ""; show(); }
+  });
+  document.addEventListener("click", function (e) { if (!box.contains(e.target) && e.target !== q) box.hidden = true; });
+})();"##;

@@ -222,7 +222,7 @@ fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
 
 /// The options that stand alone: every other `--option` takes the argument after it as its value.
 const SWITCHES: &[&str] = &[
-    "--apply", "--deliver", "--from-start", "--go-on", "--help", "--links", "--no-deliver", "--no-open", "--once",
+    "--all", "--apply", "--deliver", "--from-start", "--go-on", "--help", "--links", "--no-deliver", "--no-open", "--once",
     "--open", "--rebuild", "--reread", "--revoke", "--sealed", "--send", "--withdraw",
 ];
 
@@ -497,6 +497,7 @@ fn run(args: &[String]) -> Result<(), String> {
         Some("assist") => assist_command(args),
         Some("billing") => billing::command(args),
         Some("host") => app::host(args),
+        Some("hosting") => app::hosting(args),
         Some("id") => id_command(args),
         Some("platform") => platform_command(args),
         Some("serve") => {
@@ -1508,13 +1509,15 @@ fn hub_command(args: &[String]) -> Result<(), String> {
             let to = positional(args, 2).get(1).map(|s| s.to_string()).ok_or("to which hub?")?;
             let (src, dst) = (place::at(&from)?, place::at(&to)?);
             let (mut put, mut kept) = (0usize, 0usize);
+            // --all writes what is there already too: to give every file what this place now says of it.
+            let again = args.iter().any(|a| a == "--all");
             for path in src.list("")? {
                 // The owners of a hub that checks signatures are not data, and not for a bucket.
                 if path == "owners.yaml" || path.ends_with(".arriving") {
                     continue;
                 }
                 let bytes = src.get(&path)?;
-                if dst.get(&path).is_ok_and(|held| held == bytes) {
+                if !again && dst.get(&path).is_ok_and(|held| held == bytes) {
                     kept += 1;
                     continue;
                 }
@@ -1623,7 +1626,7 @@ const HUB_USAGE: &str = "\
       GET for anybody. PUT signed by a key that holds the owner named in the path.
       A folder, a mount and a private bucket need none of this.
 
-  zetlyn hub copy <from> <to>
+  zetlyn hub copy <from> <to> [--all]
       One hub into another, file for file, a folder into a bucket say. Run again, it writes
       only what differs.
 

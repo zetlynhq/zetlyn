@@ -205,6 +205,8 @@ pub struct S3 {
     prefix: String,
     key: String,
     secret: String,
+    /// `ZETLYN_S3_ACL`: the canned ACL every file written is given, `public-read` for a hub.
+    acl: String,
     agent: ureq::Agent,
 }
 
@@ -236,6 +238,7 @@ impl S3 {
             prefix,
             key,
             secret,
+            acl: env("ZETLYN_S3_ACL"),
             agent,
         })
     }
@@ -291,15 +294,20 @@ impl S3 {
         headers.insert("host".to_string(), self.host());
         headers.insert("x-amz-content-sha256".to_string(), payload.clone());
         headers.insert("x-amz-date".to_string(), stamp.clone());
+        // What a file written here may be read by, where the operator says: `public-read` puts a
+        // hub's files out for anybody, file by file, which holds where a bucket's policy is slow
+        // to reach every node.
+        if method == "PUT" && !self.acl.is_empty() {
+            headers.insert("x-amz-acl".to_string(), self.acl.clone());
+        }
         if self.key.is_empty() || self.secret.is_empty() {
             return headers;
         }
 
-        let signed_headers = "host;x-amz-content-sha256;x-amz-date";
-        let canonical = format!(
-            "{method}\n{canonical_uri}\n{query}\nhost:{}\nx-amz-content-sha256:{payload}\nx-amz-date:{stamp}\n\n{signed_headers}\n{payload}",
-            self.host()
-        );
+        // Every header sent is signed, sorted by name, which is what the canonical form is.
+        let signed_headers = headers.keys().cloned().collect::<Vec<_>>().join(";");
+        let lines: String = headers.iter().map(|(k, v)| format!("{k}:{v}\n")).collect();
+        let canonical = format!("{method}\n{canonical_uri}\n{query}\n{lines}\n{signed_headers}\n{payload}");
         let scope = format!("{date}/{}/s3/aws4_request", self.region);
         let to_sign = format!(
             "AWS4-HMAC-SHA256\n{stamp}\n{scope}\n{}",
@@ -471,6 +479,7 @@ mod tests {
             prefix: String::new(),
             key: "AKIDEXAMPLE".into(),
             secret: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".into(),
+            acl: String::new(),
             agent: ureq::Agent::config_builder().build().into(),
         };
         let headers = s3.signed(
@@ -513,6 +522,7 @@ mod tests {
             prefix: String::new(),
             key: String::new(),
             secret: String::new(),
+            acl: String::new(),
             agent: ureq::Agent::config_builder().build().into(),
         };
         let headers = s3.signed(

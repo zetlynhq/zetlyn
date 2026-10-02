@@ -482,9 +482,14 @@ impl App {
         let header = |name: &'static str| request.headers().iter().find(|x| x.field.equiv(name)).map(|x| x.value.as_str().to_string());
         let (cookie, signature) = (header("Cookie"), header("X-Hub-Signature-256").or_else(|| header("X-Zetlyn-Signature")));
         let session = cookie.and_then(|c| c.split(';').filter_map(|p| p.trim().split_once('=')).find(|(k, _)| *k == "zs").map(|(_, v)| v.to_string()));
-        let owner = session.and_then(|s| h.accounts.by_session(&s)).is_some_and(|a| a.email.eq_ignore_ascii_case(&h.owner));
+        let owner = session.and_then(|s| h.accounts.by_session(&s)).is_some_and(|a| h.is_member(&a.email));
         let post = request.method() == &tiny_http::Method::Post;
         let html_kind = "text/html; charset=utf-8";
+        // One sign-in for every workspace on the machine: it is at the root, not here.
+        if h.shared && parts.first().is_some_and(|p| p == "signin" || p == "signout") {
+            redirect(request, "/signin");
+            return None;
+        }
         match parts.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
             ["style.css"] => Some(request),
             // Signed by its sender, so nobody signs in to push to a source.
@@ -517,11 +522,12 @@ impl App {
                 let _ = std::io::Read::read_to_string(request.as_reader(), &mut body);
                 let email = parse_form(&body).get("email").cloned().unwrap_or_default();
                 // The same words whoever asks, so the page does not say whose workspace it is.
-                if email.trim().eq_ignore_ascii_case(&h.owner) {
-                    let sent = h.accounts.ensure(&h.owner).and_then(|a| h.accounts.new_link(a.id)).and_then(|raw| {
+                if h.is_member(&email) {
+                    let email = email.trim().to_lowercase();
+                    let sent = h.accounts.ensure(&email).and_then(|a| h.accounts.new_link(a.id)).and_then(|raw| {
                         let site = crate::account::Site::load(&self.root);
                         let link = format!("{}{}", site.url.trim_end_matches('/'), serve::at(&format!("/signin/{raw}")));
-                        site.send(&h.owner, "Your Zetlyn sign-in link", &format!("{link}\n\nGood for a quarter of an hour, and once."))
+                        site.send(&email, "Your Zetlyn sign-in link", &format!("{link}\n\nGood for a quarter of an hour, and once."))
                     });
                     if let Err(e) = sent {
                         eprintln!("sign-in mail: {e}");
@@ -2175,8 +2181,18 @@ fn example_name(ds: &Source) -> Option<&'static str> {
 
 /// A workspace hosted for somebody: whose it is, and where its plan is kept.
 struct Hosted {
-    owner: String,
+    /// Who may run it: one owner for `zetlyn host`, an organisation's members for
+    /// `zetlyn hosting`. Everybody else reads what it publishes.
+    members: Vec<String>,
     accounts: crate::account::Accounts,
+    /// Signed in once for every workspace on the machine, at its root: `zetlyn hosting`.
+    shared: bool,
+}
+
+impl Hosted {
+    fn is_member(&self, email: &str) -> bool {
+        self.members.iter().any(|m| m.eq_ignore_ascii_case(email.trim()))
+    }
 }
 
 /// `zetlyn host <workspace> --name <name> --billing <dir> [--addr 127.0.0.1:2300]`: one person's
@@ -2218,7 +2234,7 @@ pub fn host(args: &[String]) -> Result<(), String> {
         sites: BTreeMap::new(),
         jobs: Arc::new(Mutex::new(Jobs::default())),
         base,
-        hosted: Some(Hosted { owner, accounts }),
+        hosted: Some(Hosted { members: vec![owner], accounts, shared: false }),
         visitor: false,
     };
     for request in server.incoming_requests() {
@@ -2242,4 +2258,301 @@ fn first_said<A, B: Clone + Default>(fields: &[(String, A, Vec<B>)]) -> Vec<&(St
     them.sort_by_key(|f| rank(&f.0));
     them.truncate(6);
     them
+}
+
+// ---------------------------------------------------------------------------------------------
+// Every organisation's workspace, in one process: `zetlyn hosting serve <dir>`.
+//
+//   <dir>/workspace.yaml     the machine's address, its mailer
+//   <dir>/accounts.db        everybody who has signed in, once, for every organisation
+//   <dir>/members.yaml       who belongs to which organisation, and as what
+//   <dir>/orgs/<org>/        one workspace per organisation, the same as on anybody's machine
+//
+// An organisation's members run its workspace at `/<org>/`, as its owner would on their own
+// machine. Anybody else, signed in or not, reads the trackers it publishes, and the front page
+// lists every public tracker on the machine.
+
+/// `members.yaml`: per organisation, who belongs to it and as what.
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
+struct Membership {
+    #[serde(flatten)]
+    orgs: BTreeMap<String, Vec<Member>>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+struct Member {
+    email: String,
+    #[serde(default = "an_owner")]
+    role: String,
+}
+
+fn an_owner() -> String {
+    "owner".into()
+}
+
+const MEMBERS: &str = "members.yaml";
+
+impl Membership {
+    fn load(dir: &Path) -> Membership {
+        crate::yaml::read_or_default(&dir.join(MEMBERS))
+    }
+    fn save(&self, dir: &Path) -> Result<(), String> {
+        let path = dir.join(MEMBERS);
+        std::fs::write(&path, crate::yaml::to_string(self)?).map_err(|e| format!("{}: {e}", path.display()))
+    }
+    fn of(&self, org: &str) -> Vec<String> {
+        self.orgs.get(org).map(|m| m.iter().map(|x| x.email.to_lowercase()).collect()).unwrap_or_default()
+    }
+    /// The organisations somebody belongs to, with what they are in each.
+    fn orgs_of(&self, email: &str) -> Vec<(String, String)> {
+        self.orgs
+            .iter()
+            .filter_map(|(org, ms)| ms.iter().find(|m| m.email.eq_ignore_ascii_case(email)).map(|m| (org.clone(), m.role.clone())))
+            .collect()
+    }
+}
+
+/// An organisation's name is an address and a directory: lower case, digits and hyphens.
+fn org_name(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 40 && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') && !s.starts_with('-')
+}
+
+fn orgs_in(dir: &Path) -> Vec<String> {
+    let mut out: Vec<String> = std::fs::read_dir(dir.join("orgs"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| org_name(n))
+        .collect();
+    out.sort();
+    out
+}
+
+/// `zetlyn hosting serve | org | member`.
+pub fn hosting(args: &[String]) -> Result<(), String> {
+    match args.get(1).map(String::as_str) {
+        Some("serve") => hosting_serve(args),
+        // A new organisation: its workspace, empty, beside the others.
+        Some("org") => {
+            let dir = PathBuf::from(crate::positional(args, 2).first().ok_or("which hosting directory?")?.as_str());
+            let name = crate::positional(args, 2).get(1).map(|s| s.to_string()).ok_or("which organisation?")?;
+            if !org_name(&name) {
+                return Err(format!("{name}: an organisation's name is lower case letters, digits and hyphens"));
+            }
+            let root = dir.join("orgs").join(&name);
+            for d in ["sources", "trackers"] {
+                std::fs::create_dir_all(root.join(d)).map_err(|e| format!("{}: {e}", root.display()))?;
+            }
+            let file = root.join(crate::account::WORKSPACE);
+            if !file.exists() {
+                let title = crate::flag(args, "--title").unwrap_or(&name).to_string();
+                std::fs::write(&file, format!("title: {}\n", serde_json::to_string(&title).unwrap_or_default()))
+                    .map_err(|e| format!("{}: {e}", file.display()))?;
+            }
+            println!("{name} in {}", root.display());
+            Ok(())
+        }
+        // Somebody in an organisation, as owner, editor or reader. `--remove` takes them out.
+        Some("member") => {
+            let dir = PathBuf::from(crate::positional(args, 2).first().ok_or("which hosting directory?")?.as_str());
+            let org = crate::positional(args, 2).get(1).map(|s| s.to_string()).ok_or("which organisation?")?;
+            let email = crate::positional(args, 2).get(2).map(|s| s.trim().to_lowercase()).ok_or("whose address?")?;
+            if !dir.join("orgs").join(&org).is_dir() {
+                return Err(format!("{org}: no such organisation. `zetlyn hosting org {} {org}` makes it", dir.display()));
+            }
+            let role = crate::flag(args, "--role").unwrap_or("owner").to_string();
+            if !matches!(role.as_str(), "owner" | "editor" | "reader") {
+                return Err(format!("{role}: an owner, an editor or a reader"));
+            }
+            let mut m = Membership::load(&dir);
+            let list = m.orgs.entry(org.clone()).or_default();
+            list.retain(|x| !x.email.eq_ignore_ascii_case(&email));
+            let removing = args.iter().any(|a| a == "--remove");
+            if !removing {
+                list.push(Member { email: email.clone(), role: role.clone() });
+            }
+            m.save(&dir)?;
+            println!("{email} {} {org}", if removing { "is no longer in".to_string() } else { format!("is {role} in") });
+            Ok(())
+        }
+        _ => Err("zetlyn hosting serve <dir> [--addr 127.0.0.1:2400] | org <dir> <name> [--title …] | member <dir> <org> <email> [--role owner|editor|reader] [--remove]".into()),
+    }
+}
+
+/// Every public tracker on the machine, by organisation.
+fn public_trackers(dir: &Path) -> Vec<(String, String, TrackerDecl)> {
+    let mut out = Vec::new();
+    for org in orgs_in(dir) {
+        for (name, decl, _) in listed(&dir.join("orgs").join(&org).join("trackers")) {
+            if decl.visibility != "private" {
+                out.push((org.clone(), name, decl));
+            }
+        }
+    }
+    out
+}
+
+fn hosting_serve(args: &[String]) -> Result<(), String> {
+    let dir = PathBuf::from(crate::positional(args, 2).first().ok_or("which hosting directory?")?.as_str());
+    std::fs::create_dir_all(dir.join("orgs")).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let addr = crate::flag(args, "--addr").unwrap_or("127.0.0.1:2400").to_string();
+    let accounts = crate::account::Accounts::open(&dir)?;
+    let server = tiny_http::Server::http(&addr).map_err(|e| e.to_string())?;
+    println!("{} organisations from {} on http://{addr}/", orgs_in(&dir).len(), dir.display());
+
+    // Every organisation's sources, trackers and watches, one after another, as `zetlyn run`
+    // does them for one workspace.
+    {
+        let dir = dir.clone();
+        std::thread::spawn(move || loop {
+            let mut soonest: Option<i64> = None;
+            for org in orgs_in(&dir) {
+                let root = dir.join("orgs").join(&org);
+                if let Some(s) = crate::schedule_pass(&root, true, &crate::Limits::default()) {
+                    soonest = Some(soonest.map_or(s, |x| x.min(s)));
+                }
+            }
+            let wait = soonest.map(|s| (s - crate::now()).clamp(60, 900)).unwrap_or(900);
+            std::thread::sleep(std::time::Duration::from_secs(wait as u64));
+        });
+    }
+
+    let mut apps: BTreeMap<String, App> = BTreeMap::new();
+    for request in server.incoming_requests() {
+        let url = request.url().to_string();
+        let path = url.split('?').next().unwrap_or("/").to_string();
+        let parts: Vec<String> = path.split('/').filter(|s| !s.is_empty()).map(serve::urldecode).collect();
+        let first = parts.first().cloned().unwrap_or_default();
+        if org_name(&first) && dir.join("orgs").join(&first).is_dir() {
+            let members = Membership::load(&dir).of(&first);
+            if !apps.contains_key(&first) {
+                let accounts = match crate::account::Accounts::open(&dir) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        respond(request, 500, "text/plain; charset=utf-8", &e);
+                        continue;
+                    }
+                };
+                apps.insert(first.clone(), App {
+                    root: dir.join("orgs").join(&first),
+                    addr: addr.clone(),
+                    sites: BTreeMap::new(),
+                    jobs: Arc::new(Mutex::new(Jobs::default())),
+                    base: format!("/{first}"),
+                    hosted: Some(Hosted { members: Vec::new(), accounts, shared: true }),
+                    visitor: false,
+                });
+            }
+            let Some(app) = apps.get_mut(&first) else { continue };
+            // Who belongs is read afresh each time: somebody added a minute ago is in now.
+            if let Some(h) = app.hosted.as_mut() {
+                h.members = members;
+            }
+            serve::mount(&app.base);
+            app.answer(request);
+            continue;
+        }
+        serve::mount("");
+        hosting_root(request, &dir, &accounts, &parts);
+    }
+    Ok(())
+}
+
+/// The machine's own pages: what anybody can read here, signing in, and your organisations.
+fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::account::Accounts, parts: &[String]) {
+    let html_kind = "text/html; charset=utf-8";
+    let post = request.method() == &tiny_http::Method::Post;
+    let cookie = request.headers().iter().find(|h| h.field.equiv("Cookie")).map(|h| h.value.as_str().to_string());
+    let session = cookie.and_then(|c| c.split(';').filter_map(|p| p.trim().split_once('=')).find(|(k, _)| *k == "zs").map(|(_, v)| v.to_string()));
+    let who = session.as_deref().and_then(|s| accounts.by_session(s));
+    let membership = Membership::load(dir);
+    serve::frame_home("Zetlyn", "/", vec![("Hub".into(), "https://hub.zetlyn.com/".into()), ("Docs".into(), "https://zetlyn.com/docs".into())]);
+    serve::frame_section(None, Vec::new());
+    serve::frame_app(None, None);
+    match parts.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        ["style.css"] => respond(request, 200, "text/css; charset=utf-8", &format!("{}{APP_STYLE}", serve::STYLE)),
+        [] => {
+            let public = public_trackers(dir);
+            let mine = who.as_ref().map(|a| membership.orgs_of(&a.email)).unwrap_or_default();
+            respond(request, 200, html_kind, &page("Zetlyn", html! {
+                h1 { "Trackers you can read" }
+                p.about { "Every public tracker on this machine, readable without an account. Its organisation keeps it current." }
+                @if public.is_empty() { p.dim { "None yet." } }
+                table { tbody {
+                    @for (org, name, decl) in &public {
+                        tr {
+                            td { a href={"/" (org) "/t/" (name) "/"} { strong { (decl.title) } } div.why { (decl.about) } }
+                            td.dim { (org) }
+                        }
+                    }
+                } }
+                @match &who {
+                    Some(a) => {
+                        h2 { "Your organisations" }
+                        @if mine.is_empty() { p.dim { (a.email) " belongs to none yet." } }
+                        table { tbody {
+                            @for (org, role) in &mine { tr { td { a href={"/" (org) "/"} { strong { (org) } } } td.dim { (role) } } }
+                        } }
+                        form.bar method="post" action="/signout" { span.dim { "Signed in as " (a.email) } button type="submit" { "Sign out" } }
+                    }
+                    None => {
+                        p { a href="/signin" { "Sign in" } " to run your organisation's trackers." }
+                    }
+                }
+            }));
+        }
+        ["signin"] if post => {
+            let mut body = String::new();
+            let _ = std::io::Read::read_to_string(request.as_reader(), &mut body);
+            let email = parse_form(&body).get("email").cloned().unwrap_or_default().trim().to_lowercase();
+            // The same words whoever asks, so the page does not say who belongs anywhere.
+            if !membership.orgs_of(&email).is_empty() {
+                let sent = accounts.ensure(&email).and_then(|a| accounts.new_link(a.id)).and_then(|raw| {
+                    let site = crate::account::Site::load(dir);
+                    let link = format!("{}/signin/{raw}", site.url.trim_end_matches('/'));
+                    site.send(&email, "Your Zetlyn sign-in link", &format!("{link}\n\nGood for a quarter of an hour, and once."))
+                });
+                if let Err(e) = sent {
+                    eprintln!("sign-in mail: {e}");
+                }
+            }
+            respond(request, 200, html_kind, &page("Sign in", html! { h1 { "Check your mail" } p { "If that address belongs to an organisation here, a link to sign in is on its way. It is good for a quarter of an hour, and once." } }));
+        }
+        ["signin"] => respond(request, 200, html_kind, &page("Sign in", html! {
+            h1 { "Sign in" }
+            p.about { "With a link sent to your address. No password." }
+            form.bar method="post" action="/signin" {
+                input.wide type="email" name="email" placeholder="you@example.org" required;
+                button.primary type="submit" { "Send me a link" }
+            }
+        })),
+        ["signin", raw] => match accounts.spend_link(raw) {
+            Some(session) => {
+                let cookie = format!("zs={session}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000");
+                let mut response = tiny_http::Response::from_string("").with_status_code(303);
+                for (k, v) in [("Location", "/".to_string()), ("Set-Cookie", cookie)] {
+                    if let Ok(h) = tiny_http::Header::from_bytes(k.as_bytes(), v.as_bytes()) {
+                        response = response.with_header(h);
+                    }
+                }
+                let _ = request.respond(response);
+            }
+            None => respond(request, 410, html_kind, &page("Sign in", html! { h1 { "That link is spent" } p { a href="/signin" { "Ask for another" } } })),
+        },
+        ["signout"] if post => {
+            if let Some(s) = &session {
+                accounts.end_session(s);
+            }
+            let mut response = tiny_http::Response::from_string("").with_status_code(303);
+            for (k, v) in [("Location", "/"), ("Set-Cookie", "zs=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0")] {
+                if let Ok(h) = tiny_http::Header::from_bytes(k.as_bytes(), v.as_bytes()) {
+                    response = response.with_header(h);
+                }
+            }
+            let _ = request.respond(response);
+        }
+        _ => respond(request, 404, html_kind, &page("Not here", html! { h1 { "Not here" } p { a href="/" { "Every tracker on this machine" } } })),
+    }
 }

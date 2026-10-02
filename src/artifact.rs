@@ -535,7 +535,7 @@ fn write_delta(
 ///
 /// Where a place cannot compare and write in one step, this is a read and then a write, and the
 /// publisher is the lock. It catches the mistake, not a race.
-fn move_tag(
+pub(crate) fn move_tag(
     place: &dyn Place,
     path: &str,
     version: &str,

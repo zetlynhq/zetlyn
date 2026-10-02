@@ -32,6 +32,27 @@ pub struct TrackerDecl {
     pub view: Views,
     #[serde(default, skip_serializing_if = "Promise::is_empty")]
     pub promise: Promise,
+    /// Set on a tracker that arrived as a package: where from, which version, whose key. A sealed
+    /// one is never built here, because it holds no recipe to build it with; a newer package
+    /// replaces it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<Packaged>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Packaged {
+    /// A hub, or the file it was opened from.
+    pub from: String,
+    /// `owner/name@tag` on that hub; absent for a file.
+    #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    pub version: String,
+    #[serde(default)]
+    pub sealed: bool,
+    /// The publisher's key, pinned: a newer version not signed by it is not taken.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

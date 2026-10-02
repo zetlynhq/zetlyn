@@ -841,7 +841,11 @@ impl App {
             // On this machine: the sources and the tracker onto a hub, by the commands a terminal
             // would run, so the page does nothing the command line does not.
             (true, ["publish-hub", tracker]) => {
-                let id = self.publish_to_hub(tracker);
+                let id = self.publish_to_hub(tracker, false);
+                (200, json_kind, json!({ "job": id }).to_string())
+            }
+            (true, ["publish-hub-sealed", tracker]) => {
+                let id = self.publish_to_hub(tracker, true);
                 (200, json_kind, json!({ "job": id }).to_string())
             }
             (false, ["review", tracker, source]) => match self.review_page(tracker, source, &query) {
@@ -1134,11 +1138,22 @@ impl App {
                             button.primary type="submit" disabled[!blocked.is_empty()] { "Make it public" }
                         }
                     }
-                    @if self.hosted.is_none() {
+                    @if let Some(p) = &t.decl.package {
                         h2 { "On a hub" }
-                        p.dim { "Publishing puts its sources and its statement on hub.zetlyn.com, signed with this machine's key (" code { "zetlyn id" } "), where anybody can subscribe to them." }
+                        p.dim {
+                            "It came as a " @if p.sealed { "sealed " } "package, version " code { (p.version.get(..8).unwrap_or(&p.version)) }
+                            @if !p.key.is_empty() { ", signed by " code { (p.key) } }
+                            ". A package is published by whoever made it."
+                        }
+                    } @else if self.hosted.is_none() {
+                        h2 { "On a hub" }
+                        p.dim { "Sealed, it travels as one file on hub.zetlyn.com: everything it answers with, every claim and its history, and not how it was made. Which source is read where, their own field names, the mappings and the receipts stay here. Signed with this machine's key (" code { "zetlyn id" } ")." }
+                        form #publish-sealed data-job=(serve::at(&format!("/publish-hub-sealed/{tracker}"))) {
+                            button.primary type="submit" disabled[public && !blocked.is_empty()] { "Publish sealed" }
+                        }
+                        p.dim { "Open, it puts its sources and its statement there as they are, recipes included, for somebody to copy and change." }
                         form #publish data-job=(serve::at(&format!("/publish-hub/{tracker}"))) {
-                            button type="submit" disabled[public && !blocked.is_empty()] { "Publish to hub.zetlyn.com" }
+                            button type="submit" disabled[public && !blocked.is_empty()] { "Publish open" }
                         }
                         pre #log data-jobs=(serve::at("/job/")) hidden {}
                         div #error .note hidden {}
@@ -1172,10 +1187,12 @@ impl App {
         Ok(format!("It is {visibility} now."))
     }
 
-    fn publish_to_hub(&self, tracker: &str) -> u64 {
+    /// Open: every source and the statement, recipes included. Sealed: one file with what the
+    /// tracker answers with, and not how it was made.
+    fn publish_to_hub(&self, tracker: &str, sealed: bool) -> u64 {
         let (dir, sources) = (self.trackers().join(tracker), self.sources());
         self.start(move |p| {
-            p.label("Publishing to the hub");
+            p.label(if sealed { "Publishing sealed to the hub" } else { "Publishing to the hub" });
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
             let t = Tracker::open(&dir, &sources)?;
             let registry = crate::tracker::registry(&sources);
@@ -1184,6 +1201,12 @@ impl App {
                 let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
                 if out.status.success() { Ok(said) } else { Err(said.trim().to_string()) }
             };
+            let back = serve::at(&format!("/publish/{}", dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
+            if sealed {
+                p.say(format!("zetlyn tracker publish {} --sealed", dir.display()));
+                p.say(run(&["tracker", "publish", &dir.display().to_string(), "--sealed"])?.trim().to_string());
+                return Ok(back);
+            }
             for m in &t.decl.members {
                 let Some(sdir) = registry.get(&m.dataset) else { continue };
                 p.say(format!("zetlyn source publish {}", sdir.display()));

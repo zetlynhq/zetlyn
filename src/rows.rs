@@ -516,6 +516,9 @@ pub fn each_row(
         Fetch::Hub { reference, .. } => Err(format!(
             "{reference} is subscribed. `zetlyn source pull` asks its hub for a newer version"
         )),
+        Fetch::Package { tracker, .. } => Err(format!(
+            "it came in the package {tracker}. `zetlyn tracker pull` takes a newer version"
+        )),
     }
 }
 

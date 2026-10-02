@@ -90,6 +90,10 @@ pub fn set(root: &Path, every: Option<&str>, offered: bool) -> Result<(), String
 
 /// How often this source is updated: its own `schedule.every`, `never`, or the workspace's.
 pub fn source_every(ds: &Source, workspace: Option<i64>) -> Option<i64> {
+    // Claims that arrive built are not fetched here, so there is no rhythm to keep.
+    if matches!(ds.decl.source, crate::sourcedecl::Fetch::Hub { .. } | crate::sourcedecl::Fetch::Package { .. }) {
+        return None;
+    }
     match ds.decl.schedule.every.as_deref() {
         Some("never") => None,
         // A rhythm written into the declaration by hand is the author's to answer for.
@@ -103,6 +107,7 @@ pub fn held(ds: &Source, dir: &Path) -> Option<String> {
     use crate::sourcedecl::Fetch;
     match &ds.decl.source {
         Fetch::Hub { .. } => return Some("subscribed from a hub: `zetlyn source pull` takes what is new".into()),
+        Fetch::Package { tracker, .. } => return Some(format!("came in the package {tracker}: `zetlyn tracker pull` takes what is new")),
         Fetch::Webhook { .. } => return Some("pushed to, so there is nothing to fetch".into()),
         _ => {}
     }

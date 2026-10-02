@@ -66,6 +66,11 @@ impl Source {
     /// coverage is read, as on the first update. That update sweeps, so a claim held under a name
     /// no update gives it any more is removed rather than kept beside its twin.
     pub fn run_with(&self, reread: bool, from_start: bool) -> Result<RunReport, String> {
+        // Claims that came in a package are not read here, and a read that did not happen is not
+        // recorded as one that failed.
+        if let crate::sourcedecl::Fetch::Package { tracker, .. } = &self.decl.source {
+            return Err(format!("it came in the package {tracker}. `zetlyn tracker pull` takes a newer version"));
+        }
         let reread = reread || from_start;
         // Where the source is one address and says it has not changed, there is nothing to read.
         // An hourly cadence against a file that changes twice a week is mostly this.
@@ -345,7 +350,10 @@ impl Source {
             can.push("property");
             can.push("facet");
         }
-        if self.decl.ids().is_some() {
+        // Claims that arrived built carry their identifiers in the store, and say nothing of how
+        // they were found.
+        let arrived = matches!(self.decl.source, crate::sourcedecl::Fetch::Hub { .. } | crate::sourcedecl::Fetch::Package { .. });
+        if self.decl.ids().is_some() || arrived {
             can.push("ids");
         }
         if self.decl.retention.history {

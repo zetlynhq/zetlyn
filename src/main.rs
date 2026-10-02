@@ -27,6 +27,7 @@ mod platform;
 mod mail;
 mod matches;
 mod migrate;
+mod package;
 mod claim;
 mod remote;
 mod tracker;
@@ -162,10 +163,18 @@ zetlyn
       A tracker holds no index. It rewrites the query per source, fans out, merges ranked
       lists, and gathers the claims into one thing per identifier.
 
-  zetlyn tracker publish <dir> [--to <hub>] [--tag latest]
-  zetlyn tracker subscribe <reference> [--from <hub>] [--at <workspace>]
+  zetlyn tracker publish <dir> [--sealed] [--to <hub>] [--tag latest]
+  zetlyn tracker subscribe <reference | file.zetlyn> [--from <hub>] [--at <workspace>] [--key ed25519:…]
       A tracker travels as its statement. Subscribing takes the statement and every source it
-      names, and rebuilds the stores here.
+      names, and rebuilds the stores here. --sealed publishes it as one signed file instead:
+      every claim, its history, the conflicts and what changed, in the tracker's words, and not
+      how it was made. Where each source is read, their own field names, the mappings and the
+      receipts stay with the publisher. A sealed tracker is not built where it arrives.
+
+  zetlyn tracker pack <dir> [--open] [--links] [--out <file>]
+  zetlyn tracker pull <dir>
+      The same package as a file, to hand over any way; sealed unless --open, and without each
+      claim's link unless --links. `pull` takes a newer version from the hub it came from.
 
   zetlyn account [list] <workspace>
   zetlyn account grant --email <a> [--days 31] [--trackers a,b] <workspace>
@@ -212,8 +221,8 @@ fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
 
 /// The options that stand alone: every other `--option` takes the argument after it as its value.
 const SWITCHES: &[&str] = &[
-    "--apply", "--deliver", "--from-start", "--go-on", "--help", "--no-deliver", "--no-open", "--once",
-    "--rebuild", "--reread", "--revoke", "--send", "--withdraw",
+    "--apply", "--deliver", "--from-start", "--go-on", "--help", "--links", "--no-deliver", "--no-open", "--once",
+    "--open", "--rebuild", "--reread", "--revoke", "--sealed", "--send", "--withdraw",
 ];
 
 fn positional(args: &[String], from: usize) -> Vec<&String> {
@@ -333,6 +342,13 @@ fn run(args: &[String]) -> Result<(), String> {
         Some("tracker") => match args.get(1).map(String::as_str) {
             Some("publish") => scope_publish(args),
             Some("subscribe") => scope_subscribe(args),
+            Some("pack") => scope_pack(args),
+            Some("pull") => {
+                let (dir, _) = scope_at(args, 2)?;
+                let root = dir.join("..").join("..");
+                println!("{}", package::pull(&dir, &root)?);
+                Ok(())
+            }
             Some("describe") => {
                 let (dir, datasets) = scope_at(args, 2)?;
                 let scope = tracker::Tracker::open(&dir, &datasets)?;
@@ -648,6 +664,10 @@ fn dataset_new(args: &[String]) -> Result<(), String> {
 fn dataset_run(args: &[String]) -> Result<(), String> {
     let dir = dir_at(args, 2)?;
     let ds = Source::open(&dir)?;
+    // Nothing to read, and nothing to record as a read that did not happen.
+    if let sourcedecl::Fetch::Package { tracker, .. } = &ds.decl.source {
+        return Err(format!("{} came in the package {tracker}. `zetlyn tracker pull` takes a newer version", ds.decl.name));
+    }
     // A web read somebody stopped waits for them: --go-on is them saying so.
     if let Some(mut r) = web::resume_of(&dir).filter(|r| r.paused) {
         if args.iter().any(|a| a == "--go-on") {
@@ -892,6 +912,18 @@ pub fn schedule_pass(root: &Path, deliver: bool, limits: &Limits) -> Option<i64>
         // Every tracker whose sources moved looks again, so what changed is a signal before a
         // watch is asked about it.
         for dir in tracker::scope_registry(&root.join("trackers")).values() {
+            // A tracker that came as a package from a hub asks it for a newer version instead.
+            let from_hub = trackerdecl::TrackerDecl::load(dir)
+                .ok()
+                .and_then(|d| d.package)
+                .is_some_and(|p| p.reference.is_some());
+            if from_hub {
+                match package::pull(dir, &root) {
+                    Ok(said) if !said.ends_with("what you hold") => println!("{said}"),
+                    Ok(_) => {}
+                    Err(e) => eprintln!("{}: {e}", dir.display()),
+                }
+            }
             match tracker::Tracker::open(dir, &root.join("sources")).and_then(|t| t.refresh_if_moved()) {
                 Ok(Some(r)) => println!("{}: {} signals, {} conflicts", dir.display(), r.signals, r.conflicts),
                 Ok(None) => {}
@@ -1314,6 +1346,62 @@ fn dataset_update(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// `zetlyn tracker pack <dir> [--open] [--links] [--out <file>]`
+fn scope_pack(args: &[String]) -> Result<(), String> {
+    let (dir, datasets) = scope_at(args, 2)?;
+    let opts = package::Options {
+        sealed: !args.iter().any(|a| a == "--open"),
+        links: args.iter().any(|a| a == "--links"),
+    };
+    let decl = trackerdecl::TrackerDecl::load(&dir)?;
+    let packed = package::pack(&dir, &datasets, &opts)?;
+    let short = &packed.version[..8];
+    let name = decl.name.rsplit('/').next().unwrap_or(&decl.name);
+    let out = flag(args, "--out").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(format!("{name}@{short}{}", package::EXT)));
+    std::fs::write(&out, &packed.bytes).map_err(|e| format!("{}: {e}", out.display()))?;
+    let manifest: serde_json::Value = serde_json::from_str(&packed.manifest).map_err(|e| e.to_string())?;
+    println!(
+        "{} {}, {}: {} sources, {} bytes, {}",
+        decl.name,
+        packed.version,
+        if opts.sealed { "sealed" } else { "open" },
+        manifest["sources"].as_array().map(Vec::len).unwrap_or(0),
+        packed.bytes.len(),
+        out.display()
+    );
+    if packed.signature.is_none() {
+        println!("  not signed: `zetlyn id new` makes the key a subscriber can pin");
+    }
+    for w in manifest["withheld"].as_array().into_iter().flatten() {
+        println!("  withheld: {}", w.as_str().unwrap_or_default());
+    }
+    Ok(())
+}
+
+/// What a person is told when a package is opened: what it is, who signed it, what it keeps back.
+fn say_installed(manifest: &serde_json::Value, at: &Path) -> Result<(), String> {
+    println!(
+        "{} {}, {}, in {}",
+        manifest["tracker"].as_str().unwrap_or_default(),
+        manifest["version"].as_str().unwrap_or_default(),
+        if manifest["sealed"].as_bool().unwrap_or(false) { "sealed" } else { "open" },
+        at.display()
+    );
+    match manifest["signed_by"].as_str() {
+        Some(k) if !k.is_empty() => println!("  signed by {k}, pinned"),
+        _ => println!("  not signed"),
+    }
+    for s in manifest["sources"].as_array().into_iter().flatten() {
+        println!(
+            "  {} ({}), {} claims",
+            s["title"].as_str().unwrap_or_default(),
+            s["name"].as_str().unwrap_or_default(),
+            s["claims"]
+        );
+    }
+    Ok(())
+}
+
 /// `zetlyn tracker publish <dir> [--to <hub>] [--tag latest] [--expect <version>]`
 fn scope_publish(args: &[String]) -> Result<(), String> {
     let (dir, datasets) = scope_at(args, 2)?;
@@ -1329,6 +1417,18 @@ fn scope_publish(args: &[String]) -> Result<(), String> {
         return Err("publishing would put that on somebody else's machine".into());
     }
     let place = place::at(to)?;
+    // Sealed, it travels as one file with what it answers with, and not how it was made.
+    if args.iter().any(|a| a == "--sealed") {
+        let opts = package::Options { sealed: true, links: args.iter().any(|a| a == "--links") };
+        let (version, _) = package::publish(&dir, &datasets, place.as_ref(), tag, &opts, flag(args, "--expect"))?;
+        println!(
+            "{}@{tag} is {version}, sealed, {} sources, at {}",
+            scope.decl.name,
+            scope.members.len(),
+            place.describe()
+        );
+        return Ok(());
+    }
     let version =
         artifact::publish_scope(&dir, &datasets, place.as_ref(), tag, flag(args, "--expect"))?;
     println!(
@@ -1345,16 +1445,28 @@ fn scope_subscribe(args: &[String]) -> Result<(), String> {
     let raw = positional(args, 2)
         .first()
         .map(|s| s.to_string())
-        .ok_or("which tracker? owner/name, with an optional @tag")?;
+        .ok_or("which tracker? owner/name, with an optional @tag, or a .zetlyn file")?;
+    let root = PathBuf::from(flag(args, "--at").unwrap_or("."));
+    let pinned = flag(args, "--key");
+    // A package as a file: read, held against itself, and written out here.
+    if raw.ends_with(package::EXT) && std::path::Path::new(&raw).is_file() {
+        let bytes = std::fs::read(&raw).map_err(|e| format!("{raw}: {e}"))?;
+        let opened = package::read(&bytes, pinned)?;
+        let at = package::install(&opened, &root, &raw, None)?;
+        return say_installed(&opened.manifest, &at);
+    }
     let reference = artifact::Reference::parse(&raw)?;
     let from = flag(args, "--from")
         .map(str::to_string)
         .or_else(|| reference.host.as_ref().map(|h| format!("https://{h}")))
         .unwrap_or_else(|| artifact::DEFAULT_HUB.to_string());
-    let root = PathBuf::from(flag(args, "--at").unwrap_or("."));
     let into = root.join("trackers").join(&reference.name);
     let datasets = root.join("sources");
     let place = place::at(&from)?;
+    if package::on_hub(place.as_ref(), &reference) {
+        let (at, manifest) = package::subscribe(place.as_ref(), &reference, &root, &from, pinned)?;
+        return say_installed(&manifest, &at);
+    }
     let (version, taken) =
         artifact::subscribe_scope(place.as_ref(), &reference, &into, &datasets, &from)?;
     println!("{reference} is {version}, in {}", into.display());

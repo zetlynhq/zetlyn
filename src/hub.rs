@@ -201,8 +201,8 @@ impl Owners {
         let mut parts = path.split('/');
         let tree = parts.next().unwrap_or_default();
         let named = parts.next().unwrap_or_default();
-        if !matches!(tree, "sources" | "trackers") {
-            return Err(format!("{tree}: a hub holds sources and trackers"));
+        if !matches!(tree, "sources" | "trackers" | "packages") {
+            return Err(format!("{tree}: a hub holds sources, trackers and packages"));
         }
         if named != owner {
             return Err(format!("{owner} may not write under {named}"));

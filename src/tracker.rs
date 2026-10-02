@@ -1621,6 +1621,12 @@ impl Tracker {
 
     /// The tracker's own store, made to hold what the sources say now.
     pub fn refresh(&self, rebuild: bool) -> Result<crate::thingstore::Refreshed, String> {
+        if let Some(p) = self.decl.package.as_ref().filter(|p| p.sealed) {
+            return Err(format!(
+                "{} is a sealed package, {}: it carries no recipe to build it with. `zetlyn tracker pull` takes a newer version",
+                self.decl.name, p.version
+            ));
+        }
         let now = self.snapshot();
         let mut store = crate::thingstore::ThingStore::open(&self.dir)?;
         let r = store.refresh(&self.decl, &now, rebuild)?;
@@ -1632,6 +1638,9 @@ impl Tracker {
     /// surface that reads its sources again every minute does the work once an update, not once
     /// a minute.
     pub fn refresh_if_moved(&self) -> Result<Option<crate::thingstore::Refreshed>, String> {
+        if self.decl.package.as_ref().is_some_and(|p| p.sealed) {
+            return Ok(None);
+        }
         let store = crate::thingstore::ThingStore::open(&self.dir)?;
         if store.meta("mark").as_deref() == Some(self.mark().as_str()) {
             return Ok(None);

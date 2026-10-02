@@ -197,6 +197,14 @@ pub enum Fetch {
         #[serde(default, skip_serializing_if = "String::is_empty")]
         key: String,
     },
+    /// Part of a packaged tracker: the claims arrived inside it, built, and only a newer package
+    /// changes them.
+    Package {
+        /// The tracker it came with.
+        tracker: String,
+        #[serde(default = "summary", skip_serializing_if = "is_summary")]
+        text_is: String,
+    },
 }
 
 /// What the program calls itself when it asks a source, where the declaration does not say.
@@ -264,6 +272,7 @@ impl Fetch {
             Fetch::Http { .. } => "http",
             Fetch::Feed { .. } => "feed",
             Fetch::Hub { .. } => "hub",
+            Fetch::Package { .. } => "package",
             Fetch::Sql { .. } => "sql",
             Fetch::Webhook { .. } => "webhook",
             Fetch::Web { .. } => "web",
@@ -287,6 +296,7 @@ impl Fetch {
             }
             Fetch::Feed { urls, .. } => urls.join(", "),
             Fetch::Hub { at, reference, .. } => format!("{at} {reference}"),
+            Fetch::Package { tracker, .. } => format!("inside the package {tracker}"),
             // Never the connection string: it is a password, however it was written.
             Fetch::Sql { .. } => "a PostgreSQL database".into(),
             Fetch::Webhook { .. } => "what its sender pushes to it".into(),
@@ -303,6 +313,7 @@ impl Fetch {
             Fetch::Folder { .. } | Fetch::Csv { .. } | Fetch::Xlsx { .. } => "whole",
             Fetch::Http { .. } | Fetch::Sql { .. } | Fetch::Webhook { .. } | Fetch::Web { .. } => "whole",
             Fetch::Hub { text_is, .. } => text_is,
+            Fetch::Package { text_is, .. } => text_is,
         }
     }
     /// What `file:` paths resolve against, and what a run reads.
@@ -320,7 +331,7 @@ impl Fetch {
             }
             Fetch::Csv { path, .. } => path,
             Fetch::Xlsx { path, .. } => path,
-            Fetch::Http { .. } | Fetch::Feed { .. } | Fetch::Hub { .. } | Fetch::Sql { .. } | Fetch::Webhook { .. } | Fetch::Web { .. } => {
+            Fetch::Http { .. } | Fetch::Feed { .. } | Fetch::Hub { .. } | Fetch::Package { .. } | Fetch::Sql { .. } | Fetch::Webhook { .. } | Fetch::Web { .. } => {
                 return base.to_path_buf()
             }
         };
@@ -597,7 +608,7 @@ impl SourceDecl {
         // A subscribed source has nothing to extract from, so its specs carry a name and a type
         // and no expression. Everywhere else an absent `from` is a field that would silently
         // produce nothing, and saying so here costs one pass over the declaration.
-        if !matches!(d.source, Fetch::Hub { .. }) {
+        if !matches!(d.source, Fetch::Hub { .. } | Fetch::Package { .. }) {
             let mut missing: Vec<String> = Vec::new();
             if d.records.title.trim().is_empty() {
                 missing.push("title".into());

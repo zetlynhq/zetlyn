@@ -1049,3 +1049,116 @@ fn an_update_that_loses_the_column_naming_its_claims_is_refused() {
     assert!(ok && said.contains("complete") && said.contains("~1"), "{said}");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn a_sealed_package_answers_as_its_tracker_does_and_says_nothing_of_how_it_was_made() {
+    let root = std::env::temp_dir().join(format!("zetlyn-test-{}-sealed", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let (publisher, subscriber) = (root.join("publisher"), root.join("subscriber"));
+    for d in ["home", "pub/sources/leaf", "pub/sources/lind", "pub/trackers/books", "sub", "other", "hub"] {
+        std::fs::create_dir_all(root.join(d)).unwrap();
+    }
+    std::fs::create_dir_all(&publisher).unwrap();
+    std::fs::create_dir_all(&subscriber).unwrap();
+    let z = |home: &Path, cwd: &Path, args: &[&str]| -> (bool, String) {
+        let out = Command::new(env!("CARGO_BIN_EXE_zetlyn")).args(args).current_dir(cwd).env("ZETLYN_HOME", home).output().unwrap();
+        (out.status.success(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
+    };
+    let (ws, sub, hub) = (root.join("pub"), root.join("sub"), root.join("hub").display().to_string());
+    let (leaf, lind) = (root.join("leaf.csv"), root.join("lind.csv"));
+    std::fs::write(&leaf, "isbn,title,price,in_stock,binding\n978-0-451-52493-5,1984,9.99,yes,paperback\n978-0-441-17271-9,Dune,11.99,yes,paperback\n").unwrap();
+    let lind_rows = |dune: &str| format!("ean;titel;preis;lieferbar;einband\n9780451524935;Nineteen Eighty-Four;9,99;ja;Taschenbuch\n9780441172719;Dune;{dune};nein;Taschenbuch\n");
+    std::fs::write(&lind, lind_rows("13,49")).unwrap();
+    std::fs::write(ws.join("sources/leaf/source.yaml"), format!(
+        "name: test/leaf\nfetch: {{ type: csv, path: {} }}\nidentified_by: {{ isbn: field:isbn }}\nclaims:\n  title: field:title\n  properties:\n    price: {{ type: number, from: field:price }}\n    in_stock: {{ type: bool, from: field:in_stock }}\n    binding: {{ type: code, from: field:binding }}\n",
+        leaf.display())).unwrap();
+    std::fs::write(ws.join("sources/lind/source.yaml"), format!(
+        "name: test/lind\nfetch: {{ type: csv, path: {}, delimiter: \";\" }}\nidentified_by: {{ isbn: field:ean }}\nclaims:\n  title: field:titel\n  properties:\n    preis: {{ type: number, from: field:preis }}\n    lieferbar: {{ type: bool, from: field:lieferbar }}\n    einband: {{ type: code, from: field:einband }}\n",
+        lind.display())).unwrap();
+    std::fs::write(ws.join("trackers/books/tracker.yaml"),
+        "name: test/books\nsources:\n- source: test/leaf\n  why: One shop.\n- source: test/lind\n  why: The other.\nidentified_by: [isbn]\nalign:\n  price:\n    from: { test/leaf: price, test/lind: preis }\n  in_stock:\n    from: { test/leaf: in_stock, test/lind: lieferbar }\n  binding:\n    from: { test/leaf: binding, test/lind: einband }\n    test/lind: { taschenbuch: paperback }\n").unwrap();
+    let home = root.join("home");
+    let read = |at: &str| {
+        for s in ["sources/leaf", "sources/lind"] {
+            let (ok, said) = z(&home, &ws, &["source", "update", s]);
+            assert!(ok, "{at}: {said}");
+        }
+        let (ok, said) = z(&home, &ws, &["tracker", "refresh", "trackers/books"]);
+        assert!(ok, "{at}: {said}");
+    };
+    read("first");
+    let (ok, said) = z(&home, &ws, &["id", "new", "--name", "Curator", "--contact", "c@example.org"]);
+    assert!(ok, "{said}");
+    let (ok, said) = z(&home, &ws, &["tracker", "publish", "trackers/books", "--sealed", "--to", &hub]);
+    assert!(ok && said.contains("sealed"), "{said}");
+
+    // Somebody else, on another machine.
+    let theirs = root.join("other");
+    let (ok, said) = z(&theirs, &sub, &["tracker", "subscribe", "test/books", "--from", &hub]);
+    assert!(ok && said.contains("pinned"), "{said}");
+
+    // Nothing of how it was made: no address, no column of the second shop, none of its words.
+    let mut leaked = Vec::new();
+    let mut stack = vec![sub.clone()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            let bytes = String::from_utf8_lossy(&std::fs::read(&p).unwrap()).to_lowercase();
+            for word in ["lind.csv", "leaf.csv", "preis", "lieferbar", "einband", "taschenbuch", "13,49", "field:ean", "field:preis"] {
+                if bytes.contains(word) {
+                    leaked.push(format!("{word} in {}", p.display()));
+                }
+            }
+        }
+    }
+    assert!(leaked.is_empty(), "{leaked:?}");
+    let statement = std::fs::read_to_string(sub.join("trackers/books/tracker.yaml")).unwrap();
+    assert!(!statement.lines().any(|l| l.starts_with("    from:")) && statement.contains("sealed: true"), "{statement}");
+
+    // And everything it answers with: the same conflicts, the same things, in the tracker's words.
+    let answer = |home: &Path, at: &Path, args: &[&str]| {
+        let (ok, said) = z(home, at, args);
+        assert!(ok, "{said}");
+        said
+    };
+    let conflicts = ["tracker", "conflicts", "trackers/books"];
+    assert_eq!(answer(&home, &ws, &conflicts), answer(&theirs, &sub, &conflicts));
+    let paperbacks = ["tracker", "things", "trackers/books", "binding=paperback"];
+    let held = answer(&theirs, &sub, &paperbacks);
+    assert_eq!(answer(&home, &ws, &paperbacks), held);
+    assert!(held.contains("isbn:9780441172719"), "{held}");
+
+    // Not built here, and not packed again by whoever holds it.
+    let (ok, said) = z(&theirs, &sub, &["tracker", "refresh", "trackers/books"]);
+    assert!(!ok && said.contains("sealed package"), "{said}");
+    let (ok, said) = z(&theirs, &sub, &["tracker", "pack", "trackers/books"]);
+    assert!(!ok && said.contains("came as a package"), "{said}");
+    let (ok, said) = z(&theirs, &sub, &["source", "update", "sources/lind"]);
+    assert!(!ok && said.contains("came in the package"), "{said}");
+
+    // The shop changes; the publisher reads it and publishes; the subscriber takes it.
+    std::fs::write(&lind, lind_rows("11,99")).unwrap();
+    read("second");
+    let (ok, said) = z(&home, &ws, &["tracker", "publish", "trackers/books", "--sealed", "--to", &hub]);
+    assert!(ok, "{said}");
+    let (ok, said) = z(&theirs, &sub, &["tracker", "pull", "trackers/books"]);
+    assert!(ok && said.contains('→'), "{said}");
+    let (ok, said) = z(&theirs, &sub, &["tracker", "pull", "trackers/books"]);
+    assert!(ok && said.contains("what you hold"), "{said}");
+    let signals = answer(&theirs, &sub, &["tracker", "signals", "trackers/books"]);
+    assert!(signals.contains("\"changed\"") && signals.contains("test/lind") && signals.contains("11.99"), "{signals}");
+
+    // A package changed on the hub is not taken.
+    let versions = root.join("hub/packages/test/books/versions");
+    let latest = std::fs::read_to_string(root.join("hub/packages/test/books/tags/latest")).unwrap();
+    std::fs::write(versions.join(latest.trim()).join("package.zetlyn"), b"not the package").unwrap();
+    std::fs::create_dir_all(root.join("third")).unwrap();
+    let (ok, said) = z(&theirs, &root.join("third"), &["tracker", "subscribe", "test/books", "--from", &hub]);
+    assert!(!ok, "{said}");
+    assert!(!root.join("third/trackers").exists(), "nothing written from a package that did not hold");
+    let _ = std::fs::remove_dir_all(&root);
+}

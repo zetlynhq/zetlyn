@@ -137,6 +137,11 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
         div.meta {
             span.(if stale { "partial" } else { "current" }) { @if stale { "Behind" } @else { "Current" } }
             span { (plural(scope.members.len(), "source")) }
+            @if let Some(p) = &d.package {
+                span title=(if p.sealed { "What it answers with, every claim and its history; how it was made stays with whoever published it." } else { "" }) {
+                    @if p.sealed { "sealed package " } @else { "package " } (p.version.get(..8).unwrap_or(&p.version))
+                }
+            }
             @if let Some(age) = scope.oldest_finish() { span { "updated " (crate::tracker::human(age)) " ago" } }
             @if let Some(f) = &d.promise.fresh_within {
                 @if holds { span { "fresh within " (f) } } @else { span { "the promise of " (f) " does not hold" } }
@@ -1478,7 +1483,13 @@ impl TrackerSite {
             "/update" if post && *operator => {
                 let registry = crate::tracker::registry(datasets);
                 let mut said: Vec<String> = Vec::new();
-                for m in &scope.decl.members {
+                // A packaged tracker is updated by taking the next package, not by reading.
+                let packaged = scope.decl.package.is_some();
+                if packaged {
+                    let root = datasets.parent().unwrap_or(datasets).to_path_buf();
+                    said.push(crate::package::pull(dir, &root).unwrap_or_else(|e| e));
+                }
+                for m in scope.decl.members.iter().filter(|_| !packaged) {
                     let Some(path) = registry.get(&m.dataset) else { continue };
                     let title = scope.members.iter().find(|r| r.name() == m.dataset).map(|r| r.title()).unwrap_or_else(|| m.dataset.clone());
                     // Beside an update in the background it would read the same files twice at once.

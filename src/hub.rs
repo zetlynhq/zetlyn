@@ -253,6 +253,14 @@ struct Carried {
     records: u64,
     members: usize,
     bytes: u64,
+    /// A tracker's or a package's sources, by name.
+    includes: Vec<String>,
+    /// A source's own word on being shown: `yes`, `summary`, `no`, or nothing said.
+    republish: String,
+    /// A package that carries what a tracker answers with and not how it was made.
+    sealed: bool,
+    /// A tracker for the accounts it gives access to, and not for anyone.
+    private: bool,
 }
 
 impl Carried {
@@ -276,7 +284,7 @@ fn read_dir_names(dir: &Path) -> Vec<String> {
 /// Everything under `sources/` and `trackers/`, one row per tag.
 fn carried(dir: &Path) -> Vec<Carried> {
     let mut out = Vec::new();
-    for tree in ["sources", "trackers"] {
+    for tree in ["sources", "trackers", "packages"] {
         let root = dir.join(tree);
         for owner in read_dir_names(&root) {
             for name in read_dir_names(&root.join(&owner)) {
@@ -296,7 +304,21 @@ fn carried(dir: &Path) -> Vec<Carried> {
                             None => continue,
                         };
                     let s = |k: &str| manifest[k].as_str().unwrap_or_default().to_string();
+                    // A tracker names its sources; a package lists them with what each holds.
+                    let listed = manifest["sources"].as_array().cloned().unwrap_or_default();
+                    let includes: Vec<String> = listed
+                        .iter()
+                        .filter_map(|m| m.as_str().or_else(|| m["name"].as_str()).map(str::to_string))
+                        .collect();
+                    let packaged: u64 = listed.iter().filter_map(|m| m["claims"].as_u64()).sum();
                     out.push(Carried {
+                        includes,
+                        republish: manifest["licence"]["republish"].as_str().unwrap_or_default().to_string(),
+                        sealed: manifest["sealed"].as_bool().unwrap_or(false),
+                        private: manifest["declaration"]
+                            .as_str()
+                            .and_then(|d| crate::yaml::parse::<crate::trackerdecl::TrackerDecl>(d).ok())
+                            .is_some_and(|d| d.visibility == "private"),
                         tree,
                         owner: owner.clone(),
                         name: name.clone(),
@@ -309,7 +331,7 @@ fn carried(dir: &Path) -> Vec<Carried> {
                         },
                         about: s("about"),
                         built_at: manifest["built_at"].as_u64().unwrap_or(0),
-                        records: manifest["claims"].as_u64().unwrap_or(0),
+                        records: manifest["claims"].as_u64().unwrap_or(packaged),
                         members: manifest["sources"].as_array().map(Vec::len).unwrap_or(0),
                         bytes: crate::artifact::declared_bytes(&manifest, "claims.jsonl")
                             .unwrap_or(0),
@@ -349,17 +371,6 @@ fn thousands(n: u64) -> String {
     out
 }
 
-fn megabytes(n: u64) -> String {
-    if n == 0 {
-        return String::new();
-    }
-    if n < 1024 * 1024 {
-        format!("{} kB", n / 1024)
-    } else {
-        format!("{} MB", n / (1024 * 1024))
-    }
-}
-
 /// The front page. Served where a person asks for the hub itself.
 ///
 /// The design is not in this binary. The page names `/style.css`, `/mark.png` and `/favicon.png`,
@@ -369,8 +380,9 @@ fn megabytes(n: u64) -> String {
 fn index_page(dir: &Path, serving: &[String]) -> Vec<u8> {
     use maud::html;
     let rows = carried(dir);
-    let (scopes, datasets): (Vec<&Carried>, Vec<&Carried>) =
-        rows.iter().partition(|c| c.tree == "trackers");
+    // A tracker published open and one published sealed are both a tracker to whoever takes it.
+    let (trackers, sources): (Vec<&Carried>, Vec<&Carried>) =
+        rows.iter().partition(|c| c.tree != "sources");
     let has = |name: &str| dir.join(name).exists();
     let page = html! {
         (maud::DOCTYPE)
@@ -407,81 +419,85 @@ fn index_page(dir: &Path, serving: &[String]) -> Vec<u8> {
 
                 main {
                     section.hero.shell {
-                        p.overline { "THE HUB" }
-                        h1 { "Bytes somebody else " span { "already built." } }
+                        p.overline { "THE HUB · PUBLIC" }
+                        h1 { "Trackers anyone " span { "can use." } }
                         p.intro {
-                            "Subscribing fetches those bytes and reads them on your own machine. "
-                            "The hub holds no index, answers no query and never learns what you "
-                            "asked: the question is answered by your copy."
+                            "Every tracker and source here is public and free to use. Open one in the "
+                            "browser, or subscribe and keep a copy on your own machine that stays current."
+                        }
+                        p.hub-stats {
+                            span { (trackers.len()) @if trackers.len() == 1 { " tracker" } @else { " trackers" } }
+                            span { (sources.len()) @if sources.len() == 1 { " source" } @else { " sources" } }
+                            span { (thousands(sources.iter().map(|c| c.records).sum())) " claims" }
                         }
                     }
 
-                    section.comparison.shell {
-                        div.comparison-head {
-                            p.overline { "SCOPES" }
-                            h2 { "A subject, and the sources it is made of." }
-                        }
-                        @if scopes.is_empty() { p.caption { "None yet." } }
-                        div.rules {
-                            p.overline { "WHAT IS HERE" }
-                            div {
-                                ul.rule-list {
-                                    @for c in &scopes {
-                                        li {
-                                            code { (c.reference()) }
-                                            span {
-                                                @if !c.about.is_empty() { (c.about) " " }
-                                                (c.members) " sources."
-                                                @if serving.iter().any(|s| *s == c.reference()) {
-                                                    " " a href=(format!("/{}", c.reference())) { "Ask it here" } "."
-                                                }
-                                            }
-                                        }
+                    section.hub-list.shell #trackers {
+                        h2 { "Trackers" }
+                        p.caption { "A topic, and the sources it is made of, joined on what they share." }
+                        @if trackers.is_empty() { p { "None yet." } }
+                        div.hub-cards {
+                            @for c in &trackers {
+                                @let reference = c.reference();
+                                @let served = serving.iter().any(|s| *s == reference);
+                                @let claims: u64 = if c.tree == "packages" { c.records } else {
+                                    c.includes.iter().filter_map(|n| sources.iter().find(|s| s.reference() == *n)).map(|s| s.records).sum()
+                                };
+                                article.hub-card {
+                                    div.hub-card-head {
+                                        h3 { @if served { a href=(format!("/{reference}")) { (c.title) } } @else { (c.title) } }
+                                        span.badge { @if c.private { "Private" } @else if c.sealed { "Sealed" } @else { "Public" } }
                                     }
-                                }
-                                div.terminal {
-                                    div.term-head { span {} span {} span {} b { "taking one" } }
-                                    pre {
-                                        span.prompt { "$ " } "zetlyn tracker subscribe "
-                                        (scopes.first().map(|c| c.reference()).unwrap_or_else(|| "owner/name".into()))
-                                        "\n"
-                                        span.cmt { "# the statement, and every source it names" }
+                                    @if !c.about.is_empty() { p { (c.about) } }
+                                    p.hub-meta {
+                                        (c.members) @if c.members == 1 { " source" } @else { " sources" }
+                                        " · " (thousands(claims)) " claims"
+                                        @if c.built_at > 0 { " · published " (crate::tracker::human(crate::now() - c.built_at as i64)) " ago" }
                                     }
-                                }
-                                p.caption {
-                                    "A reference that names no host means this hub, so there is "
-                                    "nothing else to type."
+                                    div.hub-actions {
+                                        @if served { a.primary href=(format!("/{reference}")) { "Open" } }
+                                        code { "zetlyn tracker subscribe " (reference) }
+                                    }
                                 }
                             }
                         }
                     }
 
-                    section.page.shell {
-                        article.prose {
-                            h2 { "Sources" }
-                            @if datasets.is_empty() { p { "None yet." } }
-                            table {
-                                thead { tr {
-                                    th { "Source" } th { "Claims" } th { "Bytes" } th { "Version" }
-                                } }
-                                tbody {
-                                    @for c in &datasets {
-                                        tr {
-                                            td {
-                                                code { (c.reference()) }
-                                                @if !c.title.is_empty() && c.title != c.reference() {
-                                                    br; (c.title)
-                                                }
+                    section.hub-list.shell #sources {
+                        h2 { "Sources" }
+                        p.caption { "Each one can be taken on its own: " code { "zetlyn source subscribe owner/name" } }
+                        @if sources.is_empty() { p { "None yet." } }
+                        @else {
+                            div.hub-scroll {
+                                table.hub-table {
+                                    thead { tr { th { "Source" } th { "In" } th.n { "Claims" } th { "May be shown" } th { "Published" } } }
+                                    tbody {
+                                        @for c in &sources {
+                                            @let reference = c.reference();
+                                            @let within: Vec<&str> = trackers.iter().filter(|t| t.includes.iter().any(|n| *n == reference)).map(|t| t.title.as_str()).collect();
+                                            tr {
+                                                td { (c.title) small { (reference) " · " (c.version.get(..8).unwrap_or(&c.version)) } }
+                                                td { @if within.is_empty() { span.dim { "on its own" } } @else { (within.join(", ")) } }
+                                                td.n { (thousands(c.records)) }
+                                                td { @match c.republish.as_str() {
+                                                    "yes" => "in full",
+                                                    "summary" => "titles, values and a link",
+                                                    "no" => "not in public",
+                                                    _ => "has not said",
+                                                } }
+                                                td { @if c.built_at > 0 { (crate::tracker::human(crate::now() - c.built_at as i64)) " ago" } }
                                             }
-                                            td { (thousands(c.records)) }
-                                            td { (megabytes(c.bytes)) }
-                                            td { code { (c.version) } }
                                         }
                                     }
                                 }
                             }
-                            p { code { "zetlyn source subscribe owner/name" } }
                         }
+                    }
+
+                    // What the hub says about itself beneath its list: the operator's, in the
+                    // operator's design, from its own directory. A hub without one is its list.
+                    @if let Ok(about) = std::fs::read_to_string(dir.join("hub-about.html")) {
+                        (maud::PreEscaped(about))
                     }
                 }
 

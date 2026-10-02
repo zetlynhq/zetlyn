@@ -109,6 +109,10 @@ header.top .wrap { height: 82px; display: flex; align-items: center; gap: 1.5rem
 nav.links { margin-left: auto; display: flex; gap: 28px; font-size: 14px; }
 nav.links a { color: var(--dim); }
 nav.links a:hover, nav.links a[aria-current] { color: var(--fg); text-decoration: none; }
+/* Where the reader is, marked where the header meets its line, as the website marks it. */
+header.top nav.links { align-self: stretch; }
+header.top nav.links a { display: flex; align-items: center; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+header.top nav.links a[aria-current] { border-bottom-color: var(--accent); }
 footer.site-footer { width: min(1180px, calc(100% - 48px)); margin: 0 auto; padding: 0; height: 90px;
   border-top: 1px solid var(--line); display: flex; align-items: center; color: var(--dim);
   font: 11px/normal ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
@@ -194,6 +198,9 @@ details { margin: 2rem 0; } details > summary { cursor: pointer; font-weight: 60
 @media (max-width: 40rem) {
   header.top .wrap { height: auto; min-height: 70px; padding-block: 10px; gap: 1rem; }
   nav.links { gap: 14px; flex-wrap: wrap; justify-content: flex-end; font-size: 12px; }
+  header.top nav.links { align-self: center; }
+  header.top nav.links a { border-bottom: 0; margin-bottom: 0; }
+  header.top nav.links a[aria-current] { text-decoration: underline 2px var(--accent); text-underline-offset: 7px; }
   nav.tabs { width: 100%; overflow-x: auto; }
   .stats b { font-size: 1.5rem; }
 }
@@ -357,7 +364,7 @@ pub const SITE_NAV: &[(&str, &str)] = &[
     ("Trackers", "https://zetlyn.com/trackers"),
     ("Sources", "https://zetlyn.com/sources"),
     ("Interface", "https://zetlyn.com/api"),
-    ("Hub", "https://zetlyn.com/hub"),
+    ("Hub", "https://hub.zetlyn.com/"),
 ];
 pub const SITE_FOOTER: &[(&str, &str)] = &[
     ("Contact", "mailto:hello@zetlyn.com"),

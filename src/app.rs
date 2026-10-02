@@ -625,6 +625,7 @@ impl App {
         } else {
             vec![
                 ("Trackers".to_string(), home.clone()),
+                ("Proposals".to_string(), format!("{}/proposals", self.base)),
                 ("Assist".to_string(), format!("{}/assist", self.base)),
                 ("Docs".to_string(), "https://zetlyn.com/docs".to_string()),
             ]
@@ -648,12 +649,14 @@ impl App {
                 let here = match parts.first().map(String::as_str) {
                     Some("assist") => "Assist",
                     Some("settings") => "Settings",
+                    Some("proposals") => "Proposals",
                     None => "Trackers",
                     _ => "",
                 };
                 (
                     vec![
                         ("Trackers".to_string(), home.clone()),
+                        ("Proposals".to_string(), format!("{}/proposals", self.base)),
                         ("Assist".to_string(), format!("{}/assist", self.base)),
                         ("Settings".to_string(), format!("{}/settings", self.base)),
                     ],
@@ -824,6 +827,15 @@ impl App {
             (true, ["propose", source]) => {
                 let (status, answer) = self.take_proposal(source, &body, proposer.as_deref(), proposal_signature.as_deref());
                 (status, json_kind, answer)
+            }
+            (false, ["proposals"]) => (200, html_kind, self.proposal_sources_page(&query)),
+            (true, ["proposals"]) => match self.new_proposal_source(&form) {
+                Ok(slug) => return redirect(request, &serve::at(&format!("/proposals/{slug}?said={}", urlencode("Made. Invite the keys that may propose.")))),
+                Err(e) => return redirect(request, &serve::at(&format!("/proposals?said={}", urlencode(&e)))),
+            },
+            (true, ["proposals", source, verb @ ("invite" | "uninvite")]) => {
+                let said = self.invite(source, form.get("key").map(String::as_str).unwrap_or(""), *verb == "invite").unwrap_or_else(|e| e);
+                return redirect(request, &serve::at(&format!("/proposals/{source}?said={}", urlencode(&said))));
             }
             (false, ["proposals", source]) => match self.proposals_page(source, &query) {
                 Ok(p) => (200, html_kind, p),
@@ -1743,6 +1755,115 @@ impl App {
         out
     }
 
+    /// Every source here that people read for, and a form for another.
+    fn proposal_sources_page(&self, query: &BTreeMap<String, String>) -> String {
+        let all = self.proposal_sources();
+        let body = html! {
+            h1 { "Proposals" }
+            p.lede { "A source nobody publishes as data can still be read by people. Each row is proposed by somebody you invited, signed with their own key, and becomes a claim only when you accept it." }
+            @if let Some(s) = query.get("said") { div.note { (s) } }
+            @if all.is_empty() { p.dim { "No source here takes proposals yet." } }
+            table { tbody {
+                @for (dir, title, waiting) in &all {
+                    tr {
+                        td { a href=(serve::at(&format!("/proposals/{dir}"))) { strong { (title) } } div.why.mono { (dir) } }
+                        td.num { @if *waiting == 0 { span.dim { "nothing waiting" } } @else { a.chip.on href=(serve::at(&format!("/proposals/{dir}"))) { (waiting) " waiting" } } }
+                    }
+                }
+            } }
+            h2 { "A new source people read for" }
+            p.dim { "Name the fields a row has. The ones that identify a row together make its identifier: country, trim and week make " code { "DEU-rwd-2026-W40" } ". Field names are lowercase letters, digits and underscores." }
+            form.settings method="post" action=(serve::at("/proposals")) {
+                p { label { "Title" br; input.wide type="text" name="title" placeholder="Tesla Model Y prices" required; } }
+                p { label { "Identified by" br; input.wide type="text" name="identify" placeholder="country, trim, week" required; } }
+                p { label { "Numbers" br; input.wide type="text" name="numbers" placeholder="price"; } }
+                p { label { "Words" br; input.wide type="text" name="words" placeholder="currency"; } }
+                p { button.primary type="submit" { "Make it" } }
+            }
+            p.dim { "It is made with no licence, so no public page shows it until you decide what may be shown, in its " code { "source.yaml" } "." }
+        };
+        page("Proposals", body)
+    }
+
+    /// A proposals source from the form: its declaration written, and read back before it is kept.
+    fn new_proposal_source(&self, form: &BTreeMap<String, String>) -> Result<String, String> {
+        let title = form.get("title").map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).ok_or("A title, please.")?;
+        let fields = |k: &str| -> Result<Vec<String>, String> {
+            let mut out = Vec::new();
+            for f in form.get(k).map(String::as_str).unwrap_or("").split(',').map(str::trim).filter(|f| !f.is_empty()) {
+                if !f.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
+                    return Err(format!("{f}: a field name is lowercase letters, digits and underscores"));
+                }
+                if crate::propose::RESERVED.contains(&f) {
+                    return Err(format!("{f}: the proposal itself says that, so a row may not"));
+                }
+                if !out.iter().any(|o| o == f) {
+                    out.push(f.to_string());
+                }
+            }
+            Ok(out)
+        };
+        let (identify, numbers, words) = (fields("identify")?, fields("numbers")?, fields("words")?);
+        if identify.is_empty() {
+            return Err("Name at least one field that identifies a row.".into());
+        }
+        let slug = self.free(&self.sources(), &crate::guess::slug(&title));
+        let owner = self.root.file_name().map(|s| crate::guess::slug(&s.to_string_lossy())).filter(|s| !s.is_empty()).unwrap_or_else(|| "mine".into());
+        let q = |s: &str| serde_json::to_string(s).unwrap_or_default();
+        let braced = |sep: &str| identify.iter().map(|f| format!("{{{f}}}")).collect::<Vec<_>>().join(sep);
+        let mut yaml = format!(
+            "name: {}\ntitle: {}\nkind: observation\nabout: {}\nfetch:\n  type: proposals\n  from: []\nclaims:\n  id:\n    scheme: {}\n    from: {}\n  title: {}\n  known: field:read_at\n  properties:\n",
+            q(&format!("{owner}/{slug}")),
+            q(&title),
+            q("Rows read by people and proposed, each signed with the proposer's key; a row is here once the owner accepted it."),
+            q(&slug),
+            q(&format!("const:{}", braced("-"))),
+            q(&format!("const:{}", braced(" "))),
+        );
+        for f in &numbers {
+            yaml.push_str(&format!("    {f}:\n      type: number\n      from: field:{f}\n"));
+        }
+        for f in identify.iter().chain(&words).filter(|f| !numbers.contains(f)) {
+            yaml.push_str(&format!("    {f}:\n      type: code\n      from: field:{f}\n"));
+        }
+        yaml.push_str("    proposed_by:\n      type: text\n      from: field:proposed_by\n    read_from:\n      type: text\n      from: field:read_from\n");
+        let dir = self.sources().join(&slug);
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        std::fs::write(dir.join(crate::sourcedecl::FILE), yaml).map_err(|e| e.to_string())?;
+        if let Err(e) = crate::sourcedecl::SourceDecl::load(&dir) {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(format!("Not made: {e}"));
+        }
+        Ok(slug)
+    }
+
+    /// A key added to or taken from the ones a source takes proposals from.
+    fn invite(&self, source: &str, key: &str, yes: bool) -> Result<String, String> {
+        let dir = self.sources().join(source);
+        let mut decl = crate::sourcedecl::SourceDecl::load(&dir)?;
+        let crate::sourcedecl::Fetch::Proposals { from } = &mut decl.source else {
+            return Err(format!("{} takes no proposals", decl.name));
+        };
+        let key = key.trim().to_lowercase();
+        let hex = key.strip_prefix("ed25519:").unwrap_or("");
+        if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err("A key is ed25519: and 64 hex digits, as `zetlyn id` prints it.".into());
+        }
+        let said = if yes {
+            if from.contains(&key) {
+                return Ok("That key is invited already.".into());
+            }
+            from.push(key);
+            "Invited. Proposals signed with that key are taken from now on."
+        } else {
+            from.retain(|k| k != &key);
+            "No longer invited. What it proposed before stays, with its decisions."
+        };
+        let path = dir.join(crate::sourcedecl::FILE);
+        std::fs::write(&path, crate::yaml::to_string(&decl)?).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(said.into())
+    }
+
     /// What people proposed for one source: what waits, with who else said the same, and what
     /// was decided.
     fn proposals_page(&self, source: &str, query: &BTreeMap<String, String>) -> Result<String, String> {
@@ -1759,8 +1880,30 @@ impl App {
         let body = html! {
             h1 { "Proposals: " (if decl.title.is_empty() { decl.name.clone() } else { decl.title.clone() }) }
             p.about { "Rows people read for this source and proposed, each signed with their own key. Only what is accepted reaches the source; a rejection withdraws a row accepted before, and every decision stays in " code { "decisions.jsonl" } "." }
-            p.dim {
-                (from.len()) (if from.len() == 1 { " key is" } else { " keys are" }) " invited, in " code { "source.yaml" } ". They send to " code { (serve::at(&format!("/propose/{source}"))) } "."
+            @if let Some(s) = query.get("said") { div.note { (s) } }
+            details open[from.is_empty()] {
+                summary { "Who may propose: " (from.len()) (if from.len() == 1 { " key" } else { " keys" }) }
+                @if from.is_empty() { p.dim { "Nobody yet, so every proposal is refused. A proposer runs " code { "zetlyn id new --name … --contact …" } " once and sends you the key it prints." } }
+                table { tbody {
+                    @for k in from {
+                        tr {
+                            td.mono { (k) }
+                            td.num { form method="post" action=(serve::at(&format!("/proposals/{source}/uninvite"))) { input type="hidden" name="key" value=(k); button type="submit" { "Remove" } } }
+                        }
+                    }
+                } }
+                form.bar method="post" action=(serve::at(&format!("/proposals/{source}/invite"))) {
+                    input.wide type="text" name="key" placeholder="ed25519:…" required;
+                    button.primary type="submit" { "Invite" }
+                }
+            }
+            details {
+                summary { "How a proposer sends a row" }
+                p { "A file, " code { "row.json" } ", with the row and how it was read:" }
+                pre { (format!("{{\n  \"row\": {{ … the fields of one row … }},\n  \"read_at\": \"{}\",\n  \"read_from\": \"https://… where it was read\",\n  \"attest\": \"read\",\n  \"note\": \"optional\"\n}}", crate::iso_stamp(crate::now()).get(..10).unwrap_or(""))) }
+                p { "Then, signed with their own key:" }
+                pre { "zetlyn source propose " (format!("{}{}", crate::account::Site::load(&self.root).url.trim_end_matches('/'), serve::at(&format!("/propose/{source}")))) " row.json" }
+                p.dim { code { "attest" } " is " code { "read" } " when they looked themselves, " code { "relayed" } " when somebody who did allows it, named in " code { "note" } "." }
             }
             p {
                 @for (s, label) in [("pending", "Waiting"), ("accepted", "Accepted"), ("rejected", "Rejected"), ("all", "All")] {

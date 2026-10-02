@@ -109,6 +109,7 @@ pub fn held(ds: &Source, dir: &Path) -> Option<String> {
         Fetch::Hub { .. } => return Some("subscribed from a hub: `zetlyn source pull` takes what is new".into()),
         Fetch::Package { tracker, .. } => return Some(format!("came in the package {tracker}: `zetlyn tracker pull` takes what is new")),
         Fetch::Webhook { .. } => return Some("pushed to, so there is nothing to fetch".into()),
+        Fetch::Proposals { .. } => return Some("proposed to, and taken as its owner accepts: `zetlyn source update` reads what was accepted".into()),
         _ => {}
     }
     if ds.decl.source.truncating() {

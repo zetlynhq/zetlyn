@@ -24,6 +24,7 @@ mod hook;
 mod identity;
 mod key;
 mod place;
+mod propose;
 mod platform;
 mod mail;
 mod matches;
@@ -142,6 +143,13 @@ zetlyn
 
   zetlyn source describe <dir>
       What this source is, what it holds, what it can be asked. JSON.
+
+  zetlyn source propose <https://…/propose/<source> | dir> <proposal.json>
+  zetlyn source proposals <dir> [--status pending|accepted|rejected]
+  zetlyn source accept | reject <dir> <proposal> [--by <who>] [--why …]
+      A source people read for it (`fetch: type: proposals`, `from:` the keys invited). A
+      proposal is {row, read_at, read_from, attest: read|relayed, note}, signed with your key;
+      only what its owner accepts reaches the next update, and a rejection withdraws it.
 
   zetlyn claim <dir> <identifier or claim id>
       One claim, the words its source used for it, and every version it was at.
@@ -289,6 +297,38 @@ fn run(args: &[String]) -> Result<(), String> {
                 }
                 // Non-zero, so a check in CI stops the build that would publish it.
                 if wrong.is_empty() { Ok(()) } else { Err(format!("{} untrue", wrong.len())) }
+            }
+            // A row read for a source somebody else owns, signed as yourself and sent.
+            Some("propose") => {
+                let rest = positional(args, 2);
+                let to = rest.first().ok_or("where to? a workspace's …/propose/<source> address, or a source directory")?;
+                let file = rest.get(1).ok_or("which proposal? a JSON file: row, read_at, read_from, attest")?;
+                let body = std::fs::read(file.as_str()).map_err(|e| format!("{file}: {e}"))?;
+                println!("kept as {}, waiting for its owner", propose::send(to, &body)?);
+                Ok(())
+            }
+            Some("proposals") => {
+                let dir = dir_at(args, 2)?;
+                let all = propose::list(&dir);
+                let wanted = flag(args, "--status");
+                for e in all.iter().filter(|e| wanted.is_none_or(|w| w == e.status)) {
+                    let agree = if e.agreeing.is_empty() { String::new() } else { format!(" · {} other key(s) say the same", e.agreeing.len()) };
+                    println!("{}  {}  {}\n    {}\n    read {} from {} ({}) by {}{agree}", e.status, e.file, e.received, e.row, e.read_at, e.read_from, e.attest, e.by);
+                }
+                if all.is_empty() {
+                    println!("no proposals");
+                }
+                Ok(())
+            }
+            Some(word @ ("accept" | "reject")) => {
+                let rest = positional(args, 2);
+                let dir = PathBuf::from(rest.first().ok_or("which source directory?")?.as_str());
+                let name = rest.get(1).ok_or("which proposal? its file name, as `zetlyn source proposals` lists it")?;
+                let me = identity::read();
+                let by = flag(args, "--by").map(str::to_string).or_else(|| Some(me.name).filter(|n| !n.is_empty())).or_else(identity::key).unwrap_or_default();
+                propose::decide(&dir, name, word == "accept", &by, flag(args, "--why").unwrap_or(""))?;
+                println!("{name}: {word}ed by {by}; the next `zetlyn source update {}` takes it", dir.display());
+                Ok(())
             }
             Some("describe") => {
                 let dir = dir_at(args, 2)?;

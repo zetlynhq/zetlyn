@@ -45,8 +45,8 @@ pub fn receive(dir: &Path, body: &[u8], signature: Option<&str>) -> Result<Strin
     Ok(name)
 }
 
-/// Every body in the inbox, oldest first, as rows.
-pub fn rows(dir: &Path, root: &Path, on_row: &mut impl FnMut(Produced) -> Result<(), String>) -> Result<Option<String>, String> {
+/// Every body in the inbox, oldest first, as rows, each one's origin `<what>#<file>`.
+pub fn rows(dir: &Path, root: &Path, what: &str, on_row: &mut impl FnMut(Produced) -> Result<(), String>) -> Result<Option<String>, String> {
     let inbox = dir.join(INBOX);
     let mut files: Vec<_> = std::fs::read_dir(&inbox)
         .map(|d| d.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")).collect())
@@ -59,7 +59,7 @@ pub fn rows(dir: &Path, root: &Path, on_row: &mut impl FnMut(Produced) -> Result
         on_row(Produced {
             expanded: false,
             row: Row { value, meta: Default::default(), file: None, text: String::new(), root },
-            origin: Origin { url: Some(format!("webhook#{name}")), ..Origin::default() },
+            origin: Origin { url: Some(format!("{what}#{name}")), ..Origin::default() },
         })?;
     }
     Ok(None)

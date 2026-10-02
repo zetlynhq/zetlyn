@@ -492,7 +492,8 @@ pub fn each_row(
             let high = crate::fetch::http_rows(&f, &spec, mark, root, &mut on_row)?;
             Ok(high)
         }
-        Fetch::Webhook { .. } => crate::hook::rows(base, root, &mut on_row),
+        Fetch::Webhook { .. } => crate::hook::rows(base, root, "webhook", &mut on_row),
+        Fetch::Proposals { .. } => crate::hook::rows(base, root, "proposal", &mut on_row),
         Fetch::Web { url, items, fields, page, top, limit, since, since_default, user_agent, pause_ms } => {
             let spec = crate::web::Spec { url, items, fields, page: page.as_ref(), top: *top, limit: *limit, since: since.as_deref(), since_default, user_agent, pause_ms: *pause_ms };
             crate::web::rows(&spec, mark, base, root, &mut on_row)

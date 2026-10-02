@@ -525,6 +525,15 @@ impl App {
                 }
                 None
             }
+            // Signed by its proposer's own key, so nobody signs in to propose either.
+            ["propose", source] if post => {
+                let key = request.headers().iter().find(|x| x.field.equiv("X-Zetlyn-Key")).map(|x| x.value.as_str().to_string());
+                let mut body = Vec::new();
+                let _ = std::io::Read::read_to_end(&mut std::io::Read::take(request.as_reader(), crate::propose::MAX_BODY as u64 + 1), &mut body);
+                let (status, answer) = self.take_proposal(source, &body, key.as_deref(), signature.as_deref());
+                respond(request, status, "application/json", &answer);
+                None
+            }
             ["signin"] if post => {
                 let mut body = String::new();
                 let _ = std::io::Read::read_to_string(request.as_reader(), &mut body);
@@ -714,6 +723,9 @@ impl App {
         let query = serve::params(&url);
         let html_kind = "text/html; charset=utf-8";
         let json_kind = "application/json";
+        // A proposal says who signed it in two headers; on this machine as on a hosted one.
+        let signed_by = |name: &'static str| request.headers().iter().find(|h| h.field.equiv(name)).map(|h| h.value.as_str().to_string());
+        let (proposer, proposal_signature) = (signed_by("X-Zetlyn-Key"), signed_by("X-Zetlyn-Signature"));
 
         let (status, kind, text) = match (post, parts.iter().map(String::as_str).collect::<Vec<_>>().as_slice()) {
             (false, ["style.css"]) => (200, "text/css; charset=utf-8", format!("{}{APP_STYLE}", serve::STYLE)),
@@ -807,6 +819,28 @@ impl App {
                 match done {
                     Ok(()) => return redirect(request, &serve::at(&format!("/review/{tracker}/{source}?title={}", urlencode(&form_title(&query))))),
                     Err(e) => (400, html_kind, page("Not changed", html! { div.note { (e) } })),
+                }
+            }
+            (true, ["propose", source]) => {
+                let (status, answer) = self.take_proposal(source, &body, proposer.as_deref(), proposal_signature.as_deref());
+                (status, json_kind, answer)
+            }
+            (false, ["proposals", source]) => match self.proposals_page(source, &query) {
+                Ok(p) => (200, html_kind, p),
+                Err(e) => (404, html_kind, page("Not here", html! { p { (e) } })),
+            },
+            (true, ["proposals", source, name, verb @ ("accept" | "reject")]) => {
+                let dir = self.sources().join(source);
+                let by = self.decider();
+                match crate::propose::decide(&dir, name, *verb == "accept", &by, form.get("why").map(String::as_str).unwrap_or("")) {
+                    Ok(()) => {
+                        // Read now, as a push is, so what was accepted is a claim before the page comes back.
+                        if let Ok(ds) = Source::open(&dir) {
+                            let _ = ds.run();
+                        }
+                        return redirect(request, &serve::at(&format!("/proposals/{source}")));
+                    }
+                    Err(e) => (400, html_kind, page("Not decided", html! { p { (e) } p { a href=(serve::at(&format!("/proposals/{source}"))) { "Back to the proposals" } } })),
                 }
             }
             (false, ["settings"]) => (200, html_kind, self.settings_page(&query)),
@@ -1666,6 +1700,108 @@ impl App {
         };
         page("Automatic updates", body)
     }
+    /// A proposal for one of this workspace's sources, as `/propose/<source>` answers it.
+    fn take_proposal(&self, source: &str, body: &[u8], key: Option<&str>, signature: Option<&str>) -> (u16, String) {
+        let dir = self.sources().join(source);
+        if !dir.join(crate::sourcedecl::FILE).exists() {
+            return (404, json!({ "error": format!("{source}: no such source here") }).to_string());
+        }
+        match crate::propose::receive(&dir, body, key, signature) {
+            Ok(name) => (202, json!({ "kept": name, "waiting": "for the source's owner" }).to_string()),
+            Err(e) => {
+                let status = if e.contains("not invited") { 403 } else if e.contains("unsigned") || e.contains("signature") { 401 } else { 400 };
+                (status, json!({ "error": e }).to_string())
+            }
+        }
+    }
+
+    /// Who decides, in the words a decision is recorded with: the signed-in member on a hosted
+    /// workspace, the identity on this machine.
+    fn decider(&self) -> String {
+        if let Some(who) = self.who.clone().filter(|w| !w.is_empty()) {
+            return who;
+        }
+        let me = crate::identity::read();
+        if !me.name.is_empty() {
+            return me.name;
+        }
+        crate::identity::key().unwrap_or_else(|| "the owner".into())
+    }
+
+    /// The sources that take proposals, each with how many wait.
+    fn proposal_sources(&self) -> Vec<(String, String, usize)> {
+        let mut out = Vec::new();
+        for e in std::fs::read_dir(self.sources()).into_iter().flatten().flatten() {
+            let dir = e.path();
+            let Ok(decl) = crate::sourcedecl::SourceDecl::load(&dir) else { continue };
+            if matches!(decl.source, crate::sourcedecl::Fetch::Proposals { .. }) {
+                let waiting = crate::propose::list(&dir).iter().filter(|p| p.status == "pending").count();
+                out.push((e.file_name().to_string_lossy().into_owned(), if decl.title.is_empty() { decl.name } else { decl.title }, waiting));
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// What people proposed for one source: what waits, with who else said the same, and what
+    /// was decided.
+    fn proposals_page(&self, source: &str, query: &BTreeMap<String, String>) -> Result<String, String> {
+        let dir = self.sources().join(source);
+        let decl = crate::sourcedecl::SourceDecl::load(&dir)?;
+        let crate::sourcedecl::Fetch::Proposals { from } = &decl.source else {
+            return Err(format!("{} takes no proposals", decl.name));
+        };
+        let all = crate::propose::list(&dir);
+        let show = query.get("show").map(String::as_str).unwrap_or("pending");
+        let shown: Vec<_> = all.iter().filter(|e| show == "all" || e.status == show).rev().collect();
+        let count = |s: &str| all.iter().filter(|e| e.status == s).count();
+        let short = |k: &str| if k.len() > 24 { format!("{}…", &k[..24]) } else { k.to_string() };
+        let body = html! {
+            h1 { "Proposals: " (if decl.title.is_empty() { decl.name.clone() } else { decl.title.clone() }) }
+            p.about { "Rows people read for this source and proposed, each signed with their own key. Only what is accepted reaches the source; a rejection withdraws a row accepted before, and every decision stays in " code { "decisions.jsonl" } "." }
+            p.dim {
+                (from.len()) (if from.len() == 1 { " key is" } else { " keys are" }) " invited, in " code { "source.yaml" } ". They send to " code { (serve::at(&format!("/propose/{source}"))) } "."
+            }
+            p {
+                @for (s, label) in [("pending", "Waiting"), ("accepted", "Accepted"), ("rejected", "Rejected"), ("all", "All")] {
+                    a.chip.on[show == s] href={(serve::at(&format!("/proposals/{source}"))) "?show=" (s)} { (label) @if s != "all" { " " (count(s)) } }
+                    " "
+                }
+            }
+            @if shown.is_empty() { p.dim { "Nothing here." } }
+            table { tbody {
+                @for e in &shown {
+                    tr {
+                        td {
+                            code { (e.row) }
+                            div.why {
+                                "read " (e.read_at) " from " a href=(e.read_from) { (e.read_from) } " · " (if e.attest == "read" { "read by the proposer" } else { "relayed" })
+                                @if !e.note.is_empty() { " · " (e.note) }
+                            }
+                            div.why {
+                                "proposed by " code title=(e.by) { (short(&e.by)) } " · arrived " (e.received)
+                                @if !e.agreeing.is_empty() { " · " strong { (e.agreeing.len()) (if e.agreeing.len() == 1 { " other key says the same" } else { " other keys say the same" }) } }
+                            }
+                        }
+                        td.num {
+                            @if e.status == "pending" || e.status == "rejected" {
+                                form method="post" action=(serve::at(&format!("/proposals/{source}/{}/accept", e.file))) { button.primary type="submit" { "Accept" } }
+                            }
+                            @if e.status == "pending" || e.status == "accepted" {
+                                form method="post" action=(serve::at(&format!("/proposals/{source}/{}/reject", e.file))) {
+                                    input type="text" name="why" placeholder="why, optional";
+                                    button type="submit" { (if e.status == "accepted" { "Withdraw" } else { "Reject" }) }
+                                }
+                            }
+                            @if e.status != "pending" { div.dim { (e.status) } }
+                        }
+                    }
+                }
+            } }
+        };
+        Ok(page("Proposals", body))
+    }
+
     fn start_page(&self) -> String {
         let unseen = unseen(&self.root);
         let trackers = listed(&self.trackers());
@@ -1696,6 +1832,18 @@ impl App {
                     button.primary type="submit" { "Start" }
                 }
                 (example_card())
+            }
+            @let proposed = self.proposal_sources();
+            @if !proposed.is_empty() {
+                h2 { "Proposals" }
+                table { tbody {
+                    @for (dir, title, waiting) in &proposed {
+                        tr {
+                            td { a href=(serve::at(&format!("/proposals/{dir}"))) { strong { (title) } } }
+                            td.num { @if *waiting == 0 { span.dim { "nothing waiting" } } @else { a.chip.on href=(serve::at(&format!("/proposals/{dir}"))) { (waiting) " waiting" } } }
+                        }
+                    }
+                } }
             }
             (self.unfinished())
             p.dim { "The workspace is " code { (self.root.display()) } ". Everything here is a file in it. " a href=(serve::at("/assist")) { @if crate::assist::Assist::configured(&self.root).available() { "The assist asks " (crate::assist::Assist::configured(&self.root).who()) } @else { "No model is set up, and none is needed to begin" } } "." }

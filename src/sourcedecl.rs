@@ -168,6 +168,14 @@ pub enum Fetch {
         /// `X-Hub-Signature-256: sha256=…`).
         secret: String,
     },
+    /// Read by people for it: every signed POST to the workspace's `/propose/<source>` from a key
+    /// in `from` is kept in `proposals/`, and only what the owner accepts reaches `inbox/`, which
+    /// an update reads as a webhook's.
+    Proposals {
+        /// The keys invited to propose, `ed25519:…` as `zetlyn id` prints them.
+        #[serde(default)]
+        from: Vec<String>,
+    },
     /// A query against PostgreSQL. The connection string names a variable, never a password,
     /// and the query carries the watermark as `{since}`.
     Sql {
@@ -275,6 +283,7 @@ impl Fetch {
             Fetch::Package { .. } => "package",
             Fetch::Sql { .. } => "sql",
             Fetch::Webhook { .. } => "webhook",
+            Fetch::Proposals { .. } => "proposals",
             Fetch::Web { .. } => "web",
         }
     }
@@ -300,6 +309,7 @@ impl Fetch {
             // Never the connection string: it is a password, however it was written.
             Fetch::Sql { .. } => "a PostgreSQL database".into(),
             Fetch::Webhook { .. } => "what its sender pushes to it".into(),
+            Fetch::Proposals { .. } => "what people who read it propose, as its owner accepts it".into(),
             Fetch::Web { url, .. } => url.clone(),
         }
     }
@@ -311,7 +321,7 @@ impl Fetch {
         match self {
             Fetch::Feed { text_is, .. } => text_is,
             Fetch::Folder { .. } | Fetch::Csv { .. } | Fetch::Xlsx { .. } => "whole",
-            Fetch::Http { .. } | Fetch::Sql { .. } | Fetch::Webhook { .. } | Fetch::Web { .. } => "whole",
+            Fetch::Http { .. } | Fetch::Sql { .. } | Fetch::Webhook { .. } | Fetch::Proposals { .. } | Fetch::Web { .. } => "whole",
             Fetch::Hub { text_is, .. } => text_is,
             Fetch::Package { text_is, .. } => text_is,
         }
@@ -331,7 +341,7 @@ impl Fetch {
             }
             Fetch::Csv { path, .. } => path,
             Fetch::Xlsx { path, .. } => path,
-            Fetch::Http { .. } | Fetch::Feed { .. } | Fetch::Hub { .. } | Fetch::Package { .. } | Fetch::Sql { .. } | Fetch::Webhook { .. } | Fetch::Web { .. } => {
+            Fetch::Http { .. } | Fetch::Feed { .. } | Fetch::Hub { .. } | Fetch::Package { .. } | Fetch::Sql { .. } | Fetch::Webhook { .. } | Fetch::Proposals { .. } | Fetch::Web { .. } => {
                 return base.to_path_buf()
             }
         };

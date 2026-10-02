@@ -505,8 +505,9 @@ fn run(args: &[String]) -> Result<(), String> {
             serve::mount(flag(args, "--base").unwrap_or(""));
             // Under a hub, the hub is home: the mark and the first crumb go there.
             if !serve::mounted().is_empty() {
-                let nav = vec![("Hub".to_string(), "/".to_string()), ("Docs".to_string(), "https://zetlyn.com/docs".to_string())];
-                serve::frame_home("Hub", "/", nav);
+                serve::frame_home("Hub", "/", Vec::new());
+                // The header and the footer are the website's, with the hub the part it is in.
+                serve::frame_site("Hub");
             }
             // Loopback unless asked otherwise: a tracker reachable from the network is a decision
             // an operator makes, not a default they discover.

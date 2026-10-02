@@ -2594,10 +2594,12 @@ fn compared(scope: &Tracker) -> Vec<(String, Vec<(String, Option<String>)>)> {
                 .iter()
                 .map(|(member, title, decl)| {
                     let field = align.field_in(member, name);
-                    let column = decl
-                        .as_ref()
-                        .and_then(|d| d.records.fields.get(&field))
-                        .map(|p| p.from.trim_start_matches("field:").to_string());
+                    // A source whose claims arrived built (subscribed, or in a package) declares its
+                    // properties without the column they were read from: the name it holds is the one.
+                    let column = decl.as_ref().and_then(|d| d.records.fields.get(&field)).map(|p| {
+                        let from = p.from.trim_start_matches("field:").trim();
+                        if from.is_empty() { field.clone() } else { from.to_string() }
+                    });
                     (title.clone(), column)
                 })
                 .collect();

@@ -393,10 +393,15 @@ fn index_page(dir: &Path, serving: &[String]) -> Vec<u8> {
                         @if has("mark.png") { img src="/mark.png" alt="" class="brand-mark"; }
                         span { "Zetlyn" }
                     }
+                    // The website's header, link for link, with the hub where the reader is.
                     nav {
-                        a href="https://zetlyn.com/trackers" { "Trackers" }
-                        a href="https://zetlyn.com/sources" { "Sources" }
-                        a href="https://zetlyn.com/hub" { "Hub" }
+                        @for (label, href) in crate::serve::SITE_NAV {
+                            @if *label == "Hub" {
+                                a href=(href) aria-current="page" { (label) }
+                            } @else {
+                                a href=(href) { (label) }
+                            }
+                        }
                     }
                 }
 
@@ -480,11 +485,11 @@ fn index_page(dir: &Path, serving: &[String]) -> Vec<u8> {
                     }
                 }
 
+                p.shell.hub-note { "A hub serves files: " a href="/index.json" { "index.json" } " lists them." }
                 footer.site-footer.shell {
-                    span { "A hub serves files." }
+                    span { "© Zetlyn" }
                     div {
-                        a href="https://zetlyn.com" { "zetlyn.com" }
-                        a href="/index.json" { "index.json" }
+                        @for (label, href) in crate::serve::SITE_FOOTER { a href=(href) { (label) } }
                         @if has("app.js") {
                             button.theme-toggle type="button" id="theme-toggle" { "Theme" }
                         }

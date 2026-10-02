@@ -40,7 +40,7 @@ pub const STYLE: &str = r#"
 body { margin: 0; background: var(--bg); color: var(--fg);
        font: 15px/1.55 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
              "Segoe UI", sans-serif; -webkit-font-smoothing: antialiased; }
-main { max-width: 72rem; margin: 0 auto; padding: 2.2rem 1.25rem 5rem; }
+main { width: min(1180px, calc(100% - 48px)); margin: 0 auto; padding: 2.2rem 0 5rem; }
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 h1 { font-size: 2.1rem; line-height: 1.15; margin: 0 0 .2rem; letter-spacing: -.035em; font-weight: 750; }
@@ -95,17 +95,30 @@ details.receipt[open] { background: var(--panel); border-left: 3px solid var(--a
 .receipt pre { max-height: 18rem; overflow: auto; font-size: .78rem; background: var(--bg);
                padding: .5rem; border: 1px solid var(--line); }
 .receipt table { font-size: .82rem; }
-/* The frame: the website's header, then where the reader is. */
-.wrap { max-width: 72rem; margin: 0 auto; padding: 0 1.25rem; }
-header.top { border-bottom: 1px solid var(--line); background: var(--bg); }
-header.top .wrap { height: 64px; display: flex; align-items: center; gap: 1.5rem; }
-.brand { display: flex; align-items: center; gap: .6rem; color: var(--fg); font-weight: 750;
-  letter-spacing: -.03em; font-size: 1.15rem; }
+/* The frame: the website's header, then where the reader is. Its sizes are the website's
+   (zetlyn.com, assets/style.css: .shell, .site-header, .site-footer), so a reader moving between
+   the site, the hub and a tracker sees one header and one footer. */
+.wrap { width: min(1180px, calc(100% - 48px)); margin: 0 auto; }
+header.top { background: var(--bg); }
+header.top .wrap { height: 82px; display: flex; align-items: center; gap: 1.5rem;
+  border-bottom: 1px solid var(--line); }
+.brand { display: flex; align-items: center; gap: 10px; color: var(--fg); font-weight: 750;
+  letter-spacing: -.03em; font-size: 20px; }
 .brand:hover { text-decoration: none; }
-.brand-mark { width: 24px; height: 24px; filter: var(--mark-filter); }
-nav.links { margin-left: auto; display: flex; gap: 1.6rem; font-size: .9rem; }
+.brand-mark { width: 26px; height: 26px; filter: var(--mark-filter); }
+nav.links { margin-left: auto; display: flex; gap: 28px; font-size: 14px; }
 nav.links a { color: var(--dim); }
-nav.links a:hover { color: var(--fg); text-decoration: none; }
+nav.links a:hover, nav.links a[aria-current] { color: var(--fg); text-decoration: none; }
+footer.site-footer { width: min(1180px, calc(100% - 48px)); margin: 0 auto; padding: 0; height: 90px;
+  border-top: 1px solid var(--line); display: flex; align-items: center; color: var(--dim);
+  font: 11px/normal ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+footer.site-footer div { margin-left: auto; display: flex; gap: 22px; align-items: center; }
+footer.site-footer a { color: var(--dim); }
+footer.site-footer a:hover { color: var(--fg); text-decoration: none; }
+.theme-toggle { border: 1px solid var(--line); background: none; color: var(--dim); cursor: pointer;
+  padding: 7px 11px; font: 11px/normal ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  text-transform: uppercase; letter-spacing: .1em; }
+.theme-toggle:hover { border-color: var(--fg); color: var(--fg); }
 .subbar { border-bottom: 1px solid var(--line); background: var(--panel); }
 .subbar .wrap { display: flex; align-items: center; justify-content: space-between; gap: 1rem;
   flex-wrap: wrap; min-height: 46px; }
@@ -179,12 +192,12 @@ details { margin: 2rem 0; } details > summary { cursor: pointer; font-weight: 60
   padding: .9rem 1.1rem; background: var(--panel); margin: 1.2rem 0; }
 .offer p { margin: 0; flex: 1 1 18rem; } .offer form { margin: 0; }
 @media (max-width: 40rem) {
-  header.top .wrap { height: 56px; gap: 1rem; }
-  nav.links { gap: 1rem; font-size: .85rem; }
+  header.top .wrap { height: auto; min-height: 70px; padding-block: 10px; gap: 1rem; }
+  nav.links { gap: 14px; flex-wrap: wrap; justify-content: flex-end; font-size: 12px; }
   nav.tabs { width: 100%; overflow-x: auto; }
   .stats b { font-size: 1.5rem; }
 }
-@media (max-width: 40rem) { main { padding: 1.2rem .9rem 4rem; } }
+@media (max-width: 40rem) { main, .wrap, footer.site-footer { width: calc(100% - 28px); } main { padding: 1.2rem 0 4rem; } footer.site-footer { height: auto; padding: 26px 0; flex-wrap: wrap; gap: 12px; } }
 "#;
 
 pub fn urldecode(s: &str) -> String {
@@ -327,6 +340,45 @@ pub struct Frame {
     pub jobs: Option<String>,
     /// The automatic-update switch at the right of the header: its words, where it leads, on.
     pub status: Option<(String, String, bool)>,
+    /// Which of `nav` is where the reader is.
+    pub current: Option<String>,
+    /// The footer: what it says at the left, and its links at the right, before the theme switch.
+    pub note: String,
+    pub footer: Vec<(String, String)>,
+    /// Where the mark leads, where it is not this frame's home.
+    pub brand: Option<String>,
+}
+
+/// The website's header links and footer links, as zetlyn.com carries them (its `page.html` and
+/// the labels in its `PAGES`). Under the hub at hub.zetlyn.com the header and the footer are the
+/// website's, so a reader moving between them sees one site.
+pub const SITE_NAV: &[(&str, &str)] = &[
+    ("Docs", "https://zetlyn.com/docs"),
+    ("Trackers", "https://zetlyn.com/trackers"),
+    ("Sources", "https://zetlyn.com/sources"),
+    ("Interface", "https://zetlyn.com/api"),
+    ("Hub", "https://zetlyn.com/hub"),
+];
+pub const SITE_FOOTER: &[(&str, &str)] = &[
+    ("Contact", "mailto:hello@zetlyn.com"),
+    ("Privacy", "https://zetlyn.com/privacy"),
+    ("Legal", "https://zetlyn.com/legal"),
+];
+
+fn owned(links: &[(&str, &str)]) -> Vec<(String, String)> {
+    links.iter().map(|(l, h)| (l.to_string(), h.to_string())).collect()
+}
+
+/// The website's header and footer, with `current` the header link where the reader is.
+pub fn frame_site(current: &str) {
+    FRAME.with(|f| {
+        let mut f = f.borrow_mut();
+        f.nav = owned(SITE_NAV);
+        f.current = Some(current.to_string());
+        f.note = "© Zetlyn".into();
+        f.footer = owned(SITE_FOOTER);
+        f.brand = Some("https://zetlyn.com".into());
+    });
 }
 
 thread_local! {
@@ -367,10 +419,55 @@ pub fn frame() -> Frame {
 const MARK: &str = include_str!("mark.b64");
 const FAVICON: &str = include_str!("favicon.b64");
 
+/// The website's theme, unchanged (zetlyn.com: the script in `page.html`'s head, and the first
+/// part of `app.js`): a choice is kept per browser, and a reader who made none gets their system's.
+const THEME_EARLY: &str = r#"document.documentElement.className+=" js";try{var t=localStorage.getItem("theme");if(t)document.documentElement.dataset.theme=t}catch(e){}"#;
+const THEME_TOGGLE: &str = r##"(function () {
+  var root = document.documentElement;
+  var button = document.getElementById("theme-toggle");
+  var meta = document.querySelector('meta[name="theme-color"]');
+  var BAR = { dark: "#11181d", light: "#f2efe7" };
+  var media = window.matchMedia ? window.matchMedia("(prefers-color-scheme: light)") : null;
+
+  function current() {
+    return root.dataset.theme || (media && media.matches ? "light" : "dark");
+  }
+
+  function paint() {
+    var theme = current();
+    if (meta) meta.setAttribute("content", BAR[theme]);
+    if (!button) return;
+    button.textContent = theme === "dark" ? "☾ Dark" : "☀ Light";
+    button.setAttribute("aria-label", "Theme: " + theme + ". Switch to " +
+      (theme === "dark" ? "light" : "dark") + ".");
+  }
+
+  if (button) {
+    button.addEventListener("click", function () {
+      var next = current() === "dark" ? "light" : "dark";
+      root.dataset.theme = next;
+      try { localStorage.setItem("theme", next); } catch (e) {}
+      paint();
+    });
+  }
+
+  // The system preference can change while the page is open, and a page with no stored choice
+  // follows it.
+  if (media) {
+    var follow = function () { if (!root.dataset.theme) paint(); };
+    if (media.addEventListener) media.addEventListener("change", follow);
+    else if (media.addListener) media.addListener(follow);
+  }
+
+  paint();
+})();
+"##;
+
 pub fn shell(title: &str, body: Markup) -> String {
     let f = frame();
     // Standing alone (a tracker served by itself, a hub), the part it is in is its home.
     let home_href = if !f.home.1.is_empty() { f.home.1.clone() } else { f.section.as_ref().map(|s| s.1.clone()).unwrap_or_else(|| "/".into()) };
+    let brand_href = f.brand.clone().unwrap_or_else(|| home_href.clone());
     // Home, the part this is in, and this page: each named once.
     let mut crumbs: Vec<(String, Option<String>)> = Vec::new();
     if !f.home.1.is_empty() {
@@ -395,6 +492,9 @@ pub fn shell(title: &str, body: Markup) -> String {
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
+                meta name="theme-color" content="#f2efe7";
+                // As the website does: a theme already chosen is applied before the first paint.
+                script { (maud::PreEscaped(THEME_EARLY)) }
                 title { (title) @if title != "Zetlyn" { " · Zetlyn" } }
                 link rel="icon" type="image/png" href={"data:image/png;base64," (FAVICON)};
                 link rel="stylesheet" href=(at("/style.css"));
@@ -402,7 +502,7 @@ pub fn shell(title: &str, body: Markup) -> String {
             body {
                 header.top {
                     div.wrap {
-                        a.brand href=(home_href) aria-label="Zetlyn home" {
+                        a.brand href=(brand_href) aria-label="Zetlyn home" {
                             img.brand-mark src={"data:image/png;base64," (MARK)} alt="";
                             span { "Zetlyn" }
                         }
@@ -411,7 +511,13 @@ pub fn shell(title: &str, body: Markup) -> String {
                         }
                         @if !f.nav.is_empty() {
                             nav.links {
-                                @for (label, href) in &f.nav { a href=(href) { (label) } }
+                                @for (label, href) in &f.nav {
+                                    @if f.current.as_deref() == Some(label.as_str()) {
+                                        a href=(href) aria-current="page" { (label) }
+                                    } @else {
+                                        a href=(href) { (label) }
+                                    }
+                                }
                             }
                         }
                     }
@@ -446,6 +552,14 @@ pub fn shell(title: &str, body: Markup) -> String {
                     }
                 }
                 main { (body) }
+                footer.site-footer {
+                    span { @if f.note.is_empty() { "Zetlyn " (env!("CARGO_PKG_VERSION")) } @else { (f.note) } }
+                    div {
+                        @for (label, href) in &f.footer { a href=(href) { (label) } }
+                        button.theme-toggle type="button" id="theme-toggle" { "Theme" }
+                    }
+                }
+                script { (maud::PreEscaped(THEME_TOGGLE)) }
                 @if let Some(jobs) = &f.jobs {
                     div #jobs data-at=(jobs) hidden {}
                     (maud::PreEscaped(crate::app::BAR_SCRIPT))

@@ -74,7 +74,7 @@ pub fn free_edge() -> String {
 
 /// What a viewer may reach, as a bound on the query rather than a check around it.
 pub fn bound(viewer: &Viewer, scope: &str) -> Option<String> {
-    if viewer.entitled(scope) {
+    if viewer.free || viewer.entitled(scope) {
         None
     } else {
         Some(free_edge())
@@ -120,6 +120,9 @@ pub struct Viewer {
     pub account: Option<Account>,
     /// True where the request came with an API key rather than a session.
     pub by_key: bool,
+    /// Nothing here costs anything: no free edge, no paywall, nothing said about subscribing.
+    /// Who may see a private tracker is a different question, and this does not answer it.
+    pub free: bool,
 }
 
 impl Viewer {
@@ -377,8 +380,10 @@ pub struct Site {
     pub url: String,
     #[serde(default)]
     pub contact: String,
+    /// What a subscription costs. A workspace that names none charges nothing: every reader reads
+    /// all of it, now, and nothing on its pages speaks of paying.
     #[serde(default)]
-    pub price: Price,
+    pub price: Option<Price>,
     #[serde(default)]
     pub mail: Mail,
     /// Who the assist asks, if anyone. See assist.rs.
@@ -403,7 +408,7 @@ pub struct Publish {
     pub app: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Price {
     pub one: String,
@@ -501,6 +506,7 @@ pub fn viewer_of(accounts: &Accounts, cookie: Option<&str>, authorization: Optio
             return Viewer {
                 account: Some(account),
                 by_key: true,
+                free: false,
             };
         }
     }
@@ -514,6 +520,7 @@ pub fn viewer_of(accounts: &Accounts, cookie: Option<&str>, authorization: Optio
         Some(account) => Viewer {
             account: Some(account),
             by_key: false,
+            free: false,
         },
         None => Viewer::default(),
     }
@@ -549,6 +556,7 @@ impl Viewer {
                 curator: true,
             }),
             by_key: false,
+            free: false,
         }
     }
 }

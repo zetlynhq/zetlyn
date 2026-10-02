@@ -363,7 +363,7 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
             (d.name) " · joined on " (d.keys().join(", "))
             " · " a href=(at("/changes")) { "changes" }
             " · " a href=(at("/catalogue")) { "catalogue" }
-            " · " a href=(at("/pricing")) { "pricing" }
+            @if !v.free { " · " a href=(at("/pricing")) { "pricing" } }
             " · " a href=(at("/terms")) { "terms" }
             " · " a href=(at("/api/describe")) { "describe" }
             @if !site.title.is_empty() { " · " (site.title) }
@@ -674,8 +674,9 @@ fn entry_json(e: &crate::tracker::Thing) -> J {
 // Who is asking, and what they are paying for.
 
 fn banner(v: &Viewer, scope: &Tracker, hidden: u64) -> Markup {
-    // The person at the machine owns all of it: nothing to sign in to, nothing to buy.
-    if is_operator(v) && hidden == 0 {
+    // The person at the machine owns all of it: nothing to sign in to, nothing to buy. Where
+    // nothing costs anything there is nothing to say either.
+    if (is_operator(v) && hidden == 0) || v.free {
         return html! {};
     }
     html! {
@@ -736,7 +737,7 @@ fn account_page(scope: &Tracker, accounts: &Accounts, site: &Site, v: &Viewer) -
             @if let Some(until) = &a.paid_until { " until " (until) }
             @if !a.scopes.is_empty() { " · " (a.scopes.join(", ")) }
         }
-        @if !entitled {
+        @if !entitled && !v.free {
             div.note {
                 "Reading is " (account::FREE_DELAY_DAYS) " days behind, and there are no change "
                 "feeds, no API and no export. " a href=(at("/pricing")) { "What a subscription costs" } "."
@@ -779,7 +780,7 @@ fn account_page(scope: &Tracker, accounts: &Accounts, site: &Site, v: &Viewer) -
                 "Cancelling stops the next payment. What you already hold you keep until "
                 @match &a.paid_until { Some(u) => (u), None => "the end of the period" } "."
             }
-        } @else {
+        } @else if !v.free {
             p { a href=(at("/pricing")) { "Subscribe" } }
         }
 
@@ -800,7 +801,9 @@ fn key_made(key: &str) -> String {
 }
 
 fn pricing_page(_scope: &Tracker, site: &Site, v: &Viewer) -> String {
-    let p = &site.price;
+    // Only asked for where a price is named: the route answers 404 otherwise.
+    let named = site.price.clone().unwrap_or_default();
+    let p = &named;
     let body = html! {
         h1 { "What it costs" }
         p.about {
@@ -1248,11 +1251,13 @@ impl TrackerSite {
         };
         let cookie = header("Cookie");
         let authorization = header("Authorization");
-        let v = if *operator {
+        let mut v = if *operator {
             Viewer::operator()
         } else {
             account::viewer_of(&accounts, cookie.as_deref(), authorization.as_deref())
         };
+        // A workspace that names no price charges nothing.
+        v.free = site.price.is_none();
         // A private tracker, or one a source forbids showing in public, is its accounts' alone:
         // everything but signing in and what it costs is a page saying so.
         let closed = !*operator && (scope.private() || scope.licences().iter().any(|(_, r)| r == "no"));
@@ -1278,7 +1283,7 @@ impl TrackerSite {
             ),
             "/private" => {
                 status = 401;
-                (private_page(&scope), "text/html; charset=utf-8", None)
+                (private_page(&scope, v.free), "text/html; charset=utf-8", None)
             }
             // For the website's front page: what the overview and a thing page already show to
             // anyone, as one answer another site may fetch. Nothing gated is in it, so it is open
@@ -1288,7 +1293,7 @@ impl TrackerSite {
                 "application/json",
                 Some(("Access-Control-Allow-Origin".to_string(), "*".to_string())),
             ),
-            "/pricing" => (
+            "/pricing" if site.price.is_some() => (
                 pricing_page(&scope, &site, &v),
                 "text/html; charset=utf-8",
                 None,
@@ -1437,7 +1442,8 @@ impl TrackerSite {
                         None,
                     )?;
                 }
-                let again = account::viewer_of(&accounts, cookie.as_deref(), None);
+                let mut again = account::viewer_of(&accounts, cookie.as_deref(), None);
+                again.free = v.free;
                 (
                     account_page(&scope, &accounts, &site, &again),
                     "text/html; charset=utf-8",
@@ -1727,7 +1733,7 @@ impl TrackerSite {
             || path.starts_with("/conflicts")
             || path.starts_with("/things")
             || path.starts_with("/watch/");
-        if gated && !v.entitled(&scope.decl.name) {
+        if gated && !v.free && !v.entitled(&scope.decl.name) {
             status = 402;
         }
         if missing {
@@ -2460,7 +2466,7 @@ fn relations_section(scope: &Tracker, key: &str, scheme: &str, value: &str, oper
 
 /// What a private tracker says to somebody without an account on it: that it exists, whose it is,
 /// and how to sign in. Nothing it holds.
-fn private_page(scope: &Tracker) -> String {
+fn private_page(scope: &Tracker, free: bool) -> String {
     let forbidden: Vec<String> = scope.licences().into_iter().filter(|(_, r)| r == "no").map(|(s, _)| s).collect();
     shell(&scope.decl.title, html! {
         h1 { (scope.decl.title) }
@@ -2469,7 +2475,7 @@ fn private_page(scope: &Tracker) -> String {
         } @else {
             p.about { "Not public: " (forbidden.join(", ")) " may not be republished, so its pages are for the accounts it has given access to." }
         }
-        p.bar { a.chip.on href=(at("/signin")) { "Sign in" } a.chip href=(at("/pricing")) { "What it costs" } }
+        p.bar { a.chip.on href=(at("/signin")) { "Sign in" } @if !free { a.chip href=(at("/pricing")) { "What it costs" } } }
     })
 }
 

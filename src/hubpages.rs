@@ -24,6 +24,8 @@ pub struct Row {
     pub tag: String,
     pub version: String,
     pub manifest: J,
+    /// Every version it has on this hub, the one the tag names among them.
+    pub versions: Vec<String>,
 }
 
 impl Row {
@@ -85,14 +87,24 @@ pub fn shelf(place: &dyn Place) -> Result<Vec<Row>, String> {
             Err(e) if tree == "sources" => return Err(e),
             Err(_) => continue,
         };
-        for path in listed {
+        // Every version each thing has, from the names alone: a version is a directory with a
+        // manifest in it, and a delta inside one is not another.
+        let mut versions: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
+        for path in &listed {
+            let parts: Vec<&str> = path.split('/').collect();
+            if let [_, owner, name, "versions", v, "manifest.json"] = parts[..] {
+                versions.entry((owner.to_string(), name.to_string())).or_default().push(v.to_string());
+            }
+        }
+        for path in &listed {
             let parts: Vec<&str> = path.split('/').collect();
             let [_, owner, name, "tags", tag] = parts[..] else { continue };
-            let Ok(v) = place.get(&path) else { continue };
+            let Ok(v) = place.get(path) else { continue };
             let version = String::from_utf8_lossy(&v).trim().to_string();
             let Ok(raw) = place.get(&format!("{tree}/{owner}/{name}/versions/{version}/manifest.json")) else { continue };
             let Ok(manifest) = serde_json::from_slice::<J>(&raw) else { continue };
-            rows.push(Row { tree, owner: owner.into(), name: name.into(), tag: tag.into(), version, manifest });
+            let all = versions.get(&(owner.to_string(), name.to_string())).cloned().unwrap_or_default();
+            rows.push(Row { tree, owner: owner.into(), name: name.into(), tag: tag.into(), version, manifest, versions: all });
         }
     }
     Ok(rows)
@@ -171,6 +183,7 @@ fn frame(place: &dyn Place, title: &str, description: &str, body: Markup) -> Str
             }
             body.area-hub {
                 header.site-header.shell {
+                    (crate::serve::switcher("hub"))
                     a.brand href="/" aria-label="Zetlyn Hub" {
                         @if has("mark.png") { img src="/mark.png" alt="" class="brand-mark"; }
                         span { "Zetlyn" } span.brand-area { "Hub" }
@@ -186,9 +199,8 @@ fn frame(place: &dyn Place, title: &str, description: &str, body: Markup) -> Str
                         a href="/#sources" { "Sources" }
                         a href="/#publish" { "Publish" }
                         a href="https://zetlyn.com/docs" { "Docs" }
-                        @for (key, name, href) in crate::serve::AREAS.iter().filter(|(a, _, _)| *a != "hub") {
-                            a.area-link.{"to-" (key)} href=(href) { (name) }
-                        }
+                        // Accounts are the app's: signing in here is signing in there.
+                        a.hub-signin href="https://app.zetlyn.com/signin" { "Sign in" }
                     }
                 }
                 main { (body) }
@@ -217,79 +229,108 @@ fn badge(r: &Row) -> &'static str {
     }
 }
 
-/// The front page: what anyone can take, first, then what the hub says about itself.
+/// What a row is, in one word: a tracker, a source, or a package.
+fn kind_of(r: &Row) -> &'static str {
+    match r.tree {
+        "sources" => "source",
+        "packages" => "package",
+        _ => "tracker",
+    }
+}
+
+/// A row's claims, a tracker's being its sources' together.
+fn claims_of(r: &Row, rows: &[Row]) -> u64 {
+    if r.tree != "trackers" {
+        return r.claims();
+    }
+    r.includes()
+        .iter()
+        .filter_map(|n| rows.iter().find(|s| s.tree == "sources" && s.reference() == *n))
+        .map(|s| s.claims())
+        .sum()
+}
+
+/// The front page: a registry. Search first, the facets beside it, every tracker, package and
+/// source as one list, and what the hub says about itself beneath.
 pub fn catalog(place: &dyn Place, rows: &[Row], opens: Opens) -> String {
-    let (trackers, sources): (Vec<&Row>, Vec<&Row>) = rows.iter().partition(|r| r.is_tracker());
+    let trackers: Vec<&Row> = rows.iter().filter(|r| r.is_tracker()).collect();
+    let sources: Vec<&Row> = rows.iter().filter(|r| !r.is_tracker()).collect();
+    let packages = rows.iter().filter(|r| r.tree == "packages").count();
     let about = place.get("hub-about.html").ok().map(|b| String::from_utf8_lossy(&b).into_owned());
     let total: u64 = sources.iter().map(|r| r.claims()).sum();
+    let mut items: Vec<&Row> = trackers.iter().chain(sources.iter()).copied().collect();
+    items.dedup_by(|a, b| a.page() == b.page());
+    let shown_kinds: [(&str, &str, usize); 3] = [
+        ("tracker", "Trackers", rows.iter().filter(|r| r.tree == "trackers").count()),
+        ("package", "Packages", packages),
+        ("source", "Sources", sources.len()),
+    ];
     let body = html! {
-        section.hero.shell {
+        section.hub-top.shell {
             p.overline { "THE HUB · PUBLIC" }
-            h1 { "Trackers anyone " span { "can use." } }
-            p.intro {
-                "Every tracker and source here is public and free to use. Open one in the "
-                "browser, or subscribe and keep a copy on your own machine that stays current."
-            }
-            p.hub-stats {
-                span { (plural(trackers.len(), "tracker", "trackers")) }
-                span { (plural(sources.len(), "source", "sources")) }
-                span { (thousands(total)) " claims" }
-            }
+            h1.hub-title { "Find a tracker or a source" }
+            p.hub-sub { "Every one here is public and free to use: open it in the browser, or subscribe and keep a copy on your own machine that stays current." }
+            input #hub-filter type="search" autocomplete="off" aria-label="Search the hub"
+                placeholder=(format!("Search {} and {}", plural(trackers.len(), "tracker", "trackers"), plural(sources.len(), "source", "sources")));
         }
-        section.hub-list.shell #trackers {
-            h2 { "Trackers" }
-            p.caption { "A topic, and the sources it is made of, joined on what they share." }
-            @if trackers.is_empty() { p { "None yet." } }
-            div.hub-cards {
-                @for r in &trackers {
-                    @let claims: u64 = if r.tree == "packages" { r.claims() } else {
-                        r.includes().iter().filter_map(|n| sources.iter().find(|s| s.reference() == *n)).map(|s| s.claims()).sum()
-                    };
-                    article.hub-card {
-                        div.hub-card-head {
-                            h3 { a href=(r.page()) { (r.title()) } }
-                            span.badge { (badge(r)) }
+        section.hub-registry.shell #trackers {
+            aside.hub-facets {
+                fieldset {
+                    legend { "Type" }
+                    @for (key, label, n) in &shown_kinds {
+                        @if *n > 0 { label { input type="checkbox" data-facet="kind" value=(key) checked; " " (label) span.n { (n) } } }
+                    }
+                }
+                fieldset {
+                    legend { "Sources may be shown" }
+                    @for (key, label) in [("yes", "in full"), ("summary", "titles, values, a link"), ("other", "has not said")] {
+                        label { input type="checkbox" data-facet="shown" value=(key) checked; " " (label) }
+                    }
+                }
+                fieldset {
+                    legend { "Sort" }
+                    select #hub-sort aria-label="Sort" {
+                        option value="kind" { "Trackers first" }
+                        option value="built" { "Recently published" }
+                        option value="claims" { "Most claims" }
+                        option value="name" { "Name" }
+                    }
+                }
+                p.caption { (thousands(total)) " claims in all" }
+            }
+            div.hub-list #hub-list {
+                p.hub-count #hub-count { (plural(items.len(), "result", "results")) }
+                @for r in &items {
+                    @let claims = claims_of(r, rows);
+                    @let shown_key = match r.republish().as_str() { "yes" => "yes", "summary" => "summary", _ if r.is_tracker() => "", _ => "other" };
+                    article.hub-row id=[(r.tree == "sources" && Some(r.page()) == sources.first().map(|s| s.page())).then_some("sources")]
+                        data-kind=(kind_of(r)) data-shown=(shown_key) data-claims=(claims) data-built=(r.built_at())
+                        data-name=(r.title().to_lowercase())
+                        data-text=(format!("{} {} {}", r.title(), r.reference(), r.about()).to_lowercase()) {
+                        div.hub-row-main {
+                            h3 { a href=(r.page()) { (r.title()) } span.badge { (kind_of(r)) } @if r.is_tracker() && badge(r) != "Public" { span.badge { (badge(r)) } } }
+                            @if !r.about().is_empty() { p { (r.about()) } }
+                            p.hub-meta {
+                                (r.reference())
+                                @if r.is_tracker() { " · " (plural(r.includes().len(), "source", "sources")) }
+                                " · " (thousands(claims)) " claims"
+                                @if !r.is_tracker() { " · " (shown(&r.republish())) }
+                                @if r.built_at() > 0 { " · published " (ago(r.built_at())) }
+                            }
                         }
-                        @if !r.about().is_empty() { p { (r.about()) } }
-                        p.hub-meta {
-                            (plural(r.includes().len(), "source", "sources")) " · " (thousands(claims)) " claims"
-                            @if r.built_at() > 0 { " · published " (ago(r.built_at())) }
-                        }
-                        div.hub-actions {
+                        div.hub-row-act {
                             @if let Some(open) = opens(r) { a.primary href=(open) target="_blank" rel="noopener" { "Open" } }
                             a.secondary href=(r.page()) { "Details" }
                         }
                     }
                 }
-            }
-        }
-        section.hub-list.shell #sources {
-            h2 { "Sources" }
-            p.caption { "Each one can be taken on its own: " code { "zetlyn source subscribe owner/name" } }
-            @if sources.is_empty() { p { "None yet." } } @else {
-                div.hub-scroll {
-                    table.hub-table {
-                        thead { tr { th { "Source" } th { "In" } th.n { "Claims" } th { "May be shown" } th { "Published" } } }
-                        tbody {
-                            @for r in &sources {
-                                @let reference = r.reference();
-                                @let within: Vec<String> = trackers.iter().filter(|t| t.includes().iter().any(|n| *n == reference)).map(|t| t.title()).collect();
-                                tr {
-                                    td { a href=(r.page()) { (r.title()) } small { (reference) " · " (r.version.get(..8).unwrap_or(&r.version)) } }
-                                    td { @if within.is_empty() { span.dim { "on its own" } } @else { (within.join(", ")) } }
-                                    td.n { (thousands(r.claims())) }
-                                    td { (shown(&r.republish())) }
-                                    td { (ago(r.built_at())) }
-                                }
-                            }
-                        }
-                    }
-                }
+                p.hub-none #hub-none hidden { "Nothing here matches. " a href="/" { "Show everything" } }
             }
         }
         @if let Some(about) = about { (PreEscaped(about)) }
+        script { (PreEscaped(FILTER)) }
     };
-    frame(place, "Zetlyn Hub", "Trackers and sources anyone can use: open one, or subscribe and keep a copy that stays current.", body)
+    frame(place, "Zetlyn Hub", "Public trackers and sources: search them, open one, or subscribe and keep a copy that stays current.", body)
 }
 
 fn take(command: &str, note: &str) -> Markup {
@@ -305,13 +346,58 @@ fn crumbs(r: &Row) -> Markup {
     html! {
         p.overline.hub-crumbs {
             a href="/" { "THE HUB" } " · "
-            (match r.tree { "sources" => "SOURCE", "packages" => "PACKAGE", _ => "TRACKER" })
+            (kind_of(r).to_uppercase())
             " · " (badge(r).to_uppercase())
         }
     }
 }
 
-/// A source: what it is, where it comes from, what one claim carries, and how to take it.
+/// The tabs of a page about one thing. Each is a section of the page; without the script that
+/// shows one at a time they are all there, one after the other.
+fn tabs(names: &[(&str, &str)]) -> Markup {
+    html! {
+        nav.hub-tabs.shell aria-label="Sections" {
+            @for (i, (id, label)) in names.iter().enumerate() {
+                a.on[i == 0] href={"#" (id)} data-tab=(id) { (label) }
+            }
+        }
+    }
+}
+
+/// Every version a thing has on the hub, newest first, with when it was published and how much it held.
+fn versions(place: &dyn Place, r: &Row) -> Markup {
+    let mut held: Vec<(i64, String, u64)> = r
+        .versions
+        .iter()
+        .filter_map(|v| {
+            let raw = place.get(&format!("{}/{}/{}/versions/{v}/manifest.json", r.tree, r.owner, r.name)).ok()?;
+            let m: J = serde_json::from_slice(&raw).ok()?;
+            let claims = m["claims"].as_u64().unwrap_or_else(|| {
+                m["sources"].as_array().map(|a| a.iter().filter_map(|s| s["claims"].as_u64()).sum()).unwrap_or(0)
+            });
+            Some((m["built_at"].as_i64().unwrap_or(0), v.clone(), claims))
+        })
+        .collect();
+    held.sort_by(|a, b| b.cmp(a));
+    html! {
+        div.hub-scroll { table.hub-table {
+            thead { tr { th { "Version" } th { "Published" } th.n { "Claims" } th {} } }
+            tbody {
+                @for (at, v, claims) in &held {
+                    tr {
+                        td { code { (v.get(..12).unwrap_or(v)) } }
+                        td { (crate::iso_date(*at)) " · " (ago(*at)) }
+                        td.n { @if *claims > 0 { (thousands(*claims)) } }
+                        td { @if *v == r.version { span.badge { (r.tag) } } }
+                    }
+                }
+            }
+        } }
+        p.caption { "A subscriber holds one of these and is told of the next; an update fetches only what changed between them." }
+    }
+}
+
+/// A source: what it is, where it comes from, what one claim carries, its versions, and how to take it.
 fn source_page(place: &dyn Place, r: &Row, rows: &[Row], opens: Opens) -> String {
     let m = &r.manifest;
     let reference = r.reference();
@@ -324,7 +410,7 @@ fn source_page(place: &dyn Place, r: &Row, rows: &[Row], opens: Opens) -> String
         .unwrap_or_default();
     let examples: Vec<String> = m["read"]["search"]["examples"].as_array().map(|a| a.iter().filter_map(|e| e.as_str().map(str::to_string)).collect()).unwrap_or_default();
     let body = html! {
-        section.hero.shell.hub-detail {
+        section.hub-detail-top.shell {
             (crumbs(r))
             h1 { (r.title()) }
             @if !r.about().is_empty() { p.intro { (r.about()) } }
@@ -337,7 +423,8 @@ fn source_page(place: &dyn Place, r: &Row, rows: &[Row], opens: Opens) -> String
                 @if m["complete"].as_bool() == Some(false) { span { "partial: not every claim was reached" } }
             }
         }
-        section.hub-list.shell {
+        (tabs(&[("overview", "Overview"), ("properties", "Properties"), ("versions", "Versions"), ("use", "Use it")]))
+        section.hub-tab.shell #overview {
             h2 { "Where it comes from" }
             div.hub-scroll { table.hub-table.kv { tbody {
                 @if let Some(f) = m["fetched_from"].as_str().filter(|f| !f.is_empty()) {
@@ -351,8 +438,17 @@ fn source_page(place: &dyn Place, r: &Row, rows: &[Row], opens: Opens) -> String
                 @if let Some(t) = m["text_is"].as_str() { tr { td { "its text" } td { @if t == "whole" { "in full" } @else { (t) } } } }
                 tr { td { "published by" } td { (r.owner) @if let Some(k) = m["signed_by"].as_str() { small { "signed " (k) } } } }
             } } }
+            h2 { "In trackers" }
+            @if within.is_empty() { p.caption { "None on this hub: it is taken on its own, or into a tracker of yours." } }
+            @else {
+                ul.hub-links { @for t in &within { li { a href=(t.page()) { (t.title()) } @if let Some(o) = opens(t) { " · " a href=(o) target="_blank" rel="noopener" { "open it" } } } } }
+            }
+            @if !examples.is_empty() {
+                h2 { "Questions it answers" }
+                p.caption { "As its publisher wrote them: " @for (i, e) in examples.iter().enumerate() { @if i > 0 { ", " } code { (e) } } }
+            }
         }
-        section.hub-list.shell {
+        section.hub-tab.shell #properties {
             h2 { "What one claim carries" }
             p.caption { "Besides its title, its text and the identifiers that say what it is about." }
             div.hub-scroll { table.hub-table {
@@ -369,26 +465,18 @@ fn source_page(place: &dyn Place, r: &Row, rows: &[Row], opens: Opens) -> String
                 }
             } }
         }
-        section.hub-list.shell {
-            h2 { "In trackers" }
-            @if within.is_empty() { p.caption { "None on this hub: it is taken on its own, or into a tracker of yours." } }
-            @else {
-                ul.hub-links { @for t in &within { li { a href=(t.page()) { (t.title()) } @if let Some(o) = opens(t) { " · " a href=(o) target="_blank" rel="noopener" { "open it" } } } } }
-            }
-        }
-        section.hub-list.shell {
-            h2 { "Take it" }
+        section.hub-tab.shell #versions { h2 { "Versions" } (versions(place, r)) }
+        section.hub-tab.shell #use {
+            h2 { "Use it" }
             (take(&format!("zetlyn source subscribe {reference}"), "every claim and its history, kept current"))
-            @if !examples.is_empty() {
-                p.caption { "Questions it answers, as its publisher wrote them: " @for (i, e) in examples.iter().enumerate() { @if i > 0 { ", " } code { (e) } } }
-            }
             p.caption { "Version " code { (r.version) } " · " a href={"/sources/" (reference) "/versions/" (r.version) "/manifest.json"} { "manifest.json" } }
         }
+        script { (PreEscaped(TABS)) }
     };
     frame(place, &format!("{} · Zetlyn Hub", r.title()), &r.about(), body)
 }
 
-/// A tracker or a package: what it is about, its sources, what it promises, and how to take it.
+/// A tracker or a package: what it is about, its sources, what it compares, its versions, and how to take it.
 fn tracker_page(place: &dyn Place, r: &Row, rows: &[Row], opens: Opens) -> String {
     let m = &r.manifest;
     let reference = r.reference();
@@ -396,13 +484,32 @@ fn tracker_page(place: &dyn Place, r: &Row, rows: &[Row], opens: Opens) -> Strin
     let why = |name: &str| statement.as_ref().and_then(|d| d.members.iter().find(|s| s.dataset == name).map(|s| s.why.clone())).unwrap_or_default();
     let listed = m["sources"].as_array().cloned().unwrap_or_default();
     let withheld: Vec<String> = m["withheld"].as_array().map(|a| a.iter().filter_map(|w| w.as_str().map(str::to_string)).collect()).unwrap_or_default();
+    let compared: Vec<(String, String)> = statement
+        .as_ref()
+        .map(|d| {
+            d.normalise
+                .iter()
+                .map(|(name, a)| {
+                    let how = if !a.scale.is_empty() {
+                        format!("on the scale {}", a.scale.join(" > "))
+                    } else if let Some(t) = &a.tolerance {
+                        format!("within {t}")
+                    } else {
+                        "exactly".to_string()
+                    };
+                    (name.clone(), how)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let body = html! {
-        section.hero.shell.hub-detail {
+        section.hub-detail-top.shell {
             (crumbs(r))
             h1 { (r.title()) }
             @if !r.about().is_empty() { p.intro { (r.about()) } }
             p.hub-stats {
                 span { (plural(listed.len(), "source", "sources")) }
+                span { (thousands(claims_of(r, rows))) " claims" }
                 @if let Some(keys) = m["identified_by"].as_array() {
                     span { "joined on " (keys.iter().filter_map(|k| k.as_str()).collect::<Vec<_>>().join(", ")) }
                 }
@@ -412,7 +519,8 @@ fn tracker_page(place: &dyn Place, r: &Row, rows: &[Row], opens: Opens) -> Strin
                 div.hero-actions { a.primary href=(open) target="_blank" rel="noopener" { "Open it" } }
             }
         }
-        section.hub-list.shell {
+        (tabs(&[("overview", "Overview"), ("properties", "Properties"), ("versions", "Versions"), ("use", "Use it")]))
+        section.hub-tab.shell #overview {
             h2 { "Its sources" }
             div.hub-scroll { table.hub-table {
                 thead { tr { th { "Source" } th { "What it adds" } th.n { "Claims" } } }
@@ -431,9 +539,7 @@ fn tracker_page(place: &dyn Place, r: &Row, rows: &[Row], opens: Opens) -> Strin
                     }
                 }
             } }
-        }
-        @if let Some(covers) = m["promise"]["covers"].as_str().filter(|c| !c.is_empty()) {
-            section.hub-list.shell {
+            @if let Some(covers) = m["promise"]["covers"].as_str().filter(|c| !c.is_empty()) {
                 h2 { "What it promises" }
                 div.hub-scroll { table.hub-table.kv { tbody {
                     @if let Some(f) = m["promise"]["fresh_within"].as_str() { tr { td { "fresh within" } td { (f) } } }
@@ -441,16 +547,26 @@ fn tracker_page(place: &dyn Place, r: &Row, rows: &[Row], opens: Opens) -> Strin
                     @if let Some(x) = m["promise"]["excludes"].as_str().filter(|x| !x.is_empty()) { tr { td { "excludes" } td { (x) } } }
                 } } }
             }
-        }
-        @if r.sealed() {
-            section.hub-list.shell {
+            @if r.sealed() {
                 h2 { "Sealed" }
                 p.caption { "Every claim, its history, the conflicts and what changed, in the tracker's own words. What stays with its publisher:" }
                 ul.hub-links { @for w in &withheld { li { (w) } } }
             }
         }
-        section.hub-list.shell {
-            h2 { "Take it" }
+        section.hub-tab.shell #properties {
+            h2 { "What it compares" }
+            @if compared.is_empty() { p.caption { "Nothing is held against anything: its sources are shown side by side." } }
+            @else {
+                p.caption { "Each of these is held against every source that says it; a difference beyond what is allowed is a conflict. Everything else is shown side by side." }
+                div.hub-scroll { table.hub-table {
+                    thead { tr { th { "Property" } th { "Compared" } } }
+                    tbody { @for (name, how) in &compared { tr { td { code { (name) } } td { (how) } } } }
+                } }
+            }
+        }
+        section.hub-tab.shell #versions { h2 { "Versions" } (versions(place, r)) }
+        section.hub-tab.shell #use {
+            h2 { "Use it" }
             (take(&format!("zetlyn tracker subscribe {reference}"), if r.sealed() { "one signed file, kept current" } else { "the statement, and every source it names" }))
             p.caption {
                 "Version " code { (r.version) }
@@ -461,9 +577,68 @@ fn tracker_page(place: &dyn Place, r: &Row, rows: &[Row], opens: Opens) -> Strin
                 details { summary { "Its statement" } pre.hub-statement { (text) } }
             }
         }
+        script { (PreEscaped(TABS)) }
     };
     frame(place, &format!("{} · Zetlyn Hub", r.title()), &r.about(), body)
 }
+
+/// The front page's facets and its search, in the browser, over the rows the page already holds.
+const FILTER: &str = r##"(function () {
+  var list = document.getElementById("hub-list"); if (!list) return;
+  var rows = Array.prototype.slice.call(list.querySelectorAll(".hub-row"));
+  var q = document.getElementById("hub-filter"), sort = document.getElementById("hub-sort");
+  var count = document.getElementById("hub-count"), none = document.getElementById("hub-none");
+  function on(facet) { return Array.prototype.slice.call(document.querySelectorAll('input[data-facet="' + facet + '"]:checked')).map(function (i) { return i.value; }); }
+  function apply() {
+    var kinds = on("kind"), shown = on("shown");
+    var words = (q.value || "").trim().toLowerCase().split(/\s+/).filter(Boolean);
+    var n = 0;
+    rows.forEach(function (r) {
+      var s = r.dataset.shown, ok = kinds.indexOf(r.dataset.kind) >= 0 && (!s || shown.indexOf(s) >= 0)
+        && words.every(function (w) { return r.dataset.text.indexOf(w) >= 0; });
+      r.hidden = !ok; if (ok) n++;
+    });
+    var by = sort.value;
+    rows.slice().sort(function (a, b) {
+      if (by === "name") return a.dataset.name < b.dataset.name ? -1 : 1;
+      if (by === "kind") {
+        var rank = { tracker: 0, package: 1, source: 2 }, d = rank[a.dataset.kind] - rank[b.dataset.kind];
+        return d || Number(b.dataset.claims) - Number(a.dataset.claims);
+      }
+      return Number(b.dataset[by]) - Number(a.dataset[by]);
+    }).forEach(function (r) { list.insertBefore(r, none); });
+    count.textContent = n + (n === 1 ? " result" : " results");
+    none.hidden = n > 0;
+  }
+  [q, sort].forEach(function (el) { el.addEventListener("input", apply); });
+  document.querySelectorAll("input[data-facet]").forEach(function (el) { el.addEventListener("change", apply); });
+  apply();
+})();"##;
+
+/// One section of a page about one thing at a time, the one its tab names, and the address says which.
+const TABS: &str = r##"(function () {
+  var tabs = Array.prototype.slice.call(document.querySelectorAll(".hub-tabs a[data-tab]"));
+  if (!tabs.length) return;
+  function show() {
+    var want = (location.hash || "").slice(1);
+    if (!tabs.some(function (t) { return t.dataset.tab === want; })) want = tabs[0].dataset.tab;
+    tabs.forEach(function (t) {
+      var on = t.dataset.tab === want, s = document.getElementById(t.dataset.tab);
+      t.classList.toggle("on", on); if (s) s.hidden = !on;
+    });
+  }
+  // A tab is chosen, not scrolled to: the address says which, and the page stays where it is.
+  tabs.forEach(function (t) {
+    t.addEventListener("click", function (e) {
+      e.preventDefault();
+      history.replaceState(null, "", "#" + t.dataset.tab);
+      show();
+    });
+  });
+  window.addEventListener("hashchange", show);
+  show();
+  if (location.hash) window.scrollTo(0, 0);
+})();"##;
 
 /// The page for one row.
 pub fn page(place: &dyn Place, r: &Row, rows: &[Row], opens: Opens) -> String {

@@ -384,6 +384,10 @@ fn index_page(dir: &Path, serving: &[String]) -> Vec<u8> {
     let (trackers, sources): (Vec<&Carried>, Vec<&Carried>) =
         rows.iter().partition(|c| c.tree != "sources");
     let has = |name: &str| dir.join(name).exists();
+    // Named by what they hold, so a browser that kept the operator's old design asks for the new.
+    let stamp = |name: &str| {
+        std::fs::read(dir.join(name)).map(|b| crate::place::sha256(&b)[..8].to_string()).unwrap_or_default()
+    };
     let page = html! {
         (maud::DOCTYPE)
         html lang="en" {
@@ -397,7 +401,7 @@ fn index_page(dir: &Path, serving: &[String]) -> Vec<u8> {
                 title { "The hub — Zetlyn" }
                 meta name="description" content="Trackers and sources you can subscribe to, and the ones answering here.";
                 @if has("favicon.png") { link rel="icon" href="/favicon.png" type="image/png"; }
-                link rel="stylesheet" href="/style.css";
+                link rel="stylesheet" href={"/style.css?v=" (stamp("style.css"))};
             }
             body {
                 header.site-header.shell {
@@ -511,7 +515,7 @@ fn index_page(dir: &Path, serving: &[String]) -> Vec<u8> {
                         }
                     }
                 }
-                @if has("app.js") { script src="/app.js" {} }
+                @if has("app.js") { script src={"/app.js?v=" (stamp("app.js"))} {} }
             }
         }
     };

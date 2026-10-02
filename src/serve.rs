@@ -504,7 +504,7 @@ pub fn shell(title: &str, body: Markup) -> String {
                 script { (maud::PreEscaped(THEME_EARLY)) }
                 title { (title) @if title != "Zetlyn" { " · Zetlyn" } }
                 link rel="icon" type="image/png" href={"data:image/png;base64," (FAVICON)};
-                link rel="stylesheet" href=(at("/style.css"));
+                link rel="stylesheet" href={(at("/style.css")) "?v=" (env!("CARGO_PKG_VERSION"))};
             }
             body {
                 header.top {

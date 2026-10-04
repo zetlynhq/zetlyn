@@ -1540,8 +1540,14 @@ fn hub_command(args: &[String]) -> Result<(), String> {
             let place = place::at(&at)?;
             let app = flag(args, "--app").map(|a| a.trim_end_matches('/').to_string());
             let serving: Vec<String> = flag(args, "--serving").map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()).unwrap_or_default();
+            // Where a tracker opens in the app: its owner is the organisation, and the organisation
+            // serves it under `t/`, as `hosting serve` writes it after a publish.
             let opens = |r: &hubpages::Row| match &app {
-                Some(a) if serving.iter().any(|s| *s == r.reference()) => Some(format!("{a}/{}/", r.reference())),
+                Some(a) if serving.iter().any(|s| *s == r.reference()) => {
+                    let reference = r.reference();
+                    let (owner, name) = reference.split_once('/')?;
+                    Some(format!("{a}/{owner}/t/{name}/"))
+                }
                 _ => None,
             };
             let n = hubpages::render(place.as_ref(), &opens)?;

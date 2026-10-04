@@ -513,8 +513,13 @@ impl Site {
     }
 }
 
-/// The session cookie, or an API key. A key is for a system and carries no cookie; a session is
-/// for a person and carries nothing else.
+/// A reader's session on a tracker's pages. Not `zs`, which is a member's session in the app: the
+/// two are kept in different `accounts.db` files where a workspace is hosted, and one cookie under
+/// one name and path would sign a person out of the one by signing them in to the other.
+pub const READER_COOKIE: &str = "zr";
+
+/// The reader's session cookie, or an API key. A key is for a system and carries no cookie; a
+/// session is for a person and carries nothing else.
 pub fn viewer_of(accounts: &Accounts, cookie: Option<&str>, authorization: Option<&str>) -> Viewer {
     if let Some(key) = authorization.and_then(|a| a.strip_prefix("Bearer ")) {
         if let Some(account) = accounts.by_key(key.trim()) {
@@ -528,7 +533,7 @@ pub fn viewer_of(accounts: &Accounts, cookie: Option<&str>, authorization: Optio
     let session = cookie.and_then(|c| {
         c.split(';')
             .filter_map(|p| p.trim().split_once('='))
-            .find(|(k, _)| *k == "zs")
+            .find(|(k, _)| *k == READER_COOKIE)
             .map(|(_, v)| v.to_string())
     });
     match session.and_then(|s| accounts.by_session(&s)) {

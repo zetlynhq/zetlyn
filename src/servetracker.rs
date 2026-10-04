@@ -1190,7 +1190,16 @@ pub struct TrackerSite {
 impl TrackerSite {
     pub fn open(scope: Tracker, dir: &Path, datasets: &Path, addr: &str, operator: bool) -> Result<TrackerSite, String> {
         let accounts = Accounts::open(&scope.root)?;
-        let site = Site::load(&scope.root);
+        let mut site = Site::load(&scope.root);
+        // An organisation's workspace on a hosting machine (`<dir>/orgs/<org>`) is served at the
+        // machine's address, which the hosting directory's own workspace.yaml names. Never the
+        // address a request says it was sent to: a sign-in link built from that goes wherever
+        // whoever asked for it says.
+        if site.url.is_empty() {
+            if let Some(hosting) = scope.root.parent().filter(|p| p.file_name().is_some_and(|n| n == "orgs")).and_then(Path::parent) {
+                site.url = Site::load(hosting).url;
+            }
+        }
         let scope = scope;
         // A tracker whose store is behind its sources, or has none, refreshes before it answers.
         if let Err(e) = scope.refresh_if_moved() {
@@ -1397,7 +1406,7 @@ impl TrackerSite {
                     if let Some(s) = c
                         .split(';')
                         .filter_map(|p| p.trim().split_once('='))
-                        .find(|(k, _)| *k == "zs")
+                        .find(|(k, _)| *k == account::READER_COOKIE)
                     {
                         accounts.end_session(s.1);
                     }
@@ -1410,7 +1419,7 @@ impl TrackerSite {
                     "text/html; charset=utf-8",
                     Some((
                         "Set-Cookie".into(),
-                        "zs=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax".to_string(),
+                        reader_cookie(site, "", 0),
                     )),
                 )
             }
@@ -1615,7 +1624,7 @@ impl TrackerSite {
                     "text/html; charset=utf-8",
                     Some((
                         "Set-Cookie".into(),
-                        format!("zs={session}; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax"),
+                        reader_cookie(site, &session, 2_592_000),
                     )),
                 ),
                 None => (
@@ -2722,6 +2731,29 @@ fn reader_of(scope: &Tracker, accounts: &Accounts, v: &Viewer, operator: bool) -
     })
 }
 
+/// Where a reader's session holds: the workspace this tracker is in, which is the mount with its
+/// `/t/<tracker>` taken off. A reader signed in to one tracker is signed in to its workspace's
+/// others, because they are one `accounts.db`, and to no other workspace's on the same host.
+fn workspace_path() -> String {
+    let m = mounted();
+    let base = match m.rfind("/t/") {
+        Some(i) if !m[i + 3..].contains('/') => m[..i].to_string(),
+        _ => m,
+    };
+    if base.is_empty() { "/".into() } else { base }
+}
+
+/// The reader's cookie, set or (with no session and no age) cleared. Secure where the workspace
+/// says it is served over https.
+fn reader_cookie(site: &Site, session: &str, max_age: u32) -> String {
+    format!(
+        "{}={session}; Path={}; Max-Age={max_age}; HttpOnly; SameSite=Lax{}",
+        account::READER_COOKIE,
+        workspace_path(),
+        if site.url.starts_with("https://") { "; Secure" } else { "" }
+    )
+}
+
 /// Where a signed-in reader comes back to: a path on this site, never another site.
 fn next_of(raw: &str) -> Option<String> {
     let raw = raw.trim();
@@ -2908,7 +2940,7 @@ mod tests {
     fn session(root: &Path, email: &str) -> String {
         let accounts = Accounts::open(root).unwrap();
         let a = accounts.ensure(email).unwrap();
-        format!("zs={}", accounts.spend_link(&accounts.new_link(a.id).unwrap()).unwrap())
+        format!("zr={}", accounts.spend_link(&accounts.new_link(a.id).unwrap()).unwrap())
     }
 
     fn ask(method: &str, url: &str, cookie: Option<&str>, form: &str) -> (u16, String) {
@@ -3006,5 +3038,75 @@ mod tests {
         for elsewhere in ["//evil.example", "https://evil.example", "/x?u=https://evil", "propose/x", ""] {
             assert!(next_of(elsewhere).is_none(), "{elsewhere}");
         }
+    }
+
+    /// The Set-Cookie a request is answered with, where there is one.
+    fn set_cookie(url: &str, cookie: Option<&str>) -> Option<String> {
+        let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).build().into();
+        let mut r = agent.get(url);
+        if let Some(c) = cookie {
+            r = r.header("Cookie", c);
+        }
+        r.call().unwrap().headers().get("set-cookie").map(|v| v.to_str().unwrap_or("").to_string())
+    }
+
+    #[test]
+    fn a_reader_session_is_its_own_cookie_and_leaves_the_apps_alone() {
+        let (base, root) = served("cookie", "signed-in");
+        let accounts = Accounts::open(&root).unwrap();
+        let a = accounts.ensure("ann@example.org").unwrap();
+
+        let set = set_cookie(&format!("{base}/signin/{}", accounts.new_link(a.id).unwrap()), None).unwrap();
+        assert!(set.starts_with("zr=") && set.contains("Path=/;") && set.contains("Max-Age=2592000"), "{set}");
+        assert!(!set.contains("Secure"), "a workspace that names no https address is not told to be: {set}");
+        let session = set.split(';').next().unwrap().to_string();
+        assert!(ask("GET", &format!("{base}/account"), Some(&session), "").1.contains("ann@example.org"));
+
+        // The app's cookie, even holding a session this very database knows, is not a reader's.
+        let app_session = format!("zs={}", accounts.spend_link(&accounts.new_link(a.id).unwrap()).unwrap());
+        let (_, page) = ask("GET", &format!("{base}/account"), Some(&app_session), "");
+        assert!(!page.contains("ann@example.org") && page.contains("Send the link"), "{page}");
+
+        // Signing out ends the reader's session and clears their cookie, and only theirs.
+        let cleared = set_cookie(&format!("{base}/signout"), Some(&format!("{session}; {app_session}"))).unwrap();
+        assert!(cleared.starts_with("zr=;") && cleared.contains("Max-Age=0") && !cleared.contains("zs="), "{cleared}");
+        assert!(!ask("GET", &format!("{base}/account"), Some(&session), "").1.contains("ann@example.org"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_reader_is_signed_in_to_the_workspace_a_tracker_is_mounted_in() {
+        for (mount, path) in [("", "/"), ("/t/cve", "/"), ("/zetlyn/t/cve", "/zetlyn"), ("/acme/t/prices", "/acme"), ("/zetlyn", "/zetlyn")] {
+            crate::serve::mount(mount);
+            assert_eq!(workspace_path(), path, "mounted at {mount:?}");
+        }
+        crate::serve::mount("");
+        let site = Site { url: "https://app.zetlyn.com".into(), ..Site::default() };
+        crate::serve::mount("/zetlyn/t/cve");
+        assert_eq!(reader_cookie(&site, "abc", 60), "zr=abc; Path=/zetlyn; Max-Age=60; HttpOnly; SameSite=Lax; Secure");
+        crate::serve::mount("");
+    }
+
+    #[test]
+    fn an_organisation_with_no_address_of_its_own_is_at_the_hosting_machines() {
+        let (_, made) = served("org", "signed-in");
+        let hosting = std::env::temp_dir().join(format!("zetlyn-serve-propose-hosting-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&hosting);
+        let org = hosting.join("orgs/acme");
+        std::fs::create_dir_all(&org).unwrap();
+        for d in ["sources", "trackers"] {
+            std::fs::rename(made.join(d), org.join(d)).unwrap();
+        }
+        let open = |root: &Path| {
+            let scope = Tracker::open(&root.join("trackers/prices"), &root.join("sources")).unwrap();
+            TrackerSite::open(scope, &root.join("trackers/prices"), &root.join("sources"), "127.0.0.1:0", false).unwrap().site.url
+        };
+        assert_eq!(open(&org), "", "nothing names an address");
+        std::fs::write(hosting.join("workspace.yaml"), "url: https://app.example.org\n").unwrap();
+        assert_eq!(open(&org), "https://app.example.org");
+        std::fs::write(org.join("workspace.yaml"), "url: https://acme.example.org\n").unwrap();
+        assert_eq!(open(&org), "https://acme.example.org", "its own, where it names one");
+        let _ = std::fs::remove_dir_all(&hosting);
+        let _ = std::fs::remove_dir_all(&made);
     }
 }

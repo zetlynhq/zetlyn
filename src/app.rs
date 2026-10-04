@@ -3073,6 +3073,17 @@ fn hosting_serve(args: &[String]) -> Result<(), String> {
             }
             continue;
         }
+        // The examples the docs and the app point at: a shop's list and a bookshop's page, made as
+        // they are asked for, because one of them changes every two minutes. "examples" is a
+        // reserved name, so no organisation is here.
+        if first == "examples" && matches!(request.method(), tiny_http::Method::Get | tiny_http::Method::Head) {
+            let asked = path.trim_start_matches('/');
+            match crate::examples::file(asked) {
+                Some(body) => respond(request, 200, if asked.ends_with(".csv") { "text/csv; charset=utf-8" } else { "text/html; charset=utf-8" }, &body),
+                None => respond(request, 404, "text/plain; charset=utf-8", "nothing at that address\n"),
+            }
+            continue;
+        }
         if org_name(&first) && dir.join("orgs").join(&first).is_dir() {
             // A world with a domain of its own is there: a page asked for here goes to it.
             let own = crate::account::Site::load(&dir.join("orgs").join(&first)).domain.trim().to_lowercase();
@@ -3599,6 +3610,10 @@ mod tests {
         assert_eq!(raw(port, "GET", "elsewhere.example", "/", None).0, 421);
         assert_eq!(raw(port, "GET", &host, "/app/domain-check?domain=acme.example", None).0, 200);
         assert_eq!(raw(port, "GET", &host, "/app/domain-check?domain=elsewhere.example", None).0, 404);
+        // The examples the docs point at, made as they are asked for.
+        assert_eq!(raw(port, "GET", &host, "/examples/leafline-books.csv", None).0, 200);
+        assert!(String::from_utf8_lossy(&raw(port, "GET", &host, "/examples/lindenhof/", None).2).contains("Lindenhof"));
+        assert_eq!(raw(port, "GET", &host, "/examples/nothing", None).0, 404);
 
         // Its owner takes all of it away, and may not say it went somewhere that is no world.
         let accounts = crate::account::Accounts::open(&dir).unwrap();

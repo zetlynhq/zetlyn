@@ -806,6 +806,15 @@ fn account_page(scope: &Tracker, accounts: &Accounts, site: &Site, v: &Viewer) -
         }
 
         p.bar { a href=(at("/signout")) { "Sign out" } }
+
+        details {
+            summary { "Close this account" }
+            p.dim { "Your address, your name, your sessions, keys and sign-ins elsewhere are removed from this workspace. What you proposed stays in its sources under " code { "reader:…" } " and the name you gave, as a source's history is not rewritten, but nothing leads from it to you any more. Signing in again makes a new account." }
+            form.bar method="post" action=(at("/account/close")) {
+                label { input type="checkbox" name="sure" value="yes" required; " Close it" }
+                button type="submit" { "Close the account" }
+            }
+        }
     };
     shell(&a.email, body)
 }
@@ -1438,6 +1447,18 @@ impl TrackerSite {
                     "text/html; charset=utf-8",
                     None,
                 ),
+            },
+            // By the person, signed in as themselves, who said they are sure: never by a key.
+            "/account/close" if post && !v.by_key && form_field(&form, "sure") == "yes" => match &v.account {
+                Some(a) => match accounts.delete(a.id) {
+                    Ok(()) => (
+                        shell("Closed", html! { h1 { "The account is closed" } p { "Nothing of it is kept here any more." } p { a href=(at("/")) { "← back" } } }),
+                        "text/html; charset=utf-8",
+                        Some(("Set-Cookie".into(), reader_cookie(site, "", 0))),
+                    ),
+                    Err(e) => (shell("Not closed", html! { h1 { "The account was not closed" } p { (e) } }), "text/html; charset=utf-8", None),
+                },
+                None => (signin_page(&site, None), "text/html; charset=utf-8", None),
             },
             "/account/key/drop" if post => {
                 if let Some(a) = &v.account {

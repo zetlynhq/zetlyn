@@ -810,6 +810,17 @@ impl Accounts {
             .map_err(|e| e.to_string())
     }
 
+    /// An account closed: the row, and everything kept against it here. What it proposed stays in
+    /// the sources it was proposed to, under its pseudonym and the name it gave, because a source's
+    /// history is not rewritten; nothing here leads from that back to an address any more.
+    pub fn delete(&self, account: i64) -> Result<(), String> {
+        for table in ["session", "link", "apikey", "identity", "oauth_code", "oauth_token", "proposal"] {
+            self.db.execute(&format!("delete from {table} where account = ?1"), rusqlite::params![account]).map_err(|e| e.to_string())?;
+        }
+        self.db.execute("delete from account where id = ?1", rusqlite::params![account]).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     pub fn record_proposal(&self, account: i64, source: &str, file: &str) -> Result<(), String> {
         self.db
             .execute(
@@ -1009,6 +1020,12 @@ mod tests {
         assert!(accounts.by_session(&reader, Kind::Member).is_none(), "a reader's session is not a member's");
         assert!(accounts.by_session(&provider, Kind::Member).is_none());
         assert!(accounts.by_session(&provider, Kind::Reader).is_none());
+        // Closed, nothing of it answers any more.
+        accounts.record_proposal(ann.id, "t/prices", "p.json").unwrap();
+        accounts.delete(ann.id).unwrap();
+        assert!(accounts.by_session(&reader, Kind::Reader).is_none());
+        assert!(accounts.by_email("ann@example.org").is_none());
+        assert!(accounts.proposer_of("t/prices", "p.json").is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

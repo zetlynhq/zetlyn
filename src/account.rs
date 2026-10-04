@@ -420,11 +420,25 @@ pub struct Site {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Publish {
-    /// A hub: a folder, `s3://bucket/prefix`, or an address that takes signed writes.
+    /// A hub: a folder, `s3://bucket/prefix`, or an address that takes signed writes. A relative
+    /// folder is the workspace's own, and `hub` is the one a world serves at `<url>/hub/`.
     pub to: String,
     /// Where its trackers can be opened, for the hub's pages: `<app>/<org>/t/<tracker>/`.
     #[serde(default)]
     pub app: String,
+    /// Where what is published there can be read by anybody, where that is not the world's own
+    /// `<url>/hub`: `https://zetlyn.com` for what goes to its bucket. The world's document says it.
+    #[serde(default)]
+    pub read_at: String,
+}
+
+impl Publish {
+    /// Where it is written: a relative folder under the workspace, anything else as it is said.
+    pub fn place_for(&self, root: &Path) -> String {
+        let to = self.to.trim();
+        let addressed = to.contains("://") || Path::new(to).is_absolute();
+        if addressed { to.to_string() } else { root.join(to).to_string_lossy().into_owned() }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

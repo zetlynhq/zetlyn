@@ -130,11 +130,12 @@ impl Wanted {
 pub fn workspace_yaml(w: &Wanted, password_file: &str) -> String {
     let q = |s: &str| serde_json::to_string(s).unwrap_or_default();
     let mut y = format!(
-        "# A world of its own, made by `zetlyn world up`. Its owners sign in at {url}/signin.\ntitle: {}\nurl: {}\ncontact: {}\nowners:\n- {}\n",
+        "# A world of its own, made by `zetlyn world up`. Its owners sign in at {url}/signin.\ntitle: {}\nurl: {}\ncontact: {}\nowners:\n- {}\n# What it publishes goes to its own hub, which it serves at {url}/hub/.\npublish:\n  to: hub\n  app: {}\n",
         q(&w.title),
         q(&w.url()),
         q(&w.owner),
         q(&w.owner),
+        q(&w.url()),
         url = w.url(),
     );
     if let Some((host, port)) = &w.smtp {
@@ -657,6 +658,169 @@ pub fn unpack_binary(archive: &[u8]) -> Result<Vec<u8>, String> {
     Err("the archive holds no zetlyn".into())
 }
 
+// ---------------------------------------------------------------------------------------------
+// A world describing itself (FEDERATION.md, M12): `<url>/.well-known/zetlyn.json`, signed with
+// the world's operator key, and its own hub at `<url>/hub/`.
+
+/// What a world document says it is.
+pub const DOCUMENT: &str = "zetlyn-world/1";
+
+/// What this world is, for a stranger who knows only its address: its key, what it publishes and
+/// where, its public sources and trackers, where it takes proposals. Unsigned.
+pub fn document(root: &Path) -> Result<serde_json::Value, String> {
+    use serde_json::json;
+    let site = crate::account::Site::for_workspace(root);
+    let url = site.url.trim_end_matches('/').to_string();
+    let key = crate::propose::operator_key(root)?;
+    let hub = match &site.publish {
+        Some(p) if !p.read_at.trim().is_empty() => Some(p.read_at.trim().trim_end_matches('/').to_string()),
+        Some(p) if p.to.trim() == "hub" => Some(format!("{url}/hub")),
+        _ if root.join("hub").is_dir() => Some(format!("{url}/hub")),
+        _ => None,
+    };
+    let mut sources = Vec::new();
+    for (name, dir) in crate::tracker::registry(&root.join("sources")) {
+        let Ok(decl) = crate::sourcedecl::SourceDecl::load(&dir) else { continue };
+        // What its licence lets anybody see, and nothing it keeps to itself.
+        if !matches!(decl.licence.republish.as_str(), "yes" | "summary") {
+            continue;
+        }
+        let at = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let mut s = json!({ "name": name, "title": decl.title, "kind": decl.kind });
+        if let crate::sourcedecl::Fetch::Proposals { readers, .. } = &decl.source {
+            if !readers.is_empty() {
+                s["readers"] = json!(readers);
+                s["propose"] = json!(format!("{url}/propose/{at}"));
+            }
+        }
+        sources.push(s);
+    }
+    let mut trackers = Vec::new();
+    for (name, dir) in crate::tracker::scope_registry(&root.join("trackers")) {
+        let Ok(decl) = crate::trackerdecl::TrackerDecl::load(&dir) else { continue };
+        if decl.visibility == "private" {
+            continue;
+        }
+        let at = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        trackers.push(json!({ "name": name, "title": decl.title, "at": format!("{url}/t/{at}/") }));
+    }
+    Ok(json!({
+        "zetlyn": DOCUMENT,
+        "world": url,
+        "title": site.title,
+        "key": key,
+        "publishes_with": crate::identity::key(),
+        "hub": hub,
+        "sources": sources,
+        "trackers": trackers,
+        "moved_to": serde_json::Value::Null,
+    }))
+}
+
+/// The bytes a world document's signature is over: the document without its signature, as JSON
+/// with its keys in order.
+fn signed_bytes(doc: &serde_json::Value) -> Vec<u8> {
+    let mut d = doc.clone();
+    if let Some(o) = d.as_object_mut() {
+        o.remove("signature");
+    }
+    serde_json::to_vec(&sorted(&d)).unwrap_or_default()
+}
+
+/// Keys in order at every depth, whatever order a parser kept them in.
+fn sorted(v: &serde_json::Value) -> serde_json::Value {
+    match v {
+        serde_json::Value::Object(m) => {
+            let ordered: std::collections::BTreeMap<String, serde_json::Value> = m.iter().map(|(k, v)| (k.clone(), sorted(v))).collect();
+            serde_json::to_value(ordered).unwrap_or_default()
+        }
+        serde_json::Value::Array(a) => serde_json::Value::Array(a.iter().map(sorted).collect()),
+        other => other.clone(),
+    }
+}
+
+/// The document, signed with the operator key it names.
+pub fn signed_document(root: &Path) -> Result<serde_json::Value, String> {
+    let mut doc = document(root)?;
+    let signature = crate::key::sign(root, crate::grant::OPERATOR_KEY, &signed_bytes(&doc))?.ok_or("this world has no key to sign with")?;
+    doc["signature"] = serde_json::Value::String(signature);
+    Ok(doc)
+}
+
+/// Whether a document is signed by the key it names, and says it is a world document. The key is
+/// the world's word for itself: whoever keeps it pins it, as a subscriber pins a publisher's.
+pub fn verify(doc: &serde_json::Value) -> Result<(), String> {
+    if doc["zetlyn"].as_str() != Some(DOCUMENT) {
+        return Err("not a zetlyn world document".into());
+    }
+    let key = doc["key"].as_str().ok_or("the document names no key")?;
+    let signature = doc["signature"].as_str().ok_or("the document is not signed")?;
+    crate::key::verify(key, &signed_bytes(doc), signature)
+}
+
+/// The document of the world at `url`, verified. `None` where the address answers but is no world
+/// (a hub that is only storage, as zetlyn.com's is).
+pub fn fetch(url: &str) -> Result<Option<serde_json::Value>, String> {
+    let at = format!("{}/.well-known/zetlyn.json", url.trim_end_matches('/'));
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .user_agent(concat!("zetlyn/", env!("CARGO_PKG_VERSION")))
+        .timeout_global(Some(std::time::Duration::from_secs(30)))
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let mut r = agent.get(&at).call().map_err(|e| format!("{at}: {e}"))?;
+    if !r.status().is_success() {
+        return Ok(None);
+    }
+    let Ok(doc) = r.body_mut().read_json::<serde_json::Value>() else { return Ok(None) };
+    if doc["zetlyn"].as_str() != Some(DOCUMENT) {
+        return Ok(None);
+    }
+    verify(&doc).map_err(|e| format!("{at}: {e}"))?;
+    Ok(Some(doc))
+}
+
+/// Where to fetch from, given an address: a world's own hub and the key it publishes with, where
+/// the address is a world; the address itself, and nothing pinned, where it is a plain hub.
+pub fn resolve(address: &str) -> Result<(String, Option<String>), String> {
+    if !(address.starts_with("https://") || address.starts_with("http://")) {
+        return Ok((address.to_string(), None));
+    }
+    match fetch(address)? {
+        Some(doc) => {
+            let hub = doc["hub"].as_str().ok_or_else(|| format!("{address} is a world that publishes nothing"))?.to_string();
+            Ok((hub, doc["publishes_with"].as_str().map(str::to_string)))
+        }
+        None => Ok((address.to_string(), None)),
+    }
+}
+
+/// A file of the world's own hub, `<root>/hub/<rest>`, as a reader asks for it: a directory is its
+/// `index.html`. Nothing outside it.
+pub fn hub_file(root: &Path, rest: &[String]) -> Option<(Vec<u8>, &'static str)> {
+    if rest.iter().any(|s| s.is_empty() || s == "." || s == ".." || s.contains(['/', '\\', '\0'])) {
+        return None;
+    }
+    let mut path = root.join("hub");
+    for s in rest {
+        path.push(s);
+    }
+    if path.is_dir() {
+        path.push("index.html");
+    }
+    let bytes = std::fs::read(&path).ok()?;
+    let kind = match path.extension().and_then(|e| e.to_str()) {
+        Some("html") => "text/html; charset=utf-8",
+        Some("json") => "application/json",
+        Some("gz") => "application/gzip",
+        Some("css") => "text/css; charset=utf-8",
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("png") => "image/png",
+        _ => "application/octet-stream",
+    };
+    Some((bytes, kind))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -819,5 +983,101 @@ mod tests {
             tar.into_inner().unwrap().finish().unwrap();
         }
         assert_eq!(unpack_binary(&packed).unwrap(), b"\x7fELF binary");
+    }
+
+    #[test]
+    fn a_hub_file_is_one_of_its_own_and_a_directory_is_its_page() {
+        let root = std::env::temp_dir().join(format!("zetlyn-world-hubfile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("hub/sources/a/b")).unwrap();
+        std::fs::write(root.join("hub/index.json"), "[]").unwrap();
+        std::fs::write(root.join("hub/sources/a/b/index.html"), "<p>b</p>").unwrap();
+        std::fs::write(root.join("workspace.yaml"), "secret").unwrap();
+        let p = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(hub_file(&root, &p(&["index.json"])).unwrap(), (b"[]".to_vec(), "application/json"));
+        assert_eq!(hub_file(&root, &p(&["sources", "a", "b"])).unwrap().0, b"<p>b</p>");
+        assert!(hub_file(&root, &p(&["..", "workspace.yaml"])).is_none());
+        assert!(hub_file(&root, &p(&["nothing"])).is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_world_says_what_it_is_and_another_takes_its_source_from_it_with_no_hub_between() {
+        let tmp = |tag: &str| {
+            let d = std::env::temp_dir().join(format!("zetlyn-world-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(&d).unwrap();
+            d
+        };
+        // The key a world publishes with is its own, in its own home.
+        let home = tmp("doc-home");
+        std::env::set_var("ZETLYN_HOME", &home);
+        let publisher = crate::identity::new("World A", "ann@example.org").unwrap();
+
+        let a = tmp("doc-a");
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let url = format!("http://127.0.0.1:{port}");
+        std::fs::write(a.join("workspace.yaml"), format!("title: World A\nurl: {url}\nowners: [ann@example.org]\npublish:\n  to: hub\n  app: {url}\n")).unwrap();
+        let dir = a.join("sources/prices");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(a.join("sources/private")).unwrap();
+        std::fs::write(
+            dir.join("source.yaml"),
+            "name: t/prices\ntitle: Car prices\nkind: price\nfetch:\n  type: proposals\n  from: []\n  readers: [signed-in]\nlicence:\n  republish: yes\nclaims:\n  id:\n    scheme: price\n    from: \"const:{country}-{week}\"\n  title: \"const:{country} {week}\"\n  known: field:read_at\n  properties:\n    price:\n      type: number\n      from: field:price\n",
+        )
+        .unwrap();
+        // A source that says nothing about being shown is in no document.
+        std::fs::write(a.join("sources/private/source.yaml"), std::fs::read_to_string(dir.join("source.yaml")).unwrap().replace("t/prices", "t/private").replace("licence:\n  republish: yes\n", "")).unwrap();
+        let ann = crate::propose::Reader { id: crate::propose::pseudonym(&a, 1).unwrap(), name: "Ann".into(), email: "ann@example.org".into(), owner: false };
+        let row = br#"{"row": {"country": "DEU", "week": "2026-W40", "price": 44990}, "read_at": "2026-10-04", "read_from": "https://example.com", "attest": "read"}"#;
+        let file = crate::propose::receive_from_reader(&dir, &a, row, &ann).unwrap();
+        crate::propose::decide(&dir, &file, true, "ann", "").unwrap();
+        crate::source::Source::open(&dir).unwrap().run().unwrap();
+        // Published to its own hub, and nowhere else.
+        let moved = crate::app::publish_root(&a, "a", |_| std::collections::BTreeMap::new()).unwrap();
+        assert!(moved >= 1);
+        assert!(a.join("hub/sources/t/prices/tags/latest").exists());
+
+        // What it says about itself, signed.
+        let doc = signed_document(&a).unwrap();
+        verify(&doc).unwrap();
+        assert_eq!(doc["world"], url);
+        assert_eq!(doc["hub"], format!("{url}/hub"));
+        assert_eq!(doc["publishes_with"], publisher);
+        let sources = doc["sources"].as_array().unwrap();
+        assert_eq!(sources.len(), 1, "{sources:?}");
+        assert_eq!(sources[0]["name"], "t/prices");
+        assert_eq!(sources[0]["readers"], serde_json::json!(["signed-in"]));
+        assert_eq!(sources[0]["propose"], format!("{url}/propose/prices"));
+        // Changed after it was signed, it is not the world's word any more.
+        let mut forged = doc.clone();
+        forged["hub"] = serde_json::json!("https://elsewhere.example/hub");
+        assert!(verify(&forged).is_err());
+        // Reordered by whatever parsed it, it still is.
+        let reparsed: serde_json::Value = serde_json::from_str(&serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+        verify(&reparsed).unwrap();
+
+        // Served, and taken by somebody who knows only its address.
+        let args: Vec<String> = ["world", "serve", a.to_str().unwrap(), "--addr", &format!("127.0.0.1:{port}")].iter().map(|s| s.to_string()).collect();
+        std::thread::spawn(move || crate::app::world_serve(&args));
+        for _ in 0..50 {
+            if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let (hub, key) = resolve(&url).unwrap();
+        assert_eq!((hub.as_str(), key.as_deref()), (format!("{url}/hub").as_str(), Some(publisher.as_str())));
+        let b = tmp("doc-b");
+        let place = crate::place::at(&hub).unwrap();
+        let reference = crate::artifact::Reference::parse("t/prices").unwrap();
+        let (held, _) = crate::artifact::subscribe(place.as_ref(), &reference, &b.join("prices"), &hub, key.as_deref()).unwrap();
+        assert_eq!(held, 1);
+        assert!(std::fs::read_to_string(b.join("prices/source.yaml")).unwrap().contains(&publisher), "the publisher's key is pinned");
+        // Not an address at all: nothing to look up.
+        assert_eq!(resolve("/srv/hub").unwrap(), ("/srv/hub".to_string(), None));
+        for d in [&home, &a, &b] {
+            let _ = std::fs::remove_dir_all(d);
+        }
     }
 }

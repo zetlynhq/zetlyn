@@ -1345,6 +1345,9 @@ fn dataset_subscribe(args: &[String]) -> Result<(), String> {
         .map(str::to_string)
         .or_else(|| reference.host.as_ref().map(|h| format!("https://{h}")))
         .unwrap_or_else(|| artifact::DEFAULT_HUB.to_string());
+    // A world says where it publishes and with which key; a plain hub is its own address.
+    let (from, world_key) = world::resolve(&from)?;
+    let pinned = flag(args, "--key").map(str::to_string).or(world_key);
     let into = match flag(args, "--at") {
         Some(p) => PathBuf::from(p),
         None => PathBuf::from("sources").join(&reference.name),
@@ -1355,7 +1358,7 @@ fn dataset_subscribe(args: &[String]) -> Result<(), String> {
         &reference,
         &into,
         &from,
-        flag(args, "--key"),
+        pinned.as_deref(),
     )?;
     println!(
         "{reference} is {version}, {held} claims, in {}",
@@ -1520,6 +1523,9 @@ fn scope_subscribe(args: &[String]) -> Result<(), String> {
         .map(str::to_string)
         .or_else(|| reference.host.as_ref().map(|h| format!("https://{h}")))
         .unwrap_or_else(|| artifact::DEFAULT_HUB.to_string());
+    let (from, world_key) = world::resolve(&from)?;
+    let pinned = pinned.map(str::to_string).or(world_key);
+    let pinned = pinned.as_deref();
     let into = root.join("trackers").join(&reference.name);
     let datasets = root.join("sources");
     let place = place::at(&from)?;

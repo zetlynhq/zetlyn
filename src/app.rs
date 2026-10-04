@@ -472,6 +472,30 @@ impl App {
                 return respond(request, 403, "text/plain; charset=utf-8", "a form from another site");
             }
         }
+        // What a world says about itself and what it publishes, to anybody, signed in or not.
+        if matches!(request.method(), tiny_http::Method::Get | tiny_http::Method::Head) {
+            match parts.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+                [".well-known", "zetlyn.json"] => {
+                    return match crate::world::signed_document(&self.root) {
+                        Ok(doc) => respond(request, 200, "application/json", &serde_json::to_string_pretty(&doc).unwrap_or_default()),
+                        Err(e) => respond(request, 500, "application/json", &json!({ "error": e }).to_string()),
+                    };
+                }
+                ["hub", ..] => {
+                    return match crate::world::hub_file(&self.root, &parts[1..]) {
+                        Some((bytes, kind)) => {
+                            let mut response = tiny_http::Response::from_data(bytes);
+                            if let Ok(h) = tiny_http::Header::from_bytes(&b"Content-Type"[..], kind.as_bytes()) {
+                                response = response.with_header(h);
+                            }
+                            let _ = request.respond(response);
+                        }
+                        None => respond(request, 404, "text/plain; charset=utf-8", "nothing at that address"),
+                    };
+                }
+                _ => {}
+            }
+        }
         if self.hosted.is_some() {
             if let Some(request) = self.hosted_gate(request, &url, &path, &parts) {
                 return self.answer_as_owner(request, url, path, parts);
@@ -3050,7 +3074,7 @@ fn publish_moved(dir: &Path, org: &str) -> Result<usize, String> {
 pub(crate) fn publish_root(root: &Path, org: &str, answers: impl FnOnce(&str) -> BTreeMap<String, String>) -> Result<usize, String> {
     let root = root.to_path_buf();
     let Some(to) = crate::account::Site::load(&root).publish else { return Ok(0) };
-    let place = crate::place::at(&to.to)?;
+    let place = crate::place::at(&to.place_for(&root))?;
     let mut published: BTreeSet<String> = BTreeSet::new();
     let mut moved = 0;
     for (name, sdir) in crate::tracker::registry(&root.join("sources")) {

@@ -76,7 +76,7 @@ pub fn vouched(by: &str, name: &str, body: &str) -> String {
 }
 
 /// The workspace's operator key, made the first time something needs signing.
-fn operator_key(root: &Path) -> Result<String, String> {
+pub(crate) fn operator_key(root: &Path) -> Result<String, String> {
     match crate::key::public(root, crate::grant::OPERATOR_KEY) {
         Some(k) => Ok(k),
         None => crate::key::new(root, crate::grant::OPERATOR_KEY),

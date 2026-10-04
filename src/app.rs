@@ -2768,26 +2768,46 @@ pub fn world_serve(args: &[String]) -> Result<(), String> {
             std::thread::sleep(std::time::Duration::from_secs(wait as u64));
         });
     }
-    let accounts = crate::account::Accounts::open(&root)?;
-    let mut app = App {
-        root,
-        addr,
-        sites: BTreeMap::new(),
-        jobs: Arc::new(Mutex::new(Jobs::default())),
-        base: String::new(),
-        hosted: Some(Hosted { members: owners.clone(), owners, accounts, shared: false }),
-        visitor: false,
-        who: None,
-        orgs_of_who: Vec::new(),
-        public_of_machine: Vec::new(),
-    };
-    for request in server.incoming_requests() {
-        // Who runs it is read afresh each time: an owner added a minute ago is one now.
-        if let Some(h) = app.hosted.as_mut() {
-            h.members = crate::account::Site::load(&app.root).owners;
-        }
-        serve::mount("");
-        app.answer(request);
+    crate::account::Accounts::open(&root)?;
+    // Several requests at once, as on the hosting machine: each thread its own app and its own
+    // connection to the accounts, the jobs shared.
+    let server = Arc::new(server);
+    let jobs = Arc::new(Mutex::new(Jobs::default()));
+    let workers: Vec<_> = (0..WORKERS)
+        .map(|_| {
+            let (server, root, addr, jobs, owners) = (server.clone(), root.clone(), addr.clone(), jobs.clone(), owners.clone());
+            std::thread::spawn(move || {
+                let accounts = match crate::account::Accounts::open(&root) {
+                    Ok(a) => a,
+                    Err(e) => return eprintln!("accounts: {e}"),
+                };
+                let mut app = App {
+                    root,
+                    addr,
+                    sites: BTreeMap::new(),
+                    jobs,
+                    base: String::new(),
+                    hosted: Some(Hosted { members: owners.clone(), owners, accounts, shared: false }),
+                    visitor: false,
+                    who: None,
+                    orgs_of_who: Vec::new(),
+                    public_of_machine: Vec::new(),
+                };
+                for request in server.incoming_requests() {
+                    // Who runs it is read afresh each time: an owner added a minute ago is one now.
+                    let now = crate::account::Site::load(&app.root).owners;
+                    if let Some(h) = app.hosted.as_mut() {
+                        h.members = now.clone();
+                        h.owners = now;
+                    }
+                    serve::mount("");
+                    app.answer(request);
+                }
+            })
+        })
+        .collect();
+    for w in workers {
+        let _ = w.join();
     }
     Ok(())
 }
@@ -3012,7 +3032,9 @@ fn hosting_serve(args: &[String]) -> Result<(), String> {
     let dir = PathBuf::from(crate::positional(args, 2).first().ok_or("which hosting directory?")?.as_str());
     std::fs::create_dir_all(dir.join("orgs")).map_err(|e| format!("{}: {e}", dir.display()))?;
     let addr = crate::flag(args, "--addr").unwrap_or("127.0.0.1:2400").to_string();
-    let accounts = crate::account::Accounts::open(&dir)?;
+    // Opened once here so a store that cannot be opened stops the machine at the start, not in each
+    // thread; every thread opens its own after.
+    crate::account::Accounts::open(&dir)?;
     // The machine and its organisations answer each other here, not over HTTP to themselves.
     crate::oidc::serving_machine(&dir);
     let server = tiny_http::Server::http(&addr).map_err(|e| e.to_string())?;
@@ -3042,6 +3064,43 @@ fn hosting_serve(args: &[String]) -> Result<(), String> {
         });
     }
 
+    // Several requests at once: a slow page (a tracker's filter over thousands of claims) holds up
+    // its own thread and nobody else's. Crawlers walking those filters, two a second, once kept
+    // every other page waiting a minute (2026-10-04). Each thread keeps its own opened apps and its
+    // own connection to the accounts; what a job says is shared, so a job started on one thread is
+    // read on any.
+    let server = Arc::new(server);
+    let jobs: SharedJobs = Arc::new(Mutex::new(BTreeMap::new()));
+    let workers: Vec<_> = (0..WORKERS)
+        .map(|_| {
+            let (server, dir, addr, jobs) = (server.clone(), dir.clone(), addr.clone(), jobs.clone());
+            std::thread::spawn(move || hosting_worker(&server, &dir, &addr, &jobs))
+        })
+        .collect();
+    for w in workers {
+        let _ = w.join();
+    }
+    Ok(())
+}
+
+/// How many requests are answered at once.
+const WORKERS: usize = 8;
+
+/// Each app's jobs, by the key it is kept under, the same for every thread.
+type SharedJobs = Arc<Mutex<BTreeMap<String, Arc<Mutex<Jobs>>>>>;
+
+/// The jobs of the app under `key`, made the first time any thread asks.
+fn jobs_of(jobs: &SharedJobs, key: &str) -> Arc<Mutex<Jobs>> {
+    let mut all = jobs.lock().unwrap_or_else(|e| e.into_inner());
+    all.entry(key.to_string()).or_insert_with(|| Arc::new(Mutex::new(Jobs::default()))).clone()
+}
+
+/// One of the threads answering requests on the machine.
+fn hosting_worker(server: &tiny_http::Server, dir: &Path, addr: &str, jobs: &SharedJobs) {
+    let accounts = match crate::account::Accounts::open(dir) {
+        Ok(a) => a,
+        Err(e) => return eprintln!("accounts: {e}"),
+    };
     let mut apps: BTreeMap<String, App> = BTreeMap::new();
     for request in server.incoming_requests() {
         let url = request.url().to_string();
@@ -3059,16 +3118,16 @@ fn hosting_serve(args: &[String]) -> Result<(), String> {
         // Asked by a name that is not the machine's: a hosted world's own domain, whole, at its
         // root; or nothing here. Only a name an organisation says is its own is ever answered for.
         let host = request.headers().iter().find(|h| h.field.equiv("Host")).map(|h| h.value.as_str().split(':').next().unwrap_or("").to_lowercase()).unwrap_or_default();
-        let machine_host = crate::account::Site::load(&dir).url.split("://").nth(1).unwrap_or("").split(['/', ':']).next().unwrap_or("").to_lowercase();
+        let machine_host = crate::account::Site::load(dir).url.split("://").nth(1).unwrap_or("").split(['/', ':']).next().unwrap_or("").to_lowercase();
         if !host.is_empty() && !machine_host.is_empty() && host != machine_host && host != "127.0.0.1" && host != "localhost" {
-            match org_by_domain(&dir, &host) {
+            match org_by_domain(dir, &host) {
                 Some(org) if first == APP_PREFIX => {
                     // Signing in to it happens at its own name, so the cookie is for that name.
                     serve::mount(&format!("/{APP_PREFIX}"));
-                    hosting_root(request, &dir, &accounts, &parts[1..], &format!("https://{host}"));
+                    hosting_root(request, dir, &accounts, &parts[1..], &format!("https://{host}"));
                     let _ = org;
                 }
-                Some(org) => answer_org(&mut apps, &format!("{org}@{host}"), &org, "", &dir, &addr, &accounts, request),
+                Some(org) => answer_org(&mut apps, jobs, &format!("{org}@{host}"), &org, "", dir, addr, &accounts, request),
                 None => respond(request, 421, "text/plain; charset=utf-8", &format!("No world on this machine is at {host}.\n")),
             }
             continue;
@@ -3101,7 +3160,7 @@ fn hosting_serve(args: &[String]) -> Result<(), String> {
                 let _ = request.respond(response);
                 continue;
             }
-            answer_org(&mut apps, &first, &first, &format!("/{first}"), &dir, &addr, &accounts, request);
+            answer_org(&mut apps, jobs, &first, &first, &format!("/{first}"), dir, addr, &accounts, request);
             continue;
         }
         // The machine's own pages are under `/app/`: the site, the hub and every organisation share
@@ -3110,29 +3169,28 @@ fn hosting_serve(args: &[String]) -> Result<(), String> {
         // discovery is at the root; everything else of it is under /app/oauth/.
         if first == ".well-known" && parts.get(1).map(String::as_str) == Some("openid-configuration") {
             serve::mount("");
-            let here = crate::oidc::Here::machine(&dir);
+            let here = crate::oidc::Here::machine(dir);
             let _ = crate::oidc::answer(&here, request, &parts, &url);
             continue;
         }
         // The machine's directory of worlds, zetlyn.com/directory.
         if first == "directory" || first == "directory.json" {
             serve::mount("");
-            if let Some(request) = crate::directory::answer(&dir, request, &parts, &url) {
+            if let Some(request) = crate::directory::answer(dir, request, &parts, &url) {
                 respond(request, 404, "text/plain; charset=utf-8", "nothing at that address");
             }
             continue;
         }
         if first == APP_PREFIX {
             serve::mount(&format!("/{APP_PREFIX}"));
-            let here = crate::oidc::Here::machine(&dir);
+            let here = crate::oidc::Here::machine(dir);
             let Some(request) = crate::oidc::answer(&here, request, &parts[1..], &url) else { continue };
-            hosting_root(request, &dir, &accounts, &parts[1..], "");
+            hosting_root(request, dir, &accounts, &parts[1..], "");
             continue;
         }
         serve::mount("");
         respond(request, 404, "text/html; charset=utf-8", &page("Not here", html! { h1 { "Not here" } p { a href={"/" (APP_PREFIX) "/"} { "Every tracker on this machine" } } }));
     }
-    Ok(())
 }
 
 /// Where the machine's own pages are, on a name it shares with the site and the hub.
@@ -3142,7 +3200,7 @@ const APP_PREFIX: &str = "app";
 /// One request for an organisation, by its app under `key`: `/<org>` on the machine's name, or the
 /// root of its own domain. The app is made the first time it is asked for.
 #[allow(clippy::too_many_arguments)]
-fn answer_org(apps: &mut BTreeMap<String, App>, key: &str, org: &str, base: &str, dir: &Path, addr: &str, accounts: &crate::account::Accounts, request: tiny_http::Request) {
+fn answer_org(apps: &mut BTreeMap<String, App>, jobs: &SharedJobs, key: &str, org: &str, base: &str, dir: &Path, addr: &str, accounts: &crate::account::Accounts, request: tiny_http::Request) {
     let membership = Membership::load(dir);
     // A reader among them reads, as anybody may who is let read: the app is for who changes things.
     let (members, owners) = (membership.of(org, &["owner", "editor"]), membership.of(org, &["owner"]));
@@ -3155,7 +3213,7 @@ fn answer_org(apps: &mut BTreeMap<String, App>, key: &str, org: &str, base: &str
             root: dir.join("orgs").join(org),
             addr: addr.to_string(),
             sites: BTreeMap::new(),
-            jobs: Arc::new(Mutex::new(Jobs::default())),
+            jobs: jobs_of(jobs, key),
             base: base.to_string(),
             hosted: Some(Hosted { members: Vec::new(), owners: Vec::new(), accounts: own, shared: true }),
             visitor: false,

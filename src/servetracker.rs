@@ -11,6 +11,21 @@ use crate::expr;
 use crate::tracker::{Thing, Tracker, TrackerQuery};
 use crate::serve::{at, flatten, mounted, params, shell, unmount, urlencode};
 
+/// A query as one address: each word once, in the order first said, and no more than
+/// `MAX_TERMS` of them. Every filter click used to add its term again, and crawlers walked the
+/// endless addresses that made, each one worked out as it was asked for.
+const MAX_TERMS: usize = 8;
+
+fn canonical(q: &str) -> String {
+    let mut seen = BTreeSet::new();
+    q.split_whitespace().filter(|t| seen.insert(t.to_string())).take(MAX_TERMS).collect::<Vec<_>>().join(" ")
+}
+
+/// A filter added to a query, unless it is there already.
+fn with_term(q: &str, term: &str) -> String {
+    canonical(&format!("{q} {term}"))
+}
+
 fn link(q: &str, view: &str, kind: &str, page: usize) -> String {
     let mut url = format!("{}/?q={}", mounted(), urlencode(q));
     if !view.is_empty() {
@@ -69,7 +84,7 @@ fn cell(e: &Thing, name: &str) -> Markup {
 fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
     let bound = account::bound(v, &scope.decl.name);
     let p = params(url);
-    let q = p.get("q").cloned().unwrap_or_default();
+    let q = canonical(p.get("q").map(String::as_str).unwrap_or(""));
     let view = p.get("view").cloned().unwrap_or_default();
     let kind = p.get("kind").cloned().unwrap_or_default();
     let page: usize = p
@@ -232,7 +247,7 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
         @if q.is_empty() && !examples.is_empty() {
             p.bar {
                 span.dim { "Try:" }
-                @for ex in &examples { a.chip href=(link(ex, &view, &kind, 1)) { (ex) } }
+                @for ex in &examples { a.chip rel="nofollow" href=(link(ex, &view, &kind, 1)) { (ex) } }
             }
         }
         @if !active.is_empty() {
@@ -241,7 +256,7 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
                     @let one = format!("{name}{}{}", op.sql(), lit.display());
                     @let without = q.replace(&one, "").split_whitespace()
                         .collect::<Vec<_>>().join(" ");
-                    a.chip.on href=(link(&without, &view, &kind, 1)) {
+                    a.chip.on rel="nofollow" href=(link(&without, &view, &kind, 1)) {
                         (name) (op.sql()) (lit.display()) " ✕"
                     }
                 }
@@ -259,16 +274,16 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
         @if !one_kind || !d.view.named.is_empty() {
             p.bar {
                 @if view.is_empty() && kind.is_empty() { span.chip.on { "Everything" } }
-                @else { a.chip href=(link(&q, "", "", 1)) { "Everything" } }
+                @else { a.chip rel="nofollow" href=(link(&q, "", "", 1)) { "Everything" } }
                 @for v in &d.view.named {
                     @let t = if v.title.is_empty() { v.name.clone() } else { v.title.clone() };
                     @if v.name == view { span.chip.on { (t) } }
-                    @else { a.chip href=(link(&q, &v.name, "", 1)) { (t) } }
+                    @else { a.chip rel="nofollow" href=(link(&q, &v.name, "", 1)) { (t) } }
                 }
                 @if !one_kind {
                     @for (k, n) in scope.kinds() {
                         @if k == kind { span.chip.on { (k) " " (n) } }
-                        @else { a.chip href=(link(&q, &view, &k, 1)) { (k) " " (n) } }
+                        @else { a.chip rel="nofollow" href=(link(&q, &view, &k, 1)) { (k) " " (n) } }
                     }
                 }
             }
@@ -318,9 +333,9 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
         @if answer.entries.is_empty() { p.dim { "Nothing here." } }
         @if pages > 1 {
             div.pager {
-                @if page > 1 { a href=(link(&q, &view, &kind, page - 1)) { "← Previous" } } @else { span.off { "← Previous" } }
+                @if page > 1 { a rel="nofollow" href=(link(&q, &view, &kind, page - 1)) { "← Previous" } } @else { span.off { "← Previous" } }
                 span.dim { "Page " (page) " of " (pages) }
-                @if page < pages { a href=(link(&q, &view, &kind, page + 1)) { "Next →" } } @else { span.off { "Next →" } }
+                @if page < pages { a rel="nofollow" href=(link(&q, &view, &kind, page + 1)) { "Next →" } } @else { span.off { "Next →" } }
             }
         }
 
@@ -336,7 +351,9 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
                         }
                         @for (v, n) in &counts {
                             div.facet {
-                                a href=(link(format!("{q} {name}={v}").trim(), &view, &kind, 1)) { (v) }
+                                @let term = format!("{name}={v}");
+                                @if q.split_whitespace().any(|t| t == term) { span.on { (v) } }
+                                @else { a rel="nofollow" href=(link(&with_term(&q, &term), &view, &kind, 1)) { (v) } }
                                 span.n { (n) }
                             }
                         }
@@ -1806,10 +1823,11 @@ impl TrackerSite {
                     None,
                 )
             }
+            // Its filtered views are not for search engines: endless, and each worked out as asked.
             _ => (
                 overview(&scope, &url, &v, &site),
                 "text/html; charset=utf-8",
-                None,
+                url.contains('?').then(|| ("X-Robots-Tag".to_string(), "noindex, nofollow".to_string())),
             ),
         };
 
@@ -2931,6 +2949,15 @@ fn proposals_section(scope: &Tracker, accounts: &Accounts, account: i64) -> Mark
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_filter_is_said_once_and_a_query_is_one_address() {
+        assert_eq!(canonical("kind=a  kind=a source=x kind=a"), "kind=a source=x");
+        assert_eq!(with_term("kind=a source=x", "kind=a"), "kind=a source=x", "clicked again, nothing new");
+        assert_eq!(with_term("kind=a", "source=x"), "kind=a source=x");
+        let many: Vec<String> = (0..20).map(|i| format!("f{i}=v")).collect();
+        assert_eq!(canonical(&many.join(" ")).split_whitespace().count(), MAX_TERMS);
+    }
 
     /// A workspace with one tracker over one proposals source, served on a free port in this
     /// process. The address, and where the workspace is.

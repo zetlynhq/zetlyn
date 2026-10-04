@@ -948,27 +948,33 @@ impl App {
                 }
             }
             (false, ["settings"]) => (200, html_kind, self.settings_page(&query)),
-            // All of it, as one archive, for its owner to take away.
+            // All of it, as one archive, for its owner to take away. Made and sent on a thread of its
+            // own: it takes most of a minute for a large world and as long as the download takes
+            // after, and everybody else is answered meanwhile. The thread ends when the download does.
             (false, ["export.tar.gz"]) => {
-                let file = std::env::temp_dir().join(format!("zetlyn-export-{}.tar.gz", crate::jwt::random()));
-                return match crate::world::export(&self.root, &file).and_then(|_| std::fs::File::open(&file).map_err(|e| e.to_string())) {
-                    Ok(handle) => {
-                        // Read from the open handle; the name is gone at once, so nothing is left behind.
-                        let _ = std::fs::remove_file(&file);
-                        let name = format!("{}-{}.tar.gz", self.root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "world".into()), crate::iso_date(crate::now()));
-                        let mut response = tiny_http::Response::from_file(handle);
-                        for (k, v) in [("Content-Type", "application/gzip".to_string()), ("Content-Disposition", format!("attachment; filename=\"{name}\""))] {
-                            if let Ok(h) = tiny_http::Header::from_bytes(k.as_bytes(), v.as_bytes()) {
-                                response = response.with_header(h);
+                let root = self.root.clone();
+                std::thread::spawn(move || {
+                    let file = std::env::temp_dir().join(format!("zetlyn-export-{}.tar.gz", crate::jwt::random()));
+                    match crate::world::export(&root, &file).and_then(|_| std::fs::File::open(&file).map_err(|e| e.to_string())) {
+                        Ok(handle) => {
+                            // Read from the open handle; the name is gone at once, so nothing is left behind.
+                            let _ = std::fs::remove_file(&file);
+                            let name = format!("{}-{}.tar.gz", root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "world".into()), crate::iso_date(crate::now()));
+                            let mut response = tiny_http::Response::from_file(handle);
+                            for (k, v) in [("Content-Type", "application/gzip".to_string()), ("Content-Disposition", format!("attachment; filename=\"{name}\""))] {
+                                if let Ok(h) = tiny_http::Header::from_bytes(k.as_bytes(), v.as_bytes()) {
+                                    response = response.with_header(h);
+                                }
                             }
+                            let _ = request.respond(response);
                         }
-                        let _ = request.respond(response);
+                        Err(e) => {
+                            let _ = std::fs::remove_file(&file);
+                            respond(request, 500, "text/plain; charset=utf-8", &format!("Not exported: {e}\n"));
+                        }
                     }
-                    Err(e) => {
-                        let _ = std::fs::remove_file(&file);
-                        respond(request, 500, html_kind, &page("Not exported", html! { p { (e) } }))
-                    }
-                };
+                });
+                return;
             }
             (true, ["settings", "moved"]) => {
                 let to = form.get("to").cloned().unwrap_or_default();

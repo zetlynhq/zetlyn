@@ -399,6 +399,10 @@ pub struct Site {
     /// a link to their address and may change everything. Everybody else reads what it publishes.
     #[serde(default)]
     pub owners: Vec<String>,
+    /// Where this world is now, once it has moved (`zetlyn world move`). Its document says so,
+    /// signed with the same key, and every page redirects there.
+    #[serde(default)]
+    pub moved_to: String,
     /// What a subscription costs. A workspace that names none charges nothing: every reader reads
     /// all of it, now, and nothing on its pages speaks of paying.
     #[serde(default)]

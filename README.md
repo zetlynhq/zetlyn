@@ -190,6 +190,24 @@ what it would do. Without `--smtp` the sign-in links are written to the world's 
 With Docker instead: `DOMAIN=prices.example OWNER=you@example.org docker compose -f
 deploy/world/compose.yaml up -d`.
 
+A world describes itself at `https://prices.example/.well-known/zetlyn.json`, signed with its own
+key: what it publishes and where (its own hub, at `/hub/`), its public sources and trackers, where
+it takes proposals. Anybody who knows only its address can take a source from it:
+`zetlyn source subscribe t/prices --from https://prices.example`.
+
+Moving it is three commands:
+
+```
+zetlyn world export /srv/zetlyn/world --to world.tar.gz                       # on the old machine
+zetlyn world import world.tar.gz --to /srv/zetlyn/world --url https://new.example  # on the new one
+zetlyn world move /srv/zetlyn/world --to https://new.example                  # on the old one
+```
+
+Everything moves with it: the claims and their receipts, its readers and what they proposed, its
+keys. `move` checks that the new address answers as the same world, signed with the same key;
+after it, the old address says where it went and redirects every page there, and a subscription
+taken from it follows on its next pull.
+
 ## Letting somebody else run it
 
 A workspace can answer for itself, so that whoever keeps it current does not have to be at its

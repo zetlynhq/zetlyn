@@ -496,6 +496,23 @@ impl App {
                 _ => {}
             }
         }
+        // A world that has moved answers its document (above) and sends everything else to where
+        // it is now, the same page there. What is sent to it is refused, and says where to send it.
+        let moved = crate::account::Site::load(&self.root).moved_to.trim().trim_end_matches('/').to_string();
+        if !moved.is_empty() {
+            let query = url.split_once('?').map(|(_, q)| format!("?{q}")).unwrap_or_default();
+            let there = format!("{moved}/{}{query}", parts.iter().map(|p| urlencode(p)).collect::<Vec<_>>().join("/"));
+            if matches!(request.method(), tiny_http::Method::Get | tiny_http::Method::Head) {
+                let mut response = tiny_http::Response::from_string("").with_status_code(301);
+                if let Ok(h) = tiny_http::Header::from_bytes(&b"Location"[..], there.as_bytes()) {
+                    response = response.with_header(h);
+                }
+                let _ = request.respond(response);
+            } else {
+                respond(request, 410, "text/plain; charset=utf-8", &format!("This world has moved. Send it to {there}\n"));
+            }
+            return;
+        }
         if self.hosted.is_some() {
             if let Some(request) = self.hosted_gate(request, &url, &path, &parts) {
                 return self.answer_as_owner(request, url, path, parts);

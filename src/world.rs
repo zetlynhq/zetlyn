@@ -27,6 +27,8 @@ zetlyn world up <domain> --owner <address> [--title …] [--smtp host[:port] --s
                 [--port 2500] [--dry-run] [--root <prefix>] [--no-services]
 zetlyn world serve <workspace> [--addr 127.0.0.1:2500]
 zetlyn world export <workspace> --to <file.tar.gz>
+zetlyn world import <file.tar.gz> --to <dir> [--url <address>] [--owner <address>]
+zetlyn world move <workspace> --to <address> [--unchecked]
 zetlyn world backup <workspace> <dir> [--keep 14]
 zetlyn world upgrade [--check] [--restart]";
 
@@ -71,6 +73,21 @@ pub fn command(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         Some("upgrade") => upgrade(args.iter().any(|a| a == "--check"), args.iter().any(|a| a == "--restart")),
+        Some("import") => {
+            let rest = crate::positional(args, 2);
+            let file = PathBuf::from(rest.first().ok_or("which archive? one `zetlyn world export` wrote")?.as_str());
+            let dir = PathBuf::from(crate::flag(args, "--to").ok_or("--to <dir>, an empty directory")?);
+            let n = import(&file, &dir, crate::flag(args, "--url"), crate::flag(args, "--owner"))?;
+            println!("{n} files in {}. Serve it there, then on the old machine: zetlyn world move <workspace> --to <its address>", dir.display());
+            Ok(())
+        }
+        Some("move") => {
+            let dir = PathBuf::from(crate::positional(args, 2).first().ok_or("which workspace?")?.as_str());
+            let to = crate::flag(args, "--to").ok_or("--to <address>, where it is now")?;
+            move_to(&dir, to, args.iter().any(|a| a == "--unchecked"))?;
+            println!("{} says it is at {to} now: its document says so, and every page redirects there", dir.display());
+            Ok(())
+        }
         _ => Err(USAGE.into()),
     }
 }
@@ -713,7 +730,7 @@ pub fn document(root: &Path) -> Result<serde_json::Value, String> {
         "hub": hub,
         "sources": sources,
         "trackers": trackers,
-        "moved_to": serde_json::Value::Null,
+        "moved_to": Some(site.moved_to.trim().trim_end_matches('/').to_string()).filter(|m| !m.is_empty()),
     }))
 }
 
@@ -780,19 +797,174 @@ pub fn fetch(url: &str) -> Result<Option<serde_json::Value>, String> {
     Ok(Some(doc))
 }
 
+/// Where an address says to fetch from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Resolved {
+    /// The hub: a world's own, or the address itself where it is a plain hub.
+    pub hub: String,
+    /// The key the world publishes with, to pin.
+    pub publishes_with: Option<String>,
+    /// The world, and the key its document is signed with, where the address is one: what a
+    /// subscription remembers, so it can follow the world when it moves.
+    pub world: Option<(String, String)>,
+}
+
 /// Where to fetch from, given an address: a world's own hub and the key it publishes with, where
 /// the address is a world; the address itself, and nothing pinned, where it is a plain hub.
-pub fn resolve(address: &str) -> Result<(String, Option<String>), String> {
+pub fn resolve(address: &str) -> Result<Resolved, String> {
+    let plain = || Resolved { hub: address.to_string(), publishes_with: None, world: None };
     if !(address.starts_with("https://") || address.starts_with("http://")) {
-        return Ok((address.to_string(), None));
+        return Ok(plain());
     }
     match fetch(address)? {
         Some(doc) => {
             let hub = doc["hub"].as_str().ok_or_else(|| format!("{address} is a world that publishes nothing"))?.to_string();
-            Ok((hub, doc["publishes_with"].as_str().map(str::to_string)))
+            Ok(Resolved {
+                hub,
+                publishes_with: doc["publishes_with"].as_str().map(str::to_string),
+                world: Some((doc["world"].as_str().unwrap_or(address).to_string(), doc["key"].as_str().unwrap_or_default().to_string())),
+            })
         }
-        None => Ok((address.to_string(), None)),
+        None => Ok(plain()),
     }
+}
+
+/// Beside a subscription: which world it came from, and that world's key.
+pub const FOLLOWED: &str = "world.json";
+
+pub fn remember(dir: &Path, world: &str, key: &str) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(&serde_json::json!({ "world": world, "key": key })).unwrap_or_default();
+    std::fs::write(dir.join(FOLLOWED), text).map_err(|e| format!("{}: {e}", dir.display()))
+}
+
+/// Before a subscription fetches: ask the world it came from where it publishes now. A world that
+/// moved is followed to where its document says, only when the world there is signed by the same
+/// key; a world that publishes somewhere new is followed there. What was done, where anything was.
+pub fn follow(dir: &Path) -> Result<Option<String>, String> {
+    let Ok(text) = std::fs::read_to_string(dir.join(FOLLOWED)) else { return Ok(None) };
+    let held: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", dir.join(FOLLOWED).display()))?;
+    let (world, key) = (held["world"].as_str().unwrap_or_default().to_string(), held["key"].as_str().unwrap_or_default().to_string());
+    let doc = match fetch(&world) {
+        Ok(Some(d)) => d,
+        Ok(None) => return Ok(Some(format!("{world} does not answer as a world now; fetched from where it was"))),
+        Err(e) => return Ok(Some(format!("{e}; fetched from where it was"))),
+    };
+    if doc["key"].as_str() != Some(key.as_str()) {
+        return Ok(Some(format!("{world} answers with another key than the one it had, so nothing about it was followed")));
+    }
+    let (doc, moved) = match doc["moved_to"].as_str().filter(|m| !m.is_empty()) {
+        Some(to) => match fetch(to) {
+            Ok(Some(there)) if there["key"].as_str() == Some(key.as_str()) && there["moved_to"].is_null() => (there, true),
+            _ => return Ok(Some(format!("{world} says it moved to {to}, which does not answer as the same world; not followed"))),
+        },
+        None => (doc, false),
+    };
+    let Some(hub) = doc["hub"].as_str().map(str::to_string) else {
+        return Ok(Some(format!("{} publishes nothing now; fetched from where it was", doc["world"].as_str().unwrap_or(&world))));
+    };
+    let mut decl = crate::sourcedecl::SourceDecl::load(dir)?;
+    let mut said = None;
+    if let crate::sourcedecl::Fetch::Hub { at, .. } = &mut decl.source {
+        if *at != hub {
+            said = Some(if moved { format!("{world} moved to {}; fetching from {hub}", doc["world"].as_str().unwrap_or_default()) } else { format!("{world} publishes at {hub} now") });
+            *at = hub;
+            let path = dir.join(crate::sourcedecl::FILE);
+            std::fs::write(&path, crate::yaml::to_string(&decl)?).map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+    }
+    if moved {
+        remember(dir, doc["world"].as_str().unwrap_or(&world), &key)?;
+        said.get_or_insert_with(|| format!("{world} moved to {}", doc["world"].as_str().unwrap_or_default()));
+    }
+    Ok(said)
+}
+
+/// A top-level `key: value` in a workspace.yaml, set where it is said and added where it is not,
+/// everything else in the file as it was. `None` takes it out.
+fn set_top(file: &Path, key: &str, value: Option<&str>) -> Result<(), String> {
+    let text = std::fs::read_to_string(file).unwrap_or_default();
+    let line = value.map(|v| format!("{key}: {}", serde_json::to_string(v).unwrap_or_default()));
+    let mut out: Vec<String> = Vec::new();
+    let mut done = false;
+    for l in text.lines() {
+        if l.starts_with(&format!("{key}:")) {
+            if let (Some(new), false) = (&line, done) {
+                out.push(new.clone());
+            }
+            done = true;
+        } else {
+            out.push(l.to_string());
+        }
+    }
+    if let (Some(new), false) = (&line, done) {
+        out.push(new.clone());
+    }
+    std::fs::write(file, format!("{}\n", out.join("\n").trim_end())).map_err(|e| format!("{}: {e}", file.display()))
+}
+
+/// An exported world made again in an empty directory: at its new address where one is given,
+/// run by `owner` where one is given, and no longer moved anywhere. How many files it holds.
+pub fn import(file: &Path, dir: &Path, url: Option<&str>, owner: Option<&str>) -> Result<usize, String> {
+    if dir.exists() && std::fs::read_dir(dir).map(|mut d| d.next().is_some()).unwrap_or(true) {
+        return Err(format!("{}: not empty; a world is imported into an empty directory", dir.display()));
+    }
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let reader = std::fs::File::open(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(reader));
+    let (mut n, mut about) = (0usize, false);
+    for entry in tar.entries().map_err(|e| format!("{}: {e}", file.display()))? {
+        let mut entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path().map_err(|e| e.to_string())?.into_owned();
+        if path == Path::new("EXPORT.json") {
+            about = true;
+            continue;
+        }
+        let Ok(rel) = path.strip_prefix("world") else { continue };
+        if rel.as_os_str().is_empty() || rel.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+            return Err(format!("{}: {} is not a path inside the world", file.display(), path.display()));
+        }
+        let target = dir.join(rel);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        entry.unpack(&target).map_err(|e| format!("{}: {e}", target.display()))?;
+        n += 1;
+    }
+    let ws = dir.join(crate::account::WORKSPACE);
+    if !about || !ws.exists() {
+        return Err(format!("{}: not an exported world", file.display()));
+    }
+    if let Some(u) = url {
+        set_top(&ws, "url", Some(u.trim_end_matches('/')))?;
+    }
+    set_top(&ws, "moved_to", None)?;
+    if let Some(o) = owner {
+        let site = crate::account::Site::load(dir);
+        if !site.owners.iter().any(|x| x.eq_ignore_ascii_case(o)) {
+            if site.owners.is_empty() {
+                let text = std::fs::read_to_string(&ws).unwrap_or_default();
+                std::fs::write(&ws, format!("{}\nowners:\n- {}\n", text.trim_end(), serde_json::to_string(o).unwrap_or_default())).map_err(|e| e.to_string())?;
+            } else {
+                return Err(format!("imported, but {o} is not among its owners ({}): add them in {} by hand", site.owners.join(", "), ws.display()));
+            }
+        }
+    }
+    Ok(n)
+}
+
+/// The world at `dir` says it is at `to` now. Only once `to` answers as this same world, signed
+/// with this world's key and not itself moved, unless that check is waived.
+pub fn move_to(dir: &Path, to: &str, unchecked: bool) -> Result<(), String> {
+    let to = to.trim().trim_end_matches('/');
+    if !unchecked {
+        let key = crate::propose::operator_key(dir)?;
+        match fetch(to)? {
+            Some(doc) if doc["key"].as_str() == Some(key.as_str()) && doc["moved_to"].is_null() => {}
+            Some(_) => return Err(format!("{to} answers as another world, or one that has moved itself: not moved")),
+            None => return Err(format!("{to} does not answer as a world yet. Import it there and start it first, or say --unchecked")),
+        }
+    }
+    set_top(&dir.join(crate::account::WORKSPACE), "moved_to", Some(to))
 }
 
 /// A file of the world's own hub, `<root>/hub/<rest>`, as a reader asks for it: a directory is its
@@ -1010,9 +1182,7 @@ mod tests {
             d
         };
         // The key a world publishes with is its own, in its own home.
-        let home = tmp("doc-home");
-        std::env::set_var("ZETLYN_HOME", &home);
-        let publisher = crate::identity::new("World A", "ann@example.org").unwrap();
+        let publisher = publisher();
 
         let a = tmp("doc-a");
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
@@ -1066,8 +1236,10 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        let (hub, key) = resolve(&url).unwrap();
-        assert_eq!((hub.as_str(), key.as_deref()), (format!("{url}/hub").as_str(), Some(publisher.as_str())));
+        let r = resolve(&url).unwrap();
+        assert_eq!((r.hub.as_str(), r.publishes_with.as_deref()), (format!("{url}/hub").as_str(), Some(publisher.as_str())));
+        assert_eq!(r.world.as_ref().map(|(w, _)| w.as_str()), Some(url.as_str()));
+        let (hub, key) = (r.hub, r.publishes_with);
         let b = tmp("doc-b");
         let place = crate::place::at(&hub).unwrap();
         let reference = crate::artifact::Reference::parse("t/prices").unwrap();
@@ -1075,9 +1247,137 @@ mod tests {
         assert_eq!(held, 1);
         assert!(std::fs::read_to_string(b.join("prices/source.yaml")).unwrap().contains(&publisher), "the publisher's key is pinned");
         // Not an address at all: nothing to look up.
-        assert_eq!(resolve("/srv/hub").unwrap(), ("/srv/hub".to_string(), None));
-        for d in [&home, &a, &b] {
+        assert_eq!(resolve("/srv/hub").unwrap(), Resolved { hub: "/srv/hub".into(), publishes_with: None, world: None });
+        for d in [&a, &b] {
             let _ = std::fs::remove_dir_all(d);
         }
+    }
+
+    /// One identity for every test that publishes: `ZETLYN_HOME` is the process's, and two tests
+    /// each pointing it at their own would sign with each other's keys.
+    fn publisher() -> String {
+        static KEY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        KEY.get_or_init(|| {
+            let home = std::env::temp_dir().join(format!("zetlyn-world-home-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&home);
+            std::env::set_var("ZETLYN_HOME", &home);
+            crate::identity::new("A world", "ann@example.org").unwrap()
+        })
+        .clone()
+    }
+
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    }
+
+    /// A world at `url` with one public source and one row a reader proposed and its owner took,
+    /// published to its own hub.
+    fn a_world_with_a_row(dir: &Path, url: &str) {
+        let _ = std::fs::remove_dir_all(dir);
+        let source = dir.join("sources/prices");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(dir.join("trackers")).unwrap();
+        std::fs::write(dir.join("workspace.yaml"), format!("# kept by hand\ntitle: World A\nurl: {url}\nowners: [ann@example.org]\npublish:\n  to: hub\n  app: {url}\n")).unwrap();
+        std::fs::write(
+            source.join("source.yaml"),
+            "name: t/prices\ntitle: Car prices\nkind: price\nfetch:\n  type: proposals\n  from: []\n  readers: [signed-in]\nlicence:\n  republish: yes\nclaims:\n  id:\n    scheme: price\n    from: \"const:{country}-{week}\"\n  title: \"const:{country} {week}\"\n  known: field:read_at\n  properties:\n    price:\n      type: number\n      from: field:price\n",
+        )
+        .unwrap();
+        let accounts = crate::account::Accounts::open(dir).unwrap();
+        let reader = accounts.ensure("ben@example.org").unwrap();
+        accounts.set_name(reader.id, "Ben").unwrap();
+        let ben = crate::propose::Reader { id: crate::propose::pseudonym(dir, reader.id).unwrap(), name: "Ben".into(), email: reader.email.clone(), owner: false };
+        let row = br#"{"row": {"country": "DEU", "week": "2026-W40", "price": 44990}, "read_at": "2026-10-04", "read_from": "https://example.com", "attest": "read"}"#;
+        let file = crate::propose::receive_from_reader(&source, dir, row, &ben).unwrap();
+        accounts.record_proposal(reader.id, "t/prices", &file).unwrap();
+        crate::propose::decide(&source, &file, true, "ann", "").unwrap();
+        crate::source::Source::open(&source).unwrap().run().unwrap();
+        crate::app::publish_root(dir, "a", |_| std::collections::BTreeMap::new()).unwrap();
+    }
+
+    fn serve(dir: &Path, port: u16) {
+        let args: Vec<String> = ["world", "serve", dir.to_str().unwrap(), "--addr", &format!("127.0.0.1:{port}")].iter().map(|s| s.to_string()).collect();
+        // Ends with the test process; nothing outlives it.
+        std::thread::spawn(move || crate::app::world_serve(&args));
+        for _ in 0..50 {
+            if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        panic!("the world at {port} never answered");
+    }
+
+    #[test]
+    fn a_world_moves_to_another_machine_and_keeps_its_readers_its_subscribers_and_its_receipts() {
+        publisher();
+        let base = std::env::temp_dir().join(format!("zetlyn-world-move-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (pa, pb) = (free_port(), free_port());
+        let (url_a, url_b) = (format!("http://127.0.0.1:{pa}"), format!("http://127.0.0.1:{pb}"));
+        let (a, b, c) = (base.join("a"), base.join("b"), base.join("c"));
+        a_world_with_a_row(&a, &url_a);
+        serve(&a, pa);
+
+        // Somebody subscribed, knowing only where the world was.
+        let r = resolve(&url_a).unwrap();
+        let place = crate::place::at(&r.hub).unwrap();
+        let reference = crate::artifact::Reference::parse("t/prices").unwrap();
+        crate::artifact::subscribe(place.as_ref(), &reference, &c.join("prices"), &r.hub, r.publishes_with.as_deref()).unwrap();
+        let (world, key) = r.world.clone().unwrap();
+        remember(&c.join("prices"), &world, &key).unwrap();
+        assert_eq!(follow(&c.join("prices")).unwrap(), None, "nothing has moved yet");
+
+        // Exported, taken to the other machine, and started there.
+        let archive = base.join("a.tar.gz");
+        export(&a, &archive).unwrap();
+        assert!(import(&archive, &a, None, None).unwrap_err().contains("not empty"));
+        import(&archive, &b, Some(&url_b), Some("ann@example.org")).unwrap();
+        let site_b = crate::account::Site::load(&b);
+        assert_eq!((site_b.url.as_str(), site_b.moved_to.as_str()), (url_b.as_str(), ""));
+        assert!(std::fs::read_to_string(b.join("workspace.yaml")).unwrap().starts_with("# kept by hand"), "the rest of the file as it was");
+        serve(&b, pb);
+
+        // A world that is not this one is no place to move to.
+        let stranger = base.join("stranger");
+        let ps = free_port();
+        a_world_with_a_row(&stranger, &format!("http://127.0.0.1:{ps}"));
+        serve(&stranger, ps);
+        assert!(move_to(&a, &format!("http://127.0.0.1:{ps}"), false).unwrap_err().contains("another world"));
+        move_to(&a, &url_b, false).unwrap();
+
+        // The old address says where it went, signed by the same key, and sends every page there.
+        let doc_a = fetch(&url_a).unwrap().unwrap();
+        assert_eq!(doc_a["moved_to"], url_b);
+        assert_eq!(doc_a["key"], fetch(&url_b).unwrap().unwrap()["key"]);
+        let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).max_redirects(0).build().into();
+        let r = agent.get(&format!("{url_a}/t/prices/things?q=deu")).call().unwrap();
+        assert_eq!(r.status().as_u16(), 301);
+        assert_eq!(r.headers().get("location").unwrap().to_str().unwrap(), format!("{url_b}/t/prices/things?q=deu"));
+        let r = agent.post(&format!("{url_a}/propose/prices")).send("{}").unwrap();
+        assert_eq!(r.status().as_u16(), 410);
+
+        // The subscriber follows it, and takes what it publishes there.
+        let said = follow(&c.join("prices")).unwrap().unwrap();
+        assert!(said.contains("moved"), "{said}");
+        match crate::sourcedecl::SourceDecl::load(&c.join("prices")).unwrap().source {
+            crate::sourcedecl::Fetch::Hub { at, .. } => assert_eq!(at, format!("{url_b}/hub")),
+            _ => panic!("not a subscription"),
+        }
+        assert!(std::fs::read_to_string(c.join("prices/world.json")).unwrap().contains(&url_b));
+        assert_eq!(follow(&c.join("prices")).unwrap(), None, "followed once, settled");
+
+        // Its reader is still its reader, under the same name, and the receipt still names them.
+        let accounts = crate::account::Accounts::open(&b).unwrap();
+        let ben = accounts.by_email("ben@example.org").unwrap();
+        assert_eq!(accounts.name_of(ben.id), "Ben");
+        assert_eq!(accounts.proposals_of(ben.id).len(), 1);
+        assert_eq!(crate::propose::pseudonym(&b, ben.id).unwrap(), crate::propose::pseudonym(&a, ben.id).unwrap(), "the same key, so the same pseudonym");
+        let ds = crate::source::Source::open(&b.join("sources/prices")).unwrap();
+        let q = crate::source::Query { text: String::new(), pred: None, ids: vec!["DEU-2026-W40".into()], seen_before: None, view: None, sort: None, limit: 5, offset: 0 };
+        let ids: Vec<String> = ds.search(&q).unwrap().1.into_iter().map(|h| h.record_id).collect();
+        let claim = ds.fetch(&ids, false)[0].to_json().to_string();
+        assert!(claim.contains("Ben (reader:"), "{claim}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -23,7 +23,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 const USAGE: &str = "zetlyn world init <dir> --domain <domain> --owner <address> [--title …]
-zetlyn world up <domain> --owner <address> [--title …] [--smtp host[:port] --smtp-user … --mail-from …]
+zetlyn world up <domain> --owner <address> [--from <archive>] [--title …] [--smtp host[:port] --smtp-user … --mail-from …]
                 [--port 2500] [--dry-run] [--root <prefix>] [--no-services]
 zetlyn world serve <workspace> [--addr 127.0.0.1:2500]
 zetlyn world export <workspace> --to <file.tar.gz>
@@ -113,6 +113,8 @@ pub struct Wanted {
     pub smtp: Option<(String, u16)>,
     pub smtp_user: String,
     pub mail_from: String,
+    /// An exported world to make it from, instead of an empty one.
+    pub from: Option<PathBuf>,
 }
 
 impl Wanted {
@@ -141,6 +143,7 @@ impl Wanted {
             smtp,
             smtp_user: crate::flag(args, "--smtp-user").unwrap_or("").to_string(),
             mail_from: crate::flag(args, "--mail-from").map(str::to_string).unwrap_or_else(|| format!("Zetlyn <noreply@{domain}>")),
+            from: crate::flag(args, "--from").map(PathBuf::from),
             owner,
             domain,
         })
@@ -390,9 +393,15 @@ pub fn up(w: &Wanted, plan: &Plan) -> Result<(), String> {
     // The workspace, with its address and its owner.
     let world = paths.world();
     if !world.join(crate::account::WORKSPACE).exists() {
-        step(plan, &format!("make the workspace in {}, owned by {}", world.display(), w.owner), || {
-            init(&world, w).map(|_| ())
-        })?;
+        match &w.from {
+            // A world brought along: made again here, at this address, run by this owner.
+            Some(archive) => step(plan, &format!("make the world in {} from {}, at {}", world.display(), archive.display(), w.url()), || {
+                import(archive, &world, Some(&w.url()), Some(&w.owner)).map(|_| ())
+            })?,
+            None => step(plan, &format!("make the workspace in {}, owned by {}", world.display(), w.owner), || {
+                init(&world, w).map(|_| ())
+            })?,
+        }
     }
     if !paths.backups().is_dir() {
         step(plan, &format!("make {} for the daily copies", paths.backups().display()), || {
@@ -1084,6 +1093,27 @@ mod tests {
         up(&w, &plan).unwrap();
         assert_eq!(std::fs::read_to_string(paths.caddyfile()).unwrap().matches("import /etc/caddy/zetlyn-world.caddy").count(), 1);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn up_from_an_archive_makes_that_world_again_at_the_new_address() {
+        let base = std::env::temp_dir().join(format!("zetlyn-world-up-from-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let old = base.join("old");
+        std::fs::create_dir_all(old.join("sources/kept")).unwrap();
+        std::fs::write(old.join("workspace.yaml"), "title: Brought along\nurl: https://old.example\n").unwrap();
+        std::fs::write(old.join("sources/kept/note.txt"), "still here").unwrap();
+        export(&old, &base.join("old.tar.gz")).unwrap();
+        let mut w = wanted();
+        w.smtp = None;
+        w.from = Some(base.join("old.tar.gz"));
+        up(&w, &Plan { root: base.join("machine"), dry: false, services: false }).unwrap();
+        let world = Paths { root: base.join("machine") }.world();
+        assert_eq!(std::fs::read_to_string(world.join("sources/kept/note.txt")).unwrap(), "still here");
+        let site = crate::account::Site::load(&world);
+        assert_eq!((site.title.as_str(), site.url.as_str()), ("Brought along", "https://prices.example"));
+        assert_eq!(site.owners, vec!["ann@example.org".to_string()]);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

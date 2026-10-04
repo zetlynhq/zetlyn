@@ -927,6 +927,36 @@ impl App {
                 }
             }
             (false, ["settings"]) => (200, html_kind, self.settings_page(&query)),
+            // All of it, as one archive, for its owner to take away.
+            (false, ["export.tar.gz"]) => {
+                let file = std::env::temp_dir().join(format!("zetlyn-export-{}-{}.tar.gz", std::process::id(), crate::now()));
+                return match crate::world::export(&self.root, &file).and_then(|_| std::fs::File::open(&file).map_err(|e| e.to_string())) {
+                    Ok(handle) => {
+                        // Read from the open handle; the name is gone at once, so nothing is left behind.
+                        let _ = std::fs::remove_file(&file);
+                        let name = format!("{}-{}.tar.gz", self.root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "world".into()), crate::iso_date(crate::now()));
+                        let mut response = tiny_http::Response::from_file(handle);
+                        for (k, v) in [("Content-Type", "application/gzip".to_string()), ("Content-Disposition", format!("attachment; filename=\"{name}\""))] {
+                            if let Ok(h) = tiny_http::Header::from_bytes(k.as_bytes(), v.as_bytes()) {
+                                response = response.with_header(h);
+                            }
+                        }
+                        let _ = request.respond(response);
+                    }
+                    Err(e) => {
+                        let _ = std::fs::remove_file(&file);
+                        respond(request, 500, html_kind, &page("Not exported", html! { p { (e) } }))
+                    }
+                };
+            }
+            (true, ["settings", "moved"]) => {
+                let to = form.get("to").cloned().unwrap_or_default();
+                let said = match crate::world::move_to(&self.root, &to, false) {
+                    Ok(()) => format!("This world says it lives at {to} now."),
+                    Err(e) => e,
+                };
+                return redirect(request, &serve::at(&format!("/settings?saved={}", urlencode(&said))));
+            }
             (true, ["settings"]) => {
                 let every = form.get("every").map(String::as_str).filter(|e| matches!(*e, "1h" | "6h" | "1d"));
                 let said = match crate::autoupdate::set(&self.root, every, true) {
@@ -1779,6 +1809,21 @@ impl App {
                         }
                     }
                 }
+            }
+            // Leaving is part of what a world is: all of it, and saying where it went.
+            h2 { "Taking it with you" }
+            p.dim { "Everything this world holds in one archive: its sources and their history, its trackers, its readers and what they proposed, its keys. "
+                code { "zetlyn world up <domain> --owner <you> --from <archive>" } " makes it again on a machine of yours." }
+            p { a.chip href=(serve::at("/export.tar.gz")) { "Download all of it" } }
+            @let moved = crate::account::Site::load(&self.root).moved_to;
+            @if moved.is_empty() {
+                p.dim { "Once it answers at its new address, say so here: this one then says where it went, and sends everybody there." }
+                form.bar method="post" action=(serve::at("/settings/moved")) {
+                    input.wide type="url" name="to" placeholder="https://your-world.example" required;
+                    button type="submit" { "It lives there now" }
+                }
+            } @else {
+                div.note { "This world lives at " a href=(moved) { (moved) } " now, and sends everybody there." }
             }
         };
         page("Automatic updates", body)
@@ -2924,50 +2969,37 @@ fn hosting_serve(args: &[String]) -> Result<(), String> {
         let path = url.split('?').next().unwrap_or("/").to_string();
         let parts: Vec<String> = path.split('/').filter(|s| !s.is_empty()).map(serve::urldecode).collect();
         let first = parts.first().cloned().unwrap_or_default();
+        // Asked by a name that is not the machine's: a hosted world's own domain, whole, at its
+        // root; or nothing here. Only a name an organisation says is its own is ever answered for.
+        let host = request.headers().iter().find(|h| h.field.equiv("Host")).map(|h| h.value.as_str().split(':').next().unwrap_or("").to_lowercase()).unwrap_or_default();
+        let machine_host = crate::account::Site::load(&dir).url.split("://").nth(1).unwrap_or("").split(['/', ':']).next().unwrap_or("").to_lowercase();
+        if !host.is_empty() && !machine_host.is_empty() && host != machine_host && host != "127.0.0.1" && host != "localhost" {
+            match org_by_domain(&dir, &host) {
+                Some(org) if first == APP_PREFIX => {
+                    // Signing in to it happens at its own name, so the cookie is for that name.
+                    serve::mount(&format!("/{APP_PREFIX}"));
+                    hosting_root(request, &dir, &accounts, &parts[1..], &format!("https://{host}"));
+                    let _ = org;
+                }
+                Some(org) => answer_org(&mut apps, &format!("{org}@{host}"), &org, "", &dir, &addr, &accounts, request),
+                None => respond(request, 421, "text/plain; charset=utf-8", &format!("No world on this machine is at {host}.\n")),
+            }
+            continue;
+        }
         if org_name(&first) && dir.join("orgs").join(&first).is_dir() {
-            let members = Membership::load(&dir).of(&first);
-            if !apps.contains_key(&first) {
-                let accounts = match crate::account::Accounts::open(&dir) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        respond(request, 500, "text/plain; charset=utf-8", &e);
-                        continue;
-                    }
-                };
-                apps.insert(first.clone(), App {
-                    root: dir.join("orgs").join(&first),
-                    addr: addr.clone(),
-                    sites: BTreeMap::new(),
-                    jobs: Arc::new(Mutex::new(Jobs::default())),
-                    base: format!("/{first}"),
-                    hosted: Some(Hosted { members: Vec::new(), accounts, shared: true }),
-                    visitor: false,
-                    who: None,
-                    orgs_of_who: Vec::new(),
-                    public_of_machine: Vec::new(),
-                });
+            // A world with a domain of its own is there: a page asked for here goes to it.
+            let own = crate::account::Site::load(&dir.join("orgs").join(&first)).domain.trim().to_lowercase();
+            if !own.is_empty() && matches!(request.method(), tiny_http::Method::Get | tiny_http::Method::Head) {
+                let rest = url.strip_prefix(&format!("/{first}")).unwrap_or("/");
+                let rest = if rest.is_empty() { "/" } else { rest };
+                let mut response = tiny_http::Response::from_string("").with_status_code(301);
+                if let Ok(h) = tiny_http::Header::from_bytes(&b"Location"[..], format!("https://{own}{rest}").as_bytes()) {
+                    response = response.with_header(h);
+                }
+                let _ = request.respond(response);
+                continue;
             }
-            let Some(app) = apps.get_mut(&first) else { continue };
-            // Who belongs is read afresh each time: somebody added a minute ago is in now.
-            if let Some(h) = app.hosted.as_mut() {
-                h.members = members;
-            }
-            // Every organisation whoever is signed in belongs to, by its title, for the header.
-            app.public_of_machine = public_links(&dir);
-            app.orgs_of_who = signed_in(&request, &accounts)
-                .map(|email| {
-                    Membership::load(&dir)
-                        .orgs_of(&email)
-                        .into_iter()
-                        .map(|(org, _)| {
-                            let t = crate::account::Site::load(&dir.join("orgs").join(&org)).title;
-                            (if t.is_empty() { org.clone() } else { t }, format!("/{org}/"))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            serve::mount(&app.base);
-            app.answer(request);
+            answer_org(&mut apps, &first, &first, &format!("/{first}"), &dir, &addr, &accounts, request);
             continue;
         }
         // The machine's own pages are under `/app/`: the site, the hub and every organisation share
@@ -2992,7 +3024,7 @@ fn hosting_serve(args: &[String]) -> Result<(), String> {
             serve::mount(&format!("/{APP_PREFIX}"));
             let here = crate::oidc::Here::machine(&dir);
             let Some(request) = crate::oidc::answer(&here, request, &parts[1..], &url) else { continue };
-            hosting_root(request, &dir, &accounts, &parts[1..]);
+            hosting_root(request, &dir, &accounts, &parts[1..], "");
             continue;
         }
         serve::mount("");
@@ -3005,8 +3037,73 @@ fn hosting_serve(args: &[String]) -> Result<(), String> {
 const APP_PREFIX: &str = "app";
 
 /// The machine's own pages: what anybody can read here, signing in, and your organisations.
-fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::account::Accounts, parts: &[String]) {
+/// One request for an organisation, by its app under `key`: `/<org>` on the machine's name, or the
+/// root of its own domain. The app is made the first time it is asked for.
+#[allow(clippy::too_many_arguments)]
+fn answer_org(apps: &mut BTreeMap<String, App>, key: &str, org: &str, base: &str, dir: &Path, addr: &str, accounts: &crate::account::Accounts, request: tiny_http::Request) {
+    let members = Membership::load(dir).of(org);
+    if !apps.contains_key(key) {
+        let own = match crate::account::Accounts::open(dir) {
+            Ok(a) => a,
+            Err(e) => return respond(request, 500, "text/plain; charset=utf-8", &e),
+        };
+        apps.insert(key.to_string(), App {
+            root: dir.join("orgs").join(org),
+            addr: addr.to_string(),
+            sites: BTreeMap::new(),
+            jobs: Arc::new(Mutex::new(Jobs::default())),
+            base: base.to_string(),
+            hosted: Some(Hosted { members: Vec::new(), accounts: own, shared: true }),
+            visitor: false,
+            who: None,
+            orgs_of_who: Vec::new(),
+            public_of_machine: Vec::new(),
+        });
+    }
+    let Some(app) = apps.get_mut(key) else { return };
+    // Who belongs is read afresh each time: somebody added a minute ago is in now.
+    if let Some(h) = app.hosted.as_mut() {
+        h.members = members;
+    }
+    // Every organisation whoever is signed in belongs to, by its title, for the header.
+    app.public_of_machine = public_links(dir);
+    app.orgs_of_who = signed_in(&request, accounts)
+        .map(|email| {
+            Membership::load(dir)
+                .orgs_of(&email)
+                .into_iter()
+                .map(|(o, _)| {
+                    let t = crate::account::Site::load(&dir.join("orgs").join(&o)).title;
+                    (if t.is_empty() { o.clone() } else { t }, format!("/{o}/"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    serve::mount(&app.base);
+    app.answer(request);
+}
+
+/// The organisation whose own domain `host` is, where one says so.
+fn org_by_domain(dir: &Path, host: &str) -> Option<String> {
+    let host = host.trim().trim_end_matches('.').to_lowercase();
+    if host.is_empty() {
+        return None;
+    }
+    orgs_in(dir).into_iter().find(|org| crate::account::Site::load(&dir.join("orgs").join(org)).domain.trim().eq_ignore_ascii_case(&host))
+}
+
+/// `site_url` is the address it is asked at: the machine's, or a hosted world's own domain, where
+/// a sign-in link has to lead back to the same name its cookie is for.
+fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::account::Accounts, parts: &[String], site_url: &str) {
     let html_kind = "text/html; charset=utf-8";
+    // Caddy asks before it takes a certificate for a name: only one a hosted world says is its own.
+    if parts.len() == 1 && parts[0] == "domain-check" {
+        let asked = serve::params(request.url()).get("domain").cloned().unwrap_or_default();
+        return match org_by_domain(dir, &asked) {
+            Some(org) => respond(request, 200, "text/plain; charset=utf-8", &org),
+            None => respond(request, 404, "text/plain; charset=utf-8", "no world here is at that name"),
+        };
+    }
     let post = request.method() == &tiny_http::Method::Post;
     let cookie = request.headers().iter().find(|h| h.field.equiv("Cookie")).map(|h| h.value.as_str().to_string());
     let session = cookie.and_then(|c| c.split(';').filter_map(|p| p.trim().split_once('=')).find(|(k, _)| *k == "zs").map(|(_, v)| v.to_string()));
@@ -3061,7 +3158,10 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
             // The same words whoever asks, so the page does not say who belongs anywhere.
             if !membership.orgs_of(&email).is_empty() {
                 let sent = accounts.ensure(&email).and_then(|a| accounts.new_link(a.id)).and_then(|raw| {
-                    let site = crate::account::Site::load(dir);
+                    let mut site = crate::account::Site::load(dir);
+                    if !site_url.is_empty() {
+                        site.url = site_url.to_string();
+                    }
                     let link = site.link(&serve::at(&format!("/signin/{raw}")));
                     site.send(&email, "Your Zetlyn sign-in link", &format!("{link}\n\nGood for a quarter of an hour, and once."))
                 });
@@ -3083,7 +3183,9 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
             Some(session) => {
                 let cookie = format!("zs={session}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000");
                 let mut response = tiny_http::Response::from_string("").with_status_code(303);
-                for (k, v) in [("Location", serve::at("/")), ("Set-Cookie", cookie)] {
+                // At a world's own name, back to the world; at the machine's, to the machine's page.
+                let home = if site_url.is_empty() { serve::at("/") } else { "/".to_string() };
+                for (k, v) in [("Location", home), ("Set-Cookie", cookie)] {
                     if let Ok(h) = tiny_http::Header::from_bytes(k.as_bytes(), v.as_bytes()) {
                         response = response.with_header(h);
                     }
@@ -3314,5 +3416,103 @@ mod tests {
         assert!(page.contains("What do you want to track?"));
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&nobody);
+    }
+
+    /// One request by hand, so the Host it says is exactly the one given: status, headers, body.
+    fn raw(port: u16, method: &str, host: &str, path: &str, cookie: Option<&str>) -> (u16, String, Vec<u8>) {
+        use std::io::{Read, Write};
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let cookie = cookie.map(|c| format!("Cookie: {c}\r\n")).unwrap_or_default();
+        write!(s, "{method} {path} HTTP/1.1\r\nHost: {host}\r\n{cookie}Content-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        let mut all = Vec::new();
+        s.read_to_end(&mut all).unwrap();
+        let split = all.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        let head = String::from_utf8_lossy(&all[..split]).to_string();
+        let status = head.split_whitespace().nth(1).unwrap().parse().unwrap();
+        let mut body = all[split + 4..].to_vec();
+        if head.to_lowercase().contains("transfer-encoding: chunked") {
+            // Unchunked, for a file sent as it is read.
+            let mut out = Vec::new();
+            let mut rest = &body[..];
+            loop {
+                let end = rest.windows(2).position(|w| w == b"\r\n").unwrap();
+                let size = usize::from_str_radix(String::from_utf8_lossy(&rest[..end]).trim(), 16).unwrap();
+                if size == 0 {
+                    break;
+                }
+                out.extend_from_slice(&rest[end + 2..end + 2 + size]);
+                rest = &rest[end + 4 + size..];
+            }
+            body = out;
+        }
+        (status, head, body)
+    }
+
+    #[test]
+    fn a_hosted_world_on_a_domain_of_its_own_is_whole_there_and_its_owner_can_take_it_away() {
+        let dir = std::env::temp_dir().join(format!("zetlyn-own-domain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let port = free_port();
+        let machine = format!("http://127.0.0.1:{port}");
+        std::fs::write({ std::fs::create_dir_all(&dir).unwrap(); dir.join("workspace.yaml") }, format!("title: The machine\nurl: {machine}\n")).unwrap();
+        for (org, extra) in [("acme", "domain: acme.example\n"), ("plain", "")] {
+            std::fs::create_dir_all(dir.join(format!("orgs/{org}/sources"))).unwrap();
+            std::fs::create_dir_all(dir.join(format!("orgs/{org}/trackers"))).unwrap();
+            std::fs::write(dir.join(format!("orgs/{org}/workspace.yaml")), format!("title: {org} world\n{extra}")).unwrap();
+        }
+        std::fs::write(dir.join("members.yaml"), "plain:\n- email: ann@example.org\n  role: owner\n").unwrap();
+        let args: Vec<String> = ["hosting", "serve", dir.to_str().unwrap(), "--addr", &format!("127.0.0.1:{port}")].iter().map(|s| s.to_string()).collect();
+        // Ends with the test process; nothing outlives it.
+        std::thread::spawn(move || super::hosting(&args));
+        for _ in 0..50 {
+            if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let host = format!("127.0.0.1:{port}");
+
+        // At its own name, whole, at the root.
+        let (status, _, body) = raw(port, "GET", "acme.example", "/", None);
+        assert_eq!(status, 200);
+        assert!(String::from_utf8_lossy(&body).contains("acme world"));
+        let (_, _, disc) = raw(port, "GET", "acme.example", "/.well-known/openid-configuration", None);
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&disc).unwrap()["issuer"], "https://acme.example");
+        let (_, _, doc) = raw(port, "GET", "acme.example", "/.well-known/zetlyn.json", None);
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&doc).unwrap()["world"], "https://acme.example");
+        // Under the machine's name, it sends everybody to its own.
+        let (status, head, _) = raw(port, "GET", &host, "/acme/t/x/?q=1", None);
+        assert_eq!(status, 301);
+        assert!(head.contains("Location: https://acme.example/t/x/?q=1"), "{head}");
+        // A name nobody here said is theirs is nothing, and no certificate is taken for it.
+        assert_eq!(raw(port, "GET", "elsewhere.example", "/", None).0, 421);
+        assert_eq!(raw(port, "GET", &host, "/app/domain-check?domain=acme.example", None).0, 200);
+        assert_eq!(raw(port, "GET", &host, "/app/domain-check?domain=elsewhere.example", None).0, 404);
+
+        // Its owner takes all of it away, and may not say it went somewhere that is no world.
+        let accounts = crate::account::Accounts::open(&dir).unwrap();
+        let ann = accounts.ensure("ann@example.org").unwrap();
+        let zs = format!("zs={}", accounts.new_session(ann.id).unwrap());
+        assert_ne!(raw(port, "GET", &host, "/plain/export.tar.gz", None).0, 200, "only its owner");
+        let (status, head, body) = raw(port, "GET", &host, "/plain/export.tar.gz", Some(&zs));
+        assert_eq!(status, 200, "{head}");
+        assert!(head.contains("attachment; filename=\"plain-"), "{head}");
+        let mut names = Vec::new();
+        for e in tar::Archive::new(flate2::read::GzDecoder::new(&body[..])).entries().unwrap() {
+            names.push(e.unwrap().path().unwrap().to_string_lossy().into_owned());
+        }
+        assert!(names.contains(&"world/workspace.yaml".to_string()) && names.contains(&"EXPORT.json".to_string()), "{names:?}");
+        let (status, head, _) = {
+            use std::io::{Read, Write};
+            let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            let body = "to=http%3A%2F%2F127.0.0.1%3A1";
+            write!(s, "POST /plain/settings/moved HTTP/1.1\r\nHost: {host}\r\nCookie: {zs}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            let mut all = String::new();
+            s.read_to_string(&mut all).unwrap();
+            (all.split_whitespace().nth(1).unwrap().parse::<u16>().unwrap(), all.clone(), ())
+        };
+        assert_eq!(status, 303);
+        assert!(crate::account::Site::load(&dir.join("orgs/plain")).moved_to.is_empty(), "{head}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

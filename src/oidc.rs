@@ -216,6 +216,19 @@ fn served(url: &str) -> Option<(Here, String)> {
 
 fn served_by(dir: &std::path::Path, url: &str) -> Option<(Here, String)> {
     let dir = dir.to_path_buf();
+    // An organisation on a domain of its own is this process too, at the root of that domain.
+    for org in std::fs::read_dir(dir.join("orgs")).into_iter().flatten().flatten() {
+        let root = org.path();
+        let domain = Site::load(&root).domain.trim().to_lowercase();
+        if domain.is_empty() {
+            continue;
+        }
+        if let Some(rest) = url.strip_prefix(&format!("https://{domain}")) {
+            if rest.is_empty() || rest.starts_with('/') || rest.starts_with('?') {
+                return Some((Here::world(&root, ""), rest.split('?').next().unwrap_or("").to_string()));
+            }
+        }
+    }
     let issuer = Site::load(&dir).url.trim_end_matches('/').to_string();
     if issuer.is_empty() {
         return None;

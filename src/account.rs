@@ -445,6 +445,10 @@ pub struct Site {
     /// it is "Sign in with zetlyn.com"; `identity: []` is nobody else.
     #[serde(default)]
     pub identity: Option<Vec<IdentityDecl>>,
+    /// A hosted world's own domain (M16): it is served at the root of it, its address is
+    /// `https://<domain>`, and the machine takes a certificate for it when it is first asked.
+    #[serde(default)]
+    pub domain: String,
     /// Whether this world keeps a directory of others, at `<url>/directory` (M15).
     #[serde(default)]
     pub directory: bool,
@@ -612,6 +616,10 @@ impl Site {
     /// from that goes wherever whoever asked for it says.
     pub fn for_workspace(root: &Path) -> Site {
         let mut site = Site::load(root);
+        // A world on a domain of its own is at that domain.
+        if site.url.is_empty() && !site.domain.trim().is_empty() {
+            site.url = format!("https://{}", site.domain.trim().trim_end_matches('/'));
+        }
         if site.url.is_empty() {
             let org = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             if let Some(hosting) = root.parent().filter(|p| p.file_name().is_some_and(|n| n == "orgs")).and_then(Path::parent) {

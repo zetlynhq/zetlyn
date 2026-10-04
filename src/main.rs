@@ -10,6 +10,7 @@ mod artifact;
 mod billing;
 mod build;
 mod console;
+mod directory;
 mod source;
 mod sql;
 mod web;

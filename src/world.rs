@@ -29,6 +29,7 @@ zetlyn world serve <workspace> [--addr 127.0.0.1:2500]
 zetlyn world export <workspace> --to <file.tar.gz>
 zetlyn world import <file.tar.gz> --to <dir> [--url <address>] [--owner <address>]
 zetlyn world move <workspace> --to <address> [--unchecked]
+zetlyn world register <workspace> [--at https://zetlyn.com/directory]
 zetlyn world backup <workspace> <dir> [--keep 14]
 zetlyn world upgrade [--check] [--restart]";
 
@@ -79,6 +80,13 @@ pub fn command(args: &[String]) -> Result<(), String> {
             let dir = PathBuf::from(crate::flag(args, "--to").ok_or("--to <dir>, an empty directory")?);
             let n = import(&file, &dir, crate::flag(args, "--url"), crate::flag(args, "--owner"))?;
             println!("{n} files in {}. Serve it there, then on the old machine: zetlyn world move <workspace> --to <its address>", dir.display());
+            Ok(())
+        }
+        Some("register") => {
+            let dir = PathBuf::from(crate::positional(args, 2).first().ok_or("which workspace?")?.as_str());
+            let at = crate::flag(args, "--at").unwrap_or("https://zetlyn.com/directory");
+            let world = crate::directory::ask_to_be_listed(&dir, at)?;
+            println!("{world} is listed at {at}");
             Ok(())
         }
         Some("move") => {
@@ -730,6 +738,7 @@ pub fn document(root: &Path) -> Result<serde_json::Value, String> {
         "hub": hub,
         "sources": sources,
         "trackers": trackers,
+        "directories": site.directories,
         "moved_to": Some(site.moved_to.trim().trim_end_matches('/').to_string()).filter(|m| !m.is_empty()),
     }))
 }
@@ -778,6 +787,10 @@ pub fn verify(doc: &serde_json::Value) -> Result<(), String> {
 /// The document of the world at `url`, verified. `None` where the address answers but is no world
 /// (a hub that is only storage, as zetlyn.com's is).
 pub fn fetch(url: &str) -> Result<Option<serde_json::Value>, String> {
+    // A world this very process serves is asked here, not over HTTP to itself.
+    if let Some(root) = crate::oidc::served_world(url.trim_end_matches('/')) {
+        return signed_document(&root).map(Some);
+    }
     let at = format!("{}/.well-known/zetlyn.json", url.trim_end_matches('/'));
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .user_agent(concat!("zetlyn/", env!("CARGO_PKG_VERSION")))

@@ -201,6 +201,13 @@ pub fn serving_machine(dir: &std::path::Path) {
     }
 }
 
+/// The workspace an address of this process is the root of, where it is one: a world's document
+/// asked for from the same process is made here, not fetched from itself.
+pub fn served_world(url: &str) -> Option<PathBuf> {
+    let (here, rest) = served(url)?;
+    (rest.is_empty() || rest == "/").then_some(here.root)
+}
+
 /// The place an address of this process is, and the rest of the address under its mount.
 fn served(url: &str) -> Option<(Here, String)> {
     let dirs = SERVED.lock().ok()?.clone();

@@ -445,6 +445,12 @@ pub struct Site {
     /// it is "Sign in with zetlyn.com"; `identity: []` is nobody else.
     #[serde(default)]
     pub identity: Option<Vec<IdentityDecl>>,
+    /// Whether this world keeps a directory of others, at `<url>/directory` (M15).
+    #[serde(default)]
+    pub directory: bool,
+    /// The directories it is listed in, as `zetlyn world register` left them.
+    #[serde(default)]
+    pub directories: Vec<String>,
     /// What a subscription costs. A workspace that names none charges nothing: every reader reads
     /// all of it, now, and nothing on its pages speaks of paying.
     #[serde(default)]

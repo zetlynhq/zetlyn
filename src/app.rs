@@ -503,6 +503,13 @@ impl App {
         // Signing in, with this world as the provider or as the relying party: to anybody.
         let here = crate::oidc::Here::world(&self.root, &self.base);
         let Some(request) = crate::oidc::answer(&here, request, &parts, &url) else { return };
+        // The directory of other worlds this one keeps, where it keeps one.
+        let request = if crate::account::Site::load(&self.root).directory {
+            let Some(request) = crate::directory::answer(&self.root, request, &parts, &url) else { return };
+            request
+        } else {
+            request
+        };
         // A world that has moved answers its document (above) and sends everything else to where
         // it is now, the same page there. What is sent to it is refused, and says where to send it.
         let moved = crate::account::Site::load(&self.root).moved_to.trim().trim_end_matches('/').to_string();
@@ -2637,6 +2644,9 @@ pub fn world_serve(args: &[String]) -> Result<(), String> {
             }) {
                 eprintln!("not published: {e}");
             }
+            if let Err(e) = crate::directory::refresh(&root) {
+                eprintln!("directory: {e}");
+            }
             let wait = soonest.map(|s| (s - crate::now()).clamp(60, 900)).unwrap_or(900);
             std::thread::sleep(std::time::Duration::from_secs(wait as u64));
         });
@@ -2899,6 +2909,10 @@ fn hosting_serve(args: &[String]) -> Result<(), String> {
                     eprintln!("{org}: not published: {e}");
                 }
             }
+            // The directory's worlds, read again where they are due.
+            if let Err(e) = crate::directory::refresh(&dir) {
+                eprintln!("directory: {e}");
+            }
             let wait = soonest.map(|s| (s - crate::now()).clamp(60, 900)).unwrap_or(900);
             std::thread::sleep(std::time::Duration::from_secs(wait as u64));
         });
@@ -2964,6 +2978,14 @@ fn hosting_serve(args: &[String]) -> Result<(), String> {
             serve::mount("");
             let here = crate::oidc::Here::machine(&dir);
             let _ = crate::oidc::answer(&here, request, &parts, &url);
+            continue;
+        }
+        // The machine's directory of worlds, zetlyn.com/directory.
+        if first == "directory" || first == "directory.json" {
+            serve::mount("");
+            if let Some(request) = crate::directory::answer(&dir, request, &parts, &url) {
+                respond(request, 404, "text/plain; charset=utf-8", "nothing at that address");
+            }
             continue;
         }
         if first == APP_PREFIX {

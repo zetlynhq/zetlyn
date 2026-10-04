@@ -377,7 +377,7 @@ pub fn publish(
         // what a source made today signs with.
         let signature = match crate::key::sign(&ds.dir, KEY_FILE, served.as_bytes())? {
             Some(s) => Some(s),
-            None => crate::identity::sign(served.as_bytes())?,
+            None => crate::identity::sign_at(&ds.dir, served.as_bytes())?,
         };
         if let Some(signature) = signature {
             place.put(
@@ -810,7 +810,7 @@ pub fn publish_scope(
     let manifest = json!({
         "spec_version": SPEC_VERSION,
         "built_by": concat!("zetlyn ", env!("CARGO_PKG_VERSION")),
-        "signed_by": crate::identity::key(),
+        "signed_by": crate::identity::key_at(dir),
         "tracker": decl.name,
         "version": version,
         "built_at": crate::now(),
@@ -837,7 +837,7 @@ pub fn publish_scope(
         // A tracker is signed for the same reason a source is, and rather more: the manifest
         // carries the composition whole, so whoever can change it can change which sources a
         // subscriber assembles and what their words are taken to mean.
-        if let Some(signature) = crate::identity::sign(served.as_bytes())? {
+        if let Some(signature) = crate::identity::sign_at(dir, served.as_bytes())? {
             place.put(
                 &reference.version_path("trackers", &version, "manifest.sig"),
                 signature.as_bytes(),

@@ -2952,6 +2952,13 @@ pub fn hosting(args: &[String]) -> Result<(), String> {
                 std::fs::write(&file, format!("title: {}\n", serde_json::to_string(&title).unwrap_or_default()))
                     .map_err(|e| format!("{}: {e}", file.display()))?;
             }
+            // Its own key to publish with, not the machine's: it is in its export, and what its
+            // subscribers pinned still holds where it goes.
+            let signs = root.join(".zetlyn");
+            if !signs.join(crate::identity::KEY_FILE).exists() {
+                let title = crate::account::Site::load(&root).title;
+                crate::identity::new_in(&signs, if title.is_empty() { &name } else { &title }, "")?;
+            }
             println!("{name} in {}", root.display());
             Ok(())
         }

@@ -64,7 +64,7 @@ pub struct Kept {
 /// Who proposes from the browser: a signed-in reader, or the owner at their own pages.
 #[derive(Debug, Clone)]
 pub struct Reader {
-    /// `reader:<12 hex>`: one account in one workspace is always the same one, and nothing about
+    /// `reader:<16 hex>`: one account in one workspace is always the same one, and nothing about
     /// it says who they are.
     pub id: String,
     pub name: String,
@@ -112,11 +112,13 @@ pub(crate) fn operator_key(root: &Path) -> Result<String, String> {
     }
 }
 
-/// A reader's pseudonym in this workspace. Derived from the workspace's key, so the same account
-/// in two workspaces is two strangers.
+/// A reader's pseudonym in this workspace. Keyed with the workspace's private key, so the same
+/// account in two workspaces is two strangers, and nobody without the key can tell which account
+/// (they are numbered) is behind one. A world that moves takes its key, and its readers keep theirs.
 pub fn pseudonym(root: &Path, account: i64) -> Result<String, String> {
-    let key = operator_key(root)?;
-    Ok(format!("reader:{}", &crate::place::sha256(format!("{key}\n{account}").as_bytes())[..12]))
+    operator_key(root)?;
+    let mac = crate::key::mac(root, crate::grant::OPERATOR_KEY, format!("pseudonym\n{account}").as_bytes()).ok_or("this workspace has no key to name its readers with")?;
+    Ok(format!("reader:{}", &mac[..16]))
 }
 
 /// Whether a kept proposal is signed as it says: by the proposer's key, or by the workspace's
@@ -743,7 +745,7 @@ mod tests {
         let kept: Kept = serde_json::from_str(&text).unwrap();
         assert_eq!(kept.via, "browser");
         assert_eq!(kept.name, "Ann");
-        assert!(kept.by.starts_with("reader:") && kept.by.len() == "reader:".len() + 12, "{}", kept.by);
+        assert!(kept.by.starts_with("reader:") && kept.by.len() == "reader:".len() + 16, "{}", kept.by);
         assert_eq!(kept.vouched_by, crate::key::public(&root, crate::grant::OPERATOR_KEY).unwrap());
         assert!(verify(&kept).is_ok());
         let queue = list(&dir);

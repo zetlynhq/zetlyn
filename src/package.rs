@@ -540,7 +540,7 @@ pub fn pack(dir: &Path, datasets: &Path, opts: &Options) -> Result<Packed, Strin
     let manifest = json!({
         "format": FORMAT,
         "built_by": concat!("zetlyn ", env!("CARGO_PKG_VERSION")),
-        "signed_by": crate::identity::key(),
+        "signed_by": crate::identity::key_at(dir),
         "tracker": decl.name,
         "title": decl.title,
         "about": decl.about,
@@ -552,7 +552,7 @@ pub fn pack(dir: &Path, datasets: &Path, opts: &Options) -> Result<Packed, Strin
         "files": listed,
     });
     let manifest = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
-    let signature = crate::identity::sign(manifest.as_bytes())?;
+    let signature = crate::identity::sign_at(dir, manifest.as_bytes())?;
 
     let out = scratch.0.join("package.zetlyn");
     let p = Connection::open(&out).map_err(sql)?;

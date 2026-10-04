@@ -53,10 +53,36 @@ pub fn key() -> Option<String> {
     crate::key::public(&home(), KEY_FILE)
 }
 
+/// Where a world keeps its own key: `.zetlyn` beside the workspace that `dir` is in, where there is
+/// a key there; whoever runs the program otherwise. On a machine of many worlds each signs as itself,
+/// and its key goes with it when it leaves, so what subscribers pinned still holds.
+pub fn home_of(dir: &std::path::Path) -> PathBuf {
+    dir.ancestors()
+        .find(|p| p.join(crate::account::WORKSPACE).exists())
+        .map(|w| w.join(".zetlyn"))
+        .filter(|z| z.join(KEY_FILE).exists())
+        .unwrap_or_else(home)
+}
+
+/// The key things in `dir` are published with.
+pub fn key_at(dir: &std::path::Path) -> Option<String> {
+    crate::key::public(&home_of(dir), KEY_FILE)
+}
+
+/// Signed with the key things in `dir` are published with.
+pub fn sign_at(dir: &std::path::Path, message: &[u8]) -> Result<Option<String>, String> {
+    crate::key::sign(&home_of(dir), KEY_FILE, message)
+}
+
 /// Make one. The name and the contact are what a hub operator reads when deciding whether the
 /// person asking for a namespace is somebody; neither is checked by anything.
 pub fn new(name: &str, contact: &str) -> Result<String, String> {
-    let dir = home();
+    new_in(&home(), name, contact)
+}
+
+/// The same, in a directory named rather than found: a world's own, made for it by `world up`.
+pub fn new_in(dir: &std::path::Path, name: &str, contact: &str) -> Result<String, String> {
+    let dir = dir.to_path_buf();
     let public = crate::key::new(&dir, KEY_FILE)?;
     let who = Who {
         name: name.to_string(),
@@ -77,5 +103,22 @@ pub fn sign(message: &[u8]) -> Result<Option<String>, String> {
 /// person. A source that carries its own `publishing.key` keeps signing with it: subscribers
 /// pinned that one, and a key that changes under them is a publisher they stop trusting.
 pub fn or_local(dir: &std::path::Path, file: &str) -> Option<String> {
-    crate::key::public(dir, file).or_else(key)
+    crate::key::public(dir, file).or_else(|| key_at(dir))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_world_with_a_key_of_its_own_publishes_with_it() {
+        let w = std::env::temp_dir().join(format!("zetlyn-world-key-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&w);
+        std::fs::create_dir_all(w.join("sources/prices")).unwrap();
+        std::fs::write(w.join(crate::account::WORKSPACE), "title: t\n").unwrap();
+        assert_eq!(super::home_of(&w.join("sources/prices")), super::home(), "none of its own: whoever runs it");
+        let mine = super::new_in(&w.join(".zetlyn"), "t", "").unwrap();
+        assert_eq!(super::key_at(&w.join("sources/prices")).as_deref(), Some(mine.as_str()));
+        let sig = super::sign_at(&w.join("sources/prices"), b"m").unwrap().unwrap();
+        assert!(crate::key::verify(&mine, b"m", &sig).is_ok());
+        let _ = std::fs::remove_dir_all(&w);
+    }
 }

@@ -433,6 +433,17 @@ pub fn up(w: &Wanted, plan: &Plan) -> Result<(), String> {
         }
         changed = true;
     }
+    // A key of its own to sign what it publishes, inside the world (its unit's ZETLYN_HOME), so it
+    // goes where the world goes and a subscriber's pin holds after a move. One brought along in an
+    // archive is kept: a second key is a publisher everybody who pinned the first stops trusting.
+    let signs = world.join(".zetlyn");
+    if !signs.join(crate::identity::KEY_FILE).exists() {
+        step(plan, &format!("give the world a key to sign what it publishes, in {}", signs.display()), || {
+            let title = crate::account::Site::load(&world).title;
+            crate::identity::new_in(&signs, if title.is_empty() { &w.domain } else { &title }, &w.owner).map(|_| ())
+        })?;
+        changed = true;
+    }
     if !paths.backups().is_dir() {
         step(plan, &format!("make {} for the daily copies", paths.backups().display()), || {
             std::fs::create_dir_all(paths.backups()).map_err(|e| e.to_string())
@@ -787,7 +798,7 @@ pub fn document(root: &Path) -> Result<serde_json::Value, String> {
         "world": url,
         "title": site.title,
         "key": key,
-        "publishes_with": crate::identity::key(),
+        "publishes_with": crate::identity::key_at(root),
         "hub": hub,
         "sources": sources,
         "trackers": trackers,
@@ -1174,6 +1185,7 @@ mod tests {
         let unit = std::fs::read_to_string(paths.unit("zetlyn-world.service")).unwrap();
         assert!(unit.contains("ExecStart=/usr/local/bin/zetlyn world serve /srv/zetlyn/world --addr 127.0.0.1:2500"), "{unit}");
         assert!(unit.contains("ZETLYN_HOME=/srv/zetlyn/world/.zetlyn"));
+        assert!(crate::key::public(&paths.world().join(".zetlyn"), crate::identity::KEY_FILE).is_some(), "a key of its own to publish with");
         // Changed by hand, the workspace stays as it is; the rest is put back.
         std::fs::write(paths.world().join("workspace.yaml"), "title: mine\nurl: https://prices.example\nowners: [ann@example.org]\n").unwrap();
         up(&w, &plan).unwrap();

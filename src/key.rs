@@ -78,6 +78,15 @@ pub fn sign(dir: &Path, file: &str, message: &[u8]) -> Result<Option<String>, St
     )))
 }
 
+/// A keyed digest of `message` under the private half: the same for the same key and message, and
+/// nothing anybody without the key can work out, or check. `None` where there is no key.
+pub fn mac(dir: &Path, file: &str, message: &[u8]) -> Option<String> {
+    let raw = std::fs::read_to_string(dir.join(file)).ok()?;
+    let seed = bytes(&raw).ok()?;
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &seed);
+    Some(hex(ring::hmac::sign(&key, message).as_ref()))
+}
+
 /// Held against the key the other side already knows, over the bytes as they were served.
 pub fn verify(pinned: &str, message: &[u8], signature: &str) -> Result<(), String> {
     use ed25519_dalek::Verifier;

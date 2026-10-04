@@ -912,7 +912,7 @@ impl App {
             (true, ["proposals", source, "readers"]) => {
                 let readers: Vec<String> = match form.get("readers").map(String::as_str).unwrap_or("") {
                     "signed-in" => vec![crate::propose::SIGNED_IN.to_string()],
-                    "listed" => form.get("addresses").map(String::as_str).unwrap_or("").split([',', '\n', ' ']).map(|a| a.trim().to_lowercase()).filter(|a| a.contains('@')).collect(),
+                    "listed" => form.get("addresses").map(String::as_str).unwrap_or("").split([',', '\n', ' ']).map(|a| a.trim().to_lowercase()).filter(|a| a.contains('@') || a.strip_prefix("domain:").is_some_and(|d| d.contains('.'))).collect(),
                     _ => Vec::new(),
                 };
                 let said = match crate::propose::set_readers(&self.sources().join(source), readers.clone()) {
@@ -1891,7 +1891,10 @@ impl App {
             return (404, json!({ "error": format!("{source}: no such source here") }).to_string());
         }
         match crate::propose::receive(&dir, body, key, signature) {
-            Ok(name) => (202, json!({ "kept": name, "waiting": "for the source's owner" }).to_string()),
+            Ok(name) => {
+                crate::propose::tell_owner(&self.root, &dir, &name);
+                (202, json!({ "kept": name, "waiting": "for the source's owner" }).to_string())
+            }
             Err(e) => {
                 let status = if e.contains("not invited") { 403 } else if e.contains("unsigned") || e.contains("signature") { 401 } else { 400 };
                 (status, json!({ "error": e }).to_string())
@@ -2078,8 +2081,8 @@ impl App {
                 form.settings method="post" action=(serve::at(&format!("/proposals/{source}/readers"))) {
                     p { label { input type="radio" name="readers" value="none" checked[readers.is_empty()]; " Nobody" } }
                     p { label { input type="radio" name="readers" value="signed-in" checked[everybody]; " Anybody signed in" } }
-                    p { label { input type="radio" name="readers" value="listed" checked[!everybody && !listed.is_empty()]; " Only these addresses" } br;
-                        input.wide type="text" name="addresses" placeholder="ann@example.org, ben@example.org" value=(listed.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")); }
+                    p { label { input type="radio" name="readers" value="listed" checked[!everybody && !listed.is_empty()]; " Only these: addresses, " code { "domain:example.org" } " for everybody whose verified address is there, " code { "@zetlyn.com" } " for everybody signed in through that world" } br;
+                        input.wide type="text" name="addresses" placeholder="ann@example.org, domain:example.org, @zetlyn.com" value=(listed.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")); }
                     p { button.primary type="submit" { "Save" } }
                 }
             }

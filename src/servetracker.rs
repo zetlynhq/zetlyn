@@ -2705,11 +2705,13 @@ fn proposable(scope: &Tracker, operator: bool) -> Vec<(String, std::path::PathBu
 /// Who is proposing, where anybody is: the person at the machine as the owner, a signed-in
 /// reader as their pseudonym.
 fn reader_of(scope: &Tracker, accounts: &Accounts, v: &Viewer, operator: bool) -> Option<crate::propose::Reader> {
+    // The owner proposes as the world, by its own key: not as whoever runs the program, which on a
+    // machine of many worlds is the machine.
     if operator {
-        let me = crate::identity::read();
+        let title = Site::load(&scope.root).title;
         return Some(crate::propose::Reader {
-            id: crate::identity::key().unwrap_or_else(|| "owner".into()),
-            name: if me.name.is_empty() { "the owner".into() } else { me.name },
+            id: crate::propose::operator_key(&scope.root).ok()?,
+            name: if title.is_empty() { "the owner".into() } else { format!("the owner of {title}") },
             email: String::new(),
             owner: true,
             issuers: Vec::new(),
@@ -2867,19 +2869,21 @@ fn take_from_form(scope: &Tracker, accounts: &Accounts, dir: &Path, reader: &mut
         "attest": form_field(form, "attest"),
         "note": form_field(form, "note").trim(),
     });
-    if let Some(id) = account {
-        let name = form_field(form, "name");
-        let name: String = name.trim().chars().filter(|c| !c.is_control()).take(80).collect();
-        if name != reader.name {
-            accounts.set_name(id, &name)?;
-            reader.name = name;
-        }
+    // The name it is shown as, where the form asked for one (the owner's has no such field, and an
+    // absent field is not an empty name). Kept only once the proposal is.
+    let named = account.filter(|_| !reader.owner && form.split('&').any(|p| p == "name" || p.starts_with("name=")));
+    let before = reader.name.clone();
+    if named.is_some() {
+        reader.name = crate::account::clean_name(&form_field(form, "name"));
     }
     let file = crate::propose::receive_from_reader(dir, &scope.root, body.to_string().as_bytes(), reader)?;
+    if let Some(id) = named.filter(|_| reader.name != before) {
+        accounts.set_name(id, &reader.name)?;
+    }
     if let Some(id) = account {
         accounts.record_proposal(id, &decl.name, &file)?;
     }
-    crate::propose::tell_owner(&scope.root, dir);
+    crate::propose::tell_owner(&scope.root, dir, &file);
     Ok(file)
 }
 

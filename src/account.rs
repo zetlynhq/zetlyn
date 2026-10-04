@@ -682,6 +682,12 @@ impl Site {
     }
 }
 
+/// A name as it is shown and signed: one line, no control characters, eighty at most. A line break
+/// in a name would read, in what the workspace signs for a proposal, as a line of its own.
+pub fn clean_name(name: &str) -> String {
+    name.trim().chars().filter(|c| !c.is_control()).take(80).collect::<String>().trim().to_string()
+}
+
 /// A reader's session on a tracker's pages. Not `zs`, which is a member's session in the app: the
 /// two are kept in different `accounts.db` files where a workspace is hosted, and one cookie under
 /// one name and path would sign a person out of the one by signing them in to the other.
@@ -799,7 +805,7 @@ impl Accounts {
 
     pub fn set_name(&self, account: i64, name: &str) -> Result<(), String> {
         self.db
-            .execute("update account set name = ?2 where id = ?1", rusqlite::params![account, name.trim()])
+            .execute("update account set name = ?2 where id = ?1", rusqlite::params![account, clean_name(name)])
             .map(|_| ())
             .map_err(|e| e.to_string())
     }

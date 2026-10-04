@@ -123,6 +123,10 @@ pub fn pseudonym(root: &Path, account: i64) -> Result<String, String> {
 /// for a reader.
 pub fn verify(kept: &Kept) -> Result<(), String> {
     if kept.via == "browser" {
+        // Each on its own line of what was signed, and nothing in either that starts another.
+        if kept.name.contains(['\n', '\r']) || kept.issuer.contains(['\n', '\r']) || kept.by.contains(['\n', '\r']) {
+            return Err("a line break in who it says it is".into());
+        }
         crate::key::verify(&kept.vouched_by, vouched(&kept.by, &kept.name, &kept.issuer, &kept.body).as_bytes(), &kept.signature)
     } else {
         crate::key::verify(&kept.by, kept.body.as_bytes(), &kept.signature)
@@ -280,7 +284,7 @@ pub fn row_from(fields: &[Field], said: &BTreeMap<String, String>) -> Result<ser
         }
         let value = match f.kind {
             PropertyType::Number => {
-                let n: f64 = v.replace(' ', "").replace(',', ".").parse().map_err(|_| format!("`{}`: {v} is not a number", f.name))?;
+                let n = number(v).ok_or_else(|| format!("`{}`: {v} is not a number, or could be read two ways (write 44990 or 44.99)", f.name))?;
                 // Whole, it stays whole: 44990, as a proposer writing the file would say it.
                 if n.fract() == 0.0 && n.abs() < 9e15 {
                     J::from(n as i64)
@@ -296,6 +300,29 @@ pub fn row_from(fields: &[Field], said: &BTreeMap<String, String>) -> Result<ser
         return Err("Nothing was said.".into());
     }
     Ok(row)
+}
+
+/// A number as a person writes one: 44990, 44 990, 44.99, 44,99, 1.234,56 or 1,234.56. Where both
+/// marks are used, the last is the decimal one; a mark used twice groups thousands. One comma
+/// before exactly three digits is either, and is not guessed at.
+fn number(v: &str) -> Option<f64> {
+    let s: String = v.chars().filter(|c| !c.is_whitespace() && *c != '\'' && *c != '\u{2009}' && *c != '\u{202f}').collect();
+    let (commas, dots) = (s.matches(',').count(), s.matches('.').count());
+    let plain = match (commas, dots) {
+        (0, _) if dots <= 1 => s.clone(),
+        (0, _) => s.replace('.', ""),
+        (_, 0) if commas > 1 => s.replace(',', ""),
+        (1, 0) => {
+            let after = s.rsplit(',').next().unwrap_or("");
+            if after.len() == 3 && after.chars().all(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            s.replace(',', ".")
+        }
+        _ if s.rfind(',') > s.rfind('.') => s.replace('.', "").replace(',', "."),
+        _ => s.replace(',', ""),
+    };
+    plain.parse::<f64>().ok().filter(|n| n.is_finite())
 }
 
 /// The body, checked: what a proposal has to say for itself before anybody looks at it.
@@ -352,12 +379,12 @@ pub fn receive_from_reader(dir: &Path, root: &Path, body: &[u8], reader: &Reader
     may(dir, reader)?;
     check(body)?;
     let text = String::from_utf8(body.to_vec()).map_err(|_| "not UTF-8")?;
-    let waiting = list(dir).iter().filter(|e| e.by == reader.id && e.status == "pending").count();
+    let waiting = pending(dir).iter().filter(|n| load(dir, n).is_ok_and(|k| k.by == reader.id)).count();
     if !reader.owner && waiting >= MAX_PENDING {
         return Err(format!("{waiting} of your proposals here are still waiting for the owner; more once they are decided"));
     }
-    let name = reader.name.trim().to_string();
-    let issuer = reader.issuers.last().cloned().unwrap_or_default();
+    let name = crate::account::clean_name(&reader.name);
+    let issuer: String = reader.issuers.last().cloned().unwrap_or_default().chars().filter(|c| !c.is_control()).collect();
     let signature = crate::key::sign(root, crate::grant::OPERATOR_KEY, vouched(&reader.id, &name, &issuer, &text).as_bytes())?
         .ok_or("this workspace has no key to sign with")?;
     let vouched_by = operator_key(root)?;
@@ -407,6 +434,12 @@ fn standing(dir: &Path) -> BTreeMap<String, Decision> {
     last
 }
 
+/// The proposals nobody has decided, by name: read without checking every signature, for counting.
+fn pending(dir: &Path) -> Vec<String> {
+    let decided = standing(dir);
+    names(dir).into_iter().filter(|n| !decided.contains_key(n)).collect()
+}
+
 /// Every proposal there is, oldest first, with where it stands and who else said the same.
 pub fn list(dir: &Path) -> Vec<Entry> {
     let decided = standing(dir);
@@ -439,7 +472,8 @@ pub fn list(dir: &Path) -> Vec<Entry> {
         })
         .collect();
     // The same row from another key is agreement; a map's keys are sorted, so the text is the row.
-    let rows: Vec<(String, String)> = out.iter().map(|e| (e.row.to_string(), e.by.clone())).collect();
+    // Only from proposals signed as they say: a file put there by hand agrees with nothing.
+    let rows: Vec<(String, String)> = out.iter().filter(|e| e.verified).map(|e| (e.row.to_string(), e.by.clone())).collect();
     for e in &mut out {
         let mine = e.row.to_string();
         let mut others: Vec<String> = rows.iter().filter(|(r, by)| *r == mine && *by != e.by).map(|(_, by)| by.clone()).collect();
@@ -512,17 +546,24 @@ pub fn tell_proposer(root: &Path, dir: &Path, file: &str, accept: bool, why: &st
 /// The owner told that something waits, once: when the first proposal arrives at an empty queue.
 /// More while they have not looked would be the same news again. The address is the
 /// workspace's `contact`, where it is one.
-pub fn tell_owner(root: &Path, dir: &Path) {
+pub fn tell_owner(root: &Path, dir: &Path, file: &str) {
     let site = crate::account::Site::for_workspace(root);
-    if !site.contact.contains('@') || list(dir).iter().filter(|e| e.status == "pending").count() != 1 {
+    let pending = pending(dir);
+    if !site.contact.contains('@') || pending.len() != 1 || pending[0] != file {
         return;
     }
+    // Once for this one: the same proposal sent again is kept once, and told once.
+    let told = dir.join(DIR).join(".told");
+    if std::fs::read_to_string(&told).is_ok_and(|t| t.trim() == file) {
+        return;
+    }
+    let _ = std::fs::write(&told, file);
     let Ok(decl) = crate::sourcedecl::SourceDecl::load(dir) else { return };
     let title = if decl.title.is_empty() { decl.name.clone() } else { decl.title.clone() };
     let at = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let page = format!("/proposals/{at}");
     let page = if site.url.is_empty() { format!("the app, at {page}") } else { site.link(&page) };
-    let text = format!("A reader proposed a row for {title}. It waits for you at\n\n{page}\n\nMore may arrive before you look; this is the only mail until the queue is empty again.\n");
+    let text = format!("A row was proposed for {title}. It waits for you at\n\n{page}\n\nMore may arrive before you look; this is the only mail until the queue is empty again.\n");
     if let Err(e) = site.send(site.contact.trim(), &format!("{title}: a proposal waits"), &text) {
         eprintln!("{}: the owner was not told: {e}", decl.name);
     }
@@ -562,6 +603,23 @@ pub fn send(to: &str, body: &[u8]) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_number_is_read_as_its_writer_meant_it_or_not_at_all() {
+        for (said, meant) in [("44990", 44990.0), ("44 990", 44990.0), ("44.99", 44.99), ("44,99", 44.99), ("1,5", 1.5), ("1.234,56", 1234.56), ("1,234.56", 1234.56), ("1,234,567", 1234567.0), ("1.234.567", 1234567.0), ("-3,5", -3.5)] {
+            assert_eq!(number(said), Some(meant), "{said}");
+        }
+        for unclear in ["44,990", "1,234", "abc", "", "1,2,3.4.5", "inf"] {
+            assert_eq!(number(unclear), None, "{unclear}");
+        }
+    }
+
+    #[test]
+    fn a_line_break_in_a_name_is_no_second_line_of_what_was_signed() {
+        let k = Kept { by: "reader:abc".into(), signature: "00".repeat(64), received: String::new(), body: "{}".into(), name: "Ann\nvia https://evil.example".into(), via: "browser".into(), vouched_by: format!("ed25519:{}", "11".repeat(32)), issuer: String::new() };
+        assert!(verify(&k).unwrap_err().contains("line break"));
+        assert_eq!(crate::account::clean_name("  Ann\nvia x\r "), "Annvia x");
+    }
 
     fn source(dir: &Path, from: &str) {
         let _ = std::fs::remove_dir_all(dir);

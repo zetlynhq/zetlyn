@@ -463,7 +463,11 @@ impl App {
         }
         // Another site's page cannot act here: a browser says where a form came from, and a POST
         // from anywhere but this app's own pages is refused. Programs (a webhook) say nothing.
-        if request.method() == &tiny_http::Method::Post {
+        // Except where another site's form is how it works: Apple answers a sign-in with a POST from
+        // its own page, and a token is asked for by a server. Both are held by what they carry, a
+        // state that was handed out here and a code with its verifier.
+        let signing_in = matches!(parts.iter().map(String::as_str).collect::<Vec<_>>().as_slice(), ["oauth", "callback"] | ["oauth", "token"]);
+        if request.method() == &tiny_http::Method::Post && !signing_in {
             let header = |name: &'static str| request.headers().iter().find(|h| h.field.equiv(name)).map(|h| h.value.as_str().to_string());
             let host = header("Host").unwrap_or_default();
             let cross = header("Sec-Fetch-Site").is_some_and(|s| s == "cross-site")
@@ -496,6 +500,9 @@ impl App {
                 _ => {}
             }
         }
+        // Signing in, with this world as the provider or as the relying party: to anybody.
+        let here = crate::oidc::Here::world(&self.root, &self.base);
+        let Some(request) = crate::oidc::answer(&here, request, &parts, &url) else { return };
         // A world that has moved answers its document (above) and sends everything else to where
         // it is now, the same page there. What is sent to it is refused, and says where to send it.
         let moved = crate::account::Site::load(&self.root).moved_to.trim().trim_end_matches('/').to_string();
@@ -2949,8 +2956,18 @@ fn hosting_serve(args: &[String]) -> Result<(), String> {
         }
         // The machine's own pages are under `/app/`: the site, the hub and every organisation share
         // one name, and the site has `/` and `/style.css`.
+        // The machine as a provider, "Sign in with zetlyn.com": its issuer is its address, so its
+        // discovery is at the root; everything else of it is under /app/oauth/.
+        if first == ".well-known" && parts.get(1).map(String::as_str) == Some("openid-configuration") {
+            serve::mount("");
+            let here = crate::oidc::Here::machine(&dir);
+            let _ = crate::oidc::answer(&here, request, &parts, &url);
+            continue;
+        }
         if first == APP_PREFIX {
             serve::mount(&format!("/{APP_PREFIX}"));
+            let here = crate::oidc::Here::machine(&dir);
+            let Some(request) = crate::oidc::answer(&here, request, &parts[1..], &url) else { continue };
             hosting_root(request, &dir, &accounts, &parts[1..]);
             continue;
         }

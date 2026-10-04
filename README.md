@@ -208,6 +208,33 @@ keys. `move` checks that the new address answers as the same world, signed with 
 after it, the old address says where it went and redirects every page there, and a subscription
 taken from it follows on its next pull.
 
+## Signing in with one world at another
+
+Every world is an OpenID Connect provider for its own people and a relying party for everybody
+else's. Somebody who is a reader of one world signs in to another as that, without an account
+there: the second world never registered anywhere, because between two zetlyn worlds the client is
+the address of a document it serves about itself (`/oauth/client.json`). They are told who they
+are by a name the first world gives them, the name they chose, and their address only if they say
+so. Discovery is at `<world>/.well-known/openid-configuration`, the flow is the authorization code
+with PKCE and nothing else, and ID tokens are signed EdDSA with the world's `oidc.key`.
+
+Who a world takes identities from is `identity:` in its workspace.yaml. Not said, it is "Sign in
+with zetlyn.com", which itself takes GitHub, Google and Apple, so a world gets all three without
+registering with any:
+
+```yaml
+identity:
+  - zetlyn: https://zetlyn.com   # the default
+  - zetlyn: any                  # whichever world the person names
+  - github: { client: ${GITHUB_CLIENT_ID}, secret: ${GITHUB_CLIENT_SECRET} }
+  - google: { client: ${GOOGLE_CLIENT_ID}, secret: ${GOOGLE_CLIENT_SECRET}, domain: example.com }
+  - apple:  { client: com.example.signin, team: ${APPLE_TEAM_ID}, key_id: ${APPLE_KEY_ID}, key: ${APPLE_PRIVATE_KEY} }
+```
+
+A source's `readers` may then name a world or a domain as well as `signed-in` and addresses:
+`["@zetlyn.com", "domain:example.com"]`. A proposal made that way says, signed, which world vouched
+for whoever made it.
+
 ## Letting somebody else run it
 
 A workspace can answer for itself, so that whoever keeps it current does not have to be at its

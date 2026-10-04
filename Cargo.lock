@@ -2501,8 +2501,9 @@ dependencies = [
 
 [[package]]
 name = "zetlyn"
-version = "0.3.23"
+version = "0.3.24"
 dependencies = [
+ "base64 0.22.1",
  "calamine",
  "csv",
  "ed25519-dalek",
@@ -2512,6 +2513,7 @@ dependencies = [
  "postgres",
  "quick-xml",
  "regex",
+ "ring",
  "rusqlite",
  "rustls",
  "scraper",

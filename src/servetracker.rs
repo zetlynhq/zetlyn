@@ -733,6 +733,11 @@ fn signin_page_to(site: &Site, message: Option<&str>, next: Option<&str>) -> Str
             @if let Some(n) = next { input type="hidden" name="next" value=(n); }
             button type="submit" { "Send the link" }
         }
+        // Or as somebody another world, or GitHub, Google or Apple, already knows.
+        @let ways = crate::oidc::options(site);
+        @if !ways.is_empty() {
+            p { @for (id, label) in &ways { a.chip href=(signin_elsewhere(id, next)) { (label) } " " } }
+        }
         @if !site.contact.is_empty() { p.dim { "Trouble: " (site.contact) } }
     };
     shell("Sign in", body)
@@ -2707,6 +2712,7 @@ fn reader_of(scope: &Tracker, accounts: &Accounts, v: &Viewer, operator: bool) -
             name: if me.name.is_empty() { "the owner".into() } else { me.name },
             email: String::new(),
             owner: true,
+            issuers: Vec::new(),
         });
     }
     let a = v.account.as_ref().filter(|_| !v.by_key)?;
@@ -2715,6 +2721,7 @@ fn reader_of(scope: &Tracker, accounts: &Accounts, v: &Viewer, operator: bool) -
         name: accounts.name_of(a.id),
         email: a.email.clone(),
         owner: false,
+        issuers: accounts.issuers_of(a.id),
     })
 }
 
@@ -2739,6 +2746,13 @@ fn reader_cookie(site: &Site, session: &str, max_age: u32) -> String {
         workspace_path(),
         if site.url.starts_with("https://") { "; Secure" } else { "" }
     )
+}
+
+/// Signing in through `id`, at the workspace's own `/oauth/login`, and back to where the reader was.
+fn signin_elsewhere(id: &str, next: Option<&str>) -> String {
+    let wp = workspace_path();
+    let prefix = if wp == "/" { "" } else { wp.as_str() };
+    format!("{prefix}/oauth/login?with={}&next={}", urlencode(id), urlencode(&at(next.unwrap_or("/"))))
 }
 
 /// Where a signed-in reader comes back to: a path on this site, never another site.

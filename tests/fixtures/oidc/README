@@ -1,0 +1,7 @@
+Keys for tests only, made once with openssl and used by nothing outside the test suite:
+
+  rsa-test.der   RSA 2048, PKCS#1 DER: what a fake Google and a fake Apple sign their ID tokens with
+  ec-test.p8     P-256, PKCS#8 PEM: an Apple-style .p8, for the client secret a world signs ES256
+
+They are public on purpose. A token signed with either proves nothing anywhere but here.
+  rsa-test.jwk.json  the public half of rsa-test.der as a JWK, what the fake providers publish

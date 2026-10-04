@@ -47,6 +47,44 @@ create table if not exists apikey(
   created   text not null,
   last_used text);
 
+-- Who an account is elsewhere: signed in through another world, GitHub, Google or Apple, as
+-- that issuer's subject. The address is the one the issuer said it had verified, where it said one.
+create table if not exists identity(
+  issuer  text not null,
+  subject text not null,
+  account integer not null,
+  email   text,
+  created text not null,
+  primary key(issuer, subject));
+
+-- This world as a provider: a code handed to a relying party once, for a minute, and the token it
+-- is exchanged for. Both kept as their hashes.
+create table if not exists oauth_code(
+  hash      text primary key,
+  account   integer not null,
+  client    text not null,
+  redirect  text not null,
+  nonce     text not null,
+  challenge text not null,
+  scope     text not null,
+  expires   text not null);
+create table if not exists oauth_token(
+  hash    text primary key,
+  account integer not null,
+  client  text not null,
+  scope   text not null,
+  expires text not null);
+
+-- This world as a relying party: a sign-in sent elsewhere and not back yet, by its state.
+create table if not exists oauth_pending(
+  state    text primary key,
+  provider text not null,
+  verifier text not null,
+  nonce    text not null,
+  next     text not null,
+  purpose  text not null,
+  expires  text not null);
+
 -- Which reader made which proposal from the browser. The proposal names a pseudonym; this is
 -- the only place it meets an address, so the reader can be told what became of it.
 create table if not exists proposal(
@@ -403,6 +441,10 @@ pub struct Site {
     /// signed with the same key, and every page redirects there.
     #[serde(default)]
     pub moved_to: String,
+    /// Who it takes identities from, besides a link to an address (FEDERATION.md, M14). Not said,
+    /// it is "Sign in with zetlyn.com"; `identity: []` is nobody else.
+    #[serde(default)]
+    pub identity: Option<Vec<IdentityDecl>>,
     /// What a subscription costs. A workspace that names none charges nothing: every reader reads
     /// all of it, now, and nothing on its pages speaks of paying.
     #[serde(default)]
@@ -419,6 +461,64 @@ pub struct Site {
     /// written again: `publish: { to: s3://bucket/prefix, app: https://zetlyn.com }`.
     #[serde(default)]
     pub publish: Option<Publish>,
+}
+
+/// Where a world is signed in from when nobody said: zetlyn.com, as it is the hub when nobody said.
+pub const DEFAULT_IDENTITY: &str = "https://zetlyn.com";
+
+/// One provider a world takes identities from.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IdentityDecl {
+    /// Another zetlyn world, by its address, or `any`: whichever world the person names.
+    Zetlyn(String),
+    Github(GithubDecl),
+    Google(GoogleDecl),
+    Apple(AppleDecl),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GithubDecl {
+    pub client: String,
+    pub secret: String,
+    /// Where GitHub is, for a GitHub Enterprise or a test: `https://github.com` and its API.
+    #[serde(default)]
+    pub web: String,
+    #[serde(default)]
+    pub api: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoogleDecl {
+    pub client: String,
+    pub secret: String,
+    /// Only people of this Google Workspace domain (`hd`).
+    #[serde(default)]
+    pub domain: String,
+    #[serde(default)]
+    pub issuer: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppleDecl {
+    /// The Services ID.
+    pub client: String,
+    pub team: String,
+    pub key_id: String,
+    /// The `.p8` it signs its own client secret with, PEM, usually `${APPLE_PRIVATE_KEY}`.
+    pub key: String,
+    #[serde(default)]
+    pub issuer: String,
+}
+
+impl Site {
+    /// Who this world takes identities from.
+    pub fn identities(&self) -> Vec<IdentityDecl> {
+        self.identity.clone().unwrap_or_else(|| vec![IdentityDecl::Zetlyn(DEFAULT_IDENTITY.into())])
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -695,6 +795,155 @@ impl Accounts {
             .query_row("select account from proposal where source = ?1 and file = ?2", rusqlite::params![source, file], |r| r.get(0))
             .ok()?;
         self.read("select id, email, state, paid_until, scopes, curator from account where id = ?1", &id.to_string())
+    }
+}
+
+/// A code this world handed a relying party, as it is taken back.
+#[derive(Debug, Clone)]
+pub struct Code {
+    pub account: i64,
+    pub client: String,
+    pub redirect: String,
+    pub nonce: String,
+    pub challenge: String,
+    pub scope: String,
+}
+
+/// A sign-in sent to another provider, as it comes back.
+#[derive(Debug, Clone)]
+pub struct Pending {
+    pub provider: String,
+    pub verifier: String,
+    pub nonce: String,
+    pub next: String,
+    pub purpose: String,
+}
+
+impl Accounts {
+    /// A session for an account, without a link: what signing in elsewhere ends in.
+    pub fn new_session(&self, account: i64) -> Result<String, String> {
+        let session = token();
+        self.db
+            .execute(
+                "insert into session(hash, account, created, expires) values(?1,?2,?3,?4)",
+                rusqlite::params![digest(&session), account, crate::iso_stamp(crate::now()), crate::iso_stamp(crate::now() + 60 * 60 * 24 * 30)],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(session)
+    }
+
+    pub fn by_id(&self, account: i64) -> Option<Account> {
+        self.read("select id, email, state, paid_until, scopes, curator from account where id = ?1", &account.to_string())
+    }
+
+    /// The account an issuer's subject is, where it is one here.
+    pub fn by_identity(&self, issuer: &str, subject: &str) -> Option<Account> {
+        let id: i64 = self
+            .db
+            .query_row("select account from identity where issuer = ?1 and subject = ?2", rusqlite::params![issuer, subject], |r| r.get(0))
+            .ok()?;
+        self.by_id(id)
+    }
+
+    /// Every issuer an account has signed in through.
+    pub fn issuers_of(&self, account: i64) -> Vec<String> {
+        let Ok(mut stmt) = self.db.prepare("select issuer from identity where account = ?1 order by created") else { return Vec::new() };
+        stmt.query_map(rusqlite::params![account], |r| r.get::<_, String>(0)).map(|rows| rows.flatten().collect()).unwrap_or_default()
+    }
+
+    /// The account somebody signed in elsewhere is here: the one already linked to that issuer's
+    /// subject; else the one with the address the issuer verified; else a new one. A new one with
+    /// no verified address gets one that is not an address (`….invalid`) and is never written to.
+    pub fn for_identity(&self, issuer: &str, subject: &str, verified_email: Option<&str>) -> Result<Account, String> {
+        if let Some(a) = self.by_identity(issuer, subject) {
+            return Ok(a);
+        }
+        let account = match verified_email.map(|e| e.trim().to_lowercase()).filter(|e| e.contains('@')) {
+            Some(email) => self.ensure(&email)?,
+            None => {
+                let host = issuer.split("://").nth(1).unwrap_or(issuer).split('/').next().unwrap_or("issuer");
+                self.ensure(&format!("{}@{host}.invalid", &digest(&format!("{issuer}\n{subject}"))[..16]))?
+            }
+        };
+        self.db
+            .execute(
+                "insert or ignore into identity(issuer, subject, account, email, created) values(?1,?2,?3,?4,?5)",
+                rusqlite::params![issuer, subject, account.id, verified_email, crate::iso_stamp(crate::now())],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(account)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_code(&self, raw: &str, account: i64, client: &str, redirect: &str, nonce: &str, challenge: &str, scope: &str) -> Result<(), String> {
+        self.db
+            .execute(
+                "insert into oauth_code(hash, account, client, redirect, nonce, challenge, scope, expires) values(?1,?2,?3,?4,?5,?6,?7,?8)",
+                rusqlite::params![digest(raw), account, client, redirect, nonce, challenge, scope, crate::iso_stamp(crate::now() + 60)],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    /// A code taken back, once: it is gone whether or not it is still good.
+    pub fn take_code(&self, raw: &str) -> Option<Code> {
+        let hash = digest(raw);
+        let row = self
+            .db
+            .query_row(
+                "select account, client, redirect, nonce, challenge, scope, expires from oauth_code where hash = ?1",
+                rusqlite::params![hash],
+                |r| Ok((Code { account: r.get(0)?, client: r.get(1)?, redirect: r.get(2)?, nonce: r.get(3)?, challenge: r.get(4)?, scope: r.get(5)? }, r.get::<_, String>(6)?)),
+            )
+            .ok();
+        let _ = self.db.execute("delete from oauth_code where hash = ?1", rusqlite::params![hash]);
+        let (code, expires) = row?;
+        (expires.as_str() >= crate::iso_stamp(crate::now()).as_str()).then_some(code)
+    }
+
+    pub fn put_token(&self, raw: &str, account: i64, client: &str, scope: &str) -> Result<(), String> {
+        self.db
+            .execute(
+                "insert into oauth_token(hash, account, client, scope, expires) values(?1,?2,?3,?4,?5)",
+                rusqlite::params![digest(raw), account, client, scope, crate::iso_stamp(crate::now() + 600)],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    /// The account and scope a token was given for, while it is good.
+    pub fn by_token(&self, raw: &str) -> Option<(i64, String)> {
+        let (account, scope, expires): (i64, String, String) = self
+            .db
+            .query_row("select account, scope, expires from oauth_token where hash = ?1", rusqlite::params![digest(raw)], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .ok()?;
+        (expires.as_str() >= crate::iso_stamp(crate::now()).as_str()).then_some((account, scope))
+    }
+
+    pub fn put_pending(&self, state: &str, p: &Pending) -> Result<(), String> {
+        self.db
+            .execute(
+                "insert into oauth_pending(state, provider, verifier, nonce, next, purpose, expires) values(?1,?2,?3,?4,?5,?6,?7)",
+                rusqlite::params![digest(state), p.provider, p.verifier, p.nonce, p.next, p.purpose, crate::iso_stamp(crate::now() + 900)],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    /// A sign-in that went elsewhere, taken back once by its state.
+    pub fn take_pending(&self, state: &str) -> Option<Pending> {
+        let hash = digest(state);
+        let row = self
+            .db
+            .query_row(
+                "select provider, verifier, nonce, next, purpose, expires from oauth_pending where state = ?1",
+                rusqlite::params![hash],
+                |r| Ok((Pending { provider: r.get(0)?, verifier: r.get(1)?, nonce: r.get(2)?, next: r.get(3)?, purpose: r.get(4)? }, r.get::<_, String>(5)?)),
+            )
+            .ok();
+        let _ = self.db.execute("delete from oauth_pending where state = ?1", rusqlite::params![hash]);
+        let (p, expires) = row?;
+        (expires.as_str() >= crate::iso_stamp(crate::now()).as_str()).then_some(p)
     }
 }
 

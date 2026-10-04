@@ -55,6 +55,10 @@ pub struct Kept {
     pub via: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub vouched_by: String,
+    /// The world or provider the reader signed in here through, where it was not a link to their
+    /// address: who vouched for them before this workspace did.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub issuer: String,
 }
 
 /// Who proposes from the browser: a signed-in reader, or the owner at their own pages.
@@ -68,11 +72,36 @@ pub struct Reader {
     pub email: String,
     /// The owner needs no invitation to their own source.
     pub owner: bool,
+    /// The worlds and providers they signed in here through, oldest first: what `@world` in
+    /// `readers` is held against, and the last of them is who vouched for them.
+    pub issuers: Vec<String>,
+}
+
+/// Whether `readers` lets this reader in: anybody signed in, their address, the world or provider
+/// they signed in through (`@zetlyn.com`, `@https://prices.example`), or their verified address's
+/// domain (`domain:example.com`).
+pub(crate) fn admits(readers: &[String], reader: &Reader) -> bool {
+    let host = |u: &str| u.split("://").nth(1).unwrap_or(u).trim_end_matches('/').to_string();
+    readers.iter().any(|r| {
+        let r = r.trim();
+        r == SIGNED_IN
+            || (!reader.email.is_empty() && r.eq_ignore_ascii_case(reader.email.trim()))
+            || r.strip_prefix('@').is_some_and(|world| {
+                let world = world.trim_end_matches('/');
+                reader.issuers.iter().any(|i| i.trim_end_matches('/') == world || host(i) == world)
+            })
+            || r.strip_prefix("domain:").is_some_and(|d| {
+                let d = d.trim().to_lowercase();
+                !d.is_empty() && !reader.email.ends_with(".invalid") && reader.email.to_lowercase().ends_with(&format!("@{d}"))
+            })
+    })
 }
 
 /// What the workspace signs for a reader: the proposal, and whose it is.
-pub fn vouched(by: &str, name: &str, body: &str) -> String {
-    format!("zetlyn proposal\nby {by}\nname {name}\n{body}")
+pub fn vouched(by: &str, name: &str, issuer: &str, body: &str) -> String {
+    // An issuer is said only where there is one, so what was signed before there were is still it.
+    let via = if issuer.is_empty() { String::new() } else { format!("via {issuer}\n") };
+    format!("zetlyn proposal\nby {by}\nname {name}\n{via}{body}")
 }
 
 /// The workspace's operator key, made the first time something needs signing.
@@ -94,7 +123,7 @@ pub fn pseudonym(root: &Path, account: i64) -> Result<String, String> {
 /// for a reader.
 pub fn verify(kept: &Kept) -> Result<(), String> {
     if kept.via == "browser" {
-        crate::key::verify(&kept.vouched_by, vouched(&kept.by, &kept.name, &kept.body).as_bytes(), &kept.signature)
+        crate::key::verify(&kept.vouched_by, vouched(&kept.by, &kept.name, &kept.issuer, &kept.body).as_bytes(), &kept.signature)
     } else {
         crate::key::verify(&kept.by, kept.body.as_bytes(), &kept.signature)
     }
@@ -170,7 +199,7 @@ pub fn may(dir: &Path, reader: &Reader) -> Result<(), String> {
     if reader.owner {
         return Ok(());
     }
-    if readers.iter().any(|r| r == SIGNED_IN || (!reader.email.is_empty() && r.eq_ignore_ascii_case(reader.email.trim()))) {
+    if admits(&readers, reader) {
         return Ok(());
     }
     Err("this source takes no proposals from readers".into())
@@ -308,7 +337,7 @@ pub fn receive(dir: &Path, body: &[u8], key: Option<&str>, signature: Option<&st
     crate::key::verify(key, body, signature).map_err(|e| format!("the signature does not verify: {e}"))?;
     check(body)?;
     let text = String::from_utf8(body.to_vec()).map_err(|_| "not UTF-8")?;
-    keep(dir, Kept { by: key.to_string(), signature: signature.to_string(), received: String::new(), body: text, name: String::new(), via: String::new(), vouched_by: String::new() })
+    keep(dir, Kept { by: key.to_string(), signature: signature.to_string(), received: String::new(), body: text, name: String::new(), via: String::new(), vouched_by: String::new(), issuer: String::new() })
 }
 
 /// A reader's proposal from the browser, signed by the workspace at `root` for them, and kept.
@@ -322,10 +351,11 @@ pub fn receive_from_reader(dir: &Path, root: &Path, body: &[u8], reader: &Reader
         return Err(format!("{waiting} of your proposals here are still waiting for the owner; more once they are decided"));
     }
     let name = reader.name.trim().to_string();
-    let signature = crate::key::sign(root, crate::grant::OPERATOR_KEY, vouched(&reader.id, &name, &text).as_bytes())?
+    let issuer = reader.issuers.last().cloned().unwrap_or_default();
+    let signature = crate::key::sign(root, crate::grant::OPERATOR_KEY, vouched(&reader.id, &name, &issuer, &text).as_bytes())?
         .ok_or("this workspace has no key to sign with")?;
     let vouched_by = operator_key(root)?;
-    keep(dir, Kept { by: reader.id.clone(), signature, received: String::new(), body: text, name, via: "browser".into(), vouched_by })
+    keep(dir, Kept { by: reader.id.clone(), signature, received: String::new(), body: text, name, via: "browser".into(), vouched_by, issuer })
 }
 
 /// Kept under when it came and what it is, from whom.
@@ -428,7 +458,8 @@ pub fn decide(dir: &Path, name: &str, accept: bool, by: &str, why: &str) -> Resu
     if accept {
         let j = check(kept.body.as_bytes())?;
         let mut row = j["row"].as_object().cloned().unwrap_or_default();
-        row.insert("proposed_by".into(), json!(if kept.name.is_empty() { kept.by.clone() } else { format!("{} ({})", kept.name, kept.by) }));
+        let via = if kept.issuer.is_empty() { String::new() } else { format!(", via {}", kept.issuer.split("://").nth(1).unwrap_or(&kept.issuer).trim_end_matches('/')) };
+        row.insert("proposed_by".into(), json!(if kept.name.is_empty() { format!("{}{via}", kept.by) } else { format!("{} ({}{via})", kept.name, kept.by) }));
         row.insert("read_at".into(), j["read_at"].clone());
         row.insert("read_from".into(), j["read_from"].clone());
         row.insert("attest".into(), j["attest"].clone());
@@ -619,7 +650,7 @@ mod tests {
     }
 
     fn reader(root: &Path, account: i64, email: &str, name: &str) -> Reader {
-        Reader { id: pseudonym(root, account).unwrap(), name: name.into(), email: email.into(), owner: false }
+        Reader { id: pseudonym(root, account).unwrap(), name: name.into(), email: email.into(), owner: false, issuers: Vec::new() }
     }
 
     #[test]
@@ -661,7 +692,7 @@ mod tests {
 
         // The owner needs no invitation to their own source.
         set_readers(&dir, Vec::new()).unwrap();
-        let owner = Reader { id: "owner".into(), name: "the owner".into(), email: String::new(), owner: true };
+        let owner = Reader { id: "owner".into(), name: "the owner".into(), email: String::new(), owner: true, issuers: Vec::new() };
         assert!(receive_from_reader(&dir, &root, br#"{"row": {"country": "AUT", "week": "2026-W40", "price": 1}, "read_at": "2026-10-02", "read_from": "x", "attest": "read"}"#, &owner).is_ok());
         let _ = std::fs::remove_dir_all(&root);
     }

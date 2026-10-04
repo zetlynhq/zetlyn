@@ -1198,7 +1198,7 @@ mod tests {
         .unwrap();
         // A source that says nothing about being shown is in no document.
         std::fs::write(a.join("sources/private/source.yaml"), std::fs::read_to_string(dir.join("source.yaml")).unwrap().replace("t/prices", "t/private").replace("licence:\n  republish: yes\n", "")).unwrap();
-        let ann = crate::propose::Reader { id: crate::propose::pseudonym(&a, 1).unwrap(), name: "Ann".into(), email: "ann@example.org".into(), owner: false };
+        let ann = crate::propose::Reader { id: crate::propose::pseudonym(&a, 1).unwrap(), name: "Ann".into(), email: "ann@example.org".into(), owner: false, issuers: Vec::new() };
         let row = br#"{"row": {"country": "DEU", "week": "2026-W40", "price": 44990}, "read_at": "2026-10-04", "read_from": "https://example.com", "attest": "read"}"#;
         let file = crate::propose::receive_from_reader(&dir, &a, row, &ann).unwrap();
         crate::propose::decide(&dir, &file, true, "ann", "").unwrap();
@@ -1286,7 +1286,7 @@ mod tests {
         let accounts = crate::account::Accounts::open(dir).unwrap();
         let reader = accounts.ensure("ben@example.org").unwrap();
         accounts.set_name(reader.id, "Ben").unwrap();
-        let ben = crate::propose::Reader { id: crate::propose::pseudonym(dir, reader.id).unwrap(), name: "Ben".into(), email: reader.email.clone(), owner: false };
+        let ben = crate::propose::Reader { id: crate::propose::pseudonym(dir, reader.id).unwrap(), name: "Ben".into(), email: reader.email.clone(), owner: false, issuers: Vec::new() };
         let row = br#"{"row": {"country": "DEU", "week": "2026-W40", "price": 44990}, "read_at": "2026-10-04", "read_from": "https://example.com", "attest": "read"}"#;
         let file = crate::propose::receive_from_reader(&source, dir, row, &ben).unwrap();
         accounts.record_proposal(reader.id, "t/prices", &file).unwrap();

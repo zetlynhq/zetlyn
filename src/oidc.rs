@@ -190,18 +190,29 @@ fn agent() -> ureq::Agent {
 /// machine and for every organisation on it, one request at a time, so an organisation asking the
 /// machine (or the machine asking an organisation) over HTTP would be waiting for itself. Asked of
 /// an address this process serves, the answer is made here instead.
-static SERVED: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+/// A list rather than one, because a process that serves two (a test does) must not forget the first.
+static SERVED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
 
 pub fn serving_machine(dir: &std::path::Path) {
     if let Ok(mut s) = SERVED.lock() {
-        *s = Some(dir.to_path_buf());
+        if !s.iter().any(|d| d == dir) {
+            s.push(dir.to_path_buf());
+        }
     }
 }
 
 /// The place an address of this process is, and the rest of the address under its mount.
 fn served(url: &str) -> Option<(Here, String)> {
-    let dir = SERVED.lock().ok()?.clone()?;
+    let dirs = SERVED.lock().ok()?.clone();
+    dirs.iter().find_map(|dir| served_by(dir, url))
+}
+
+fn served_by(dir: &std::path::Path, url: &str) -> Option<(Here, String)> {
+    let dir = dir.to_path_buf();
     let issuer = Site::load(&dir).url.trim_end_matches('/').to_string();
+    if issuer.is_empty() {
+        return None;
+    }
     let rest = url.strip_prefix(&issuer)?;
     if !(rest.is_empty() || rest.starts_with('/')) {
         return None;

@@ -364,7 +364,9 @@ pub enum CaddyIs {
 
 pub fn caddy_is(held: Option<&str>, w: &Wanted) -> CaddyIs {
     let Some(text) = held else { return CaddyIs::Placeholder };
-    if text.contains(&format!("{} {{", w.domain)) {
+    // A site whose address list names the domain itself: not one that only ends in it.
+    let names_it = |l: &str| l.trim_end().strip_suffix('{').is_some_and(|names| names.split([',', ' ']).map(str::trim).any(|n| n == w.domain || n == format!("https://{}", w.domain)));
+    if text.lines().any(names_it) {
         return CaddyIs::Ours;
     }
     // The file Ubuntu's package ships: a site on :80 serving its welcome page, and comments.
@@ -397,6 +399,9 @@ pub fn up(w: &Wanted, plan: &Plan) -> Result<(), String> {
         })?;
     }
 
+    // What this run changed, so that a run that changed nothing restarts nothing.
+    let (mut changed, mut caddy_changed) = (false, false);
+
     // The binary: this one, where the units name it.
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let bin = paths.bin();
@@ -411,6 +416,7 @@ pub fn up(w: &Wanted, plan: &Plan) -> Result<(), String> {
             set_mode(&tmp, 0o755);
             std::fs::rename(&tmp, &bin).map_err(|e| format!("{}: {e}", bin.display()))
         })?;
+        changed = true;
     }
 
     // The workspace, with its address and its owner.
@@ -425,6 +431,7 @@ pub fn up(w: &Wanted, plan: &Plan) -> Result<(), String> {
                 init(&world, w).map(|_| ())
             })?,
         }
+        changed = true;
     }
     if !paths.backups().is_dir() {
         step(plan, &format!("make {} for the daily copies", paths.backups().display()), || {
@@ -439,8 +446,8 @@ pub fn up(w: &Wanted, plan: &Plan) -> Result<(), String> {
     if w.smtp.is_some() {
         match std::env::var("SMTP_PASSWORD").ok().filter(|p| !p.is_empty()) {
             Some(password) => {
-                step(plan, &format!("keep the mailer's password in {}, readable by zetlyn alone", paths.password().display()), || {
-                    ensure_file(&paths.password(), &password, 0o640)?;
+                step(plan, &format!("keep the mailer's password in {}, readable by zetlyn alone", paths.password().display()), || -> Result<(), String> {
+                    changed |= ensure_file(&paths.password(), &password, 0o640)?;
                     if machine {
                         run("chown", &["root:zetlyn", &paths.password().to_string_lossy()])?;
                     }
@@ -455,27 +462,35 @@ pub fn up(w: &Wanted, plan: &Plan) -> Result<(), String> {
     }
 
     // Caddy, and the world behind it.
-    if machine && run("which", &["caddy"]).is_err() {
-        step(plan, "install Caddy from the distribution", || {
+    // Git too: a source can be a repository, and is read with it.
+    if machine && (run("which", &["caddy"]).is_err() || run("which", &["git"]).is_err()) {
+        step(plan, "install Caddy and git from the distribution", || {
             run("apt-get", &["update", "-q"])?;
-            run("apt-get", &["install", "-y", "-q", "caddy"]).map(|_| ())
+            run("apt-get", &["install", "-y", "-q", "caddy", "git"]).map(|_| ())
         })?;
     }
     let held = std::fs::read_to_string(paths.caddyfile()).ok();
     match caddy_is(held.as_deref(), w) {
-        CaddyIs::Ours => {}
+        // Written by an earlier run, perhaps with another port, perhaps with sites added since: said,
+        // and not written over.
+        CaddyIs::Ours => {
+            if !held.as_deref().unwrap_or("").contains(&caddy_block(w)) {
+                println!("  (the site for {} in {} is not what this run would write, with port {}: left as it is; change it there)", w.domain, paths.caddyfile().display(), w.port);
+            }
+        }
         CaddyIs::Placeholder => {
             step(plan, &format!("make {} the world's", paths.caddyfile().display()), || {
                 ensure_file(&paths.caddyfile(), &format!("{{\n\temail {}\n}}\n\n{}", w.owner, caddy_block(w)), 0o644).map(|_| ())
             })?;
+            caddy_changed = true;
         }
         CaddyIs::Theirs => {
             step(plan, &format!("put the world beside the sites already in {}, in {}", paths.caddyfile().display(), paths.caddy_own().display()), || {
-                ensure_file(&paths.caddy_own(), &caddy_block(w), 0o644)?;
+                caddy_changed |= ensure_file(&paths.caddy_own(), &caddy_block(w), 0o644)?;
                 let import = format!("import {}", "/etc/caddy/zetlyn-world.caddy");
                 let text = held.clone().unwrap_or_default();
                 if !text.lines().any(|l| l.trim() == import) {
-                    ensure_file(&paths.caddyfile(), &format!("{}\n{import}\n", text.trim_end()), 0o644)?;
+                    caddy_changed |= ensure_file(&paths.caddyfile(), &format!("{}\n{import}\n", text.trim_end()), 0o644)?;
                 }
                 Ok(())
             })?;
@@ -487,14 +502,21 @@ pub fn up(w: &Wanted, plan: &Plan) -> Result<(), String> {
         let path = paths.unit(name);
         if std::fs::read_to_string(&path).ok().as_deref() != Some(content.as_str()) {
             step(plan, &format!("write {}", path.display()), || ensure_file(&path, &content, 0o644).map(|_| ()))?;
+            changed = true;
         }
     }
     if machine && plan.services {
-        step(plan, "start the world, its backup and its upgrade, and reload Caddy", || {
+        step(plan, "start the world, its backup and its upgrade, and have Caddy read its configuration", || {
             run("systemctl", &["daemon-reload"])?;
             run("systemctl", &["enable", "--now", "zetlyn-world.service", "zetlyn-backup.timer", "zetlyn-upgrade.timer"])?;
-            run("systemctl", &["restart", "zetlyn-world.service"])?;
-            run("systemctl", &["reload-or-restart", "caddy"]).map(|_| ())
+            // Restarted only for something new: a run that changed nothing interrupts nobody.
+            if changed {
+                run("systemctl", &["restart", "zetlyn-world.service"])?;
+            }
+            if caddy_changed || changed {
+                run("systemctl", &["reload-or-restart", "caddy"])?;
+            }
+            Ok(())
         })?;
         if !plan.dry {
             answered(w)?;
@@ -1044,7 +1066,7 @@ pub fn stay(dir: &Path) -> Result<(), String> {
 
 /// A file of the world's own hub, `<root>/hub/<rest>`, as a reader asks for it: a directory is its
 /// `index.html`. Nothing outside it.
-pub fn hub_file(root: &Path, rest: &[String]) -> Option<(Vec<u8>, &'static str)> {
+pub fn hub_file(root: &Path, rest: &[String], prefix: &str) -> Option<(Vec<u8>, &'static str)> {
     if rest.iter().any(|s| s.is_empty() || s == "." || s == ".." || s.contains(['/', '\\', '\0'])) {
         return None;
     }
@@ -1055,7 +1077,24 @@ pub fn hub_file(root: &Path, rest: &[String]) -> Option<(Vec<u8>, &'static str)>
     if path.is_dir() {
         path.push("index.html");
     }
-    let bytes = std::fs::read(&path).ok()?;
+    let mut bytes = std::fs::read(&path).ok()?;
+    // The pages are written for a hub at the root of its host (hubpages.rs); here it is at
+    // `<prefix>`, and what they link to is said under it. Only the pages and the list: a manifest
+    // or an archive is signed as it is, and goes out byte for byte.
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if name == "index.html" || (name == "index.json" && rest.len() == 1) {
+        let mut text = String::from_utf8_lossy(&bytes).into_owned();
+        if name == "index.html" {
+            for at in ["/hub/", "/sources/", "/trackers/", "/packages/", "/style.css", "/app.js", "/mark.png", "/favicon.png"] {
+                let to = if at == "/hub/" { format!("{prefix}/") } else { format!("{prefix}{at}") };
+                text = text.replace(&format!("=\"{at}"), &format!("=\"{to}"));
+            }
+            text = text.replace("fetch(\"/index.json\")", &format!("fetch(\"{prefix}/index.json\")"));
+        } else {
+            text = text.replace("\"page\":\"/", &format!("\"page\":\"{prefix}/"));
+        }
+        bytes = text.into_bytes();
+    }
     let kind = match path.extension().and_then(|e| e.to_str()) {
         Some("html") => "text/html; charset=utf-8",
         Some("json") => "application/json",
@@ -1112,6 +1151,8 @@ mod tests {
         assert_eq!(caddy_is(None, &w), CaddyIs::Placeholder);
         assert_eq!(caddy_is(Some(&caddy_block(&w)), &w), CaddyIs::Ours);
         assert_eq!(caddy_is(Some("shop.example {\n\treverse_proxy :3000\n}\n"), &w), CaddyIs::Theirs);
+        assert_eq!(caddy_is(Some("shop.prices.example {\n\treverse_proxy :3000\n}\n"), &w), CaddyIs::Theirs, "a site that only ends in the name");
+        assert_eq!(caddy_is(Some("www.prices.example, prices.example {\n\treverse_proxy :3000\n}\n"), &w), CaddyIs::Ours);
         assert!(caddy_block(&w).contains("prices.example {") && caddy_block(&w).contains("reverse_proxy 127.0.0.1:2500"));
     }
 
@@ -1297,10 +1338,18 @@ mod tests {
         std::fs::write(root.join("hub/sources/a/b/index.html"), "<p>b</p>").unwrap();
         std::fs::write(root.join("workspace.yaml"), "secret").unwrap();
         let p = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-        assert_eq!(hub_file(&root, &p(&["index.json"])).unwrap(), (b"[]".to_vec(), "application/json"));
-        assert_eq!(hub_file(&root, &p(&["sources", "a", "b"])).unwrap().0, b"<p>b</p>");
-        assert!(hub_file(&root, &p(&["..", "workspace.yaml"])).is_none());
-        assert!(hub_file(&root, &p(&["nothing"])).is_none());
+        assert_eq!(hub_file(&root, &p(&["index.json"]), "/hub").unwrap(), (b"[]".to_vec(), "application/json"));
+        assert_eq!(hub_file(&root, &p(&["sources", "a", "b"]), "/hub").unwrap().0, b"<p>b</p>");
+        assert!(hub_file(&root, &p(&["..", "workspace.yaml"]), "/hub").is_none());
+        assert!(hub_file(&root, &p(&["nothing"]), "/hub").is_none());
+        // Its pages link under where it is; what is signed goes out as it is.
+        std::fs::write(root.join("hub/index.html"), r#"<a href="/hub/#x"></a><a href="/sources/a/b/"></a><link href="/style.css"><script>fetch("/index.json")</script>"#).unwrap();
+        std::fs::write(root.join("hub/index.json"), r#"[{"page":"/sources/a/b/"}]"#).unwrap();
+        std::fs::write(root.join("hub/sources/a/b/manifest.json"), r#"{"page":"/sources/a/b/"}"#).unwrap();
+        let page = String::from_utf8(hub_file(&root, &[], "/acme/hub").unwrap().0).unwrap();
+        assert_eq!(page, r#"<a href="/acme/hub/#x"></a><a href="/acme/hub/sources/a/b/"></a><link href="/acme/hub/style.css"><script>fetch("/acme/hub/index.json")</script>"#);
+        assert_eq!(hub_file(&root, &p(&["index.json"]), "/acme/hub").unwrap().0, br#"[{"page":"/acme/hub/sources/a/b/"}]"#);
+        assert_eq!(hub_file(&root, &p(&["sources", "a", "b", "manifest.json"]), "/acme/hub").unwrap().0, br#"{"page":"/sources/a/b/"}"#);
         let _ = std::fs::remove_dir_all(&root);
     }
 

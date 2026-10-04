@@ -480,7 +480,7 @@ impl App {
                     };
                 }
                 ["hub", ..] => {
-                    return match crate::world::hub_file(&self.root, &parts[1..]) {
+                    return match crate::world::hub_file(&self.root, &parts[1..], &format!("{}/hub", self.base)) {
                         Some((bytes, kind)) => {
                             let mut response = tiny_http::Response::from_data(bytes);
                             if let Ok(h) = tiny_http::Header::from_bytes(&b"Content-Type"[..], kind.as_bytes()) {
@@ -3147,7 +3147,9 @@ fn answer_org(apps: &mut BTreeMap<String, App>, key: &str, org: &str, base: &str
         h.owners = owners;
     }
     // Every organisation whoever is signed in belongs to, by its title, for the header.
-    app.public_of_machine = public_links(dir);
+    // At a domain of its own, the machine's pages are at the machine's name, and said with it.
+    let machine = if base.is_empty() { crate::account::Site::load(dir).url.trim_end_matches('/').to_string() } else { String::new() };
+    app.public_of_machine = public_links(dir).into_iter().map(|(t, l)| (t, format!("{machine}{l}"))).collect();
     app.orgs_of_who = signed_in(&request, accounts)
         .map(|email| {
             Membership::load(dir)
@@ -3155,7 +3157,7 @@ fn answer_org(apps: &mut BTreeMap<String, App>, key: &str, org: &str, base: &str
                 .into_iter()
                 .map(|(o, _)| {
                     let t = crate::account::Site::load(&dir.join("orgs").join(&o)).title;
-                    (if t.is_empty() { o.clone() } else { t }, format!("/{o}/"))
+                    (if t.is_empty() { o.clone() } else { t }, format!("{machine}/{o}/"))
                 })
                 .collect()
         })

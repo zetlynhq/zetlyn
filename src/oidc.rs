@@ -149,6 +149,10 @@ fn reply(request: tiny_http::Request, status: u16, kind: &str, body: String, hea
     let mut all = vec![("Content-Type", kind.to_string()), ("Cache-Control", "no-store".to_string())];
     all.extend(headers.iter().map(|(k, v)| (*k, v.clone())));
     for (k, v) in all {
+        // A value that would end the header and start another is not sent at all.
+        if v.contains(['\r', '\n']) {
+            continue;
+        }
         if let Ok(h) = tiny_http::Header::from_bytes(k.as_bytes(), v.as_bytes()) {
             response = response.with_header(h);
         }
@@ -174,13 +178,16 @@ fn json_reply(request: tiny_http::Request, status: u16, body: J) {
 
 /// A path on this site to come back to, and nothing else.
 fn local(next: &str) -> Option<String> {
-    (next.starts_with('/') && !next.starts_with("//") && !next.contains('\\')).then(|| next.to_string())
+    // A path, and nothing a browser would read as another site: no `//`, no backslash, and no
+    // control character or space it might strip (`/\t/evil` is `//evil` to a browser).
+    let clean = next.starts_with('/') && !next.starts_with("//") && !next.chars().any(|c| c == '\\' || c.is_control() || c.is_whitespace());
+    clean.then(|| next.to_string())
 }
 
 fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .user_agent(concat!("zetlyn/", env!("CARGO_PKG_VERSION")))
-        .timeout_global(Some(std::time::Duration::from_secs(30)))
+        .timeout_global(Some(std::time::Duration::from_secs(10)))
         .http_status_as_error(false)
         .build()
         .into()
@@ -269,7 +276,9 @@ fn answered_here(url: &str, form: Option<&BTreeMap<String, String>>) -> Option<R
                 (status, body) => Err(format!("{url}: {status} {}", body["error_description"].as_str().unwrap_or(""))),
             }
         }
-        _ => return None,
+        // An address of this very process it has nothing at: said here, not asked of itself over
+        // HTTP, which would wait for the answer it is itself supposed to give.
+        _ => Err(format!("{url}: nothing at that address")),
     })
 }
 
@@ -357,9 +366,16 @@ pub fn answer(here: &Here, mut request: tiny_http::Request, rel: &[String], url:
 
 /// The client a relying party says it is, from its own document, and the redirect it asked for,
 /// held against that document.
-fn client_of(client_id: &str, redirect: &str) -> Result<J, String> {
-    if !(client_id.starts_with("https://") || client_id.starts_with("http://127.0.0.1") || client_id.starts_with("http://localhost")) {
-        return Err("a client here is the address of a document about itself".into());
+fn client_of(client_id: &str, redirect: &str, loopback_ok: bool) -> Result<J, String> {
+    // Asked on the client's say-so: a public https address only, unless it is this process.
+    if served(client_id).is_none() {
+        crate::outbound::allowed(client_id, loopback_ok).map_err(|e| format!("a client here is the address of a document about itself, on the public internet: {e}"))?;
+    }
+    // The redirect is on the client's own origin, so nobody can name a page of somebody else's (or
+    // a `javascript:` one) as where a person is sent back to.
+    match (origin(client_id), origin(redirect)) {
+        (Some(a), Some(b)) if a == b && !redirect.chars().any(|c| c.is_control() || c.is_whitespace()) => {}
+        _ => return Err(format!("{redirect} is not on the same site as {client_id}")),
     }
     let doc = get_json(client_id)?;
     if doc["client_id"].as_str() != Some(client_id) {
@@ -370,6 +386,19 @@ fn client_of(client_id: &str, redirect: &str) -> Result<J, String> {
         return Err(format!("{redirect} is not where {client_id} says to send people back to"));
     }
     Ok(doc)
+}
+
+/// `scheme://host[:port]` of an http(s) address with no user information in it, lower case.
+pub fn origin(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    if scheme != "https" && scheme != "http" {
+        return None;
+    }
+    let authority = rest.split(['/', '?', '#']).next()?;
+    if authority.is_empty() || authority.contains('@') {
+        return None;
+    }
+    Some(format!("{scheme}://{}", authority.to_lowercase()))
 }
 
 fn session_of(accounts: &Accounts, asked: &Asked) -> Option<crate::account::Account> {
@@ -392,7 +421,7 @@ fn authorize(here: &Here, accounts: &Accounts, request: tiny_http::Request, aske
     if !scope.iter().any(|s| s == "openid") {
         return refuse(request, "the scope has to include `openid`".into());
     }
-    let client = match client_of(&client_id, &redirect) {
+    let client = match client_of(&client_id, &redirect, crate::outbound::on_loopback(&here.issuer)) {
         Ok(c) => c,
         Err(e) => return refuse(request, e),
     };
@@ -595,6 +624,16 @@ fn discover(issuer: &str) -> Result<J, String> {
     if doc["issuer"].as_str().map(|i| i.trim_end_matches('/')) != Some(issuer.trim_end_matches('/')) {
         return Err(format!("{issuer} says its issuer is {}", doc["issuer"].as_str().unwrap_or("nothing")));
     }
+    // What it says to ask next is asked on its say-so: on its own site, or on the public internet.
+    for k in ["authorization_endpoint", "token_endpoint", "jwks_uri"] {
+        let Some(at) = doc[k].as_str() else { continue };
+        if origin(at).is_none() || at.chars().any(|c| c.is_control() || c.is_whitespace()) {
+            return Err(format!("{issuer}: its {k} is not an address"));
+        }
+        if origin(at) != origin(issuer) && served(at).is_none() {
+            crate::outbound::allowed(at, crate::outbound::on_loopback(issuer)).map_err(|e| format!("{issuer}: its {k}: {e}"))?;
+        }
+    }
     Ok(doc)
 }
 
@@ -626,6 +665,10 @@ fn login(here: &Here, accounts: &Accounts, request: tiny_http::Request, asked: &
             });
         };
         let at = if at.starts_with("http://") || at.starts_with("https://") { at } else { format!("https://{at}") };
+        // A world a person names is asked on their say-so: a public https address only.
+        if let Err(e) = crate::outbound::allowed(&at, crate::outbound::on_loopback(&here.issuer)) {
+            return fail(request, e);
+        }
         id = format!("zetlyn:{at}");
     }
     let Some(d) = decl(&site, &id) else { return fail(request, format!("{id} is not a way to sign in here")) };
@@ -763,7 +806,11 @@ fn exchange(here: &Here, d: &IdentityDecl, pending: &Pending, code: &str, p: &BT
                 }
             }
             let verified = matches!(&claims["email_verified"], J::Bool(true)) || claims["email_verified"].as_str() == Some("true");
-            let email = claims["email"].as_str().filter(|_| verified).map(str::to_string);
+            // An address is taken only from a provider that can vouch for it: Google and Apple. Another
+            // zetlyn world says whatever its operator makes it say, so its word on an address would
+            // let anybody who runs one sign in as anybody else here.
+            let authoritative = matches!(d, IdentityDecl::Google(_) | IdentityDecl::Apple(_));
+            let email = claims["email"].as_str().filter(|_| verified && authoritative).map(str::to_string);
             let mut name = claims["name"].as_str().unwrap_or("").to_string();
             if let (IdentityDecl::Apple(_), Some(user)) = (d, p.get("user")) {
                 // Apple says the name once, on the first sign-in, beside the code and nowhere else.
@@ -950,7 +997,9 @@ mod tests {
         let evil = to_a.replace(&crate::serve::urlencode(&format!("{url_b}/oauth/callback")), &crate::serve::urlencode("http://127.0.0.1:1/steal"));
         let (status, page, _, _) = ask("GET", &evil, Some(&zo), None);
         assert_eq!(status, 400);
-        assert!(page.contains("not where"), "{page}");
+        assert!(page.contains("not on the same site"), "{page}");
+        let script = to_a.replace(&crate::serve::urlencode(&format!("{url_b}/oauth/callback")), &crate::serve::urlencode("javascript://127.0.0.1/%0aalert(1)//"));
+        assert_eq!(ask("GET", &script, Some(&zo), None).0, 400, "a script is nowhere to send anybody back to");
         let code = query_of(&back)["code"].clone();
         let (status, body, _, _) = ask("POST", &format!("{url_a}/oauth/token"), None, Some(&format!("grant_type=authorization_code&code={code}&redirect_uri=x&client_id=y&code_verifier=z")));
         assert_eq!(status, 400);
@@ -1255,5 +1304,16 @@ mod tests {
         let acme = Accounts::open(&m.join("orgs/acme")).unwrap();
         assert!(acme.by_identity(&url_m, &crate::propose::pseudonym(&m, ann.id).unwrap()).is_some());
         let _ = std::fs::remove_dir_all(&m);
+    }
+
+    #[test]
+    fn where_to_come_back_to_is_a_path_here_and_nothing_a_browser_reads_as_elsewhere() {
+        assert_eq!(local("/t/x/?q=1").as_deref(), Some("/t/x/?q=1"));
+        for bad in ["//evil.example", "/\t/evil.example", "/\\evil.example", "/x\r\nSet-Cookie: zs=1", "https://evil.example", "/ x"] {
+            assert!(local(bad).is_none(), "{bad:?}");
+        }
+        assert_eq!(origin("https://Zetlyn.com/acme/x").as_deref(), Some("https://zetlyn.com"));
+        assert_eq!(origin("https://zetlyn.com@evil.example/cb"), None);
+        assert_eq!(origin("javascript://zetlyn.com/x"), None);
     }
 }

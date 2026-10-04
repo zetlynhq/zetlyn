@@ -57,6 +57,9 @@ pub fn register(root: &Path, body: &[u8], signature: &str) -> Result<String, Str
     if (crate::now() - at).abs() > WINDOW {
         return Err("signed more than five minutes from now: send it again".into());
     }
+    // Asked on a stranger's say-so: a public https address only, never this machine's own network.
+    let here = crate::account::Site::load(root).url;
+    crate::outbound::allowed(&url, crate::outbound::on_loopback(&here))?;
     let doc = crate::world::fetch(&url)?.ok_or_else(|| format!("{url} does not answer as a world"))?;
     let key = doc["key"].as_str().ok_or("the world names no key")?.to_string();
     crate::key::verify(&key, body, signature).map_err(|_| format!("not signed by {url}'s own key"))?;
@@ -145,6 +148,16 @@ pub fn list(root: &Path, q: &str) -> Vec<Entry> {
     out
 }
 
+/// A link a registered world's document asks for, where it is one this page may carry: http(s),
+/// and at or under that world's own address. Anything else is shown as text, never as a link a
+/// reader might follow into a script.
+fn under(world: &str, href: &str) -> Option<String> {
+    let world = world.trim_end_matches('/');
+    let ok_scheme = world.starts_with("https://") || world.starts_with("http://");
+    let inside = href == world || href.starts_with(&format!("{world}/"));
+    (ok_scheme && inside && !href.chars().any(|c| c.is_control() || c.is_whitespace() || c == '"' || c == '<' || c == '>')).then(|| href.to_string())
+}
+
 /// Everything a world says about itself that a search may match.
 fn said(doc: &J) -> String {
     let mut words = vec![doc["title"].as_str().unwrap_or("").to_string(), doc["world"].as_str().unwrap_or("").to_string()];
@@ -191,10 +204,10 @@ pub fn answer(root: &Path, mut request: tiny_http::Request, rel: &[String], url:
                 @if all.is_empty() { p.dim { @if q.is_empty() { "None yet." } @else { "Nothing here says that." } } }
                 @for e in &all {
                     div.card {
-                        h3 { a href=(e.url) { (e.doc["title"].as_str().filter(|t| !t.is_empty()).unwrap_or(&e.url)) } }
+                        h3 { a href=(under(&e.url, &e.url).unwrap_or_default()) { (e.doc["title"].as_str().filter(|t| !t.is_empty()).unwrap_or(&e.url)) } }
                         p.dim { code { (e.url) } }
                         @for t in e.doc["trackers"].as_array().cloned().unwrap_or_default() {
-                            p { a href=(t["at"].as_str().unwrap_or("")) { (t["title"].as_str().unwrap_or("")) } " " span.chip { "tracker" } }
+                            p { @match under(&e.url, t["at"].as_str().unwrap_or("")) { Some(href) => { a href=(href) { (t["title"].as_str().unwrap_or("")) } } None => { (t["title"].as_str().unwrap_or("")) } } " " span.chip { "tracker" } }
                         }
                         @let sources = e.doc["sources"].as_array().cloned().unwrap_or_default();
                         @if !sources.is_empty() {
@@ -345,5 +358,29 @@ mod tests {
         let held: Vec<String> = list(&d, "").into_iter().map(|e| e.url).collect();
         assert!(held.contains(&"http://127.0.0.1:2".to_string()) && !held.contains(&"http://127.0.0.1:1".to_string()));
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_link_from_a_registered_world_is_one_only_under_its_own_address() {
+        let w = "https://w.example";
+        assert_eq!(under(w, "https://w.example/t/x/").as_deref(), Some("https://w.example/t/x/"));
+        for bad in ["javascript:alert(1)", "https://w.example.evil/", "https://other.example/", "https://w.example/\"onmouseover=x", "data:text/html,x"] {
+            assert!(under(w, bad).is_none(), "{bad}");
+        }
+        assert!(under("javascript:x", "javascript:x").is_none());
+    }
+
+    #[test]
+    fn nobody_registers_a_world_on_this_machines_own_network() {
+        let root = std::env::temp_dir().join(format!("zetlyn-directory-ssrf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("workspace.yaml"), "url: https://directory.example\n").unwrap();
+        for world in ["http://169.254.169.254/latest", "https://127.0.0.1:6379", "https://10.0.0.5"] {
+            let body = json!({ "world": world, "at": crate::now() }).to_string();
+            let e = register(&root, body.as_bytes(), "ed25519:00").unwrap_err();
+            assert!(e.contains("public internet") || e.contains("only https"), "{world}: {e}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

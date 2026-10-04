@@ -11,7 +11,9 @@ use std::path::Path;
 
 pub fn bytes(raw: &str) -> Result<[u8; 32], String> {
     let hex = raw.trim().trim_start_matches("ed25519:");
-    if hex.len() != 64 {
+    // Hex digits first: a byte length of 64 is not 64 characters when some of them are not ASCII,
+    // and slicing such a string by bytes would panic, on input anybody can send.
+    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("a key is 32 bytes, written as 64 hex characters".into());
     }
     let mut out = [0u8; 32];
@@ -82,7 +84,7 @@ pub fn verify(pinned: &str, message: &[u8], signature: &str) -> Result<(), Strin
     let key = ed25519_dalek::VerifyingKey::from_bytes(&bytes(pinned)?)
         .map_err(|e| format!("that key is not one: {e}"))?;
     let raw = signature.trim().trim_start_matches("ed25519:");
-    if raw.len() != 128 {
+    if raw.len() != 128 || !raw.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("a signature is 64 bytes, written as 128 hex characters".into());
     }
     let mut out = [0u8; 64];
@@ -92,4 +94,20 @@ pub fn verify(pinned: &str, message: &[u8], signature: &str) -> Result<(), Strin
     }
     key.verify(message, &ed25519_dalek::Signature::from_bytes(&out))
         .map_err(|_| "the signature is not that key's, over these bytes".to_string())
+}
+
+#[cfg(test)]
+mod hostile {
+    #[test]
+    fn a_key_or_signature_that_is_not_hex_is_refused_not_a_panic() {
+        // 64 and 128 bytes long, but not that many characters: sliced by bytes, these panicked.
+        let key = format!("a{}a", "é".repeat(31));
+        assert_eq!(key.len(), 64);
+        assert!(super::bytes(&key).is_err());
+        let good = format!("ed25519:{}", "11".repeat(32));
+        let sig = format!("a{}a", "é".repeat(63));
+        assert_eq!(sig.len(), 128);
+        assert!(super::verify(&good, b"x", &sig).is_err());
+        assert!(super::verify(&key, b"x", &"00".repeat(64)).is_err());
+    }
 }

@@ -32,6 +32,7 @@ mod mail;
 mod matches;
 mod migrate;
 mod oidc;
+mod outbound;
 mod package;
 mod claim;
 mod remote;

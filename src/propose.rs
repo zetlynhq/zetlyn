@@ -316,8 +316,14 @@ pub fn check(body: &[u8]) -> Result<J, String> {
     if !dated {
         return Err("`read_at`: when it was read, as 2026-10-02 or 2026-10-02T09:14:00Z".into());
     }
-    if j["read_from"].as_str().is_none_or(|s| s.trim().is_empty()) {
+    // Where it was read is an address a person may follow from the owner's page: http(s) only, so
+    // it cannot be a script that runs as the owner when they do.
+    let read_from = j["read_from"].as_str().unwrap_or("").trim();
+    if read_from.is_empty() {
         return Err("`read_from`: where it was read".into());
+    }
+    if !(read_from.starts_with("https://") || read_from.starts_with("http://")) || read_from.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("`read_from`: an http(s) address, where it was read".into());
     }
     if !j["attest"].as_str().is_some_and(|a| ATTEST.contains(&a)) {
         return Err("`attest`: `read` (you looked yourself) or `relayed` (somebody who did allows it, named in `note`)".into());
@@ -587,7 +593,7 @@ mod tests {
         let one = receive(&dir, BODY, Some(&a), Some(&sig)).unwrap();
         assert_eq!(receive(&dir, BODY, Some(&a), Some(&sig)).unwrap(), one);
         assert_eq!(names(&dir).len(), 1);
-        let bad = br#"{"row": {"proposed_by": "me"}, "read_at": "2026-10-02", "read_from": "x", "attest": "read"}"#;
+        let bad = br#"{"row": {"proposed_by": "me"}, "read_at": "2026-10-02", "read_from": "https://example.com/x", "attest": "read"}"#;
         let (_, sig_bad) = signed(1, bad);
         assert!(receive(&dir, bad, Some(&a), Some(&sig_bad)).unwrap_err().contains("may not name"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -693,7 +699,7 @@ mod tests {
         // The owner needs no invitation to their own source.
         set_readers(&dir, Vec::new()).unwrap();
         let owner = Reader { id: "owner".into(), name: "the owner".into(), email: String::new(), owner: true, issuers: Vec::new() };
-        assert!(receive_from_reader(&dir, &root, br#"{"row": {"country": "AUT", "week": "2026-W40", "price": 1}, "read_at": "2026-10-02", "read_from": "x", "attest": "read"}"#, &owner).is_ok());
+        assert!(receive_from_reader(&dir, &root, br#"{"row": {"country": "AUT", "week": "2026-W40", "price": 1}, "read_at": "2026-10-02", "read_from": "https://example.com/x", "attest": "read"}"#, &owner).is_ok());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -713,7 +719,7 @@ mod tests {
         let (root, dir) = workspace("m");
         set_readers(&dir, vec![SIGNED_IN.into()]).unwrap();
         let ann = reader(&root, 7, "ann@example.org", "Ann");
-        let body = |n: usize| format!(r#"{{"row": {{"country": "C{n}", "week": "2026-W40", "price": {n}}}, "read_at": "2026-10-02", "read_from": "x", "attest": "read"}}"#);
+        let body = |n: usize| format!(r#"{{"row": {{"country": "C{n}", "week": "2026-W40", "price": {n}}}, "read_at": "2026-10-02", "read_from": "https://example.com/x", "attest": "read"}}"#);
         let mut first = String::new();
         for n in 0..MAX_PENDING {
             let name = receive_from_reader(&dir, &root, body(n).as_bytes(), &ann).unwrap();
@@ -795,5 +801,14 @@ mod tests {
         assert_eq!(accounts.proposer_of("t/prices", &file).unwrap().email, "ann@example.org");
         assert!(accounts.proposer_of("t/prices", "other.json").is_none());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn where_it_was_read_is_an_address_a_person_may_follow_safely() {
+        let body = |at: &str| format!(r#"{{"row": {{"a": 1}}, "read_at": "2026-10-04", "read_from": {}, "attest": "read"}}"#, serde_json::to_string(at).unwrap());
+        assert!(check(body("https://example.com/page").as_bytes()).is_ok());
+        for bad in ["javascript:alert(1)", "javascript://example.com/%0aalert(1)", "data:text/html,x", "https://example.com/ x", ""] {
+            assert!(check(body(bad).as_bytes()).is_err(), "{bad}");
+        }
     }
 }

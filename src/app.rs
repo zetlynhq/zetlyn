@@ -467,14 +467,8 @@ impl App {
         // its own page, and a token is asked for by a server. Both are held by what they carry, a
         // state that was handed out here and a code with its verifier.
         let signing_in = matches!(parts.iter().map(String::as_str).collect::<Vec<_>>().as_slice(), ["oauth", "callback"] | ["oauth", "token"]);
-        if request.method() == &tiny_http::Method::Post && !signing_in {
-            let header = |name: &'static str| request.headers().iter().find(|h| h.field.equiv(name)).map(|h| h.value.as_str().to_string());
-            let host = header("Host").unwrap_or_default();
-            let cross = header("Sec-Fetch-Site").is_some_and(|s| s == "cross-site")
-                || header("Origin").is_some_and(|o| o == "null" || o.split("://").nth(1).unwrap_or("") != host);
-            if cross {
-                return respond(request, 403, "text/plain; charset=utf-8", "a form from another site");
-            }
+        if request.method() == &tiny_http::Method::Post && !signing_in && from_another_site(&request) {
+            return respond(request, 403, "text/plain; charset=utf-8", "a form from another site");
         }
         // What a world says about itself and what it publishes, to anybody, signed in or not.
         if matches!(request.method(), tiny_http::Method::Get | tiny_http::Method::Head) {
@@ -2048,7 +2042,7 @@ impl App {
                         td {
                             code { (e.row) }
                             div.why {
-                                "read " (e.read_at) " from " a href=(e.read_from) { (e.read_from) } " · " (if e.attest == "read" { "read by the proposer" } else { "relayed" })
+                                "read " (e.read_at) " from " @if e.read_from.starts_with("https://") || e.read_from.starts_with("http://") { a href=(e.read_from) { (e.read_from) } } @else { (e.read_from) } " · " (if e.attest == "read" { "read by the proposer" } else { "relayed" })
                                 @if !e.note.is_empty() { " · " (e.note) }
                             }
                             div.why {
@@ -2969,6 +2963,14 @@ fn hosting_serve(args: &[String]) -> Result<(), String> {
         let path = url.split('?').next().unwrap_or("/").to_string();
         let parts: Vec<String> = path.split('/').filter(|s| !s.is_empty()).map(serve::urldecode).collect();
         let first = parts.first().cloned().unwrap_or_default();
+        // A form from another site is refused here too, before the machine's own pages and its
+        // provider see it, as an organisation's app refuses one. A sign-in answer and a token are
+        // what they are (Apple's answer is a form from Apple's page), held by state and code.
+        let signing_in = path.ends_with("/oauth/callback") || path.ends_with("/oauth/token");
+        if request.method() == &tiny_http::Method::Post && !signing_in && from_another_site(&request) {
+            respond(request, 403, "text/plain; charset=utf-8", "a form from another site");
+            continue;
+        }
         // Asked by a name that is not the machine's: a hosted world's own domain, whole, at its
         // root; or nothing here. Only a name an organisation says is its own is ever answered for.
         let host = request.headers().iter().find(|h| h.field.equiv("Host")).map(|h| h.value.as_str().split(':').next().unwrap_or("").to_lowercase()).unwrap_or_default();
@@ -3081,6 +3083,14 @@ fn answer_org(apps: &mut BTreeMap<String, App>, key: &str, org: &str, base: &str
         .unwrap_or_default();
     serve::mount(&app.base);
     app.answer(request);
+}
+
+/// A request a page of another site made: a browser says where a form came from, and a form from
+/// anywhere but this site's own pages is refused. Programs (a webhook) say nothing and pass.
+pub(crate) fn from_another_site(request: &tiny_http::Request) -> bool {
+    let header = |name: &'static str| request.headers().iter().find(|h| h.field.equiv(name)).map(|h| h.value.as_str().to_string());
+    let host = header("Host").unwrap_or_default();
+    header("Sec-Fetch-Site").is_some_and(|s| s == "cross-site") || header("Origin").is_some_and(|o| o == "null" || o.split("://").nth(1).unwrap_or("") != host)
 }
 
 /// The organisation whose own domain `host` is, where one says so.

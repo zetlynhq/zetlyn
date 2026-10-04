@@ -803,7 +803,7 @@ pub fn fetch(url: &str) -> Result<Option<serde_json::Value>, String> {
     let at = format!("{}/.well-known/zetlyn.json", url.trim_end_matches('/'));
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .user_agent(concat!("zetlyn/", env!("CARGO_PKG_VERSION")))
-        .timeout_global(Some(std::time::Duration::from_secs(30)))
+        .timeout_global(Some(std::time::Duration::from_secs(10)))
         .http_status_as_error(false)
         .build()
         .into();

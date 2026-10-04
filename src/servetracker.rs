@@ -1190,16 +1190,7 @@ pub struct TrackerSite {
 impl TrackerSite {
     pub fn open(scope: Tracker, dir: &Path, datasets: &Path, addr: &str, operator: bool) -> Result<TrackerSite, String> {
         let accounts = Accounts::open(&scope.root)?;
-        let mut site = Site::load(&scope.root);
-        // An organisation's workspace on a hosting machine (`<dir>/orgs/<org>`) is served at the
-        // machine's address, which the hosting directory's own workspace.yaml names. Never the
-        // address a request says it was sent to: a sign-in link built from that goes wherever
-        // whoever asked for it says.
-        if site.url.is_empty() {
-            if let Some(hosting) = scope.root.parent().filter(|p| p.file_name().is_some_and(|n| n == "orgs")).and_then(Path::parent) {
-                site.url = Site::load(hosting).url;
-            }
-        }
+        let site = Site::for_workspace(&scope.root);
         let scope = scope;
         // A tracker whose store is behind its sources, or has none, refreshes before it answers.
         if let Err(e) = scope.refresh_if_moved() {
@@ -1366,13 +1357,9 @@ impl TrackerSite {
                 let email = form_field(&form, "email");
                 match accounts.ensure(&email).and_then(|a| accounts.new_link(a.id).map(|raw| (a, raw))) {
                     Ok((a, raw)) => {
-                        let base = if site.url.is_empty() {
-                            format!("http://{addr}", addr = site_addr)
-                        } else {
-                            site.url.clone()
-                        };
                         let next = next_of(&form_field(&form, "next")).map(|n| format!("?next={}", urlencode(&n))).unwrap_or_default();
-                        let link = format!("{base}{}/signin/{raw}{next}", mounted());
+                        let here = at(&format!("/signin/{raw}{next}"));
+                        let link = if site.url.is_empty() { format!("http://{site_addr}{here}") } else { site.link(&here) };
                         let sent = site
                             .send(
                                 &a.email,
@@ -3103,7 +3090,7 @@ mod tests {
         };
         assert_eq!(open(&org), "", "nothing names an address");
         std::fs::write(hosting.join("workspace.yaml"), "url: https://app.example.org\n").unwrap();
-        assert_eq!(open(&org), "https://app.example.org");
+        assert_eq!(open(&org), "https://app.example.org/acme", "the machine's, under its own name");
         std::fs::write(org.join("workspace.yaml"), "url: https://acme.example.org\n").unwrap();
         assert_eq!(open(&org), "https://acme.example.org", "its own, where it names one");
         let _ = std::fs::remove_dir_all(&hosting);

@@ -542,8 +542,8 @@ impl App {
                 if h.is_member(&email) {
                     let email = email.trim().to_lowercase();
                     let sent = h.accounts.ensure(&email).and_then(|a| h.accounts.new_link(a.id)).and_then(|raw| {
-                        let site = crate::account::Site::load(&self.root);
-                        let link = format!("{}{}", site.url.trim_end_matches('/'), serve::at(&format!("/signin/{raw}")));
+                        let site = crate::account::Site::for_workspace(&self.root);
+                        let link = site.link(&serve::at(&format!("/signin/{raw}")));
                         site.send(&email, "Your Zetlyn sign-in link", &format!("{link}\n\nGood for a quarter of an hour, and once."))
                     });
                     if let Err(e) = sent {
@@ -1214,7 +1214,7 @@ impl App {
                 let blocked = t.not_public();
                 let public = !t.private();
                 let where_ = if self.hosted.is_some() {
-                    format!("{}{}", crate::account::Site::load(&self.root).url.trim_end_matches('/'), serve::at(&format!("/t/{tracker}/")))
+                    crate::account::Site::for_workspace(&self.root).link(&serve::at(&format!("/t/{tracker}/")))
                 } else {
                     String::new()
                 };
@@ -1932,7 +1932,7 @@ impl App {
                 p { "A file, " code { "row.json" } ", with the row and how it was read:" }
                 pre { (format!("{{\n  \"row\": {{ … the fields of one row … }},\n  \"read_at\": \"{}\",\n  \"read_from\": \"https://… where it was read\",\n  \"attest\": \"read\",\n  \"note\": \"optional\"\n}}", crate::iso_stamp(crate::now()).get(..10).unwrap_or(""))) }
                 p { "Then, signed with their own key:" }
-                pre { "zetlyn source propose " (format!("{}{}", crate::account::Site::load(&self.root).url.trim_end_matches('/'), serve::at(&format!("/propose/{source}")))) " row.json" }
+                pre { "zetlyn source propose " (crate::account::Site::for_workspace(&self.root).link(&serve::at(&format!("/propose/{source}")))) " row.json" }
                 p.dim { code { "attest" } " is " code { "read" } " when they looked themselves, " code { "relayed" } " when somebody who did allows it, named in " code { "note" } "." }
             }
             p {

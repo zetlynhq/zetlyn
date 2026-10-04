@@ -476,15 +476,16 @@ pub fn tell_proposer(root: &Path, dir: &Path, file: &str, accept: bool, why: &st
 /// More while they have not looked would be the same news again. The address is the
 /// workspace's `contact`, where it is one.
 pub fn tell_owner(root: &Path, dir: &Path) {
-    let site = crate::account::Site::load(root);
+    let site = crate::account::Site::for_workspace(root);
     if !site.contact.contains('@') || list(dir).iter().filter(|e| e.status == "pending").count() != 1 {
         return;
     }
     let Ok(decl) = crate::sourcedecl::SourceDecl::load(dir) else { return };
     let title = if decl.title.is_empty() { decl.name.clone() } else { decl.title.clone() };
-    let base = site.url.trim_end_matches('/');
     let at = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let text = format!("A reader proposed a row for {title}. It waits for you at\n\n{base}/proposals/{at}\n\nMore may arrive before you look; this is the only mail until the queue is empty again.\n");
+    let page = format!("/proposals/{at}");
+    let page = if site.url.is_empty() { format!("the app, at {page}") } else { site.link(&page) };
+    let text = format!("A reader proposed a row for {title}. It waits for you at\n\n{page}\n\nMore may arrive before you look; this is the only mail until the queue is empty again.\n");
     if let Err(e) = site.send(site.contact.trim(), &format!("{title}: a proposal waits"), &text) {
         eprintln!("{}: the owner was not told: {e}", decl.name);
     }

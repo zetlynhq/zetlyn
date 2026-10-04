@@ -478,6 +478,45 @@ impl Site {
         site
     }
 
+    /// What a workspace says about itself, its address included where it names none of its own:
+    /// an organisation on a hosting machine (`<dir>/orgs/<org>`) is at the machine's address,
+    /// under its own name. Never the address a request says it was sent to: a sign-in link built
+    /// from that goes wherever whoever asked for it says.
+    pub fn for_workspace(root: &Path) -> Site {
+        let mut site = Site::load(root);
+        if site.url.is_empty() {
+            let org = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            if let Some(hosting) = root.parent().filter(|p| p.file_name().is_some_and(|n| n == "orgs")).and_then(Path::parent) {
+                let machine = Site::load(hosting).url;
+                if !machine.is_empty() {
+                    site.url = format!("{}/{org}", machine.trim_end_matches('/'));
+                }
+            }
+        }
+        site
+    }
+
+    /// An address on this site: `path` as a browser asks for it here, mount and all, under the
+    /// address the workspace names. Where that address carries the path's beginning already (an
+    /// organisation's `https://app.zetlyn.com/zetlyn`, a page under `/zetlyn/…`), it is said once.
+    /// Empty where the workspace names no address.
+    pub fn link(&self, path: &str) -> String {
+        let url = self.url.trim().trim_end_matches('/');
+        if url.is_empty() {
+            return String::new();
+        }
+        let host_from = url.find("://").map(|i| i + 3).unwrap_or(0);
+        let (origin, own) = match url[host_from..].find('/') {
+            Some(i) => url.split_at(host_from + i),
+            None => (url, ""),
+        };
+        if !own.is_empty() && (path == own || path.starts_with(&format!("{own}/")) || path.starts_with(&format!("{own}?"))) {
+            format!("{origin}{path}")
+        } else {
+            format!("{url}{path}")
+        }
+    }
+
     /// Hands the mailer the message on its standard input. Where none is named, the link goes to
     /// the operator's own terminal and the page says where to look.
     pub fn send(&self, to: &str, subject: &str, body: &str) -> Result<bool, String> {
@@ -634,5 +673,48 @@ impl Accounts {
             .query_row("select account from proposal where source = ?1 and file = ?2", rusqlite::params![source, file], |r| r.get(0))
             .ok()?;
         self.read("select id, email, state, paid_until, scopes, curator from account where id = ?1", &id.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(url: &str) -> Site {
+        Site { url: url.into(), ..Site::default() }
+    }
+
+    #[test]
+    fn a_path_the_address_already_carries_is_said_once() {
+        // An organisation whose own address names its path, and a tracker mounted under it.
+        let org = at("https://app.zetlyn.com/zetlyn");
+        assert_eq!(org.link("/zetlyn/t/cve/signin/abc"), "https://app.zetlyn.com/zetlyn/t/cve/signin/abc");
+        assert_eq!(org.link("/zetlyn"), "https://app.zetlyn.com/zetlyn");
+        assert_eq!(org.link("/proposals/prices"), "https://app.zetlyn.com/zetlyn/proposals/prices", "a path inside it, not mounted");
+        assert_eq!(org.link("/zetlynx/t/a"), "https://app.zetlyn.com/zetlyn/zetlynx/t/a", "a longer name is another name");
+        let trailing = at("https://app.zetlyn.com/zetlyn/");
+        assert_eq!(trailing.link("/zetlyn/t/cve/"), "https://app.zetlyn.com/zetlyn/t/cve/");
+        // A machine, or a workspace standing alone, with no path of its own.
+        assert_eq!(at("https://app.zetlyn.com").link("/zetlyn/t/cve/"), "https://app.zetlyn.com/zetlyn/t/cve/");
+        assert_eq!(at("http://127.0.0.1:4747/").link("/t/cve/"), "http://127.0.0.1:4747/t/cve/");
+        assert_eq!(at("").link("/t/cve/"), "");
+    }
+
+    #[test]
+    fn an_organisation_with_no_address_is_at_the_machines_under_its_name() {
+        let dir = std::env::temp_dir().join(format!("zetlyn-site-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let org = dir.join("orgs/acme");
+        std::fs::create_dir_all(&org).unwrap();
+        assert_eq!(Site::for_workspace(&org).url, "");
+        std::fs::write(dir.join(WORKSPACE), "url: https://app.example.org/\n").unwrap();
+        let site = Site::for_workspace(&org);
+        assert_eq!(site.url, "https://app.example.org/acme");
+        assert_eq!(site.link("/acme/t/prices/signin/x"), "https://app.example.org/acme/t/prices/signin/x");
+        // Not an organisation: a workspace that names nothing has no address.
+        assert_eq!(Site::for_workspace(&dir.join("orgs")).url, "");
+        std::fs::write(org.join(WORKSPACE), "url: https://acme.example.org\n").unwrap();
+        assert_eq!(Site::for_workspace(&org).url, "https://acme.example.org");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

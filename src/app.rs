@@ -2859,14 +2859,8 @@ fn hosting_serve(args: &[String]) -> Result<(), String> {
             hosting_root(request, &dir, &accounts, &parts[1..]);
             continue;
         }
-        // An address the machine answered before it shared its name (a sign-in link already sent,
-        // a bookmark): the same thing, where it is now. Anything else is nothing here.
         serve::mount("");
-        if matches!(first.as_str(), "" | "signin" | "signout" | "style.css") {
-            redirect(request, &format!("/{APP_PREFIX}{}", if path == "/" { "/" } else { url.as_str() }));
-        } else {
-            respond(request, 404, "text/html; charset=utf-8", &page("Not here", html! { h1 { "Not here" } p { a href={"/" (APP_PREFIX) "/"} { "Every tracker on this machine" } } }));
-        }
+        respond(request, 404, "text/html; charset=utf-8", &page("Not here", html! { h1 { "Not here" } p { a href={"/" (APP_PREFIX) "/"} { "Every tracker on this machine" } } }));
     }
     Ok(())
 }

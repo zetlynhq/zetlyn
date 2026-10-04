@@ -3060,10 +3060,14 @@ fn hosting_serve(args: &[String]) -> Result<(), String> {
         if org_name(&first) && dir.join("orgs").join(&first).is_dir() {
             // A world with a domain of its own is there: a page asked for here goes to it.
             let own = crate::account::Site::load(&dir.join("orgs").join(&first)).domain.trim().to_lowercase();
-            if !own.is_empty() && matches!(request.method(), tiny_http::Method::Get | tiny_http::Method::Head) {
+            // Not its sign-in, which a world that knew it here before still asks for here; not the
+            // machine's own name, which is no domain of its own. And for now, not for good: a
+            // domain can be given up, and a browser keeps a permanent answer past that.
+            let signing = matches!(parts.get(1).map(String::as_str), Some("oauth" | ".well-known"));
+            if !own.is_empty() && own != machine_host && !signing && matches!(request.method(), tiny_http::Method::Get | tiny_http::Method::Head) {
                 let rest = url.strip_prefix(&format!("/{first}")).unwrap_or("/");
                 let rest = if rest.is_empty() { "/" } else { rest };
-                let mut response = tiny_http::Response::from_string("").with_status_code(301);
+                let mut response = tiny_http::Response::from_string("").with_status_code(302);
                 if let Ok(h) = tiny_http::Header::from_bytes(&b"Location"[..], format!("https://{own}{rest}").as_bytes()) {
                     response = response.with_header(h);
                 }
@@ -3319,7 +3323,15 @@ pub(crate) fn publish_root(root: &Path, org: &str, answers: impl FnOnce(&str) ->
     let place = crate::place::at(&to.place_for(&root))?;
     let mut published: BTreeSet<String> = BTreeSet::new();
     let mut moved = 0;
+    // A private tracker is for the readers it names, and is not put where anybody can fetch it;
+    // nor is a source only private trackers hold.
+    let trackers: Vec<(PathBuf, TrackerDecl)> = crate::tracker::scope_registry(&root.join("trackers")).into_values().filter_map(|t| TrackerDecl::load(&t).ok().map(|d| (t, d))).collect();
+    let in_public: BTreeSet<String> = trackers.iter().filter(|(_, d)| d.visibility != "private").flat_map(|(_, d)| d.members.iter().map(|m| m.dataset.clone())).collect();
+    let in_private: BTreeSet<String> = trackers.iter().filter(|(_, d)| d.visibility == "private").flat_map(|(_, d)| d.members.iter().map(|m| m.dataset.clone())).collect();
     for (name, sdir) in crate::tracker::registry(&root.join("sources")) {
+        if in_private.contains(&name) && !in_public.contains(&name) {
+            continue;
+        }
         let Ok(ds) = Source::open(&sdir) else { continue };
         // What arrived built belongs to whoever built it.
         if matches!(ds.decl.source, crate::sourcedecl::Fetch::Hub { .. } | crate::sourcedecl::Fetch::Package { .. }) {
@@ -3344,9 +3356,8 @@ pub(crate) fn publish_root(root: &Path, org: &str, answers: impl FnOnce(&str) ->
             Err(e) => eprintln!("{org}: {name}: {e}"),
         }
     }
-    for tdir in crate::tracker::scope_registry(&root.join("trackers")).values() {
-        let Ok(decl) = TrackerDecl::load(tdir) else { continue };
-        if decl.package.is_some() {
+    for (tdir, decl) in &trackers {
+        if decl.package.is_some() || decl.visibility == "private" {
             continue;
         }
         let text = std::fs::read_to_string(tdir.join(crate::trackerdecl::FILE)).unwrap_or_default();
@@ -3564,7 +3575,7 @@ mod tests {
         assert_eq!(serde_json::from_slice::<serde_json::Value>(&doc).unwrap()["world"], "https://acme.example");
         // Under the machine's name, it sends everybody to its own.
         let (status, head, _) = raw(port, "GET", &host, "/acme/t/x/?q=1", None);
-        assert_eq!(status, 301);
+        assert_eq!(status, 302);
         assert!(head.contains("Location: https://acme.example/t/x/?q=1"), "{head}");
         // A name nobody here said is theirs is nothing, and no certificate is taken for it.
         assert_eq!(raw(port, "GET", "elsewhere.example", "/", None).0, 421);

@@ -141,6 +141,9 @@ pub fn check(claims: &J, issuer: &str, audience: &str, nonce: Option<&str>, now:
     if claims["iat"].as_i64().is_some_and(|iat| iat > now + 60) {
         return Err("issued in the future".into());
     }
+    if claims["nbf"].as_i64().is_some_and(|nbf| nbf > now + 60) {
+        return Err("not good yet".into());
+    }
     if let Some(n) = nonce {
         if claims["nonce"].as_str() != Some(n) {
             return Err("not in answer to this sign-in".into());

@@ -68,6 +68,15 @@ const REFUSED: &[&str] = &[
     "account",
     "proposals",
     "propose",
+    // The site's other pages, and the names it used to have.
+    "hosting",
+    "hub-about",
+    "install",
+    "404",
+    "scopes",
+    "datasets",
+    "impressum",
+    "datenschutz",
     // A publisher named after a body it is not.
     "cve",
     "nvd",

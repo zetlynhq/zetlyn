@@ -235,6 +235,12 @@ zetlyn
   zetlyn world serve <workspace> | export <workspace> --to <file> | backup <workspace> <dir> | upgrade
       One world at the root of its domain, run by the `owners:` its workspace.yaml names; all of
       it in one archive; that archive kept daily; the next release, where there is one.
+  zetlyn world import <file> --to <dir> [--url …] [--owner …] | move <workspace> --to <address> | --back
+  zetlyn world register <workspace> [--at <directory>]
+      An archive made a world again; saying where it went, or that it did not; being listed.
+
+  zetlyn hosting serve <dir> | org <dir> <name> | member <dir> <org> <email> [--role owner|editor|reader]
+      Many worlds on one machine, each at /<org> or a domain of its own, signed in to once at /app/.
 ";
 
 fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {

@@ -110,10 +110,10 @@ zetlyn tracker subscribe zetlyn/cve          # and its sources
 zetlyn source pull sources/cve-kev
 ```
 
-A reference names a host or it does not, and one that does not means `hub.zetlyn.com`. That is the
+A reference names a host or it does not, and one that does not means `zetlyn.com`. That is the
 whole of the default: `--from` and `--to` are for the other cases. It carries these, and serves two
 of the trackers it carries so you can see what one answers before subscribing:
-<https://hub.zetlyn.com/zetlyn/cve> and <https://hub.zetlyn.com/zetlyn/local-models>.
+<https://zetlyn.com/zetlyn/t/cve/> and <https://zetlyn.com/zetlyn/t/local-models/>.
 
 A hub is a directory layout over HTTPS and nothing more. A folder, a mounted drive, an S3 bucket
 or a web server is one:
@@ -122,7 +122,7 @@ or a web server is one:
 zetlyn source publish sources/prices --to /Volumes/share/hub
 zetlyn source publish sources/prices --to s3://my-bucket/hub
 zetlyn source publish sources/prices --to https://hub.example.com
-zetlyn source publish sources/prices                          # hub.zetlyn.com
+zetlyn source publish sources/prices                          # zetlyn.com
 ```
 
 Only the last two need anybody's permission, because they are the only ones where a name is

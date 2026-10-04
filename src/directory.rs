@@ -85,6 +85,7 @@ pub fn refresh(root: &Path) -> Result<(usize, usize, usize), String> {
     if !root.join(DB).exists() {
         return Ok((0, 0, 0));
     }
+    let loopback_ok = crate::outbound::on_loopback(&crate::account::Site::load(root).url);
     let db = open(root)?;
     let due: Vec<(String, String, Option<i64>)> = {
         let mut stmt = db.prepare("select url, key, failing_since from world where read_at < ?1").map_err(|e| e.to_string())?;
@@ -95,10 +96,12 @@ pub fn refresh(root: &Path) -> Result<(usize, usize, usize), String> {
     for (url, key, failing) in due {
         let now = crate::now();
         match crate::world::fetch(&url) {
-            Ok(Some(doc)) if doc["key"].as_str() == Some(key.as_str()) => {
+            // Signed by the key it was listed with, and saying it is the world at this address.
+            Ok(Some(doc)) if doc["key"].as_str() == Some(key.as_str()) && same(&doc, &url) => {
                 if let Some(to) = doc["moved_to"].as_str().filter(|m| !m.is_empty()).map(|m| m.trim_end_matches('/').to_string()) {
-                    match crate::world::fetch(&to) {
-                        Ok(Some(there)) if there["key"].as_str() == Some(key.as_str()) => {
+                    let there = if crate::outbound::allowed(&to, loopback_ok).is_ok() { crate::world::fetch(&to) } else { Ok(None) };
+                    match there {
+                        Ok(Some(there)) if there["key"].as_str() == Some(key.as_str()) && same(&there, &to) && there["moved_to"].as_str().map_or(true, str::is_empty) => {
                             let _ = db.execute("delete from world where url = ?1", rusqlite::params![url]);
                             let _ = db.execute(
                                 "insert or replace into world(url, key, doc, registered, read_at, failing_since) values(?1,?2,?3,?4,?5,null)",
@@ -106,8 +109,15 @@ pub fn refresh(root: &Path) -> Result<(usize, usize, usize), String> {
                             );
                             moved += 1;
                         }
+                        // Gone somewhere that is not it: as good as not answering, and let go in time.
                         _ => {
-                            let _ = db.execute("update world set read_at = ?2 where url = ?1", rusqlite::params![url, now]);
+                            let since = failing.unwrap_or(now);
+                            if now - since > GONE_AFTER {
+                                let _ = db.execute("delete from world where url = ?1", rusqlite::params![url]);
+                                gone += 1;
+                            } else {
+                                let _ = db.execute("update world set read_at = ?2, failing_since = ?3 where url = ?1", rusqlite::params![url, now, since]);
+                            }
                         }
                     }
                 } else {
@@ -128,6 +138,11 @@ pub fn refresh(root: &Path) -> Result<(usize, usize, usize), String> {
         }
     }
     Ok((read, moved, gone))
+}
+
+/// A world's document says it is the world at this address.
+fn same(doc: &serde_json::Value, url: &str) -> bool {
+    doc["world"].as_str().map(|w| w.trim_end_matches('/')) == Some(url.trim_end_matches('/'))
 }
 
 /// The worlds it holds, those that answer first and then by title; with `q`, only those whose

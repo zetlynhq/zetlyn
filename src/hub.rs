@@ -54,6 +54,20 @@ const REFUSED: &[&str] = &[
     "tags",
     "owners",
     "index",
+    // The paths of zetlyn.com itself, where the hub, the website and every hosted organisation share
+    // one name: an organisation called one of these would be a page of the site, or the machine.
+    "app",
+    "docs",
+    "legal",
+    "privacy",
+    "directory",
+    "packages",
+    "examples",
+    "signin",
+    "signout",
+    "account",
+    "proposals",
+    "propose",
     // A publisher named after a body it is not.
     "cve",
     "nvd",
@@ -346,4 +360,21 @@ pub fn serve(dir: &Path, addr: &str, serving: &[String]) -> Result<(), String> {
 fn is_page(path: &str) -> bool {
     let parts: Vec<&str> = path.trim_end_matches('/').split('/').collect();
     parts.len() == 3 && matches!(parts[0], "sources" | "trackers" | "packages") && parts.iter().all(|p| !p.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::why_not;
+
+    #[test]
+    fn a_path_of_zetlyn_com_is_nobodys_name() {
+        // The site, the hub's roots and the machine share one name with every organisation.
+        for taken in ["app", "hub", "docs", "api", "trackers", "sources", "packages", "examples", "legal", "privacy", "directory", "signin", "signout", "account"] {
+            assert_eq!(why_not(taken).as_deref(), Some("reserved"), "{taken}");
+        }
+        assert!(why_not("zetlyn").is_some() && why_not("zetlyn-labs").is_some());
+        for free in ["acme", "car-prices", "app-store", "docs2"] {
+            assert_eq!(why_not(free), None, "{free}");
+        }
+    }
 }

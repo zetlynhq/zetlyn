@@ -1098,7 +1098,7 @@ pub fn page_name(url: &str) -> String {
 mod page_names {
     #[test]
     fn a_page_is_named_by_what_its_address_says() {
-        assert_eq!(super::page_name("https://hub.zetlyn.com/examples/lindenhof/"), "lindenhof");
+        assert_eq!(super::page_name("https://zetlyn.com/examples/lindenhof/"), "lindenhof");
         assert_eq!(super::page_name("https://store.steampowered.com/search/?tags=492"), "steampowered");
         assert_eq!(super::page_name("http://127.0.0.1:4791/examples/lindenhof/"), "lindenhof");
         assert_eq!(super::page_name("http://127.0.0.1:4791/"), "site");

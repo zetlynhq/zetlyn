@@ -408,7 +408,7 @@ pub struct Site {
     #[serde(default)]
     pub update: crate::autoupdate::Config,
     /// Where what this workspace reads is published after an update moved it, and its hub's pages
-    /// written again: `publish: { to: s3://bucket/prefix, app: https://app.zetlyn.com }`.
+    /// written again: `publish: { to: s3://bucket/prefix, app: https://zetlyn.com }`.
     #[serde(default)]
     pub publish: Option<Publish>,
 }
@@ -498,7 +498,7 @@ impl Site {
 
     /// An address on this site: `path` as a browser asks for it here, mount and all, under the
     /// address the workspace names. Where that address carries the path's beginning already (an
-    /// organisation's `https://app.zetlyn.com/zetlyn`, a page under `/zetlyn/…`), it is said once.
+    /// organisation's `https://zetlyn.com/zetlyn`, a page under `/zetlyn/…`), it is said once.
     /// Empty where the workspace names no address.
     pub fn link(&self, path: &str) -> String {
         let url = self.url.trim().trim_end_matches('/');
@@ -687,15 +687,15 @@ mod tests {
     #[test]
     fn a_path_the_address_already_carries_is_said_once() {
         // An organisation whose own address names its path, and a tracker mounted under it.
-        let org = at("https://app.zetlyn.com/zetlyn");
-        assert_eq!(org.link("/zetlyn/t/cve/signin/abc"), "https://app.zetlyn.com/zetlyn/t/cve/signin/abc");
-        assert_eq!(org.link("/zetlyn"), "https://app.zetlyn.com/zetlyn");
-        assert_eq!(org.link("/proposals/prices"), "https://app.zetlyn.com/zetlyn/proposals/prices", "a path inside it, not mounted");
-        assert_eq!(org.link("/zetlynx/t/a"), "https://app.zetlyn.com/zetlyn/zetlynx/t/a", "a longer name is another name");
-        let trailing = at("https://app.zetlyn.com/zetlyn/");
-        assert_eq!(trailing.link("/zetlyn/t/cve/"), "https://app.zetlyn.com/zetlyn/t/cve/");
+        let org = at("https://zetlyn.com/zetlyn");
+        assert_eq!(org.link("/zetlyn/t/cve/signin/abc"), "https://zetlyn.com/zetlyn/t/cve/signin/abc");
+        assert_eq!(org.link("/zetlyn"), "https://zetlyn.com/zetlyn");
+        assert_eq!(org.link("/proposals/prices"), "https://zetlyn.com/zetlyn/proposals/prices", "a path inside it, not mounted");
+        assert_eq!(org.link("/zetlynx/t/a"), "https://zetlyn.com/zetlyn/zetlynx/t/a", "a longer name is another name");
+        let trailing = at("https://zetlyn.com/zetlyn/");
+        assert_eq!(trailing.link("/zetlyn/t/cve/"), "https://zetlyn.com/zetlyn/t/cve/");
         // A machine, or a workspace standing alone, with no path of its own.
-        assert_eq!(at("https://app.zetlyn.com").link("/zetlyn/t/cve/"), "https://app.zetlyn.com/zetlyn/t/cve/");
+        assert_eq!(at("https://zetlyn.com").link("/zetlyn/t/cve/"), "https://zetlyn.com/zetlyn/t/cve/");
         assert_eq!(at("http://127.0.0.1:4747/").link("/t/cve/"), "http://127.0.0.1:4747/t/cve/");
         assert_eq!(at("").link("/t/cve/"), "");
     }

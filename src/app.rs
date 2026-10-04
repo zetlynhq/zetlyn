@@ -25,12 +25,12 @@ use crate::trackerdecl::TrackerDecl;
 /// and the docs begin with (see `examples.rs`); Lindenhof's page changes every two minutes.
 const EXAMPLE: [(&str, &str, &str); 2] = [
     (
-        "https://hub.zetlyn.com/examples/leafline-books.csv",
+        "https://zetlyn.com/examples/leafline-books.csv",
         "Leafline Books",
         "What Leafline Books charges for a book, and whether it has it.",
     ),
     (
-        "https://hub.zetlyn.com/examples/lindenhof/",
+        "https://zetlyn.com/examples/lindenhof/",
         "Bücherstube Lindenhof",
         "What Bücherstube Lindenhof charges for a book, and whether it has it.",
     ),
@@ -493,9 +493,9 @@ impl App {
         self.who = signed_in;
         let post = request.method() == &tiny_http::Method::Post;
         let html_kind = "text/html; charset=utf-8";
-        // One sign-in for every workspace on the machine: it is at the root, not here.
+        // One sign-in for every workspace on the machine: the machine's, under /app/, not here.
         if h.shared && parts.first().is_some_and(|p| p == "signin" || p == "signout") {
-            redirect(request, "/signin");
+            redirect(request, "/app/signin");
             return None;
         }
         match parts.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
@@ -632,7 +632,7 @@ impl App {
         };
         serve::frame_home("Your trackers", &home, nav);
         serve::frame_hosted(None, None);
-        // On app.zetlyn.com an organisation's pages wear the website's header and footer, under
+        // On zetlyn.com an organisation's pages wear the website's header and footer, under
         // the machine they are part of, with who is signed in at the right.
         if self.hosted.as_ref().is_some_and(|h| h.shared) {
             let title = crate::account::Site::load(&self.root).title;
@@ -666,7 +666,7 @@ impl App {
             serve::frame_site("App");
             serve::frame_home(&title, &home, links);
             serve::frame_current(current);
-            serve::frame_hosted(Some(("App".into(), "/".into())), Some(self.who.clone()));
+            serve::frame_hosted(Some(("App".into(), "/app/".into())), Some(self.who.clone()));
             serve::frame_area("app", Some(title.clone()), self.orgs_of_who.clone());
             serve::frame_side(if self.visitor { "Public trackers" } else { "" });
         } else {
@@ -1262,7 +1262,7 @@ impl App {
                         }
                     } @else if self.hosted.is_none() {
                         h2 { "On a hub" }
-                        p.dim { "Sealed, it travels as one file on hub.zetlyn.com: everything it answers with, every claim and its history, and not how it was made. Which source is read where, their own field names, the mappings and the receipts stay here. Signed with this machine's key (" code { "zetlyn id" } ")." }
+                        p.dim { "Sealed, it travels as one file on the hub at zetlyn.com: everything it answers with, every claim and its history, and not how it was made. Which source is read where, their own field names, the mappings and the receipts stay here. Signed with this machine's key (" code { "zetlyn id" } ")." }
                         form #publish-sealed data-job=(serve::at(&format!("/publish-hub-sealed/{tracker}"))) {
                             button.primary type="submit" disabled[public && !blocked.is_empty()] { "Publish sealed" }
                         }
@@ -2713,6 +2713,13 @@ pub fn hosting(args: &[String]) -> Result<(), String> {
                 return Err(format!("{name}: an organisation's name is lower case letters, digits and hyphens"));
             }
             let root = dir.join("orgs").join(&name);
+            // One name for the site, the hub and every organisation: a name the hub refuses, or a
+            // path of the site, is refused here too. One already made stays reachable.
+            if !root.is_dir() {
+                if let Some(why) = crate::hub::why_not(&name) {
+                    return Err(format!("{name}: {why}"));
+                }
+            }
             for d in ["sources", "trackers"] {
                 std::fs::create_dir_all(root.join(d)).map_err(|e| format!("{}: {e}", root.display()))?;
             }
@@ -2845,11 +2852,27 @@ fn hosting_serve(args: &[String]) -> Result<(), String> {
             app.answer(request);
             continue;
         }
+        // The machine's own pages are under `/app/`: the site, the hub and every organisation share
+        // one name, and the site has `/` and `/style.css`.
+        if first == APP_PREFIX {
+            serve::mount(&format!("/{APP_PREFIX}"));
+            hosting_root(request, &dir, &accounts, &parts[1..]);
+            continue;
+        }
+        // An address the machine answered before it shared its name (a sign-in link already sent,
+        // a bookmark): the same thing, where it is now. Anything else is nothing here.
         serve::mount("");
-        hosting_root(request, &dir, &accounts, &parts);
+        if matches!(first.as_str(), "" | "signin" | "signout" | "style.css") {
+            redirect(request, &format!("/{APP_PREFIX}{}", if path == "/" { "/" } else { url.as_str() }));
+        } else {
+            respond(request, 404, "text/html; charset=utf-8", &page("Not here", html! { h1 { "Not here" } p { a href={"/" (APP_PREFIX) "/"} { "Every tracker on this machine" } } }));
+        }
     }
     Ok(())
 }
+
+/// Where the machine's own pages are, on a name it shares with the site and the hub.
+const APP_PREFIX: &str = "app";
 
 /// The machine's own pages: what anybody can read here, signing in, and your organisations.
 fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::account::Accounts, parts: &[String]) {
@@ -2862,7 +2885,7 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
     // The app's own frame: its sidebar lists what anybody may read here, and where whoever is
     // signed in belongs.
     serve::frame_site("App");
-    serve::frame_home("App", "/", public_links(dir));
+    serve::frame_home("App", &serve::at("/"), public_links(dir));
     serve::frame_current(None);
     serve::frame_hosted(None, Some(who.as_ref().map(|a| a.email.clone())));
     serve::frame_area("app", None, who.as_ref().map(|a| orgs_links(dir, &a.email)).unwrap_or_default());
@@ -2893,10 +2916,10 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                         table { tbody {
                             @for (org, role) in &mine { tr { td { a href={"/" (org) "/"} { strong { (org) } } } td.dim { (role) } } }
                         } }
-                        form.bar method="post" action="/signout" { span.dim { "Signed in as " (a.email) } button type="submit" { "Sign out" } }
+                        form.bar method="post" action=(serve::at("/signout")) { span.dim { "Signed in as " (a.email) } button type="submit" { "Sign out" } }
                     }
                     None => {
-                        p { a href="/signin" { "Sign in" } " to run your organisation's trackers." }
+                        p { a href=(serve::at("/signin")) { "Sign in" } " to run your organisation's trackers." }
                     }
                 }
             }));
@@ -2909,7 +2932,7 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
             if !membership.orgs_of(&email).is_empty() {
                 let sent = accounts.ensure(&email).and_then(|a| accounts.new_link(a.id)).and_then(|raw| {
                     let site = crate::account::Site::load(dir);
-                    let link = format!("{}/signin/{raw}", site.url.trim_end_matches('/'));
+                    let link = site.link(&serve::at(&format!("/signin/{raw}")));
                     site.send(&email, "Your Zetlyn sign-in link", &format!("{link}\n\nGood for a quarter of an hour, and once."))
                 });
                 if let Err(e) = sent {
@@ -2921,7 +2944,7 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
         ["signin"] => respond(request, 200, html_kind, &page("Sign in", html! {
             h1 { "Sign in" }
             p.about { "With a link sent to your address. No password." }
-            form.bar method="post" action="/signin" {
+            form.bar method="post" action=(serve::at("/signin")) {
                 input.wide type="email" name="email" placeholder="you@example.org" required;
                 button.primary type="submit" { "Send me a link" }
             }
@@ -2930,28 +2953,28 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
             Some(session) => {
                 let cookie = format!("zs={session}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000");
                 let mut response = tiny_http::Response::from_string("").with_status_code(303);
-                for (k, v) in [("Location", "/".to_string()), ("Set-Cookie", cookie)] {
+                for (k, v) in [("Location", serve::at("/")), ("Set-Cookie", cookie)] {
                     if let Ok(h) = tiny_http::Header::from_bytes(k.as_bytes(), v.as_bytes()) {
                         response = response.with_header(h);
                     }
                 }
                 let _ = request.respond(response);
             }
-            None => respond(request, 410, html_kind, &page("Sign in", html! { h1 { "That link is spent" } p { a href="/signin" { "Ask for another" } } })),
+            None => respond(request, 410, html_kind, &page("Sign in", html! { h1 { "That link is spent" } p { a href=(serve::at("/signin")) { "Ask for another" } } })),
         },
         ["signout"] if post => {
             if let Some(s) = &session {
                 accounts.end_session(s);
             }
             let mut response = tiny_http::Response::from_string("").with_status_code(303);
-            for (k, v) in [("Location", "/"), ("Set-Cookie", "zs=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0")] {
+            for (k, v) in [("Location", serve::at("/")), ("Set-Cookie", "zs=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0".to_string())] {
                 if let Ok(h) = tiny_http::Header::from_bytes(k.as_bytes(), v.as_bytes()) {
                     response = response.with_header(h);
                 }
             }
             let _ = request.respond(response);
         }
-        _ => respond(request, 404, html_kind, &page("Not here", html! { h1 { "Not here" } p { a href="/" { "Every tracker on this machine" } } })),
+        _ => respond(request, 404, html_kind, &page("Not here", html! { h1 { "Not here" } p { a href=(serve::at("/")) { "Every tracker on this machine" } } })),
     }
 }
 
@@ -3050,4 +3073,23 @@ fn orgs_links(dir: &Path, email: &str) -> Vec<(String, String)> {
             (if t.is_empty() { org.clone() } else { t }, format!("/{org}/"))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn an_organisation_may_not_take_a_path_of_the_site_but_one_already_made_stays() {
+        let dir = std::env::temp_dir().join(format!("zetlyn-hosting-names-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let args = |name: &str| ["hosting", "org", dir.to_str().unwrap(), name].iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(super::hosting(&args("docs")).unwrap_err().contains("reserved"));
+        assert!(super::hosting(&args("app")).unwrap_err().contains("reserved"));
+        assert!(!dir.join("orgs/docs").exists());
+        super::hosting(&args("acme")).unwrap();
+        assert!(dir.join("orgs/acme/sources").is_dir());
+        // `zetlyn` was made before the list said so, and is not refused for being there.
+        std::fs::create_dir_all(dir.join("orgs/zetlyn")).unwrap();
+        super::hosting(&args("zetlyn")).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

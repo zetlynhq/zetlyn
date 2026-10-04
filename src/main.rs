@@ -202,7 +202,7 @@ zetlyn
   zetlyn source subscribe <reference> [--from <hub>] [--at <dir>] [--key ed25519:…]
   zetlyn source pull <dir>
       A hub is a folder, a mount, s3://bucket/prefix or an address. Named nowhere, it is
-      hub.zetlyn.com; a reference that carries a host means that host. What travels is the
+      zetlyn.com; a reference that carries a host means that host. What travels is the
       claims, so a subscriber needs none of the publisher's credentials.
 
   zetlyn run [<workspace>]

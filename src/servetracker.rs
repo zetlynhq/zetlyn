@@ -3068,7 +3068,7 @@ mod tests {
             assert_eq!(workspace_path(), path, "mounted at {mount:?}");
         }
         crate::serve::mount("");
-        let site = Site { url: "https://app.zetlyn.com".into(), ..Site::default() };
+        let site = Site { url: "https://zetlyn.com".into(), ..Site::default() };
         crate::serve::mount("/zetlyn/t/cve");
         assert_eq!(reader_cookie(&site, "abc", 60), "zr=abc; Path=/zetlyn; Max-Age=60; HttpOnly; SameSite=Lax; Secure");
         crate::serve::mount("");

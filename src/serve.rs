@@ -157,7 +157,7 @@ details.switcher > summary, details.org-switch > summary, details.dash-org > sum
 .switcher-panel b { display: block; font-size: 14px; }
 .switcher-panel span { display: block; font-size: 12.5px; color: var(--dim); margin-top: 2px; }
 
-/* app.zetlyn.com: software, not a page. A dark sidebar, and a light place to work beside it. */
+/* The app, at zetlyn.com/app/ and every organisation's pages: software, not a page. A dark sidebar, and a light place to work beside it. */
 body.dash { background: var(--panel); }
 .dash-grid { display: grid; grid-template-columns: 248px minmax(0, 1fr); min-height: 100vh; }
 .dash-side { background: #10171c; color: #d5dce0; display: flex; flex-direction: column; gap: 4px; padding: 16px 14px;
@@ -467,7 +467,7 @@ pub struct Frame {
     /// Who is signed in, at the right of the header, where somebody can be: `None` where nobody
     /// signs in (this machine's own app), `Some(None)` for a visitor, `Some(Some(email))` signed in.
     pub account: Option<Option<String>>,
-    /// Which of the three this page is part of: `app` on app.zetlyn.com, empty everywhere else.
+    /// Which of the three this page is part of: `app` for the hosted app on zetlyn.com, empty everywhere else.
     /// It names the logo, colours the page and says where the other two are.
     pub area: String,
     /// The organisation a page is in, and the others whoever is signed in belongs to.
@@ -512,8 +512,8 @@ pub fn frame_side(title: &str) {
 /// The three parts of Zetlyn, each a site of its own: what it is called beside the logo, where it is.
 pub const AREAS: &[(&str, &str, &str)] = &[
     ("site", "Zetlyn", "https://zetlyn.com/"),
-    ("hub", "Hub", "https://hub.zetlyn.com/"),
-    ("app", "App", "https://app.zetlyn.com/"),
+    ("hub", "Hub", "https://zetlyn.com/hub/"),
+    ("app", "App", "https://zetlyn.com/app/"),
 ];
 
 /// This page is part of `area`, in `org`, whose reader belongs to `orgs` too. In the app the mark
@@ -525,7 +525,7 @@ pub fn frame_area(area: &str, org: Option<String>, orgs: Vec<(String, String)>) 
         f.org = org;
         f.orgs = orgs;
         if area == "app" {
-            f.brand = Some("/".into());
+            f.brand = Some("/app/".into());
         }
     });
 }
@@ -545,15 +545,15 @@ pub fn frame_hosted(above: Option<(String, String)>, account: Option<Option<Stri
 }
 
 /// The website's header links and footer links, as zetlyn.com carries them (its `page.html` and
-/// the labels in its `PAGES`). Under the hub at hub.zetlyn.com the header and the footer are the
+/// the labels in its `PAGES`). Under the hub at zetlyn.com/hub/ the header and the footer are the
 /// website's, so a reader moving between them sees one site.
 pub const SITE_NAV: &[(&str, &str)] = &[
     ("Docs", "https://zetlyn.com/docs"),
     ("Trackers", "https://zetlyn.com/trackers"),
     ("Sources", "https://zetlyn.com/sources"),
     ("Interface", "https://zetlyn.com/api"),
-    ("Hub", "https://hub.zetlyn.com/"),
-    ("App", "https://app.zetlyn.com/"),
+    ("Hub", "https://zetlyn.com/hub/"),
+    ("App", "https://zetlyn.com/app/"),
 ];
 pub const SITE_FOOTER: &[(&str, &str)] = &[
     ("Contact", "mailto:hello@zetlyn.com"),
@@ -739,12 +739,12 @@ pub fn shell(title: &str, body: Markup) -> String {
                         }
                         @match &f.account {
                             Some(Some(email)) => {
-                                form.account method="post" action="/signout" {
+                                form.account method="post" action="/app/signout" {
                                     span.dim { (email) }
                                     button type="submit" { "Sign out" }
                                 }
                             }
-                            Some(None) => { a.account href="/signin" { "Sign in" } }
+                            Some(None) => { a.account href="/app/signin" { "Sign in" } }
                             None => {}
                         }
                         // The other two parts of Zetlyn, a click away from wherever one is.
@@ -806,7 +806,7 @@ pub fn shell(title: &str, body: Markup) -> String {
 }
 
 
-/// app.zetlyn.com: a dark sidebar with the switch, the organisation and its pages, and beside it a
+/// The hosted app: a dark sidebar with the switch, the organisation and its pages, and beside it a
 /// slim bar with where the reader is, the tabs of what they are in, and the work.
 fn dashboard(title: &str, body: Markup, f: &Frame, crumbs: &[(String, Option<String>)], brand_href: &str) -> String {
     let tab_on = |label: &String, href: &String| {
@@ -864,10 +864,10 @@ fn dashboard(title: &str, body: Markup, f: &Frame, crumbs: &[(String, Option<Str
                                 Some(Some(email)) => {
                                     div.dash-me {
                                         span.dash-email { (email) }
-                                        form method="post" action="/signout" { button type="submit" { "Sign out" } }
+                                        form method="post" action="/app/signout" { button type="submit" { "Sign out" } }
                                     }
                                 }
-                                _ => { a.dash-signin href="/signin" { "Sign in" } }
+                                _ => { a.dash-signin href="/app/signin" { "Sign in" } }
                             }
                             div.dash-small {
                                 a href="https://zetlyn.com/docs" { "Docs" }

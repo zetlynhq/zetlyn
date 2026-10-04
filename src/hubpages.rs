@@ -184,7 +184,7 @@ fn frame(place: &dyn Place, title: &str, description: &str, body: Markup) -> Str
             body.area-hub {
                 header.site-header.shell {
                     (crate::serve::switcher("hub"))
-                    a.brand href="/" aria-label="Zetlyn Hub" {
+                    a.brand href="/hub/" aria-label="Zetlyn Hub" {
                         @if has("mark.png") { img src="/mark.png" alt="" class="brand-mark"; }
                         span { "Zetlyn" } span.brand-area { "Hub" }
                     }
@@ -195,12 +195,12 @@ fn frame(place: &dyn Place, title: &str, description: &str, body: Markup) -> Str
                         div #hub-results hidden {}
                     }
                     nav {
-                        a href="/#trackers" { "Trackers" }
-                        a href="/#sources" { "Sources" }
-                        a href="/#publish" { "Publish" }
+                        a href="/hub/#trackers" { "Trackers" }
+                        a href="/hub/#sources" { "Sources" }
+                        a href="/hub/#publish" { "Publish" }
                         a href="https://zetlyn.com/docs" { "Docs" }
                         // Accounts are the app's: signing in here is signing in there.
-                        a.hub-signin href="https://app.zetlyn.com/signin" { "Sign in" }
+                        a.hub-signin href="/app/signin" { "Sign in" }
                     }
                 }
                 main { (body) }
@@ -324,7 +324,7 @@ pub fn catalog(place: &dyn Place, rows: &[Row], opens: Opens) -> String {
                         }
                     }
                 }
-                p.hub-none #hub-none hidden { "Nothing here matches. " a href="/" { "Show everything" } }
+                p.hub-none #hub-none hidden { "Nothing here matches. " a href="/hub/" { "Show everything" } }
             }
         }
         @if let Some(about) = about { (PreEscaped(about)) }
@@ -345,7 +345,7 @@ fn take(command: &str, note: &str) -> Markup {
 fn crumbs(r: &Row) -> Markup {
     html! {
         p.overline.hub-crumbs {
-            a href="/" { "THE HUB" } " · "
+            a href="/hub/" { "THE HUB" } " · "
             (kind_of(r).to_uppercase())
             " · " (badge(r).to_uppercase())
         }

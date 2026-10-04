@@ -168,6 +168,28 @@ An example that returns nothing, a column naming a property no claim carries, an
 source has, a promise that no longer holds. None of it is wrong until somebody reads it, which is
 why an update never catches it.
 
+## A world of your own
+
+Your sources, your trackers and your readers, on a domain of yours, with nobody else's server in
+between. On an empty Ubuntu machine, as root, with the domain pointing at it:
+
+```
+curl -fsSL https://zetlyn.com/install.sh | ZETLYN_BIN=/usr/local/bin sh
+SMTP_PASSWORD=… zetlyn world up prices.example --owner you@example.org \
+    --smtp smtp.example.org:587 --smtp-user you@example.org --mail-from "Prices <noreply@prices.example>"
+```
+
+That makes a system user, the workspace at `https://prices.example` with you as its owner, Caddy
+with a certificate in front of it, and three units: the world, a daily backup of all of it into
+`/srv/zetlyn/backups` (`zetlyn world export`, one archive, each database as one moment of itself),
+and a daily look for the next release (`zetlyn world upgrade`), which installs it only when it is
+newer and its checksum holds. Run it again and it changes only what is missing; `--dry-run` says
+what it would do. Without `--smtp` the sign-in links are written to the world's log
+(`journalctl -u zetlyn-world`) until a mailer is named in its `workspace.yaml`.
+
+With Docker instead: `DOMAIN=prices.example OWNER=you@example.org docker compose -f
+deploy/world/compose.yaml up -d`.
+
 ## Letting somebody else run it
 
 A workspace can answer for itself, so that whoever keeps it current does not have to be at its

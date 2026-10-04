@@ -2563,6 +2563,60 @@ impl Hosted {
     }
 }
 
+/// `zetlyn world serve <workspace> [--addr 127.0.0.1:2500]`: one world on a domain of its own, at
+/// its root (FEDERATION.md, M11). Its owners, `owners:` in its workspace.yaml, sign in by a link to
+/// their address and run it; everybody else reads what it publishes. Kept current and published on
+/// its own clock, as `zetlyn run` would.
+pub fn world_serve(args: &[String]) -> Result<(), String> {
+    let root = crate::positional(args, 2).first().map(|s| PathBuf::from(s.as_str())).ok_or("which workspace?")?;
+    let addr = crate::flag(args, "--addr").unwrap_or("127.0.0.1:2500").to_string();
+    let owners = crate::account::Site::load(&root).owners;
+    if owners.is_empty() {
+        return Err(format!("{}: its workspace.yaml names no `owners:`, so nobody could sign in to run it", root.display()));
+    }
+    let server = tiny_http::Server::http(&addr).map_err(|e| e.to_string())?;
+    println!("{} on http://{addr}/, run by {}", root.display(), owners.join(", "));
+    {
+        let root = root.clone();
+        std::thread::spawn(move || loop {
+            let soonest = crate::schedule_pass(&root, true, &crate::Limits::default());
+            // A world's trackers open where it serves them, at its root.
+            if let Err(e) = publish_root(&root, "world", |app| {
+                crate::tracker::scope_registry(&root.join("trackers"))
+                    .into_iter()
+                    .filter_map(|(name, path)| Some((name, format!("{app}/t/{}/", path.file_name()?.to_string_lossy()))))
+                    .collect()
+            }) {
+                eprintln!("not published: {e}");
+            }
+            let wait = soonest.map(|s| (s - crate::now()).clamp(60, 900)).unwrap_or(900);
+            std::thread::sleep(std::time::Duration::from_secs(wait as u64));
+        });
+    }
+    let accounts = crate::account::Accounts::open(&root)?;
+    let mut app = App {
+        root,
+        addr,
+        sites: BTreeMap::new(),
+        jobs: Arc::new(Mutex::new(Jobs::default())),
+        base: String::new(),
+        hosted: Some(Hosted { members: owners, accounts, shared: false }),
+        visitor: false,
+        who: None,
+        orgs_of_who: Vec::new(),
+        public_of_machine: Vec::new(),
+    };
+    for request in server.incoming_requests() {
+        // Who runs it is read afresh each time: an owner added a minute ago is one now.
+        if let Some(h) = app.hosted.as_mut() {
+            h.members = crate::account::Site::load(&app.root).owners;
+        }
+        serve::mount("");
+        app.answer(request);
+    }
+    Ok(())
+}
+
 /// `zetlyn host <workspace> --name <name> --billing <dir> [--addr 127.0.0.1:2300]`: one person's
 /// workspace, served under `/<name>`, updated on its plan's terms. The same program as on their
 /// own machine; what is added is that the owner signs in, visitors read, and the plan decides how
@@ -2977,6 +3031,24 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
 /// its sources was, or its statement is not the one it published.
 fn publish_moved(dir: &Path, org: &str) -> Result<usize, String> {
     let root = dir.join("orgs").join(org);
+    // Every tracker on the machine opens where it answers: its organisation, in the app.
+    publish_root(&root, org, |app| {
+        let mut answers: BTreeMap<String, String> = BTreeMap::new();
+        for o in orgs_in(dir) {
+            for (name, path) in crate::tracker::scope_registry(&dir.join("orgs").join(&o).join("trackers")) {
+                if let Some(d) = path.file_name() {
+                    answers.insert(name, format!("{app}/{o}/t/{}/", d.to_string_lossy()));
+                }
+            }
+        }
+        answers
+    })
+}
+
+/// One workspace's pass of publishing, and the hub's pages written again when anything moved.
+/// `answers`, given the address trackers open under (`publish.app`), says where each one does.
+pub(crate) fn publish_root(root: &Path, org: &str, answers: impl FnOnce(&str) -> BTreeMap<String, String>) -> Result<usize, String> {
+    let root = root.to_path_buf();
     let Some(to) = crate::account::Site::load(&root).publish else { return Ok(0) };
     let place = crate::place::at(&to.to)?;
     let mut published: BTreeSet<String> = BTreeSet::new();
@@ -3027,17 +3099,7 @@ fn publish_moved(dir: &Path, org: &str) -> Result<usize, String> {
         }
     }
     if moved > 0 {
-        // Every tracker on the machine opens where it answers: its organisation, in the app.
-        let mut answers: BTreeMap<String, String> = BTreeMap::new();
-        if !to.app.is_empty() {
-            for o in orgs_in(dir) {
-                for (name, path) in crate::tracker::scope_registry(&dir.join("orgs").join(&o).join("trackers")) {
-                    if let Some(d) = path.file_name() {
-                        answers.insert(name, format!("{}/{o}/t/{}/", to.app.trim_end_matches('/'), d.to_string_lossy()));
-                    }
-                }
-            }
-        }
+        let answers = if to.app.is_empty() { BTreeMap::new() } else { answers(to.app.trim_end_matches('/')) };
         let opens = |r: &crate::hubpages::Row| answers.get(&r.reference()).cloned();
         let n = crate::hubpages::render(place.as_ref(), &opens)?;
         println!("{org}: {n} pages in {}", place.describe());
@@ -3085,5 +3147,90 @@ mod tests {
         std::fs::create_dir_all(dir.join("orgs/zetlyn")).unwrap();
         super::hosting(&args("zetlyn")).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A free port on this machine, for a server a test starts.
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    }
+
+    fn ask(url: &str, cookie: Option<&str>, form: Option<&str>) -> (u16, String, Option<String>) {
+        let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).max_redirects(0).build().into();
+        let mut r = match form {
+            Some(body) => {
+                let mut q = agent.post(url).header("Content-Type", "application/x-www-form-urlencoded");
+                if let Some(c) = cookie {
+                    q = q.header("Cookie", c);
+                }
+                q.send(body).unwrap()
+            }
+            None => {
+                let mut q = agent.get(url);
+                if let Some(c) = cookie {
+                    q = q.header("Cookie", c);
+                }
+                q.call().unwrap()
+            }
+        };
+        let cookie = r.headers().get("set-cookie").map(|v| v.to_str().unwrap_or("").to_string());
+        (r.status().as_u16(), r.body_mut().read_to_string().unwrap_or_default(), cookie)
+    }
+
+    #[test]
+    fn a_world_on_its_own_domain_is_its_owners_to_run_and_everybody_elses_to_read() {
+        let root = std::env::temp_dir().join(format!("zetlyn-world-serve-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("sources")).unwrap();
+        std::fs::create_dir_all(root.join("trackers")).unwrap();
+        std::fs::write(root.join("workspace.yaml"), "title: Car prices\nurl: https://prices.example\nowners: [ann@example.org]\n").unwrap();
+        // Nobody named to run it is refused before anything is served.
+        let nobody = std::env::temp_dir().join(format!("zetlyn-world-serve-nobody-{}", std::process::id()));
+        std::fs::create_dir_all(&nobody).unwrap();
+        std::fs::write(nobody.join("workspace.yaml"), "title: x\n").unwrap();
+        let args = |dir: &std::path::Path, addr: &str| ["world", "serve", dir.to_str().unwrap(), "--addr", addr].iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(super::world_serve(&args(&nobody, "127.0.0.1:0")).unwrap_err().contains("owners"));
+
+        let addr = format!("127.0.0.1:{}", free_port());
+        let a = args(&root, &addr);
+        // Ends with the test process; nothing outlives it.
+        std::thread::spawn(move || super::world_serve(&a));
+        let base = format!("http://{addr}");
+        let mut up = false;
+        for _ in 0..50 {
+            if std::net::TcpStream::connect(&addr).is_ok() {
+                up = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(up, "the world never answered");
+
+        // A visitor reads it, at its root.
+        let (status, page, _) = ask(&format!("{base}/"), None, None);
+        assert_eq!(status, 200);
+        assert!(page.contains("Car prices") && page.contains("Sign in"), "{page}");
+        assert!(!page.contains("What do you want to track?"));
+        // Somebody who is not an owner is told the same words, and no link is made for them.
+        let accounts = crate::account::Accounts::open(&root).unwrap();
+        let (status, _, _) = ask(&format!("{base}/signin"), None, Some("email=mallory%40example.org"));
+        assert_eq!(status, 200);
+        assert!(accounts.by_email("mallory@example.org").is_none());
+        // The owner follows a link and runs it.
+        let ann = accounts.ensure("ann@example.org").unwrap();
+        let (status, _, cookie) = ask(&format!("{base}/signin/{}", accounts.new_link(ann.id).unwrap()), None, None);
+        assert_eq!(status, 303);
+        let cookie = cookie.unwrap();
+        assert!(cookie.starts_with("zs=") && cookie.contains("Path=/;"), "{cookie}");
+        let session = cookie.split(';').next().unwrap().to_string();
+        let (_, page, _) = ask(&format!("{base}/"), Some(&session), None);
+        assert!(page.contains("What do you want to track?"), "{page}");
+        // An owner added to the file is one at once.
+        std::fs::write(root.join("workspace.yaml"), "title: Car prices\nurl: https://prices.example\nowners: [ann@example.org, ben@example.org]\n").unwrap();
+        let ben = accounts.ensure("ben@example.org").unwrap();
+        let (_, _, cookie) = ask(&format!("{base}/signin/{}", accounts.new_link(ben.id).unwrap()), None, None);
+        let (_, page, _) = ask(&format!("{base}/"), Some(cookie.unwrap().split(';').next().unwrap()), None);
+        assert!(page.contains("What do you want to track?"));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&nobody);
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "zetlyn"
-version = "0.3.20"
+version = "0.3.21"
 edition = "2021"
 rust-version = "1.80"
 publish = false
@@ -39,6 +39,8 @@ postgres = { version = "0.19", default-features = false }
 tokio-postgres-rustls = { version = "0.14", default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "1"
+# A world exported, or a release unpacked: one archive, its files as they were.
+tar = { version = "0.4", default-features = false }
 # A source that is a web page: its items by CSS selector. html5ever underneath, as browsers parse.
 scraper = "0.23"
 

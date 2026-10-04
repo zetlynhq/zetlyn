@@ -43,6 +43,7 @@ mod teach;
 mod thingquery;
 mod thingstore;
 mod watch;
+mod world;
 mod yaml;
 
 use std::path::{Path, PathBuf};
@@ -221,6 +222,15 @@ zetlyn
   zetlyn console serve <workspace> | grant | call
   zetlyn hub register | owners | serve
       Letting somebody else run it, and letting somebody else fetch from you.
+
+  zetlyn world up <domain> --owner <address> [--smtp host[:port] --smtp-user … --mail-from …] [--dry-run]
+      A world of your own on an empty Ubuntu machine, as root: the workspace at that address,
+      Caddy with a certificate, the mail sign-in links go out by, a daily backup and a daily
+      upgrade. Run again, it changes only what is missing. The mailer's password is read from
+      SMTP_PASSWORD.
+  zetlyn world serve <workspace> | export <workspace> --to <file> | backup <workspace> <dir> | upgrade
+      One world at the root of its domain, run by the `owners:` its workspace.yaml names; all of
+      it in one archive; that archive kept daily; the next release, where there is one.
 ";
 
 fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
@@ -544,6 +554,7 @@ fn run(args: &[String]) -> Result<(), String> {
         Some("billing") => billing::command(args),
         Some("host") => app::host(args),
         Some("hosting") => app::hosting(args),
+        Some("world") => world::command(args),
         Some("id") => id_command(args),
         Some("platform") => platform_command(args),
         Some("serve") => {

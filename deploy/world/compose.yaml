@@ -1,0 +1,32 @@
+# A world of its own with Docker: the world, and Caddy in front of it for the domain and its
+# certificate. Point the domain at this machine, open ports 80 and 443, then:
+#
+#   DOMAIN=prices.example OWNER=you@example.org docker compose -f deploy/world/compose.yaml up -d
+#
+# Sign in at https://<domain>/signin. Until a mailer is named in /world/workspace.yaml the sign-in
+# link is in the world's log: `docker compose -f deploy/world/compose.yaml logs world`.
+services:
+  world:
+    build:
+      context: ../..
+      dockerfile: deploy/world/Dockerfile
+    environment:
+      DOMAIN: ${DOMAIN:?the domain the world is at}
+      OWNER: ${OWNER:?the address the first sign-in link goes to}
+    volumes:
+      - world:/world
+    restart: unless-stopped
+  caddy:
+    image: caddy:2
+    environment:
+      DOMAIN: ${DOMAIN}
+    command: ["caddy", "reverse-proxy", "--from", "${DOMAIN}", "--to", "world:2500"]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy:/data
+    restart: unless-stopped
+volumes:
+  world:
+  caddy:

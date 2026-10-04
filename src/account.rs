@@ -395,6 +395,10 @@ pub struct Site {
     pub url: String,
     #[serde(default)]
     pub contact: String,
+    /// Who runs this world where it is served on its own (`zetlyn world serve`): they sign in with
+    /// a link to their address and may change everything. Everybody else reads what it publishes.
+    #[serde(default)]
+    pub owners: Vec<String>,
     /// What a subscription costs. A workspace that names none charges nothing: every reader reads
     /// all of it, now, and nothing on its pages speaks of paying.
     #[serde(default)]

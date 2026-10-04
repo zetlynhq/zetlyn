@@ -31,7 +31,7 @@ use std::path::PathBuf;
 use maud::html;
 use serde_json::{json, Value as J};
 
-use crate::account::{Accounts, IdentityDecl, Pending, Site};
+use crate::account::{Accounts, IdentityDecl, Kind, Pending, Site};
 
 /// The ID token key, beside the operator's.
 pub const KEY_FILE: &str = "oidc.key";
@@ -345,7 +345,7 @@ pub fn answer(here: &Here, mut request: tiny_http::Request, rel: &[String], url:
         ["oauth", "client.json"] => json_reply(request, 200, here.client_document()),
         ["oauth", "authorize"] => authorize(here, &accounts, request, &asked, url),
         ["oauth", "signin"] if post => signin_mail(here, &accounts, request, &asked),
-        ["oauth", "signin", raw] => match accounts.spend_link(raw) {
+        ["oauth", "signin", raw] => match accounts.spend_link(raw, Kind::Provider) {
             Some(session) => {
                 let next = asked.query.get("next").and_then(|n| local(n)).unwrap_or_else(|| here.at("/"));
                 go(request, &next, Some(format!("zo={session}; Path={}; Max-Age=3600; HttpOnly; SameSite=Lax{}", here.oauth_path(), here.secure())));
@@ -403,7 +403,7 @@ pub fn origin(url: &str) -> Option<String> {
 
 fn session_of(accounts: &Accounts, asked: &Asked) -> Option<crate::account::Account> {
     let raw = asked.cookie.as_deref()?.split(';').filter_map(|p| p.trim().split_once('=')).find(|(k, _)| *k == "zo").map(|(_, v)| v.to_string())?;
-    accounts.by_session(&raw)
+    accounts.by_session(&raw, Kind::Provider)
 }
 
 fn authorize(here: &Here, accounts: &Accounts, request: tiny_http::Request, asked: &Asked, url: &str) {
@@ -707,7 +707,11 @@ fn login(here: &Here, accounts: &Accounts, request: tiny_http::Request, asked: &
     if let Err(e) = accounts.put_pending(&state, &pending) {
         return fail(request, e);
     }
-    go(request, &to, None);
+    // The state is also this browser's, in a cookie: an answer that comes back to another browser,
+    // one somebody started and handed on, signs nobody in there. Apple answers with a form from its
+    // own page, which carries a cookie only where it may cross sites.
+    let same_site = if here.secure().is_empty() { "Lax" } else { "None" };
+    go(request, &to, Some(format!("zp={state}; Path={}; Max-Age=900; HttpOnly; SameSite={same_site}{}", here.oauth_path(), here.secure())));
 }
 
 /// Who signed in, as the provider says.
@@ -724,6 +728,10 @@ fn callback(here: &Here, accounts: &Accounts, request: tiny_http::Request, asked
     let fail = |request: tiny_http::Request, why: String| page(request, 400, "Not signed in", html! { h1 { "Signing in did not work" } p { (why) } });
     if let Some(e) = p.get("error") {
         return fail(request, format!("The provider said: {e}"));
+    }
+    let started_here = asked.cookie.as_deref().and_then(|c| c.split(';').filter_map(|p| p.trim().split_once('=')).find(|(k, _)| *k == "zp").map(|(_, v)| v.to_string()));
+    if started_here.is_none() || started_here.as_deref() != p.get("state").map(String::as_str) {
+        return fail(request, "This sign-in was not started in this browser.".into());
     }
     let Some(pending) = p.get("state").and_then(|s| accounts.take_pending(s)) else {
         return fail(request, "This sign-in was not started here, or was started more than a quarter of an hour ago.".into());
@@ -742,7 +750,8 @@ fn callback(here: &Here, accounts: &Accounts, request: tiny_http::Request, asked
     if accounts.name_of(account.id).is_empty() && !signed.name.is_empty() {
         let _ = accounts.set_name(account.id, &signed.name);
     }
-    let session = match accounts.new_session(account.id) {
+    let kind = if pending.purpose == "provider" { Kind::Provider } else { Kind::Reader };
+    let session = match accounts.new_session(account.id, kind) {
         Ok(s) => s,
         Err(e) => return fail(request, e),
     };
@@ -896,6 +905,13 @@ mod tests {
         (r.status().as_u16(), r.body_mut().read_to_string().unwrap_or_default(), location, set)
     }
 
+    /// The sign-in a browser started, as its cookie, from the Set-Cookie that started it.
+    fn zp(set: &str) -> String {
+        let c = set.split(';').next().unwrap().to_string();
+        assert!(c.starts_with("zp="), "{set}");
+        c
+    }
+
     fn query_of(url: &str) -> BTreeMap<String, String> {
         pairs(url.split_once('?').map(|(_, q)| q).unwrap_or(""))
     }
@@ -949,7 +965,7 @@ mod tests {
         assert_eq!(serde_json::from_str::<J>(&client).unwrap()["redirect_uris"], json!([format!("{url_b}/oauth/callback")]));
 
         // Signing in at B with A: off to A, which asks who it is first.
-        let (status, _, to_a, _) = ask("GET", &format!("{url_b}/oauth/login?with=zetlyn:{url_a}&next=/after"), None, None);
+        let (status, _, to_a, started) = ask("GET", &format!("{url_b}/oauth/login?with=zetlyn:{url_a}&next=/after"), None, None);
         assert_eq!(status, 303);
         assert!(to_a.starts_with(&format!("{url_a}/oauth/authorize?")), "{to_a}");
         let q = query_of(&to_a);
@@ -962,7 +978,7 @@ mod tests {
         // Signed in at A, Ann is asked, and says yes.
         let accounts_a = Accounts::open(&a).unwrap();
         let ann = accounts_a.ensure("ann@example.org").unwrap();
-        let zo = format!("zo={}", accounts_a.new_session(ann.id).unwrap());
+        let zo = format!("zo={}", accounts_a.new_session(ann.id, Kind::Provider).unwrap());
         let (_, consent, _, _) = ask("GET", &to_a, Some(&zo), None);
         assert!(consent.contains("asks who you are") && consent.contains("reader:"), "{consent}");
         let mut form: Vec<String> = q.iter().map(|(k, v)| format!("{k}={}", crate::serve::urlencode(v))).collect();
@@ -973,7 +989,11 @@ mod tests {
         assert!(back.starts_with(&format!("{url_b}/oauth/callback?code=")), "{back}");
 
         // Back at B: a reader of its own, by A's word, with no address and no account made first.
-        let (status, page, next, cookie) = ask("GET", &back, None, None);
+        // Not in another browser, which did not start it.
+        let (status, elsewhere, _, _) = ask("GET", &back, None, None);
+        assert_eq!(status, 400, "{elsewhere}");
+        assert!(elsewhere.contains("not started in this browser"), "{elsewhere}");
+        let (status, page, next, cookie) = ask("GET", &back, Some(&zp(&started)), None);
         assert_eq!((status, next.as_str()), (303, "/after"), "{page}");
         assert!(cookie.starts_with("zr=") && cookie.contains("Path=/;"), "{cookie}");
         let accounts_b = Accounts::open(&b).unwrap();
@@ -982,9 +1002,9 @@ mod tests {
         assert!(there.email.ends_with(".invalid"), "no address was shared: {}", there.email);
         assert_eq!(accounts_b.name_of(there.id), "Ann");
         let session = cookie.split(';').next().unwrap().trim_start_matches("zr=").to_string();
-        assert_eq!(accounts_b.by_session(&session).unwrap().id, there.id);
+        assert_eq!(accounts_b.by_session(&session, Kind::Reader).unwrap().id, there.id);
         // The same answer twice is nothing the second time.
-        let (status, again, _, _) = ask("GET", &back, None, None);
+        let (status, again, _, _) = ask("GET", &back, Some(&zp(&started)), None);
         assert_eq!(status, 400, "{again}");
 
         // `readers` by world: A's people may propose at B, nobody else's.
@@ -1025,7 +1045,7 @@ mod tests {
         let redirect = format!("{client}/back");
         let accounts = Accounts::open(&a).unwrap();
         let ann = accounts.ensure("ann@example.org").unwrap();
-        let zo = format!("zo={}", accounts.new_session(ann.id).unwrap());
+        let zo = format!("zo={}", accounts.new_session(ann.id, Kind::Provider).unwrap());
         let verifier = crate::jwt::random();
         let challenge = crate::jwt::sha256_b64(verifier.as_bytes());
         let code_for = |share: bool| {
@@ -1098,12 +1118,12 @@ mod tests {
         let pb = free_port();
         let b = tmp("google");
         let url_b = world(&b, pb, &format!("identity:\n- google:\n    client: cid\n    secret: shh\n    domain: example.com\n    issuer: {google}\n"));
-        let (status, _, to, _) = ask("GET", &format!("{url_b}/oauth/login?with=google&next=/t/x/"), None, None);
+        let (status, _, to, started) = ask("GET", &format!("{url_b}/oauth/login?with=google&next=/t/x/"), None, None);
         assert_eq!(status, 303);
         let q = query_of(&to);
         assert!(to.starts_with(&format!("{google}/authorize?")) && q["hd"] == "example.com" && q["scope"] == "openid email profile");
         *nonce.lock().unwrap() = q["nonce"].clone();
-        let (status, page, next, cookie) = ask("GET", &format!("{url_b}/oauth/callback?code=c1&state={}", crate::serve::urlencode(&q["state"])), None, None);
+        let (status, page, next, cookie) = ask("GET", &format!("{url_b}/oauth/callback?code=c1&state={}", crate::serve::urlencode(&q["state"])), Some(&zp(&started)), None);
         assert_eq!((status, next.as_str()), (303, "/t/x/"), "{page}");
         assert!(cookie.starts_with("zr="));
         assert!(sent.lock().unwrap().contains("client_secret=shh") && sent.lock().unwrap().contains("code_verifier="), "{}", sent.lock().unwrap());
@@ -1117,10 +1137,10 @@ mod tests {
         let pc = free_port();
         let c = tmp("google-other");
         let url_c = world(&c, pc, &format!("identity:\n- google:\n    client: cid\n    secret: shh\n    domain: example.com\n    issuer: {google}\n"));
-        let (_, _, to, _) = ask("GET", &format!("{url_c}/oauth/login?with=google&next=/"), None, None);
+        let (_, _, to, started) = ask("GET", &format!("{url_c}/oauth/login?with=google&next=/"), None, None);
         let q = query_of(&to);
         *nonce.lock().unwrap() = q["nonce"].clone();
-        let (status, page, _, _) = ask("GET", &format!("{url_c}/oauth/callback?code=c&state={}", crate::serve::urlencode(&q["state"])), None, None);
+        let (status, page, _, _) = ask("GET", &format!("{url_c}/oauth/callback?code=c&state={}", crate::serve::urlencode(&q["state"])), Some(&zp(&started)), None);
         assert_eq!(status, 400);
         assert!(page.contains("only people of example.com"), "{page}");
         assert!(Accounts::open(&c).unwrap().by_identity(&google, "g-9").is_none());
@@ -1135,13 +1155,14 @@ mod tests {
         let b = tmp("apple");
         std::env::set_var("ZETLYN_TEST_APPLE_KEY", EC_P8);
         let url_b = world(&b, pb, &format!("identity:\n- apple:\n    client: com.example.signin\n    team: TEAM123\n    key_id: KEY123\n    key: ${{ZETLYN_TEST_APPLE_KEY}}\n    issuer: {apple}\n"));
-        let (_, _, to, _) = ask("GET", &format!("{url_b}/oauth/login?with=apple&next=/"), None, None);
+        let (_, _, to, started) = ask("GET", &format!("{url_b}/oauth/login?with=apple&next=/"), None, None);
+        assert!(started.contains("SameSite=Lax") || started.contains("SameSite=None"), "{started}");
         let q = query_of(&to);
         assert_eq!((q["response_mode"].as_str(), q["scope"].as_str()), ("form_post", "name email"));
         *nonce.lock().unwrap() = q["nonce"].clone();
         // Apple answers with a form, from its own page, the name beside the code.
         let user = crate::serve::urlencode(r#"{"name":{"firstName":"Ann","lastName":"Apple"}}"#);
-        let (status, page, _, cookie) = ask("POST", &format!("{url_b}/oauth/callback"), None, Some(&format!("code=c&state={}&user={user}", crate::serve::urlencode(&q["state"]))));
+        let (status, page, _, cookie) = ask("POST", &format!("{url_b}/oauth/callback"), Some(&zp(&started)), Some(&format!("code=c&state={}&user={user}", crate::serve::urlencode(&q["state"]))));
         assert_eq!(status, 303, "{page}");
         assert!(cookie.starts_with("zr="));
         // What it was sent as a secret is a token signed with the .p8, for Apple, from the team.
@@ -1182,10 +1203,10 @@ mod tests {
         // Somebody already a reader by address is the same person through GitHub.
         let accounts = Accounts::open(&b).unwrap();
         let before = accounts.ensure("ann@example.org").unwrap();
-        let (_, _, to, _) = ask("GET", &format!("{url_b}/oauth/login?with=github&next=/"), None, None);
+        let (_, _, to, started) = ask("GET", &format!("{url_b}/oauth/login?with=github&next=/"), None, None);
         assert!(to.starts_with(&format!("{github}/login/oauth/authorize?")), "{to}");
         let q = query_of(&to);
-        let (status, page, _, _) = ask("GET", &format!("{url_b}/oauth/callback?code=c&state={}", crate::serve::urlencode(&q["state"])), None, None);
+        let (status, page, _, _) = ask("GET", &format!("{url_b}/oauth/callback?code=c&state={}", crate::serve::urlencode(&q["state"])), Some(&zp(&started)), None);
         assert_eq!(status, 303, "{page}");
         assert!(sent.lock().unwrap().contains("client_secret=gsecret"));
         let ann = accounts.by_identity(&github, "42").unwrap();
@@ -1232,18 +1253,18 @@ mod tests {
         let b = tmp("chain-b");
         let url_b = world(&b, pb, &format!("identity:\n- zetlyn: {url_m}\n"));
 
-        let (_, _, to_m, _) = ask("GET", &format!("{url_b}/oauth/login?with=zetlyn:{url_m}&next=/t/x/"), None, None);
+        let (_, _, to_m, started_b) = ask("GET", &format!("{url_b}/oauth/login?with=zetlyn:{url_m}&next=/t/x/"), None, None);
         assert!(to_m.starts_with(&format!("{url_m}/app/oauth/authorize?")), "{to_m}");
         // The machine asks who it is, and offers GitHub.
         let (_, page, _, _) = ask("GET", &to_m, None, None);
         let start = page.find("/app/oauth/login?with=github").expect("GitHub offered");
         let href: String = page[start..].chars().take_while(|c| *c != '"').collect::<String>().replace("&amp;", "&");
-        let (status, _, to_github, _) = ask("GET", &format!("{url_m}{href}"), None, None);
+        let (status, _, to_github, started_m) = ask("GET", &format!("{url_m}{href}"), None, None);
         assert_eq!(status, 303);
         assert!(to_github.starts_with(&format!("{github}/login/oauth/authorize?")), "{to_github}");
         // GitHub sends them back to the machine, which signs them in there and returns to asking.
         let state = query_of(&to_github)["state"].clone();
-        let (status, page, back_to_authorize, zo) = ask("GET", &format!("{url_m}/app/oauth/callback?code=c&state={}", crate::serve::urlencode(&state)), None, None);
+        let (status, page, back_to_authorize, zo) = ask("GET", &format!("{url_m}/app/oauth/callback?code=c&state={}", crate::serve::urlencode(&state)), Some(&zp(&started_m)), None);
         assert_eq!(status, 303, "{page}");
         assert!(zo.starts_with("zo=") && zo.contains("Path=/app/oauth"), "{zo}");
         assert!(back_to_authorize.starts_with("/app/oauth/authorize?"), "{back_to_authorize}");
@@ -1255,7 +1276,7 @@ mod tests {
         let (status, _, back_to_b, _) = ask("POST", &format!("{url_m}/app/oauth/authorize"), Some(&zo), Some(&form.join("&")));
         assert_eq!(status, 303);
         // And at the world: a reader, the machine's word for who, the name GitHub gave.
-        let (status, page, next, cookie) = ask("GET", &back_to_b, None, None);
+        let (status, page, next, cookie) = ask("GET", &back_to_b, Some(&zp(&started_b)), None);
         assert_eq!((status, next.as_str()), (303, "/t/x/"), "{page}");
         assert!(cookie.starts_with("zr="));
         let machine = Accounts::open(&m).unwrap();
@@ -1285,19 +1306,19 @@ mod tests {
         std::thread::spawn(move || crate::app::hosting(&args));
         up(pm);
         let started = std::time::Instant::now();
-        let (status, page, to_m, _) = ask("GET", &format!("{url_m}/acme/oauth/login?with=zetlyn:{url_m}&next=/acme/"), None, None);
+        let (status, page, to_m, signing_in) = ask("GET", &format!("{url_m}/acme/oauth/login?with=zetlyn:{url_m}&next=/acme/"), None, None);
         assert_eq!(status, 303, "{page}");
         assert!(to_m.starts_with(&format!("{url_m}/app/oauth/authorize?")), "{to_m}");
         let machine = Accounts::open(&m).unwrap();
         let ann = machine.ensure("ann@example.org").unwrap();
-        let zo = format!("zo={}", machine.new_session(ann.id).unwrap());
+        let zo = format!("zo={}", machine.new_session(ann.id, Kind::Provider).unwrap());
         let (status, consent, _, _) = ask("GET", &to_m, Some(&zo), None);
         assert_eq!(status, 200, "the machine fetched the organisation's client document from itself: {consent}");
         let mut form: Vec<String> = query_of(&to_m).iter().map(|(k, v)| format!("{k}={}", crate::serve::urlencode(v))).collect();
         form.push("allow=1".into());
         let (_, _, back, _) = ask("POST", &format!("{url_m}/app/oauth/authorize"), Some(&zo), Some(&form.join("&")));
         assert!(back.starts_with(&format!("{url_m}/acme/oauth/callback?")), "{back}");
-        let (status, page, next, cookie) = ask("GET", &back, None, None);
+        let (status, page, next, cookie) = ask("GET", &back, Some(&zp(&signing_in)), None);
         assert_eq!((status, next.as_str()), (303, "/acme/"), "{page}");
         assert!(cookie.starts_with("zr=") && cookie.contains("Path=/acme;"), "{cookie}");
         assert!(started.elapsed() < std::time::Duration::from_secs(10), "it waited for itself: {:?}", started.elapsed());

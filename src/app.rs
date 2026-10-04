@@ -507,11 +507,16 @@ impl App {
         // A world that has moved answers its document (above) and sends everything else to where
         // it is now, the same page there. What is sent to it is refused, and says where to send it.
         let moved = crate::account::Site::load(&self.root).moved_to.trim().trim_end_matches('/').to_string();
-        if !moved.is_empty() {
+        // Except for its own people: they sign in, take it with them, and say it did not move after all,
+        // here. And told so for now, not for good: a browser keeps a permanent answer past an undo.
+        let owners_way = self.hosted.is_none()
+            || matches!(parts.first().map(String::as_str), Some("signin" | "signout" | "settings" | "export.tar.gz" | "style.css"))
+            || self.member_signed_in(&request);
+        if !moved.is_empty() && !owners_way {
             let query = url.split_once('?').map(|(_, q)| format!("?{q}")).unwrap_or_default();
             let there = format!("{moved}/{}{query}", parts.iter().map(|p| urlencode(p)).collect::<Vec<_>>().join("/"));
             if matches!(request.method(), tiny_http::Method::Get | tiny_http::Method::Head) {
-                let mut response = tiny_http::Response::from_string("").with_status_code(301);
+                let mut response = tiny_http::Response::from_string("").with_status_code(302);
                 if let Ok(h) = tiny_http::Header::from_bytes(&b"Location"[..], there.as_bytes()) {
                     response = response.with_header(h);
                 }
@@ -530,6 +535,18 @@ impl App {
         self.answer_as_owner(request, url, path, parts)
     }
 
+    /// Whether a member of this hosted world is signed in on this request.
+    fn member_signed_in(&self, request: &tiny_http::Request) -> bool {
+        let Some(h) = self.hosted.as_ref() else { return false };
+        let cookie = request.headers().iter().find(|x| x.field.equiv("Cookie")).map(|x| x.value.as_str().to_string()).unwrap_or_default();
+        cookie
+            .split(';')
+            .filter_map(|p| p.trim().split_once('='))
+            .filter(|(k, _)| *k == "zs")
+            .filter_map(|(_, v)| h.accounts.by_session(v, crate::account::Kind::Member))
+            .any(|a| h.is_member(&a.email))
+    }
+
     /// What anybody may reach on a hosted workspace, and whether this request is its owner's. The
     /// request comes back where the owner's app should answer it; otherwise it has been answered.
     fn hosted_gate(&mut self, mut request: tiny_http::Request, url: &str, path: &str, parts: &[String]) -> Option<tiny_http::Request> {
@@ -537,7 +554,7 @@ impl App {
         let header = |name: &'static str| request.headers().iter().find(|x| x.field.equiv(name)).map(|x| x.value.as_str().to_string());
         let (cookie, signature) = (header("Cookie"), header("X-Hub-Signature-256").or_else(|| header("X-Zetlyn-Signature")));
         let session = cookie.and_then(|c| c.split(';').filter_map(|p| p.trim().split_once('=')).find(|(k, _)| *k == "zs").map(|(_, v)| v.to_string()));
-        let signed_in = session.and_then(|s| h.accounts.by_session(&s)).map(|a| a.email);
+        let signed_in = session.and_then(|s| h.accounts.by_session(&s, crate::account::Kind::Member)).map(|a| a.email);
         let owner = signed_in.as_deref().is_some_and(|e| h.is_member(e));
         self.who = signed_in;
         let post = request.method() == &tiny_http::Method::Post;
@@ -614,7 +631,7 @@ impl App {
                 None
             }
             ["signin", raw] => {
-                match h.accounts.spend_link(raw) {
+                match h.accounts.spend_link(raw, crate::account::Kind::Member) {
                     Some(session) => {
                         let cookie = format!("zs={session}; Path={}; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000", if self.base.is_empty() { "/" } else { &self.base });
                         let mut response = tiny_http::Response::from_string("").with_status_code(303);
@@ -633,6 +650,11 @@ impl App {
             ["t", ..] => {
                 self.visitor = !owner;
                 Some(request)
+            }
+            // What the world is, where it went, all of it at once: its owners', not every editor's.
+            ["export.tar.gz"] | ["settings", "moved"] | ["assist"] if owner && (post || parts.len() == 1 && parts[0] == "export.tar.gz") && !self.who.as_deref().is_some_and(|e| h.is_owner(e)) => {
+                respond(request, 403, html_kind, &page("Owners only", html! { h1 { "Only an owner of this world changes that" } p { a href=(serve::at("/")) { "Back" } } }));
+                None
             }
             _ if owner => {
                 self.visitor = false;
@@ -844,8 +866,13 @@ impl App {
             }
             (true, ["readweb", tracker]) => {
                 let pick: usize = query.get("pick").and_then(|p| p.parse().ok()).unwrap_or(0);
-                let id = self.read_web(tracker, query.get("url").cloned().unwrap_or_default(), form_title(&query), pick);
+                let url = query.get("url").cloned().unwrap_or_default();
+                if let Err(e) = self.may_read(&url) {
+                    (400, json_kind, json!({ "error": e }).to_string())
+                } else {
+                    let id = self.read_web(tracker, query.get("url").cloned().unwrap_or_default(), form_title(&query), pick);
                 (200, json_kind, json!({ "job": id }).to_string())
+                }
             }
             // A property chosen as the identifier, the declaration changed to say so, the source
             // read again from the start, and back to what it is now.
@@ -923,7 +950,7 @@ impl App {
             (false, ["settings"]) => (200, html_kind, self.settings_page(&query)),
             // All of it, as one archive, for its owner to take away.
             (false, ["export.tar.gz"]) => {
-                let file = std::env::temp_dir().join(format!("zetlyn-export-{}-{}.tar.gz", std::process::id(), crate::now()));
+                let file = std::env::temp_dir().join(format!("zetlyn-export-{}.tar.gz", crate::jwt::random()));
                 return match crate::world::export(&self.root, &file).and_then(|_| std::fs::File::open(&file).map_err(|e| e.to_string())) {
                     Ok(handle) => {
                         // Read from the open handle; the name is gone at once, so nothing is left behind.
@@ -945,7 +972,8 @@ impl App {
             }
             (true, ["settings", "moved"]) => {
                 let to = form.get("to").cloned().unwrap_or_default();
-                let said = match crate::world::move_to(&self.root, &to, false) {
+                let said = match if to.trim().is_empty() { crate::world::stay(&self.root) } else { crate::world::move_to(&self.root, &to, false) } {
+                    Ok(()) if to.trim().is_empty() => "This world answers here again.".to_string(),
                     Ok(()) => format!("This world says it lives at {to} now."),
                     Err(e) => e,
                 };
@@ -1008,6 +1036,8 @@ impl App {
                 let from = form.get("url").cloned().unwrap_or_default();
                 if from.trim().is_empty() {
                     (400, json_kind, json!({ "error": "paste an address, or choose a file" }).to_string())
+                } else if let Err(e) = self.may_read(from.trim()) {
+                    (400, json_kind, json!({ "error": e }).to_string())
                 } else {
                     let id = self.analyse(tracker, from.trim().to_string(), form_title(&query));
                     (200, json_kind, json!({ "job": id }).to_string())
@@ -1015,8 +1045,13 @@ impl App {
             }
             (false, ["assist", tracker, source]) => (200, html_kind, self.assist_page(tracker, source, &query)),
             (true, ["teach", tracker, source]) => {
-                let id = self.teach(tracker, source, query.get("url").cloned().unwrap_or_default(), form_title(&query));
-                (200, json_kind, json!({ "job": id }).to_string())
+                match self.may_read(query.get("url").map(String::as_str).unwrap_or("")) {
+                    Err(e) => (400, json_kind, json!({ "error": e }).to_string()),
+                    Ok(()) => {
+                        let id = self.teach(tracker, source, query.get("url").cloned().unwrap_or_default(), form_title(&query));
+                        (200, json_kind, json!({ "job": id }).to_string())
+                    }
+                }
             }
             (true, ["why", tracker, source]) => {
                 let id = self.propose_why(tracker, source, form_title(&query));
@@ -1106,6 +1141,20 @@ impl App {
 
     /// Read a source from an address or a file, propose its declaration, and read it whole, so
     /// that what the person is shown next is the source as it is and not a guess from a sample.
+    /// Whether a pasted address is one this app reads. On a person's own machine, anything,
+    /// their files included. Hosted, the machine is not theirs: an address on the public
+    /// internet, or a GitHub repository, and nothing on the machine or beside it.
+    fn may_read(&self, from: &str) -> Result<(), String> {
+        if self.hosted.is_none() || from.starts_with("github:") {
+            return Ok(());
+        }
+        if !from.starts_with("http://") && !from.starts_with("https://") {
+            return Err("an address, https://…, or a file chosen from your computer".into());
+        }
+        // Plain http is a source like any other; what is checked is where it points.
+        crate::outbound::allowed(&from.replacen("http://", "https://", 1), false)
+    }
+
     fn analyse(&self, tracker: &str, from: String, title: String) -> u64 {
         let sources = self.sources();
         let taken: BTreeSet<String> = std::fs::read_dir(&sources)
@@ -1531,7 +1580,11 @@ impl App {
                 input.wide type="password" name="key" placeholder="An Anthropic API key, sk-ant-…" autocomplete="off";
                 button.primary type="submit" { "Keep the key" }
             }
-            p.dim { "Kept in " code { "~/.zetlyn/assist/anthropic.key" } ", readable by you alone. " code { "ANTHROPIC_API_KEY" } " works as well." }
+            @if self.hosted.is_some() {
+                p.dim { "Kept beside this world's workspace, as " code { "assist-anthropic.key" } ", for this world alone, and in its export." }
+            } @else {
+                p.dim { "Kept in " code { "~/.zetlyn/assist/anthropic.key" } ", readable by you alone. " code { "ANTHROPIC_API_KEY" } " works as well." }
+            }
             h2 { "A model of your own" }
             form method="post" action=(serve::at("/assist")) {
                 input type="hidden" name="provider" value="openai";
@@ -1579,7 +1632,8 @@ impl App {
         };
         match form.get("provider").map(String::as_str) {
             Some("anthropic") => {
-                crate::assist::keep_key("anthropic", form.get("key").map(String::as_str).unwrap_or(""))?;
+                // Hosted, the key is this world's, beside its workspace, and not the machine's for every world on it.
+                crate::assist::keep_key("anthropic", form.get("key").map(String::as_str).unwrap_or(""), self.hosted.is_some().then_some(self.root.as_path()))?;
                 write("assist:\n  provider: anthropic\n")?;
                 Ok("The key is kept. The assist asks Claude from now on.".into())
             }
@@ -1588,6 +1642,10 @@ impl App {
                 let model = form.get("model").map(|s| s.trim()).unwrap_or("");
                 if !url.starts_with("http") || model.is_empty() {
                     return Err("an address, http… ending in /v1, and the name of a model it serves".into());
+                }
+                // Hosted, the machine asks it, and a machine is not asked to talk to its own insides.
+                if self.hosted.is_some() {
+                    crate::outbound::allowed(url, false)?;
                 }
                 write(&format!("assist:\n  provider: openai\n  url: {}\n  model: {}\n", serde_json::to_string(url).unwrap_or_default(), serde_json::to_string(model).unwrap_or_default()))?;
                 Ok(format!("The assist asks {model} at {url} from now on."))
@@ -1818,6 +1876,10 @@ impl App {
                 }
             } @else {
                 div.note { "This world lives at " a href=(moved) { (moved) } " now, and sends everybody there." }
+                form.bar method="post" action=(serve::at("/settings/moved")) {
+                    input type="hidden" name="to" value="";
+                    button type="submit" { "It did not move: answer here again" }
+                }
             }
         };
         page("Automatic updates", body)
@@ -2647,6 +2709,10 @@ struct Hosted {
     /// `zetlyn hosting`. Everybody else reads what it publishes.
     members: Vec<String>,
     accounts: crate::account::Accounts,
+    /// Of the members, who may also change what the world is: its settings, where it went, its
+    /// whole export. Everybody else among them edits sources and trackers. The same people as
+    /// `members` where nobody is told apart.
+    owners: Vec<String>,
     /// Signed in once for every workspace on the machine, at its root: `zetlyn hosting`.
     shared: bool,
 }
@@ -2654,6 +2720,9 @@ struct Hosted {
 impl Hosted {
     fn is_member(&self, email: &str) -> bool {
         self.members.iter().any(|m| m.eq_ignore_ascii_case(email.trim()))
+    }
+    fn is_owner(&self, email: &str) -> bool {
+        self.owners.iter().any(|m| m.eq_ignore_ascii_case(email.trim()))
     }
 }
 
@@ -2697,7 +2766,7 @@ pub fn world_serve(args: &[String]) -> Result<(), String> {
         sites: BTreeMap::new(),
         jobs: Arc::new(Mutex::new(Jobs::default())),
         base: String::new(),
-        hosted: Some(Hosted { members: owners, accounts, shared: false }),
+        hosted: Some(Hosted { members: owners.clone(), owners, accounts, shared: false }),
         visitor: false,
         who: None,
         orgs_of_who: Vec::new(),
@@ -2753,7 +2822,7 @@ pub fn host(args: &[String]) -> Result<(), String> {
         sites: BTreeMap::new(),
         jobs: Arc::new(Mutex::new(Jobs::default())),
         base,
-        hosted: Some(Hosted { members: vec![owner], accounts, shared: false }),
+        hosted: Some(Hosted { members: vec![owner.clone()], owners: vec![owner], accounts, shared: false }),
         visitor: false,
         who: None,
         orgs_of_who: Vec::new(),
@@ -2822,8 +2891,8 @@ impl Membership {
         let path = dir.join(MEMBERS);
         std::fs::write(&path, crate::yaml::to_string(self)?).map_err(|e| format!("{}: {e}", path.display()))
     }
-    fn of(&self, org: &str) -> Vec<String> {
-        self.orgs.get(org).map(|m| m.iter().map(|x| x.email.to_lowercase()).collect()).unwrap_or_default()
+    fn of(&self, org: &str, roles: &[&str]) -> Vec<String> {
+        self.orgs.get(org).map(|m| m.iter().filter(|x| roles.contains(&x.role.as_str())).map(|x| x.email.to_lowercase()).collect()).unwrap_or_default()
     }
     /// The organisations somebody belongs to, with what they are in each.
     fn orgs_of(&self, email: &str) -> Vec<(String, String)> {
@@ -3043,7 +3112,9 @@ const APP_PREFIX: &str = "app";
 /// root of its own domain. The app is made the first time it is asked for.
 #[allow(clippy::too_many_arguments)]
 fn answer_org(apps: &mut BTreeMap<String, App>, key: &str, org: &str, base: &str, dir: &Path, addr: &str, accounts: &crate::account::Accounts, request: tiny_http::Request) {
-    let members = Membership::load(dir).of(org);
+    let membership = Membership::load(dir);
+    // A reader among them reads, as anybody may who is let read: the app is for who changes things.
+    let (members, owners) = (membership.of(org, &["owner", "editor"]), membership.of(org, &["owner"]));
     if !apps.contains_key(key) {
         let own = match crate::account::Accounts::open(dir) {
             Ok(a) => a,
@@ -3055,7 +3126,7 @@ fn answer_org(apps: &mut BTreeMap<String, App>, key: &str, org: &str, base: &str
             sites: BTreeMap::new(),
             jobs: Arc::new(Mutex::new(Jobs::default())),
             base: base.to_string(),
-            hosted: Some(Hosted { members: Vec::new(), accounts: own, shared: true }),
+            hosted: Some(Hosted { members: Vec::new(), owners: Vec::new(), accounts: own, shared: true }),
             visitor: false,
             who: None,
             orgs_of_who: Vec::new(),
@@ -3066,6 +3137,7 @@ fn answer_org(apps: &mut BTreeMap<String, App>, key: &str, org: &str, base: &str
     // Who belongs is read afresh each time: somebody added a minute ago is in now.
     if let Some(h) = app.hosted.as_mut() {
         h.members = members;
+        h.owners = owners;
     }
     // Every organisation whoever is signed in belongs to, by its title, for the header.
     app.public_of_machine = public_links(dir);
@@ -3117,7 +3189,7 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
     let post = request.method() == &tiny_http::Method::Post;
     let cookie = request.headers().iter().find(|h| h.field.equiv("Cookie")).map(|h| h.value.as_str().to_string());
     let session = cookie.and_then(|c| c.split(';').filter_map(|p| p.trim().split_once('=')).find(|(k, _)| *k == "zs").map(|(_, v)| v.to_string()));
-    let who = session.as_deref().and_then(|s| accounts.by_session(s));
+    let who = session.as_deref().and_then(|s| accounts.by_session(s, crate::account::Kind::Member));
     let membership = Membership::load(dir);
     // The app's own frame: its sidebar lists what anybody may read here, and where whoever is
     // signed in belongs.
@@ -3189,7 +3261,7 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                 button.primary type="submit" { "Send me a link" }
             }
         })),
-        ["signin", raw] => match accounts.spend_link(raw) {
+        ["signin", raw] => match accounts.spend_link(raw, crate::account::Kind::Member) {
             Some(session) => {
                 let cookie = format!("zs={session}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000");
                 let mut response = tiny_http::Response::from_string("").with_status_code(303);
@@ -3305,7 +3377,7 @@ pub(crate) fn publish_root(root: &Path, org: &str, answers: impl FnOnce(&str) ->
 fn signed_in(request: &tiny_http::Request, accounts: &crate::account::Accounts) -> Option<String> {
     let cookie = request.headers().iter().find(|h| h.field.equiv("Cookie"))?.value.as_str().to_string();
     let session = cookie.split(';').filter_map(|p| p.trim().split_once('=')).find(|(k, _)| *k == "zs").map(|(_, v)| v.to_string())?;
-    accounts.by_session(&session).map(|a| a.email)
+    accounts.by_session(&session, crate::account::Kind::Member).map(|a| a.email)
 }
 
 /// Every public tracker on the machine as a link: its title, and where it answers.
@@ -3470,7 +3542,7 @@ mod tests {
             std::fs::create_dir_all(dir.join(format!("orgs/{org}/trackers"))).unwrap();
             std::fs::write(dir.join(format!("orgs/{org}/workspace.yaml")), format!("title: {org} world\n{extra}")).unwrap();
         }
-        std::fs::write(dir.join("members.yaml"), "plain:\n- email: ann@example.org\n  role: owner\n").unwrap();
+        std::fs::write(dir.join("members.yaml"), "plain:\n- email: ann@example.org\n  role: owner\n- email: ed@example.org\n  role: editor\n- email: rita@example.org\n  role: reader\n").unwrap();
         let args: Vec<String> = ["hosting", "serve", dir.to_str().unwrap(), "--addr", &format!("127.0.0.1:{port}")].iter().map(|s| s.to_string()).collect();
         // Ends with the test process; nothing outlives it.
         std::thread::spawn(move || super::hosting(&args));
@@ -3502,8 +3574,19 @@ mod tests {
         // Its owner takes all of it away, and may not say it went somewhere that is no world.
         let accounts = crate::account::Accounts::open(&dir).unwrap();
         let ann = accounts.ensure("ann@example.org").unwrap();
-        let zs = format!("zs={}", accounts.new_session(ann.id).unwrap());
+        let zs = format!("zs={}", accounts.new_session(ann.id, crate::account::Kind::Member).unwrap());
         assert_ne!(raw(port, "GET", &host, "/plain/export.tar.gz", None).0, 200, "only its owner");
+        // An editor edits, and does not take the world away; a reader is not in the app at all.
+        let ed = accounts.ensure("ed@example.org").unwrap();
+        let zs_ed = format!("zs={}", accounts.new_session(ed.id, crate::account::Kind::Member).unwrap());
+        assert_eq!(raw(port, "GET", &host, "/plain/export.tar.gz", Some(&zs_ed)).0, 403);
+        assert_eq!(raw(port, "GET", &host, "/plain/settings", Some(&zs_ed)).0, 200);
+        let rita = accounts.ensure("rita@example.org").unwrap();
+        let zs_rita = format!("zs={}", accounts.new_session(rita.id, crate::account::Kind::Member).unwrap());
+        assert_ne!(raw(port, "GET", &host, "/plain/settings", Some(&zs_rita)).0, 200);
+        // Nor is anybody whose session was made for reading.
+        let zr = format!("zs={}", accounts.new_session(ann.id, crate::account::Kind::Reader).unwrap());
+        assert_ne!(raw(port, "GET", &host, "/plain/export.tar.gz", Some(&zr)).0, 200);
         let (status, head, body) = raw(port, "GET", &host, "/plain/export.tar.gz", Some(&zs));
         assert_eq!(status, 200, "{head}");
         assert!(head.contains("attachment; filename=\"plain-"), "{head}");

@@ -1604,7 +1604,7 @@ impl TrackerSite {
                 missing = nothing_there;
                 (answer.to_string(), "application/json", None)
             }
-            _ if parts.len() == 2 && parts[0] == "signin" => match accounts.spend_link(&parts[1]) {
+            _ if parts.len() == 2 && parts[0] == "signin" => match accounts.spend_link(&parts[1], crate::account::Kind::Reader) {
                 Some(session) => (
                     shell(
                         "Signed in",
@@ -2941,7 +2941,7 @@ mod tests {
     fn session(root: &Path, email: &str) -> String {
         let accounts = Accounts::open(root).unwrap();
         let a = accounts.ensure(email).unwrap();
-        format!("zr={}", accounts.spend_link(&accounts.new_link(a.id).unwrap()).unwrap())
+        format!("zr={}", accounts.spend_link(&accounts.new_link(a.id).unwrap(), crate::account::Kind::Reader).unwrap())
     }
 
     fn ask(method: &str, url: &str, cookie: Option<&str>, form: &str) -> (u16, String) {
@@ -3064,7 +3064,7 @@ mod tests {
         assert!(ask("GET", &format!("{base}/account"), Some(&session), "").1.contains("ann@example.org"));
 
         // The app's cookie, even holding a session this very database knows, is not a reader's.
-        let app_session = format!("zs={}", accounts.spend_link(&accounts.new_link(a.id).unwrap()).unwrap());
+        let app_session = format!("zs={}", accounts.spend_link(&accounts.new_link(a.id).unwrap(), crate::account::Kind::Member).unwrap());
         let (_, page) = ask("GET", &format!("{base}/account"), Some(&app_session), "");
         assert!(!page.contains("ann@example.org") && page.contains("Send the link"), "{page}");
 

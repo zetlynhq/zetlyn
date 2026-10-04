@@ -82,7 +82,7 @@ impl Assist {
                 model: if model.is_empty() { "gemma4".into() } else { model },
             })
         } else {
-            env("ANTHROPIC_API_KEY").or_else(|| stored_key("anthropic")).map(|key| Provider::Anthropic {
+            env("ANTHROPIC_API_KEY").or_else(|| world_key(root, "anthropic")).or_else(|| stored_key("anthropic")).map(|key| Provider::Anthropic {
                 key,
                 model: if model.is_empty() { CLAUDE_MODEL.into() } else { model },
             })
@@ -245,6 +245,11 @@ fn key_path(provider: &str) -> PathBuf {
     crate::identity::home().join("assist").join(format!("{provider}.key"))
 }
 
+/// A world's own key, beside its workspace: where worlds share a machine, each pays for its own.
+fn world_key(root: &Path, provider: &str) -> Option<String> {
+    std::fs::read_to_string(root.join(format!("assist-{provider}.key"))).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
 fn stored_key(provider: &str) -> Option<String> {
     std::fs::read_to_string(key_path(provider)).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
@@ -340,8 +345,9 @@ mod tests {
     }
 }
 
-/// A key given on a page rather than on standard input, kept the same way.
-pub fn keep_key(provider: &str, key: &str) -> Result<PathBuf, String> {
+/// A key given on a page rather than on standard input, kept the same way: for whoever runs the
+/// program, or, given a world, for that world alone.
+pub fn keep_key(provider: &str, key: &str, world: Option<&Path>) -> Result<PathBuf, String> {
     if !matches!(provider, "anthropic" | "openai") {
         return Err(format!("{provider}: a key is for anthropic or openai"));
     }
@@ -349,7 +355,10 @@ pub fn keep_key(provider: &str, key: &str) -> Result<PathBuf, String> {
     if key.is_empty() || key.contains(char::is_whitespace) {
         return Err("that is not a key".into());
     }
-    let path = key_path(provider);
+    let path = match world {
+        Some(root) => root.join(format!("assist-{provider}.key")),
+        None => key_path(provider),
+    };
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }

@@ -32,6 +32,8 @@ create table if not exists account(
 create table if not exists session(
   hash    text primary key,
   account integer not null,
+  -- member (zs), reader (zr) or provider (zo): a session is good for the cookie it was made for.
+  kind    text not null default '',
   created text not null,
   expires text not null);
 
@@ -197,6 +199,8 @@ impl Accounts {
         let _ =
             db.execute_batch("alter table account add column curator integer not null default 0");
         let _ = db.execute_batch("alter table account add column name text not null default ''");
+        // Sessions from before kinds were kept answer to none of them: whoever held one signs in again.
+        let _ = db.execute_batch("alter table session add column kind text not null default ''");
         Ok(Accounts { db })
     }
 
@@ -260,7 +264,7 @@ impl Accounts {
 
     /// Spends the link and hands back a session. A link that was used is gone, so a copy of the
     /// mail in somebody else's hands is worth nothing.
-    pub fn spend_link(&self, raw: &str) -> Option<String> {
+    pub fn spend_link(&self, raw: &str, kind: Kind) -> Option<String> {
         let hash = digest(raw);
         let (account, expires): (i64, String) = self
             .db
@@ -276,28 +280,18 @@ impl Accounts {
         if expires.as_str() < crate::iso_stamp(crate::now()).as_str() {
             return None;
         }
-        let session = token();
-        self.db
-            .execute(
-                "insert into session(hash, account, created, expires) values(?1,?2,?3,?4)",
-                rusqlite::params![
-                    digest(&session),
-                    account,
-                    crate::iso_stamp(crate::now()),
-                    crate::iso_stamp(crate::now() + 60 * 60 * 24 * 30)
-                ],
-            )
-            .ok()?;
-        Some(session)
+        self.new_session(account, kind).ok()
     }
 
-    pub fn by_session(&self, raw: &str) -> Option<Account> {
+    /// The account behind a session, where it was made for this kind of cookie: a reader's or a
+    /// provider's session copied into a member's cookie is no session at all.
+    pub fn by_session(&self, raw: &str, kind: Kind) -> Option<Account> {
         let hash = digest(raw);
         let expires: String = self
             .db
             .query_row(
-                "select expires from session where hash = ?1",
-                rusqlite::params![hash],
+                "select expires from session where hash = ?1 and kind = ?2",
+                rusqlite::params![hash, kind.name()],
                 |r| r.get(0),
             )
             .ok()?;
@@ -693,6 +687,34 @@ impl Site {
 /// one name and path would sign a person out of the one by signing them in to the other.
 pub const READER_COOKIE: &str = "zr";
 
+/// What a session was made for, which is which cookie carries it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// `zs`: a member in the app, who may change things.
+    Member,
+    /// `zr`: a reader on a tracker's pages, who may read and propose.
+    Reader,
+    /// `zo`: somebody this world is signing in somewhere else, for as long as that takes.
+    Provider,
+}
+
+impl Kind {
+    fn name(self) -> &'static str {
+        match self {
+            Kind::Member => "member",
+            Kind::Reader => "reader",
+            Kind::Provider => "provider",
+        }
+    }
+    /// As long as its cookie: a provider's cookie lives an hour, and so does what it carries.
+    pub fn lasts(self) -> i64 {
+        match self {
+            Kind::Provider => 60 * 60,
+            _ => 60 * 60 * 24 * 30,
+        }
+    }
+}
+
 /// The reader's session cookie, or an API key. A key is for a system and carries no cookie; a
 /// session is for a person and carries nothing else.
 pub fn viewer_of(accounts: &Accounts, cookie: Option<&str>, authorization: Option<&str>) -> Viewer {
@@ -711,7 +733,7 @@ pub fn viewer_of(accounts: &Accounts, cookie: Option<&str>, authorization: Optio
             .find(|(k, _)| *k == READER_COOKIE)
             .map(|(_, v)| v.to_string())
     });
-    match session.and_then(|s| accounts.by_session(&s)) {
+    match session.and_then(|s| accounts.by_session(&s, Kind::Reader)) {
         Some(account) => Viewer {
             account: Some(account),
             by_key: false,
@@ -835,12 +857,12 @@ pub struct Pending {
 
 impl Accounts {
     /// A session for an account, without a link: what signing in elsewhere ends in.
-    pub fn new_session(&self, account: i64) -> Result<String, String> {
+    pub fn new_session(&self, account: i64, kind: Kind) -> Result<String, String> {
         let session = token();
         self.db
             .execute(
-                "insert into session(hash, account, created, expires) values(?1,?2,?3,?4)",
-                rusqlite::params![digest(&session), account, crate::iso_stamp(crate::now()), crate::iso_stamp(crate::now() + 60 * 60 * 24 * 30)],
+                "insert into session(hash, account, kind, created, expires) values(?1,?2,?3,?4,?5)",
+                rusqlite::params![digest(&session), account, kind.name(), crate::iso_stamp(crate::now()), crate::iso_stamp(crate::now() + kind.lasts())],
             )
             .map_err(|e| e.to_string())?;
         Ok(session)
@@ -967,6 +989,21 @@ mod tests {
 
     fn at(url: &str) -> Site {
         Site { url: url.into(), ..Site::default() }
+    }
+
+    #[test]
+    fn a_session_is_good_only_for_the_cookie_it_was_made_for() {
+        let dir = std::env::temp_dir().join(format!("zetlyn-kinds-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let accounts = Accounts::open(&dir).unwrap();
+        let ann = accounts.ensure("ann@example.org").unwrap();
+        let reader = accounts.spend_link(&accounts.new_link(ann.id).unwrap(), Kind::Reader).unwrap();
+        let provider = accounts.new_session(ann.id, Kind::Provider).unwrap();
+        assert_eq!(accounts.by_session(&reader, Kind::Reader).unwrap().id, ann.id);
+        assert!(accounts.by_session(&reader, Kind::Member).is_none(), "a reader's session is not a member's");
+        assert!(accounts.by_session(&provider, Kind::Member).is_none());
+        assert!(accounts.by_session(&provider, Kind::Reader).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

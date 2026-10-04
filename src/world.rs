@@ -28,7 +28,7 @@ zetlyn world up <domain> --owner <address> [--from <archive>] [--title …] [--s
 zetlyn world serve <workspace> [--addr 127.0.0.1:2500]
 zetlyn world export <workspace> --to <file.tar.gz>
 zetlyn world import <file.tar.gz> --to <dir> [--url <address>] [--owner <address>]
-zetlyn world move <workspace> --to <address> [--unchecked]
+zetlyn world move <workspace> --to <address> [--unchecked] | --back
 zetlyn world register <workspace> [--at https://zetlyn.com/directory]
 zetlyn world backup <workspace> <dir> [--keep 14]
 zetlyn world upgrade [--check] [--restart]";
@@ -91,6 +91,11 @@ pub fn command(args: &[String]) -> Result<(), String> {
         }
         Some("move") => {
             let dir = PathBuf::from(crate::positional(args, 2).first().ok_or("which workspace?")?.as_str());
+            if args.iter().any(|a| a == "--back") {
+                stay(&dir)?;
+                println!("{} answers where it is again", dir.display());
+                return Ok(());
+            }
             let to = crate::flag(args, "--to").ok_or("--to <address>, where it is now")?;
             move_to(&dir, to, args.iter().any(|a| a == "--unchecked"))?;
             println!("{} says it is at {to} now: its document says so, and every page redirects there", dir.display());
@@ -315,10 +320,28 @@ fn ensure_file(path: &Path, content: &str, mode: u32) -> Result<bool, String> {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
     let tmp = path.with_extension("zetlyn-new");
-    std::fs::write(&tmp, content).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    set_mode(&tmp, mode);
+    {
+        use std::io::Write;
+        let mut f = create_private(&tmp, mode)?;
+        f.write_all(content.as_bytes()).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    }
     std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(true)
+}
+
+/// A new file that is never, for a moment, readable by more than `mode` says: a password is not
+/// written first and hidden after. Whatever was at the name before is gone, a link included.
+fn create_private(path: &Path, mode: u32) -> Result<std::fs::File, String> {
+    let _ = std::fs::remove_file(path);
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(mode);
+    }
+    let _ = mode;
+    o.open(path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 fn set_mode(path: &Path, mode: u32) {
@@ -520,12 +543,11 @@ pub fn export(dir: &Path, to: &Path) -> Result<usize, String> {
     if let Some(d) = to.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
     }
-    let scratch = std::env::temp_dir().join(format!("zetlyn-export-{}-{}", std::process::id(), crate::now()));
-    std::fs::create_dir_all(&scratch).map_err(|e| e.to_string())?;
+    let scratch = std::env::temp_dir().join(format!("zetlyn-export-{}", crate::jwt::random()));
+    std::fs::create_dir(&scratch).map_err(|e| e.to_string())?;
     let partial = to.with_extension("partial");
     let result = (|| {
-        let file = std::fs::File::create(&partial).map_err(|e| format!("{}: {e}", partial.display()))?;
-        set_mode(&partial, 0o600);
+        let file = create_private(&partial, 0o600)?;
         let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(file, flate2::Compression::default()));
         let mut n = 0usize;
         for path in files(dir)? {
@@ -841,6 +863,9 @@ pub fn resolve(address: &str) -> Result<Resolved, String> {
     match fetch(address)? {
         Some(doc) => {
             let hub = doc["hub"].as_str().ok_or_else(|| format!("{address} is a world that publishes nothing"))?.to_string();
+            if !on_the_web(&hub) {
+                return Err(format!("{address} says it publishes at {hub}, which is not an address on the web"));
+            }
             Ok(Resolved {
                 hub,
                 publishes_with: doc["publishes_with"].as_str().map(str::to_string),
@@ -849,6 +874,11 @@ pub fn resolve(address: &str) -> Result<Resolved, String> {
         }
         None => Ok(plain()),
     }
+}
+
+/// A hub another world names is fetched from the web, never read from this machine's own disk.
+fn on_the_web(hub: &str) -> bool {
+    hub.starts_with("https://") || hub.starts_with("http://")
 }
 
 /// Beside a subscription: which world it came from, and that world's key.
@@ -881,7 +911,7 @@ pub fn follow(dir: &Path) -> Result<Option<String>, String> {
         },
         None => (doc, false),
     };
-    let Some(hub) = doc["hub"].as_str().map(str::to_string) else {
+    let Some(hub) = doc["hub"].as_str().map(str::to_string).filter(|h| on_the_web(h)) else {
         return Ok(Some(format!("{} publishes nothing now; fetched from where it was", doc["world"].as_str().unwrap_or(&world))));
     };
     let mut decl = crate::sourcedecl::SourceDecl::load(dir)?;
@@ -924,6 +954,10 @@ fn set_top(file: &Path, key: &str, value: Option<&str>) -> Result<(), String> {
     std::fs::write(file, format!("{}\n", out.join("\n").trim_end())).map_err(|e| format!("{}: {e}", file.display()))
 }
 
+/// More than any world this exports, and less than fills a disk.
+const IMPORT_MAX_FILES: usize = 2_000_000;
+const IMPORT_MAX_BYTES: u64 = 64 << 30;
+
 /// An exported world made again in an empty directory: at its new address where one is given,
 /// run by `owner` where one is given, and no longer moved anywhere. How many files it holds.
 pub fn import(file: &Path, dir: &Path, url: Option<&str>, owner: Option<&str>) -> Result<usize, String> {
@@ -934,6 +968,7 @@ pub fn import(file: &Path, dir: &Path, url: Option<&str>, owner: Option<&str>) -
     let reader = std::fs::File::open(file).map_err(|e| format!("{}: {e}", file.display()))?;
     let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(reader));
     let (mut n, mut about) = (0usize, false);
+    let mut bytes = 0u64;
     for entry in tar.entries().map_err(|e| format!("{}: {e}", file.display()))? {
         let mut entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path().map_err(|e| e.to_string())?.into_owned();
@@ -942,6 +977,16 @@ pub fn import(file: &Path, dir: &Path, url: Option<&str>, owner: Option<&str>) -
             continue;
         }
         let Ok(rel) = path.strip_prefix("world") else { continue };
+        // Files and directories, nothing else: a link in an archive points wherever its maker liked,
+        // and the next file written "inside" it lands there.
+        let kind = entry.header().entry_type();
+        if !kind.is_file() && !kind.is_dir() {
+            return Err(format!("{}: {} is a link or a device, which no export holds", file.display(), path.display()));
+        }
+        bytes += entry.size();
+        if n >= IMPORT_MAX_FILES || bytes > IMPORT_MAX_BYTES {
+            return Err(format!("{}: more than {IMPORT_MAX_FILES} files or {} GiB; not a world this imports", file.display(), IMPORT_MAX_BYTES >> 30));
+        }
         if rel.as_os_str().is_empty() || rel.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
             return Err(format!("{}: {} is not a path inside the world", file.display(), path.display()));
         }
@@ -960,6 +1005,9 @@ pub fn import(file: &Path, dir: &Path, url: Option<&str>, owner: Option<&str>) -
         set_top(&ws, "url", Some(u.trim_end_matches('/')))?;
     }
     set_top(&ws, "moved_to", None)?;
+    // A domain is a name a machine answers for, and not this machine's to claim because an archive
+    // says so: it is said again here, where it is wanted.
+    set_top(&ws, "domain", None)?;
     if let Some(o) = owner {
         let site = crate::account::Site::load(dir);
         if !site.owners.iter().any(|x| x.eq_ignore_ascii_case(o)) {
@@ -987,6 +1035,11 @@ pub fn move_to(dir: &Path, to: &str, unchecked: bool) -> Result<(), String> {
         }
     }
     set_top(&dir.join(crate::account::WORKSPACE), "moved_to", Some(to))
+}
+
+/// The world at `dir` answers where it is again: whatever it said about moving, unsaid.
+pub fn stay(dir: &Path) -> Result<(), String> {
+    set_top(&dir.join(crate::account::WORKSPACE), "moved_to", None)
 }
 
 /// A file of the world's own hub, `<root>/hub/<rest>`, as a reader asks for it: a directory is its
@@ -1154,6 +1207,41 @@ mod tests {
         let about: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(unpacked.join("EXPORT.json")).unwrap()).unwrap();
         assert_eq!(about["url"], "https://w.example");
         assert!(export(&dir.join("sources"), &dir.join("x.tar.gz")).unwrap_err().contains("not a workspace"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_archive_with_a_link_in_it_is_refused_and_a_domain_is_not_carried_in() {
+        let dir = std::env::temp_dir().join(format!("zetlyn-world-links-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let build = |name: &str, link: bool| {
+            let file = dir.join(name);
+            let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(std::fs::File::create(&file).unwrap(), flate2::Compression::default()));
+            let mut add = |path: &str, body: &[u8]| {
+                let mut h = tar::Header::new_gnu();
+                h.set_size(body.len() as u64);
+                h.set_mode(0o644);
+                h.set_cksum();
+                tar.append_data(&mut h, path, body).unwrap();
+            };
+            add("EXPORT.json", b"{}");
+            add("world/workspace.yaml", b"title: t\ndomain: data.example.org\n");
+            if link {
+                let mut h = tar::Header::new_gnu();
+                h.set_entry_type(tar::EntryType::Symlink);
+                h.set_size(0);
+                h.set_mode(0o777);
+                tar.append_link(&mut h, "world/sources", "/etc").unwrap();
+            }
+            tar.into_inner().unwrap().finish().unwrap();
+            file
+        };
+        let err = import(&build("bad.tar.gz", true), &dir.join("bad"), None, None).unwrap_err();
+        assert!(err.contains("a link"), "{err}");
+        assert!(!dir.join("bad/sources").exists());
+        import(&build("good.tar.gz", false), &dir.join("good"), None, None).unwrap();
+        assert_eq!(crate::account::Site::load(&dir.join("good")).domain, "");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1395,7 +1483,7 @@ mod tests {
         assert_eq!(doc_a["key"], fetch(&url_b).unwrap().unwrap()["key"]);
         let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).max_redirects(0).build().into();
         let r = agent.get(&format!("{url_a}/t/prices/things?q=deu")).call().unwrap();
-        assert_eq!(r.status().as_u16(), 301);
+        assert_eq!(r.status().as_u16(), 302);
         assert_eq!(r.headers().get("location").unwrap().to_str().unwrap(), format!("{url_b}/t/prices/things?q=deu"));
         let r = agent.post(&format!("{url_a}/propose/prices")).send("{}").unwrap();
         assert_eq!(r.status().as_u16(), 410);

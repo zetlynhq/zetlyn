@@ -186,7 +186,66 @@ fn agent() -> ureq::Agent {
         .into()
 }
 
+/// The machine this process serves, where it serves one: `zetlyn hosting serve` answers for the
+/// machine and for every organisation on it, one request at a time, so an organisation asking the
+/// machine (or the machine asking an organisation) over HTTP would be waiting for itself. Asked of
+/// an address this process serves, the answer is made here instead.
+static SERVED: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+pub fn serving_machine(dir: &std::path::Path) {
+    if let Ok(mut s) = SERVED.lock() {
+        *s = Some(dir.to_path_buf());
+    }
+}
+
+/// The place an address of this process is, and the rest of the address under its mount.
+fn served(url: &str) -> Option<(Here, String)> {
+    let dir = SERVED.lock().ok()?.clone()?;
+    let issuer = Site::load(&dir).url.trim_end_matches('/').to_string();
+    let rest = url.strip_prefix(&issuer)?;
+    if !(rest.is_empty() || rest.starts_with('/')) {
+        return None;
+    }
+    let path = rest.split('?').next().unwrap_or("").to_string();
+    if path.starts_with("/.well-known/openid-configuration") {
+        return Some((Here::machine(&dir), path));
+    }
+    if let Some(under) = path.strip_prefix("/app") {
+        return Some((Here::machine(&dir), under.to_string()));
+    }
+    let org = path.trim_start_matches('/').split('/').next().unwrap_or("").to_string();
+    let root = dir.join("orgs").join(&org);
+    if org.is_empty() || !root.is_dir() {
+        return None;
+    }
+    Some((Here::world(&root, &format!("/{org}")), path[org.len() + 1..].to_string()))
+}
+
+/// What this process would answer `url` with, where it serves it.
+fn answered_here(url: &str, form: Option<&BTreeMap<String, String>>) -> Option<Result<J, String>> {
+    let (here, path) = served(url)?;
+    Some(match (path.as_str(), form) {
+        ("/.well-known/openid-configuration", None) => Ok(here.discovery()),
+        ("/oauth/jwks", None) => here.key().and_then(|k| crate::jwt::ed25519_jwk(&k)).map(|jwk| json!({ "keys": [jwk] })),
+        ("/oauth/client.json", None) => Ok(here.client_document()),
+        ("/oauth/token", Some(form)) => {
+            let accounts = match Accounts::open(&here.root) {
+                Ok(a) => a,
+                Err(e) => return Some(Err(e)),
+            };
+            match token_answer(&here, &accounts, form) {
+                (200, body) => Ok(body),
+                (status, body) => Err(format!("{url}: {status} {}", body["error_description"].as_str().unwrap_or(""))),
+            }
+        }
+        _ => return None,
+    })
+}
+
 fn get_json(url: &str) -> Result<J, String> {
+    if let Some(answer) = answered_here(url, None) {
+        return answer;
+    }
     let mut r = agent().get(url).header("Accept", "application/json").call().map_err(|e| format!("{url}: {e}"))?;
     if !r.status().is_success() {
         return Err(format!("{url}: {}", r.status()));
@@ -196,6 +255,10 @@ fn get_json(url: &str) -> Result<J, String> {
 
 /// What a sign-in endpoint says, to a POST of a form.
 fn post_form(url: &str, form: &[(&str, &str)], bearer: Option<&str>) -> Result<J, String> {
+    let as_map: BTreeMap<String, String> = form.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    if let Some(answer) = answered_here(url, Some(&as_map)) {
+        return answer;
+    }
     let mut req = agent().post(url).header("Accept", "application/json");
     if let Some(t) = bearer {
         req = req.header("Authorization", &format!("Bearer {t}"));
@@ -383,21 +446,28 @@ fn signin_mail(here: &Here, accounts: &Accounts, request: tiny_http::Request, as
 }
 
 fn token(here: &Here, accounts: &Accounts, request: tiny_http::Request, asked: &Asked) {
-    let f = |k: &str| asked.form.get(k).cloned().unwrap_or_default();
-    let bad = |request: tiny_http::Request, e: &str, d: &str| json_reply(request, 400, json!({ "error": e, "error_description": d }));
+    let (status, body) = token_answer(here, accounts, &asked.form);
+    json_reply(request, status, body);
+}
+
+/// What the token endpoint answers a form with: over HTTP, or in this process where the relying
+/// party is this process too.
+fn token_answer(here: &Here, accounts: &Accounts, form: &BTreeMap<String, String>) -> (u16, J) {
+    let f = |k: &str| form.get(k).cloned().unwrap_or_default();
+    let bad = |e: &str, d: &str| (400, json!({ "error": e, "error_description": d }));
     if f("grant_type") != "authorization_code" {
-        return bad(request, "unsupported_grant_type", "only authorization_code");
+        return bad("unsupported_grant_type", "only authorization_code");
     }
     let Some(code) = accounts.take_code(&f("code")) else {
-        return bad(request, "invalid_grant", "that code was used, is older than a minute, or was never given");
+        return bad("invalid_grant", "that code was used, is older than a minute, or was never given");
     };
     if code.client != f("client_id") || code.redirect != f("redirect_uri") {
-        return bad(request, "invalid_grant", "that code was given to somebody else");
+        return bad("invalid_grant", "that code was given to somebody else");
     }
     if crate::jwt::sha256_b64(f("code_verifier").as_bytes()) != code.challenge {
-        return bad(request, "invalid_grant", "the verifier is not the one the challenge was made from");
+        return bad("invalid_grant", "the verifier is not the one the challenge was made from");
     }
-    let Some(account) = accounts.by_id(code.account) else { return bad(request, "invalid_grant", "nobody") };
+    let Some(account) = accounts.by_id(code.account) else { return bad("invalid_grant", "nobody") };
     let now = crate::now();
     let scope: Vec<&str> = code.scope.split_whitespace().collect();
     let mut claims = json!({
@@ -421,11 +491,11 @@ fn token(here: &Here, accounts: &Accounts, request: tiny_http::Request, asked: &
     let _ = here.key();
     let id_token = match crate::jwt::sign_eddsa(&here.root, KEY_FILE, &claims) {
         Ok(t) => t,
-        Err(e) => return json_reply(request, 500, json!({ "error": "server_error", "error_description": e })),
+        Err(e) => return (500, json!({ "error": "server_error", "error_description": e })),
     };
     let access = crate::jwt::random();
     let _ = accounts.put_token(&access, account.id, &code.client, &code.scope);
-    json_reply(request, 200, json!({ "access_token": access, "token_type": "Bearer", "expires_in": 600, "id_token": id_token, "scope": code.scope }));
+    (200, json!({ "access_token": access, "token_type": "Bearer", "expires_in": 600, "id_token": id_token, "scope": code.scope }))
 }
 
 fn userinfo(here: &Here, accounts: &Accounts, request: tiny_http::Request, asked: &Asked) {
@@ -1117,5 +1187,42 @@ mod tests {
         assert!(there.email.ends_with(".invalid"), "the world was not told the address: {}", there.email);
         let _ = std::fs::remove_dir_all(&m);
         let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn an_organisation_signs_in_through_the_machine_it_runs_on_without_waiting_for_itself() {
+        let pm = free_port();
+        let m = tmp("same-process");
+        let _ = std::fs::remove_dir_all(&m);
+        let url_m = format!("http://127.0.0.1:{pm}");
+        std::fs::create_dir_all(m.join("orgs/acme/sources")).unwrap();
+        std::fs::create_dir_all(m.join("orgs/acme/trackers")).unwrap();
+        std::fs::write(m.join("workspace.yaml"), format!("title: The machine\nurl: {url_m}\n")).unwrap();
+        // The organisation names no address of its own and takes the machine, as it does by default.
+        std::fs::write(m.join("orgs/acme/workspace.yaml"), format!("title: Acme\nidentity:\n- zetlyn: {url_m}\n")).unwrap();
+        let args: Vec<String> = ["hosting", "serve", m.to_str().unwrap(), "--addr", &format!("127.0.0.1:{pm}")].iter().map(|s| s.to_string()).collect();
+        // Ends with the test process; nothing outlives it.
+        std::thread::spawn(move || crate::app::hosting(&args));
+        up(pm);
+        let started = std::time::Instant::now();
+        let (status, page, to_m, _) = ask("GET", &format!("{url_m}/acme/oauth/login?with=zetlyn:{url_m}&next=/acme/"), None, None);
+        assert_eq!(status, 303, "{page}");
+        assert!(to_m.starts_with(&format!("{url_m}/app/oauth/authorize?")), "{to_m}");
+        let machine = Accounts::open(&m).unwrap();
+        let ann = machine.ensure("ann@example.org").unwrap();
+        let zo = format!("zo={}", machine.new_session(ann.id).unwrap());
+        let (status, consent, _, _) = ask("GET", &to_m, Some(&zo), None);
+        assert_eq!(status, 200, "the machine fetched the organisation's client document from itself: {consent}");
+        let mut form: Vec<String> = query_of(&to_m).iter().map(|(k, v)| format!("{k}={}", crate::serve::urlencode(v))).collect();
+        form.push("allow=1".into());
+        let (_, _, back, _) = ask("POST", &format!("{url_m}/app/oauth/authorize"), Some(&zo), Some(&form.join("&")));
+        assert!(back.starts_with(&format!("{url_m}/acme/oauth/callback?")), "{back}");
+        let (status, page, next, cookie) = ask("GET", &back, None, None);
+        assert_eq!((status, next.as_str()), (303, "/acme/"), "{page}");
+        assert!(cookie.starts_with("zr=") && cookie.contains("Path=/acme;"), "{cookie}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "it waited for itself: {:?}", started.elapsed());
+        let acme = Accounts::open(&m.join("orgs/acme")).unwrap();
+        assert!(acme.by_identity(&url_m, &crate::propose::pseudonym(&m, ann.id).unwrap()).is_some());
+        let _ = std::fs::remove_dir_all(&m);
     }
 }

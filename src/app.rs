@@ -2879,6 +2879,8 @@ fn hosting_serve(args: &[String]) -> Result<(), String> {
     std::fs::create_dir_all(dir.join("orgs")).map_err(|e| format!("{}: {e}", dir.display()))?;
     let addr = crate::flag(args, "--addr").unwrap_or("127.0.0.1:2400").to_string();
     let accounts = crate::account::Accounts::open(&dir)?;
+    // The machine and its organisations answer each other here, not over HTTP to themselves.
+    crate::oidc::serving_machine(&dir);
     let server = tiny_http::Server::http(&addr).map_err(|e| e.to_string())?;
     println!("{} organisations from {} on http://{addr}/", orgs_in(&dir).len(), dir.display());
 

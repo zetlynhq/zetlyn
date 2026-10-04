@@ -345,12 +345,16 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
             }
         }
 
+        @let open_to = proposable(scope, is_operator(v));
         h2 { "Sources" }
         div.grid {
             @for m in &scope.members {
                 div.card {
                     h4 { (m.title()) " " span.cover { (m.decl.priority.name()) } }
                     p.dim { (m.decl.why) }
+                    @if open_to.iter().any(|(n, _)| n == m.name()) {
+                        p { a href=(at(&format!("/propose/{}", urlencode(m.name())))) { "Propose a row" } }
+                    }
                     div.facet {
                         span { (m.kind()) " · " span.state.(m.state()) { (m.state()) } }
                         span.n { (m.records()) }
@@ -521,8 +525,12 @@ fn record_page(scope: &Tracker, member: &str, id: &str, operator: bool) -> Optio
         .into_iter()
         .next()?;
     let (source, answered) = said_by(scope, member);
+    let correctable = proposable(scope, operator).iter().any(|(n, _)| n == member);
     let body = html! {
         h1 { (rec.title) }
+        @if correctable {
+            p { a href={(at(&format!("/propose/{}", urlencode(member)))) "?claim=" (urlencode(&rec.record_id))} { "Propose a correction" } }
+        }
         p.state { span.chip { (member) } " " span.chip { (rec.kind) } " "
             @for i in &rec.ids { span.chip { (i.scheme) " " (i.value) } " " }
             span.dim { "known " (rec.known) } }
@@ -707,6 +715,11 @@ fn banner(v: &Viewer, scope: &Tracker, hidden: u64) -> Markup {
 }
 
 fn signin_page(site: &Site, message: Option<&str>) -> String {
+    signin_page_to(site, message, None)
+}
+
+/// The sign-in form, and where the link in the mail leads back to once it is followed.
+fn signin_page_to(site: &Site, message: Option<&str>, next: Option<&str>) -> String {
     let body = html! {
         p { a href=(at("/")) { "←" } }
         h1 { "Sign in" }
@@ -717,6 +730,7 @@ fn signin_page(site: &Site, message: Option<&str>) -> String {
         @if let Some(m) = message { div.note { (m) } }
         form.bar method="post" action=(at("/signin")) {
             input type="search" name="email" placeholder="you@example.com";
+            @if let Some(n) = next { input type="hidden" name="next" value=(n); }
             button type="submit" { "Send the link" }
         }
         @if !site.contact.is_empty() { p.dim { "Trouble: " (site.contact) } }
@@ -743,6 +757,8 @@ fn account_page(scope: &Tracker, accounts: &Accounts, site: &Site, v: &Viewer) -
                 "feeds, no API and no export. " a href=(at("/pricing")) { "What a subscription costs" } "."
             }
         }
+
+        (proposals_section(scope, accounts, a.id))
 
         h2 { "API keys" }
         @if !entitled {
@@ -1346,7 +1362,8 @@ impl TrackerSite {
                         } else {
                             site.url.clone()
                         };
-                        let link = format!("{base}{}/signin/{raw}", mounted());
+                        let next = next_of(&form_field(&form, "next")).map(|n| format!("?next={}", urlencode(&n))).unwrap_or_default();
+                        let link = format!("{base}{}/signin/{raw}{next}", mounted());
                         let sent = site
                             .send(
                                 &a.email,
@@ -1373,7 +1390,7 @@ impl TrackerSite {
                     ),
                 }
             }
-            "/signin" => (signin_page(&site, None), "text/html; charset=utf-8", None),
+            "/signin" => (signin_page_to(&site, None, params(&url).get("next").and_then(|n| next_of(n)).as_deref()), "text/html; charset=utf-8", None),
 
             "/signout" => {
                 if let Some(c) = &cookie {
@@ -1590,7 +1607,10 @@ impl TrackerSite {
                 Some(session) => (
                     shell(
                         "Signed in",
-                        html! { p { a href=(at("/account")) { "→ your account" } } h1 { "Signed in" } },
+                        html! {
+                            p { a href=(at("/account")) { "→ your account" } } h1 { "Signed in" }
+                            @if let Some(next) = params(&url).get("next").and_then(|n| next_of(n)) { p { a href=(at(&next)) { "Go on where you were" } } }
+                        },
                     ),
                     "text/html; charset=utf-8",
                     Some((
@@ -1686,6 +1706,53 @@ impl TrackerSite {
                             "text/html; charset=utf-8",
                             None,
                         )
+                    }
+                }
+            }
+            // A row proposed from the browser, by a reader the workspace signs for.
+            _ if parts.len() == 2 && parts[0] == "propose" => {
+                let member = parts[1].clone();
+                match proposable(scope, *operator).into_iter().find(|(m, _)| *m == member) {
+                    None => {
+                        missing = true;
+                        (shell("Not here", html! { h1 { "Nothing here takes proposals" } }), "text/html; charset=utf-8", None)
+                    }
+                    Some((_, source)) => {
+                        let mut reader = reader_of(scope, accounts, &v, *operator);
+                        let may = reader.as_ref().map(|r| crate::propose::may(&source, r)).unwrap_or(Ok(()));
+                        let page = match reader.as_mut() {
+                            Some(r) if post && may.is_ok() => {
+                                let account = if *operator { None } else { v.account.as_ref().map(|a| a.id) };
+                                match take_from_form(scope, accounts, &source, r, account, &form) {
+                                    Ok(_) => shell("Proposed", html! {
+                                        p { a href=(at("/")) { "← " (scope.decl.title) } }
+                                        h1 { "Proposed" }
+                                        p.about { "It waits for the owner, and is part of this tracker once they accept it. "
+                                            @if !*operator { "You get a mail when they decide." } }
+                                        p.bar {
+                                            a href=(at(&format!("/propose/{}", urlencode(&member)))) { "Propose another" }
+                                            @if !*operator { " · " a href=(at("/account")) { "Your proposals" } }
+                                        }
+                                    }),
+                                    Err(e) => {
+                                        status = 400;
+                                        let given: BTreeMap<String, String> = form
+                                            .split('&')
+                                            .filter_map(|p| p.split_once('='))
+                                            .map(|(k, v)| (crate::serve::urldecode(k), crate::serve::urldecode(v)))
+                                            .collect();
+                                        propose_page(scope, &member, &source, Some(r), Ok(()), &url, Some(&e), &given)
+                                    }
+                                }
+                            }
+                            _ => {
+                                if post {
+                                    status = if reader.is_none() { 401 } else { 403 };
+                                }
+                                propose_page(scope, &member, &source, reader.as_ref(), may, &url, None, &BTreeMap::new())
+                            }
+                        };
+                        (page, "text/html; charset=utf-8", None)
                     }
                 }
             }
@@ -2612,4 +2679,332 @@ fn compared(scope: &Tracker) -> Vec<(String, Vec<(String, Option<String>)>)> {
             (name.clone(), per)
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------------------------
+// Proposing from the browser: a reader signed in by a link, a form made from the source's own
+// declaration, and the workspace signing for them. See propose.rs.
+
+/// The sources of this tracker a viewer may propose to from here, by name, with where they are:
+/// every one that takes proposals for the person at the machine, the ones that name readers for
+/// everybody else.
+fn proposable(scope: &Tracker, operator: bool) -> Vec<(String, std::path::PathBuf)> {
+    let registry = crate::tracker::registry(&scope.root.join("sources"));
+    scope
+        .members
+        .iter()
+        .filter_map(|m| {
+            let dir = registry.get(m.name())?.clone();
+            let readers = crate::propose::readers(&dir).ok()?;
+            (operator || !readers.is_empty()).then(|| (m.name().to_string(), dir))
+        })
+        .collect()
+}
+
+/// Who is proposing, where anybody is: the person at the machine as the owner, a signed-in
+/// reader as their pseudonym.
+fn reader_of(scope: &Tracker, accounts: &Accounts, v: &Viewer, operator: bool) -> Option<crate::propose::Reader> {
+    if operator {
+        let me = crate::identity::read();
+        return Some(crate::propose::Reader {
+            id: crate::identity::key().unwrap_or_else(|| "owner".into()),
+            name: if me.name.is_empty() { "the owner".into() } else { me.name },
+            email: String::new(),
+            owner: true,
+        });
+    }
+    let a = v.account.as_ref().filter(|_| !v.by_key)?;
+    Some(crate::propose::Reader {
+        id: crate::propose::pseudonym(&scope.root, a.id).ok()?,
+        name: accounts.name_of(a.id),
+        email: a.email.clone(),
+        owner: false,
+    })
+}
+
+/// Where a signed-in reader comes back to: a path on this site, never another site.
+fn next_of(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    (raw.starts_with('/') && !raw.starts_with("//") && !raw.contains("://")).then(|| raw.to_string())
+}
+
+/// The form for one row: a field per field of the source, filled from a claim when it corrects
+/// one, then where it was read and how.
+#[allow(clippy::too_many_arguments)]
+fn propose_page(
+    scope: &Tracker,
+    member: &str,
+    dir: &Path,
+    reader: Option<&crate::propose::Reader>,
+    may: Result<(), String>,
+    url: &str,
+    said: Option<&str>,
+    given: &BTreeMap<String, String>,
+) -> String {
+    let Ok(decl) = crate::sourcedecl::SourceDecl::load(dir) else {
+        return shell("Not here", html! { h1 { "No such source" } });
+    };
+    let fields = crate::propose::fields(&decl);
+    let title = if decl.title.is_empty() { decl.name.clone() } else { decl.title.clone() };
+    let p = params(url);
+    // A correction starts from what the claim says now.
+    let correcting = p.get("claim").and_then(|id| scope.records_of(member, std::slice::from_ref(id), false).into_iter().next());
+    let mut value: BTreeMap<String, String> = BTreeMap::new();
+    if let Some(rec) = &correcting {
+        // The row as it was proposed, where the claim came from one; what the claim says
+        // otherwise, which has no field that only went into its identifier.
+        let behind = rec.from.url.as_deref().and_then(|u| crate::propose::row_behind(dir, u)).unwrap_or_default();
+        for f in &fields {
+            let property = f.property.clone().unwrap_or_else(|| f.name.clone());
+            let said = match behind.get(&f.name) {
+                Some(J::String(s)) => Some(s.clone()),
+                Some(J::Null) | None => rec.fields.get(&property).map(|v| v.display()),
+                Some(other) => Some(other.to_string()),
+            };
+            if let Some(v) = said {
+                value.insert(format!("f.{}", f.name), v);
+            }
+        }
+    }
+    value.extend(given.iter().map(|(k, v)| (k.clone(), v.clone())));
+    let get = |k: &str| value.get(k).cloned().unwrap_or_default();
+    let today = crate::iso_date(crate::now());
+    let here = format!("/propose/{}{}", urlencode(member), correcting.as_ref().map(|r| format!("?claim={}", urlencode(&r.record_id))).unwrap_or_default());
+    let body = html! {
+        p { a href=(at("/")) { "← " (scope.decl.title) } }
+        h1 { @if let Some(rec) = &correcting { "A correction to " (rec.title) } @else { "A row for " (title) } }
+        p.about {
+            "What you propose waits for the owner of " (title) ", and is part of it only once they accept it. "
+            "Say where you read it: the receipt for every value names that place, and you."
+        }
+        @if let Some(s) = said { div.note { (s) } }
+        @match (reader, &may) {
+            (None, _) => {
+                div.note {
+                    "Proposing needs you signed in, so the owner can tell you what they decided. "
+                    a href={(at("/signin")) "?next=" (urlencode(&here))} { "Sign in with your address" } "."
+                }
+            }
+            (Some(_), Err(e)) => { div.note { (e) "." } }
+            (Some(r), Ok(())) => {
+                form.settings method="post" action=(at(&here)) {
+                    @for f in &fields {
+                        p { label {
+                            (f.name) @if f.identifies { " *" }
+                            @if let Some(p) = &f.property { span.dim { " → " (p) } }
+                            br;
+                            @if f.kind == crate::sourcedecl::PropertyType::Number {
+                                input.wide type="text" inputmode="decimal" name={"f." (f.name)} value=(get(&format!("f.{}", f.name))) required[f.identifies];
+                            } @else if f.kind == crate::sourcedecl::PropertyType::Date {
+                                input.wide type="date" name={"f." (f.name)} value=(get(&format!("f.{}", f.name))) required[f.identifies];
+                            } @else {
+                                input.wide type="text" name={"f." (f.name)} value=(get(&format!("f.{}", f.name))) required[f.identifies];
+                            }
+                        } }
+                    }
+                    h2 { "Where you read it" }
+                    p { label { "Address *" br; input.wide type="url" name="read_from" placeholder="https://…" value=(get("read_from")) required; } }
+                    p { label { "On *" br; input type="date" name="read_at" value=(if get("read_at").is_empty() { today.clone() } else { get("read_at") }) required; } }
+                    p { label { input type="radio" name="attest" value="read" checked[get("attest") != "relayed"]; " I read it there myself" } }
+                    p { label { input type="radio" name="attest" value="relayed" checked[get("attest") == "relayed"]; " Somebody who read it passed it on, and allows it (name them below)" } }
+                    p { label { "Note" br; input.wide type="text" name="note" value=(if get("note").is_empty() { correcting.as_ref().map(|c| format!("Corrects {}", c.title)).unwrap_or_default() } else { get("note") }); } }
+                    @if !r.owner {
+                        p { label { "Shown as" br; input.wide type="text" name="name" placeholder="your name, or leave it empty" value=(if given.contains_key("name") { get("name") } else { r.name.clone() }); } }
+                        p.dim { "Beside your proposal the owner and the receipts show this name and " code { (r.id) } ". Your address is never shown." }
+                    }
+                    p { button.primary type="submit" { "Propose" } }
+                }
+            }
+        }
+    };
+    shell(&format!("Propose · {title}"), body)
+}
+
+/// A proposal from the form: made into a body as a key's proposer would write it, and kept,
+/// signed by this workspace for the reader. The file it was kept under.
+fn take_from_form(scope: &Tracker, accounts: &Accounts, dir: &Path, reader: &mut crate::propose::Reader, account: Option<i64>, form: &str) -> Result<String, String> {
+    let decl = crate::sourcedecl::SourceDecl::load(dir)?;
+    let fields = crate::propose::fields(&decl);
+    let said: BTreeMap<String, String> = fields.iter().map(|f| (f.name.clone(), form_field(form, &format!("f.{}", f.name)))).collect();
+    let row = crate::propose::row_from(&fields, &said)?;
+    let body = json!({
+        "row": row,
+        "read_at": form_field(form, "read_at").trim(),
+        "read_from": form_field(form, "read_from").trim(),
+        "attest": form_field(form, "attest"),
+        "note": form_field(form, "note").trim(),
+    });
+    if let Some(id) = account {
+        let name = form_field(form, "name");
+        let name: String = name.trim().chars().filter(|c| !c.is_control()).take(80).collect();
+        if name != reader.name {
+            accounts.set_name(id, &name)?;
+            reader.name = name;
+        }
+    }
+    let file = crate::propose::receive_from_reader(dir, &scope.root, body.to_string().as_bytes(), reader)?;
+    if let Some(id) = account {
+        accounts.record_proposal(id, &decl.name, &file)?;
+    }
+    crate::propose::tell_owner(&scope.root, dir);
+    Ok(file)
+}
+
+/// What a reader proposed here, and where each stands.
+fn proposals_section(scope: &Tracker, accounts: &Accounts, account: i64) -> Markup {
+    let mine = accounts.proposals_of(account);
+    let registry = crate::tracker::registry(&scope.root.join("sources"));
+    html! {
+        h2 { "Your proposals" }
+        @if mine.is_empty() { p.dim { "None yet." } }
+        table { tbody {
+            @for p in &mine {
+                @let entry = registry.get(&p.source).and_then(|d| crate::propose::list(d).into_iter().find(|e| e.file == p.file));
+                tr {
+                    td { span.chip { (p.source) } " " @if let Some(e) = &entry { code { (e.row) } } }
+                    td.dim { (p.at) }
+                    td.num { @match &entry { Some(e) => span.state.(if e.status == "accepted" { "current" } else { "empty" }) { (e.status) }, None => span.dim { "gone" } } }
+                }
+            }
+        } }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A workspace with one tracker over one proposals source, served on a free port in this
+    /// process. The address, and where the workspace is.
+    fn served(tag: &str, readers: &str) -> (String, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("zetlyn-serve-propose-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let source = root.join("sources/prices");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(
+            source.join("source.yaml"),
+            format!("name: t/prices\ntitle: Car prices\nkind: price\nfetch:\n  type: proposals\n  from: []\n  readers: [{readers}]\nlicence:\n  republish: yes\nclaims:\n  id:\n    scheme: price\n    from: \"const:{{country}}-{{week}}\"\n  title: \"const:{{country}} {{week}}\"\n  known: field:read_at\n  properties:\n    price:\n      type: number\n      from: field:price\n"),
+        )
+        .unwrap();
+        let tracker = root.join("trackers/prices");
+        std::fs::create_dir_all(&tracker).unwrap();
+        std::fs::write(tracker.join("tracker.yaml"), "name: t/prices-tracker\ntitle: Prices\nsources:\n- source: t/prices\n  why: Read by people, since nobody publishes it.\nidentified_by: [price]\n").unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let at = root.clone();
+        // Ends with the test process; nothing outlives it.
+        std::thread::spawn(move || {
+            let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+            let addr = server.server_addr().to_ip().unwrap().to_string();
+            let scope = Tracker::open(&at.join("trackers/prices"), &at.join("sources")).unwrap();
+            let mut site = TrackerSite::open(scope, &at.join("trackers/prices"), &at.join("sources"), &addr, false).unwrap();
+            tx.send(addr).unwrap();
+            for request in server.incoming_requests() {
+                site.answer(request);
+            }
+        });
+        (format!("http://{}", rx.recv().unwrap()), root)
+    }
+
+    fn session(root: &Path, email: &str) -> String {
+        let accounts = Accounts::open(root).unwrap();
+        let a = accounts.ensure(email).unwrap();
+        format!("zs={}", accounts.spend_link(&accounts.new_link(a.id).unwrap()).unwrap())
+    }
+
+    fn ask(method: &str, url: &str, cookie: Option<&str>, form: &str) -> (u16, String) {
+        let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).build().into();
+        let mut response = match method {
+            "POST" => {
+                let mut r = agent.post(url).header("Content-Type", "application/x-www-form-urlencoded");
+                if let Some(c) = cookie {
+                    r = r.header("Cookie", c);
+                }
+                r.send(form).unwrap()
+            }
+            _ => {
+                let mut r = agent.get(url);
+                if let Some(c) = cookie {
+                    r = r.header("Cookie", c);
+                }
+                r.call().unwrap()
+            }
+        };
+        (response.status().as_u16(), response.body_mut().read_to_string().unwrap_or_default())
+    }
+
+    #[test]
+    fn a_reader_signs_in_proposes_from_the_form_and_sees_it_wait() {
+        let (base, root) = served("flow", "signed-in");
+        let form_url = format!("{base}/propose/t%2Fprices");
+
+        let (status, page) = ask("GET", &format!("{base}/"), None, "");
+        assert_eq!(status, 200);
+        assert!(page.contains("Propose a row"), "the overview offers it");
+
+        // Not signed in: the form says why, and sign-in comes back here.
+        let (status, page) = ask("GET", &form_url, None, "");
+        assert_eq!(status, 200);
+        assert!(page.contains("Sign in with your address") && page.contains("next=%2Fpropose%2Ft%252Fprices"), "{page}");
+        assert_eq!(ask("POST", &form_url, None, "f.country=DEU").0, 401);
+        let (_, page) = ask("GET", &format!("{base}/signin?next=%2Fpropose%2Ft%252Fprices"), None, "");
+        assert!(page.contains(r#"name="next" value="/propose/t%2Fprices""#), "{page}");
+        assert!(!ask("GET", &format!("{base}/signin?next=%2F%2Fevil.example"), None, "").1.contains(r#"name="next""#));
+
+        let ann = session(&root, "ann@example.org");
+        let (status, page) = ask("GET", &form_url, Some(&ann), "");
+        assert_eq!(status, 200);
+        for field in ["f.country", "f.week", "f.price", "read_from", "read_at", "attest"] {
+            assert!(page.contains(&format!(r#"name="{field}""#)), "{field} in {page}");
+        }
+
+        // What was typed stays when something is missing.
+        let (status, page) = ask("POST", &form_url, Some(&ann), "f.country=DEU&f.price=44990&read_from=https%3A%2F%2Fexample.com&read_at=2026-10-02&attest=read&name=Ann");
+        assert_eq!(status, 400);
+        assert!(page.contains("`week`") && page.contains(r#"value="44990""#), "{page}");
+
+        let (status, page) = ask("POST", &form_url, Some(&ann), "f.country=DEU&f.week=2026-W40&f.price=44990&read_from=https%3A%2F%2Fexample.com&read_at=2026-10-02&attest=read&name=Ann");
+        assert_eq!(status, 200, "{page}");
+        assert!(page.contains("Proposed"));
+        let queue = crate::propose::list(&root.join("sources/prices"));
+        assert_eq!(queue.len(), 1);
+        assert_eq!((queue[0].name.as_str(), queue[0].via.as_str(), queue[0].verified), ("Ann", "browser", true));
+        assert_eq!(queue[0].row, json!({"country": "DEU", "week": "2026-W40", "price": 44990}));
+
+        let (_, page) = ask("GET", &format!("{base}/account"), Some(&ann), "");
+        assert!(page.contains("Your proposals") && page.contains("pending"), "{page}");
+
+        // Accepted, it is a claim, and its page offers a correction filled from what it says.
+        crate::propose::decide(&root.join("sources/prices"), &queue[0].file, true, "owner", "").unwrap();
+        let ds = crate::source::Source::open(&root.join("sources/prices")).unwrap();
+        ds.run().unwrap();
+        let q = crate::source::Query { text: String::new(), pred: None, ids: vec!["DEU-2026-W40".into()], seen_before: None, view: None, sort: None, limit: 5, offset: 0 };
+        let id = ds.search(&q).unwrap().1.into_iter().next().unwrap().record_id;
+        let (status, page) = ask("GET", &format!("{base}/claim/t%2Fprices/{}", urlencode(&id)), None, "");
+        assert_eq!(status, 200, "{page}");
+        assert!(page.contains("Propose a correction"), "{page}");
+        let (_, page) = ask("GET", &format!("{form_url}?claim={}", urlencode(&id)), Some(&ann), "");
+        assert!(page.contains("A correction to") && page.contains(r#"value="44990""#) && page.contains(r#"value="DEU""#), "{page}");
+        let (_, page) = ask("GET", &format!("{base}/account"), Some(&ann), "");
+        assert!(page.contains("accepted"), "{page}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_source_that_names_no_readers_takes_nothing_from_the_browser() {
+        let (base, root) = served("closed", "");
+        let ann = session(&root, "ann@example.org");
+        assert!(!ask("GET", &format!("{base}/"), None, "").1.contains("Propose a row"));
+        assert_eq!(ask("GET", &format!("{base}/propose/t%2Fprices"), Some(&ann), "").0, 404);
+        assert_eq!(ask("POST", &format!("{base}/propose/t%2Fprices"), Some(&ann), "f.country=DEU&f.week=W&read_from=x&read_at=2026-10-02&attest=read").0, 404);
+        assert!(crate::propose::list(&root.join("sources/prices")).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn only_a_path_here_is_somewhere_to_come_back_to() {
+        assert_eq!(next_of("/propose/x").as_deref(), Some("/propose/x"));
+        for elsewhere in ["//evil.example", "https://evil.example", "/x?u=https://evil", "propose/x", ""] {
+            assert!(next_of(elsewhere).is_none(), "{elsewhere}");
+        }
+    }
 }

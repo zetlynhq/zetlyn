@@ -175,6 +175,11 @@ pub enum Fetch {
         /// The keys invited to propose, `ed25519:…` as `zetlyn id` prints them.
         #[serde(default)]
         from: Vec<String>,
+        /// Readers of this workspace's published pages who may propose from the browser, the
+        /// workspace signing for them: `signed-in` for anybody signed in, or their addresses.
+        /// Empty, nobody may.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        readers: Vec<String>,
     },
     /// A query against PostgreSQL. The connection string names a variable, never a password,
     /// and the query carries the watermark as `{since}`.

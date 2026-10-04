@@ -46,6 +46,15 @@ create table if not exists apikey(
   name      text not null,
   created   text not null,
   last_used text);
+
+-- Which reader made which proposal from the browser. The proposal names a pseudonym; this is
+-- the only place it meets an address, so the reader can be told what became of it.
+create table if not exists proposal(
+  source  text not null,
+  file    text not null,
+  account integer not null,
+  at      text not null,
+  primary key(source, file));
 ";
 
 /// How far behind a free reader stands. One number, and the whole of the paywall.
@@ -149,6 +158,7 @@ impl Accounts {
         // duplicate column, and that refusal is the whole of the check.
         let _ =
             db.execute_batch("alter table account add column curator integer not null default 0");
+        let _ = db.execute_batch("alter table account add column name text not null default ''");
         Ok(Accounts { db })
     }
 
@@ -563,5 +573,61 @@ impl Viewer {
             by_key: false,
             free: false,
         }
+    }
+}
+
+/// A proposal a reader made from the browser, and whose it is. Kept here and nowhere else: the
+/// proposal itself names a pseudonym, because a receipt is public and an address is not.
+#[derive(Clone, Debug)]
+pub struct Proposed {
+    /// The source's name, as its declaration says it.
+    pub source: String,
+    /// The file the proposal is kept under in the source's `proposals/`.
+    pub file: String,
+    pub at: String,
+}
+
+impl Accounts {
+    /// What a reader asked to be called beside what they propose. Empty until they say.
+    pub fn name_of(&self, account: i64) -> String {
+        self.db
+            .query_row("select name from account where id = ?1", rusqlite::params![account], |r| r.get::<_, String>(0))
+            .unwrap_or_default()
+    }
+
+    pub fn set_name(&self, account: i64, name: &str) -> Result<(), String> {
+        self.db
+            .execute("update account set name = ?2 where id = ?1", rusqlite::params![account, name.trim()])
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn record_proposal(&self, account: i64, source: &str, file: &str) -> Result<(), String> {
+        self.db
+            .execute(
+                "insert or ignore into proposal(source, file, account, at) values(?1, ?2, ?3, ?4)",
+                rusqlite::params![source, file, account, crate::iso_stamp(crate::now())],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    /// Newest first.
+    pub fn proposals_of(&self, account: i64) -> Vec<Proposed> {
+        let Ok(mut stmt) = self.db.prepare("select source, file, at from proposal where account = ?1 order by at desc, file desc") else {
+            return Vec::new();
+        };
+        stmt.query_map(rusqlite::params![account], |r| Ok(Proposed { source: r.get(0)?, file: r.get(1)?, at: r.get(2)? }))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    }
+
+    /// Who proposed it, where a reader did: the one to tell what became of it.
+    pub fn proposer_of(&self, source: &str, file: &str) -> Option<Account> {
+        let id: i64 = self
+            .db
+            .query_row("select account from proposal where source = ?1 and file = ?2", rusqlite::params![source, file], |r| r.get(0))
+            .ok()?;
+        self.read("select id, email, state, paid_until, scopes, curator from account where id = ?1", &id.to_string())
     }
 }

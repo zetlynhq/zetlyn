@@ -830,9 +830,23 @@ impl App {
             }
             (false, ["proposals"]) => (200, html_kind, self.proposal_sources_page(&query)),
             (true, ["proposals"]) => match self.new_proposal_source(&form) {
-                Ok(slug) => return redirect(request, &serve::at(&format!("/proposals/{slug}?said={}", urlencode("Made. Invite the keys that may propose.")))),
+                Ok(slug) => return redirect(request, &serve::at(&format!("/proposals/{slug}?said={}", urlencode("Made. Anybody signed in to its published pages may propose to it; keys you invite may too.")))),
                 Err(e) => return redirect(request, &serve::at(&format!("/proposals?said={}", urlencode(&e)))),
             },
+            (true, ["proposals", source, "readers"]) => {
+                let readers: Vec<String> = match form.get("readers").map(String::as_str).unwrap_or("") {
+                    "signed-in" => vec![crate::propose::SIGNED_IN.to_string()],
+                    "listed" => form.get("addresses").map(String::as_str).unwrap_or("").split([',', '\n', ' ']).map(|a| a.trim().to_lowercase()).filter(|a| a.contains('@')).collect(),
+                    _ => Vec::new(),
+                };
+                let said = match crate::propose::set_readers(&self.sources().join(source), readers.clone()) {
+                    Ok(()) if readers.is_empty() => "Readers can no longer propose here. What they proposed before stays, with its decisions.".to_string(),
+                    Ok(()) if readers.iter().any(|r| r == crate::propose::SIGNED_IN) => "Anybody signed in to the published pages may propose here now.".to_string(),
+                    Ok(()) => format!("{} may propose here now.", readers.join(", ")),
+                    Err(e) => e,
+                };
+                return redirect(request, &serve::at(&format!("/proposals/{source}?said={}", urlencode(&said))));
+            }
             (true, ["proposals", source, verb @ ("invite" | "uninvite")]) => {
                 let said = self.invite(source, form.get("key").map(String::as_str).unwrap_or(""), *verb == "invite").unwrap_or_else(|e| e);
                 return redirect(request, &serve::at(&format!("/proposals/{source}?said={}", urlencode(&said))));
@@ -844,12 +858,14 @@ impl App {
             (true, ["proposals", source, name, verb @ ("accept" | "reject")]) => {
                 let dir = self.sources().join(source);
                 let by = self.decider();
-                match crate::propose::decide(&dir, name, *verb == "accept", &by, form.get("why").map(String::as_str).unwrap_or("")) {
+                let why = form.get("why").map(String::as_str).unwrap_or("");
+                match crate::propose::decide(&dir, name, *verb == "accept", &by, why) {
                     Ok(()) => {
                         // Read now, as a push is, so what was accepted is a claim before the page comes back.
                         if let Ok(ds) = Source::open(&dir) {
                             let _ = ds.run();
                         }
+                        crate::propose::tell_proposer(&self.root, &dir, name, *verb == "accept", why);
                         return redirect(request, &serve::at(&format!("/proposals/{source}")));
                     }
                     Err(e) => (400, html_kind, page("Not decided", html! { p { (e) } p { a href=(serve::at(&format!("/proposals/{source}"))) { "Back to the proposals" } } })),
@@ -1812,7 +1828,7 @@ impl App {
         let q = |s: &str| serde_json::to_string(s).unwrap_or_default();
         let braced = |sep: &str| identify.iter().map(|f| format!("{{{f}}}")).collect::<Vec<_>>().join(sep);
         let mut yaml = format!(
-            "name: {}\ntitle: {}\nkind: observation\nabout: {}\nfetch:\n  type: proposals\n  from: []\nclaims:\n  id:\n    scheme: {}\n    from: {}\n  title: {}\n  known: field:read_at\n  properties:\n",
+            "name: {}\ntitle: {}\nkind: observation\nabout: {}\nfetch:\n  type: proposals\n  from: []\n  readers: [signed-in]\nclaims:\n  id:\n    scheme: {}\n    from: {}\n  title: {}\n  known: field:read_at\n  properties:\n",
             q(&format!("{owner}/{slug}")),
             q(&title),
             q("Rows read by people and proposed, each signed with the proposer's key; a row is here once the owner accepted it."),
@@ -1841,7 +1857,7 @@ impl App {
     fn invite(&self, source: &str, key: &str, yes: bool) -> Result<String, String> {
         let dir = self.sources().join(source);
         let mut decl = crate::sourcedecl::SourceDecl::load(&dir)?;
-        let crate::sourcedecl::Fetch::Proposals { from } = &mut decl.source else {
+        let crate::sourcedecl::Fetch::Proposals { from, .. } = &mut decl.source else {
             return Err(format!("{} takes no proposals", decl.name));
         };
         let key = key.trim().to_lowercase();
@@ -1869,7 +1885,7 @@ impl App {
     fn proposals_page(&self, source: &str, query: &BTreeMap<String, String>) -> Result<String, String> {
         let dir = self.sources().join(source);
         let decl = crate::sourcedecl::SourceDecl::load(&dir)?;
-        let crate::sourcedecl::Fetch::Proposals { from } = &decl.source else {
+        let crate::sourcedecl::Fetch::Proposals { from, readers } = &decl.source else {
             return Err(format!("{} takes no proposals", decl.name));
         };
         let all = crate::propose::list(&dir);
@@ -1897,6 +1913,20 @@ impl App {
                     button.primary type="submit" { "Invite" }
                 }
             }
+            @let everybody = readers.iter().any(|r| r == crate::propose::SIGNED_IN);
+            @let listed: Vec<&String> = readers.iter().filter(|r| r.as_str() != crate::propose::SIGNED_IN).collect();
+            details open[!readers.is_empty()] {
+                summary { "Readers who may propose from the browser: "
+                    (if everybody { "anybody signed in".to_string() } else if listed.is_empty() { "nobody".to_string() } else { format!("{} listed", listed.len()) }) }
+                p.dim { "A reader of the published pages signs in with a link sent to their address and proposes through a form; this workspace signs for them. Their proposals name a pseudonym, never the address, and they are mailed what you decide." }
+                form.settings method="post" action=(serve::at(&format!("/proposals/{source}/readers"))) {
+                    p { label { input type="radio" name="readers" value="none" checked[readers.is_empty()]; " Nobody" } }
+                    p { label { input type="radio" name="readers" value="signed-in" checked[everybody]; " Anybody signed in" } }
+                    p { label { input type="radio" name="readers" value="listed" checked[!everybody && !listed.is_empty()]; " Only these addresses" } br;
+                        input.wide type="text" name="addresses" placeholder="ann@example.org, ben@example.org" value=(listed.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")); }
+                    p { button.primary type="submit" { "Save" } }
+                }
+            }
             details {
                 summary { "How a proposer sends a row" }
                 p { "A file, " code { "row.json" } ", with the row and how it was read:" }
@@ -1922,8 +1952,8 @@ impl App {
                                 @if !e.note.is_empty() { " · " (e.note) }
                             }
                             div.why {
-                                "proposed by " code title=(e.by) { (short(&e.by)) } " · arrived " (e.received)
-                                @if !e.agreeing.is_empty() { " · " strong { (e.agreeing.len()) (if e.agreeing.len() == 1 { " other key says the same" } else { " other keys say the same" }) } }
+                                "proposed by " @if e.via == "browser" { strong { (if e.name.is_empty() { "a reader" } else { e.name.as_str() }) } " " code { (e.by) } " · signed in, from the browser" } @else { code title=(e.by) { (short(&e.by)) } } " · arrived " (e.received)
+                                @if !e.verified { " · " strong { "its signature does not verify: the file was changed after it arrived" } } @if !e.agreeing.is_empty() { " · " strong { (e.agreeing.len()) (if e.agreeing.len() == 1 { " other key says the same" } else { " other keys say the same" }) } }
                             }
                         }
                         td.num {

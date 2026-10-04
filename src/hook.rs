@@ -45,13 +45,19 @@ pub fn receive(dir: &Path, body: &[u8], signature: Option<&str>) -> Result<Strin
     Ok(name)
 }
 
-/// Every body in the inbox, oldest first, as rows, each one's origin `<what>#<file>`.
+/// Every body in the inbox, oldest first (a proposals source newest first), as rows, each one's origin `<what>#<file>`.
 pub fn rows(dir: &Path, root: &Path, what: &str, on_row: &mut impl FnMut(Produced) -> Result<(), String>) -> Result<Option<String>, String> {
     let inbox = dir.join(INBOX);
     let mut files: Vec<_> = std::fs::read_dir(&inbox)
         .map(|d| d.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")).collect())
         .unwrap_or_default();
     files.sort();
+    // An update keeps the first row it reads under one claim id (source.rs). A proposal accepted
+    // later about the same thing is a correction, so proposals are read newest first: the
+    // correction is the one kept, and the row it corrects stays in the inbox and on the record.
+    if what == "proposal" {
+        files.reverse();
+    }
     for f in files {
         let text = std::fs::read_to_string(&f).map_err(|e| format!("{}: {e}", f.display()))?;
         let Ok(value) = serde_json::from_str::<J>(&text) else { continue };

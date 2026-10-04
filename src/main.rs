@@ -150,6 +150,8 @@ zetlyn
       A source people read for it (`fetch: type: proposals`, `from:` the keys invited). A
       proposal is {row, read_at, read_from, attest: read|relayed, note}, signed with your key;
       only what its owner accepts reaches the next update, and a rejection withdraws it.
+      `readers: [signed-in]` (or addresses) lets readers of the published pages propose from
+      the browser, signed in by a mailed link; the workspace signs for them.
 
   zetlyn claim <dir> <identifier or claim id>
       One claim, the words its source used for it, and every version it was at.
@@ -313,7 +315,9 @@ fn run(args: &[String]) -> Result<(), String> {
                 let wanted = flag(args, "--status");
                 for e in all.iter().filter(|e| wanted.is_none_or(|w| w == e.status)) {
                     let agree = if e.agreeing.is_empty() { String::new() } else { format!(" · {} other key(s) say the same", e.agreeing.len()) };
-                    println!("{}  {}  {}\n    {}\n    read {} from {} ({}) by {}{agree}", e.status, e.file, e.received, e.row, e.read_at, e.read_from, e.attest, e.by);
+                    let by = if e.name.is_empty() { e.by.clone() } else { format!("{} ({})", e.name, e.by) };
+                    let by = if e.verified { by } else { format!("{by} · THE SIGNATURE DOES NOT VERIFY") };
+                    println!("{}  {}  {}\n    {}\n    read {} from {} ({}) by {by}{agree}", e.status, e.file, e.received, e.row, e.read_at, e.read_from, e.attest);
                 }
                 if all.is_empty() {
                     println!("no proposals");
@@ -327,6 +331,8 @@ fn run(args: &[String]) -> Result<(), String> {
                 let me = identity::read();
                 let by = flag(args, "--by").map(str::to_string).or_else(|| Some(me.name).filter(|n| !n.is_empty())).or_else(identity::key).unwrap_or_default();
                 propose::decide(&dir, name, word == "accept", &by, flag(args, "--why").unwrap_or(""))?;
+                // A reader who proposed from the browser hears what was decided, as from the app.
+                propose::tell_proposer(&workspace_of(&dir), &dir, name, word == "accept", flag(args, "--why").unwrap_or(""));
                 println!("{name}: {word}ed by {by}; the next `zetlyn source update {}` takes it", dir.display());
                 Ok(())
             }

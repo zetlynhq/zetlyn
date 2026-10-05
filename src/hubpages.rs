@@ -165,7 +165,9 @@ pub type Opens<'a> = &'a dyn Fn(&Row) -> Option<String>;
 fn frame(place: &dyn Place, title: &str, description: &str, body: Markup) -> String {
     let has = |name: &str| place.exists(name);
     // Named by what they hold, so a browser that kept the operator's old design asks for the new.
-    let stamp = |name: &str| place.get(name).map(|b| crate::place::sha256(&b)[..8].to_string()).unwrap_or_default();
+    // What the hub holds of a file, and this release: on zetlyn.com the sheet is the website's, which
+    // the hub's own copy says nothing about, and a release that changes the pages changes the name.
+    let stamp = |name: &str| format!("{}-{}", place.get(name).map(|b| crate::place::sha256(&b)[..8].to_string()).unwrap_or_default(), env!("CARGO_PKG_VERSION"));
     let page = html! {
         (DOCTYPE)
         html lang="en" {

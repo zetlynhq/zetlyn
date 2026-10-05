@@ -34,8 +34,10 @@ impl Row {
     }
     /// Where its page is.
     /// Where its page is kept in the hub, from the hub's root.
+    /// Its page is kept beside its publisher's others, as a person reads the address: whose, what
+    /// kind, which. What it is made of stays where every hub keeps it, `<tree>/<owner>/<name>/`.
     pub fn page(&self) -> String {
-        format!("/{}/{}/{}/", self.tree, self.owner, self.name)
+        format!("/{}/{}/{}/", self.owner, self.tree, self.name)
     }
     /// Where its page is read: a hub is at `/hub/` on the name it shares with a site or a world.
     pub fn href(&self) -> String {
@@ -344,7 +346,7 @@ fn take(command: &str, note: &str) -> Markup {
 /// Where a page is, beneath the header: Zetlyn, the hub, and on a page about one thing, its kind
 /// and its name. The last is where the reader is and leads nowhere.
 fn trail(r: Option<&Row>) -> Markup {
-    // As the address says it: /hub/trackers/<owner>/<name>/ is Hub / Trackers / owner / name.
+    // As the address says it: /hub/<owner>/trackers/<name>/ is Hub / owner / Trackers / name.
     html! {
         nav.crumbs.shell aria-label="Breadcrumb" {
             ol {
@@ -352,14 +354,65 @@ fn trail(r: Option<&Row>) -> Markup {
                     None => { li { span aria-current="page" { "Hub" } } }
                     Some(r) => {
                         li { a href="/hub/" { "Hub" } }
-                        li { a href={"/hub/#" (if r.is_tracker() { "trackers" } else { "sources" })} { (if r.is_tracker() { "Trackers" } else if r.tree == "packages" { "Packages" } else { "Sources" }) } }
-                        li { span { (r.owner) } }
+                        li { a href={"/hub/" (r.owner) "/"} { (r.owner) } }
+                        li { a href={"/hub/" (r.owner) "/#" (r.tree)} { (tree_label(r.tree)) } }
                         li { span aria-current="page" { (r.title()) } }
                     }
                 }
             }
         }
     }
+}
+
+/// A tree's name as a person reads it.
+fn tree_label(tree: &str) -> &'static str {
+    match tree {
+        "trackers" => "Trackers",
+        "packages" => "Packages",
+        _ => "Sources",
+    }
+}
+
+/// A publisher's page, at /hub/<owner>/: everything they have in this hub, trackers first.
+fn owner_page(place: &dyn Place, owner: &str, rows: &[Row], opens: Opens) -> String {
+    let mut theirs: Vec<&Row> = rows.iter().filter(|r| r.owner == owner).collect();
+    theirs.sort_by_key(|r| (r.tree != "trackers", r.tree, r.title().to_lowercase()));
+    theirs.dedup_by(|a, b| a.page() == b.page());
+    let trees: Vec<&str> = ["trackers", "packages", "sources"].into_iter().filter(|t| theirs.iter().any(|r| r.tree == *t)).collect();
+    let body = html! {
+        nav.crumbs.shell aria-label="Breadcrumb" {
+            ol { li { a href="/hub/" { "Hub" } } li { span aria-current="page" { (owner) } } }
+        }
+        section.hub-top.shell {
+            p.overline { "Publisher · in the hub" }
+            h1.hub-title { (owner) }
+            p.hub-sub { "Everything " (owner) " publishes in this hub: open it where it runs, or read its entry and take a copy." }
+        }
+        @for tree in &trees {
+            section.hub-registry.shell id=(tree) {
+                p.overline { (tree_label(tree)) }
+                @for r in theirs.iter().filter(|r| r.tree == *tree) {
+                    article.hub-row {
+                        div.hub-row-main {
+                            h3 { a href=(r.href()) { (r.title()) } span.badge { (kind_of(r)) } }
+                            @if !r.about().is_empty() { p { (r.about()) } }
+                            p.hub-meta {
+                                (r.reference())
+                                " · " (thousands(claims_of(r, rows))) " claims"
+                                @if r.built_at() > 0 { " · published " (ago(r.built_at())) }
+                                @if let Some((world, shown)) = instance(r, rows, opens) { " · from " a.hub-from href=(world) { (shown) } }
+                            }
+                        }
+                        div.hub-row-act {
+                            @if let Some(open) = opens(r) { a.primary href=(open) { "Live" } }
+                            a.secondary href=(r.href()) { "Entry" }
+                        }
+                    }
+                }
+            }
+        }
+    };
+    frame(place, &format!("{owner} · Zetlyn Hub"), &format!("Everything {owner} publishes in the hub."), body)
 }
 
 /// What a page about one thing is, above its name: its kind, that this is its entry in the hub,
@@ -701,8 +754,13 @@ pub fn page_at(place: &dyn Place, path: &str, opens: Opens) -> Option<String> {
     if trimmed.is_empty() {
         return Some(catalog(place, &rows, opens));
     }
-    let r = rows.iter().find(|r| format!("{}/{}/{}", r.tree, r.owner, r.name) == trimmed && r.tag == "latest")
-        .or_else(|| rows.iter().find(|r| format!("{}/{}/{}", r.tree, r.owner, r.name) == trimmed))?;
+    // A publisher's page; then a thing's, by the address a person reads (owner first) or the one
+    // its files are kept at (kind first), which is where its page was until 2026-10-05.
+    if !trimmed.contains('/') {
+        return rows.iter().any(|r| r.owner == trimmed).then(|| owner_page(place, trimmed, &rows, opens));
+    }
+    let is = |r: &Row| format!("{}/{}/{}", r.owner, r.tree, r.name) == trimmed || format!("{}/{}/{}", r.tree, r.owner, r.name) == trimmed;
+    let r = rows.iter().find(|r| is(r) && r.tag == "latest").or_else(|| rows.iter().find(|r| is(r)))?;
     Some(page(place, r, &rows, opens))
 }
 
@@ -721,6 +779,12 @@ pub fn render(place: &dyn Place, opens: Opens) -> Result<usize, String> {
             continue;
         }
         place.put(&format!("{}index.html", key.trim_start_matches('/')), page(place, latest, &rows, opens).as_bytes())?;
+        written += 1;
+    }
+    // A page for each publisher, at /hub/<owner>/: everything they have here.
+    let owners: std::collections::BTreeSet<&str> = rows.iter().map(|r| r.owner.as_str()).collect();
+    for owner in owners {
+        place.put(&format!("{owner}/index.html"), owner_page(place, owner, &rows, opens).as_bytes())?;
         written += 1;
     }
     Ok(written)

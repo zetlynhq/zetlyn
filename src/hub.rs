@@ -378,9 +378,19 @@ pub fn serve(dir: &Path, addr: &str, serving: &[String]) -> Result<(), String> {
 }
 
 /// `sources/owner/name`, `trackers/owner/name/`, `packages/owner/name`: the page about one thing.
+/// A page rather than a file: a publisher (`<owner>`), or a thing by the address a person reads
+/// (`<owner>/<tree>/<name>`) or the one its files are kept at (`<tree>/<owner>/<name>`).
 fn is_page(path: &str) -> bool {
     let parts: Vec<&str> = path.trim_end_matches('/').split('/').collect();
-    parts.len() == 3 && matches!(parts[0], "sources" | "trackers" | "packages") && parts.iter().all(|p| !p.is_empty())
+    let tree = |p: &str| matches!(p, "sources" | "trackers" | "packages");
+    if parts.iter().any(|p| p.is_empty()) {
+        return false;
+    }
+    match parts.as_slice() {
+        [owner] => !owner.contains('.') && !tree(owner),
+        [a, b, _] => tree(a) || tree(b),
+        _ => false,
+    }
 }
 
 #[cfg(test)]

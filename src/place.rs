@@ -139,8 +139,12 @@ impl Web {
             .timeout_global(Some(std::time::Duration::from_secs(120)))
             .build()
             .into();
+        // zetlyn.com's hub was at its root until 2026-10-05 and is at /hub since; a subscription
+        // that says the root reads from there without the detour through a redirect.
+        let base = base.trim_end_matches('/');
+        let base = if base == "https://zetlyn.com" { crate::artifact::DEFAULT_HUB } else { base };
         Web {
-            base: base.trim_end_matches('/').to_string(),
+            base: base.to_string(),
             agent,
         }
     }

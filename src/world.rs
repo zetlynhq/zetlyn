@@ -791,7 +791,7 @@ pub fn document(root: &Path) -> Result<serde_json::Value, String> {
             continue;
         }
         let at = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        trackers.push(json!({ "name": name, "title": decl.title, "at": format!("{url}/t/{at}/") }));
+        trackers.push(json!({ "name": name, "title": decl.title, "at": format!("{url}/trackers/{at}/") }));
     }
     Ok(json!({
         "zetlyn": DOCUMENT,
@@ -1100,9 +1100,9 @@ pub fn hub_file(root: &Path, rest: &[String], prefix: &str) -> Option<(Vec<u8>, 
                 let to = if at == "/hub/" { format!("{prefix}/") } else { format!("{prefix}{at}") };
                 text = text.replace(&format!("=\"{at}"), &format!("=\"{to}"));
             }
-            text = text.replace("fetch(\"/index.json\")", &format!("fetch(\"{prefix}/index.json\")"));
+            text = text.replace("fetch(\"/hub/index.json\")", &format!("fetch(\"{prefix}/index.json\")"));
         } else {
-            text = text.replace("\"page\":\"/", &format!("\"page\":\"{prefix}/"));
+            text = text.replace("\"page\":\"/hub/", &format!("\"page\":\"{prefix}/"));
         }
         bytes = text.into_bytes();
     }
@@ -1355,8 +1355,8 @@ mod tests {
         assert!(hub_file(&root, &p(&["..", "workspace.yaml"]), "/hub").is_none());
         assert!(hub_file(&root, &p(&["nothing"]), "/hub").is_none());
         // Its pages link under where it is; what is signed goes out as it is.
-        std::fs::write(root.join("hub/index.html"), r#"<a href="/hub/#x"></a><a href="/sources/a/b/"></a><link href="/style.css"><script>fetch("/index.json")</script>"#).unwrap();
-        std::fs::write(root.join("hub/index.json"), r#"[{"page":"/sources/a/b/"}]"#).unwrap();
+        std::fs::write(root.join("hub/index.html"), r#"<a href="/hub/#x"></a><a href="/hub/sources/a/b/"></a><link href="/style.css"><script>fetch("/hub/index.json")</script>"#).unwrap();
+        std::fs::write(root.join("hub/index.json"), r#"[{"page":"/hub/sources/a/b/"}]"#).unwrap();
         std::fs::write(root.join("hub/sources/a/b/manifest.json"), r#"{"page":"/sources/a/b/"}"#).unwrap();
         let page = String::from_utf8(hub_file(&root, &[], "/acme/hub").unwrap().0).unwrap();
         assert_eq!(page, r#"<a href="/acme/hub/#x"></a><a href="/acme/hub/sources/a/b/"></a><link href="/acme/hub/style.css"><script>fetch("/acme/hub/index.json")</script>"#);
@@ -1543,9 +1543,9 @@ mod tests {
         assert_eq!(doc_a["moved_to"], url_b);
         assert_eq!(doc_a["key"], fetch(&url_b).unwrap().unwrap()["key"]);
         let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).max_redirects(0).build().into();
-        let r = agent.get(&format!("{url_a}/t/prices/things?q=deu")).call().unwrap();
+        let r = agent.get(&format!("{url_a}/trackers/prices/things?q=deu")).call().unwrap();
         assert_eq!(r.status().as_u16(), 302);
-        assert_eq!(r.headers().get("location").unwrap().to_str().unwrap(), format!("{url_b}/t/prices/things?q=deu"));
+        assert_eq!(r.headers().get("location").unwrap().to_str().unwrap(), format!("{url_b}/trackers/prices/things?q=deu"));
         let r = agent.post(&format!("{url_a}/propose/prices")).send("{}").unwrap();
         assert_eq!(r.status().as_u16(), 410);
 

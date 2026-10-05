@@ -329,7 +329,7 @@ mod tests {
         assert_eq!(crate::world::signed_document(&a).unwrap()["directories"], json!([format!("{url_d}/directory")]));
         // Found, by what it is about.
         let page = get(&format!("{url_d}/directory?q=cargo"));
-        assert!(page.contains("Bike prices") && page.contains("Cargo bikes, what they cost") && page.contains(&format!("{url_a}/t/bikes/")), "{page}");
+        assert!(page.contains("Bike prices") && page.contains("Cargo bikes, what they cost") && page.contains(&format!("{url_a}/trackers/bikes/")), "{page}");
         assert!(!get(&format!("{url_d}/directory?q=submarines")).contains("Bike prices"));
         let json: J = serde_json::from_str(&get(&format!("{url_d}/directory.json"))).unwrap();
         assert_eq!(json["worlds"][0]["world"], url_a);

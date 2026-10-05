@@ -5,7 +5,7 @@
 //! adds is the order a newcomer meets them in: what do you want to track, the first source, is it
 //! right, a second source, how many they share, connect. There are no accounts: whoever runs the
 //! program owns what it holds, and sees every page of it. The trackers themselves are served as
-//! they are published, each under `/t/<name>/`.
+//! they are published, each under `/trackers/<name>/`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -480,8 +480,13 @@ impl App {
         let parts: Vec<String> = path.split('/').filter(|s| !s.is_empty()).map(serve::urldecode).collect();
         // A name in an address is one name: never a way out of the directory it names something
         // in. `..%2F..` decodes after the split, so it is looked at here, once, for every route.
+        // A tracker was at `t/<name>/` until 2026-10-05; asked for there, it says where it is now.
+        if parts.first().map(String::as_str) == Some("t") && matches!(request.method(), tiny_http::Method::Get | tiny_http::Method::Head) {
+            let rest = url.strip_prefix("/t").unwrap_or("");
+            return redirect_permanently(request, &format!("{}/trackers{rest}", self.base));
+        }
         let unsafe_name = |s: &String| s == "." || s == ".." || s.contains(['/', '\\', '\0']);
-        let named = if parts.first().map(String::as_str) == Some("t") { &parts[1.min(parts.len())..2.min(parts.len())] } else { &parts[..] };
+        let named = if parts.first().map(String::as_str) == Some("trackers") { &parts[1.min(parts.len())..2.min(parts.len())] } else { &parts[..] };
         if named.iter().any(unsafe_name) {
             return respond(request, 400, "text/plain; charset=utf-8", "not a name");
         }
@@ -671,7 +676,7 @@ impl App {
                 None
             }
             // The trackers answer for themselves, the owner as their operator.
-            ["t", ..] => {
+            ["trackers", ..] => {
                 self.visitor = !owner;
                 Some(request)
             }
@@ -705,7 +710,7 @@ impl App {
             @if trackers.is_empty() { p.dim { "Nothing published here yet." } }
             table { tbody {
                 @for (name, decl, _) in &trackers {
-                    tr { td { a href=(serve::at(&format!("/t/{name}/"))) { strong { (decl.title) } } @if decl.visibility == "private" { " " span.chip { "private" } } div.why { (decl.about) } } }
+                    tr { td { a href=(serve::at(&format!("/trackers/{name}/"))) { strong { (decl.title) } } @if decl.visibility == "private" { " " span.chip { "private" } } div.why { (decl.about) } } }
                 }
             } }
             p.dim { a href=(serve::at("/signin")) { "Sign in" } " if this workspace is yours." }
@@ -736,7 +741,7 @@ impl App {
             let (links, current) = if self.visitor {
                 // A reader's sidebar is what anybody may read on the machine, this one marked.
                 let here = match parts.as_slice() {
-                    [t, name, ..] if t == "t" => self.public_of_machine.iter().find(|(_, h)| h.ends_with(&format!("/t/{name}/"))).map(|(l, _)| l.clone()),
+                    [t, name, ..] if t == "trackers" => self.public_of_machine.iter().find(|(_, h)| h.ends_with(&format!("/trackers/{name}/"))).map(|(l, _)| l.clone()),
                     _ => None,
                 };
                 (self.public_of_machine.clone(), here)
@@ -779,25 +784,25 @@ impl App {
         }
         serve::frame_section(None, Vec::new());
         if let [first, tracker, ..] = parts.as_slice() {
-            if first != "t" && first != "job" {
+            if first != "trackers" && first != "job" {
                 let dir = self.trackers().join(tracker);
                 let title = TrackerDecl::load(&dir).ok().map(|d| d.title).or_else(|| draft_title(&dir));
                 if let Some(title) = title {
-                    let href = if dir.join("tracker.yaml").exists() { format!("{}/t/{tracker}/", self.base) } else { format!("{}/new/{tracker}?title={}", self.base, urlencode(&title)) };
+                    let href = if dir.join("tracker.yaml").exists() { format!("{}/trackers/{tracker}/", self.base) } else { format!("{}/new/{tracker}?title={}", self.base, urlencode(&title)) };
                     serve::frame_section(Some((title, href)), Vec::new());
                 }
             }
         }
 
         // A tracker's own pages, as a reader would see them published.
-        if parts.first().map(String::as_str) == Some("t") && parts.len() >= 2 {
+        if parts.first().map(String::as_str) == Some("trackers") && parts.len() >= 2 {
             let name = parts[1].clone();
             let dir = self.trackers().join(&name);
             let site = match tracker_site(&dir, &self.sources(), &self.addr) {
                 Ok(site) => site,
                 Err(e) => return respond(request, 404, "text/html; charset=utf-8", &page("Not here", html! { p { (e) } })),
             };
-            serve::mount(&format!("{}/t/{name}", self.base));
+            serve::mount(&format!("{}/trackers/{name}", self.base));
             // One request at a time for each tracker, whichever thread it came in on: what a
             // tracker holds open is held once, and its expensive pages cannot run eight at once.
             let mut site = site.lock().unwrap_or_else(|e| e.into_inner());
@@ -1368,7 +1373,7 @@ impl App {
                 let blocked = t.not_public();
                 let public = !t.private();
                 let where_ = if self.hosted.is_some() {
-                    crate::account::Site::for_workspace(&self.root).link(&serve::at(&format!("/t/{tracker}/")))
+                    crate::account::Site::for_workspace(&self.root).link(&serve::at(&format!("/trackers/{tracker}/")))
                 } else {
                     String::new()
                 };
@@ -2177,8 +2182,8 @@ impl App {
                 table { tbody {
                     @for (name, decl, _fresh) in &trackers {
                         tr {
-                            td { a href={(serve::at("/t/")) (name) "/"} { strong { (decl.title) } } div.why { (decl.members.len()) (if decl.members.len() == 1 { " source" } else { " sources" }) " · identified by " (decl.join.join(", ")) } }
-                            td.num { @match unseen.get(name).copied().unwrap_or(0) { 0 => span.dim { "nothing new since you looked" }, n => a.chip.on href={(serve::at("/t/")) (name) "/changes"} { (n) " new since you looked" } } }
+                            td { a href={(serve::at("/trackers/")) (name) "/"} { strong { (decl.title) } } div.why { (decl.members.len()) (if decl.members.len() == 1 { " source" } else { " sources" }) " · identified by " (decl.join.join(", ")) } }
+                            td.num { @match unseen.get(name).copied().unwrap_or(0) { 0 => span.dim { "nothing new since you looked" }, n => a.chip.on href={(serve::at("/trackers/")) (name) "/changes"} { (n) " new since you looked" } } }
                             td.num { a href={(serve::at("/new/")) (name) "?title=" (urlencode(&decl.title))} { "Add a source" } }
                             td.num { a href={(serve::at("/publish/")) (name)} { (if decl.visibility == "private" { "Private" } else { "Publish" }) } }
                         }
@@ -2287,7 +2292,7 @@ impl App {
             @if joined && added {
                 div.offer {
                     p { strong { "Connected." } " " (ds.decl.title) " is part of " (title) "." }
-                    a.button href={(serve::at("/t/")) (tracker) "/"} { "Open the tracker" }
+                    a.button href={(serve::at("/trackers/")) (tracker) "/"} { "Open the tracker" }
                 // What Zetlyn compares from here on, and under which of this source's columns:
                 // a pairing it made by the values is said, so it can be checked.
                 @let compared: Vec<(String, String)> = decl.as_ref().map(|d| d.normalise.iter().map(|(name, a)| {
@@ -2313,7 +2318,7 @@ impl App {
             @if added && decl.as_ref().is_some_and(|d| d.members.len() >= 2) && crate::autoupdate::every(&self.root).is_none() && !crate::autoupdate::offered(&self.root) {
                 div.offer {
                     p { strong { "Keep an eye on these for you?" } br; span.dim { "Zetlyn reads both sources again every hour while it runs, and Changes says what moved. You can change this at any time under Auto-update." } }
-                    form method="post" action={(serve::at("/settings?back=")) (urlencode(&serve::at(&format!("/t/{tracker}/"))))} {
+                    form method="post" action={(serve::at("/settings?back=")) (urlencode(&serve::at(&format!("/trackers/{tracker}/"))))} {
                         input type="hidden" name="every" value="1h";
                         button.primary type="submit" { "Every hour" }
                     }
@@ -2442,16 +2447,16 @@ impl App {
                     @if joined {
                         p { "For example " @for (i, (scheme, value)) in m.examples.iter().enumerate() {
                             @if i > 0 { ", " }
-                            a href={(serve::at("/t/")) (tracker) "/thing/" (urlencode(scheme)) "/" (urlencode(value))} { (value) }
+                            a href={(serve::at("/trackers/")) (tracker) "/thing/" (urlencode(scheme)) "/" (urlencode(value))} { (value) }
                         } ", each with two perspectives." }
                     }
                 }
             }
 
             @if joined {
-                div.note { @if added { "Connected. " } (ds.decl.title) " is part of " a href={(serve::at("/t/")) (tracker) "/"} { (title) } "." }
+                div.note { @if added { "Connected. " } (ds.decl.title) " is part of " a href={(serve::at("/trackers/")) (tracker) "/"} { (title) } "." }
                 p.bar {
-                    a.chip href={(serve::at("/t/")) (tracker) "/"} { "Open the tracker" }
+                    a.chip href={(serve::at("/trackers/")) (tracker) "/"} { "Open the tracker" }
                     a.chip href={(serve::at("/new/")) (tracker) "?title=" (urlencode(&title))} { "Add another perspective" }
                 }
             } @else {
@@ -2622,6 +2627,15 @@ fn respond(request: tiny_http::Request, status: u16, kind: &str, body: &str) {
     let _ = request.respond(response);
 }
 
+/// An address that moved for good: a browser and a search engine remember where it went.
+fn redirect_permanently(request: tiny_http::Request, to: &str) {
+    let mut response = tiny_http::Response::from_string("").with_status_code(301);
+    if let Ok(h) = tiny_http::Header::from_bytes(&b"Location"[..], to.as_bytes()) {
+        response = response.with_header(h);
+    }
+    let _ = request.respond(response);
+}
+
 fn redirect(request: tiny_http::Request, to: &str) {
     let mut response = tiny_http::Response::from_string("").with_status_code(303);
     if let Ok(h) = tiny_http::Header::from_bytes(&b"Location"[..], to.as_bytes()) {
@@ -2776,7 +2790,7 @@ pub fn world_serve(args: &[String]) -> Result<(), String> {
             if let Err(e) = publish_root(&root, "world", |app| {
                 crate::tracker::scope_registry(&root.join("trackers"))
                     .into_iter()
-                    .filter_map(|(name, path)| Some((name, format!("{app}/t/{}/", path.file_name()?.to_string_lossy()))))
+                    .filter_map(|(name, path)| Some((name, format!("{app}/trackers/{}/", path.file_name()?.to_string_lossy()))))
                     .collect()
             }) {
                 eprintln!("not published: {e}");
@@ -3167,15 +3181,18 @@ fn hosting_worker(server: &tiny_http::Server, dir: &Path, addr: &str, jobs: &Sha
             }
             continue;
         }
-        if org_name(&first) && dir.join("orgs").join(&first).is_dir() {
+        // A world is at /worlds/<name>/, its trackers at /worlds/<name>/trackers/<tracker>/.
+        if first == WORLDS && parts.len() >= 2 && org_name(&parts[1]) && dir.join("orgs").join(&parts[1]).is_dir() {
+            let org = parts[1].clone();
+            let base = format!("/{WORLDS}/{org}");
             // A world with a domain of its own is there: a page asked for here goes to it.
-            let own = crate::account::Site::load(&dir.join("orgs").join(&first)).domain.trim().to_lowercase();
+            let own = crate::account::Site::load(&dir.join("orgs").join(&org)).domain.trim().to_lowercase();
             // Not its sign-in, which a world that knew it here before still asks for here; not the
             // machine's own name, which is no domain of its own. And for now, not for good: a
             // domain can be given up, and a browser keeps a permanent answer past that.
-            let signing = matches!(parts.get(1).map(String::as_str), Some("oauth" | ".well-known"));
+            let signing = matches!(parts.get(2).map(String::as_str), Some("oauth" | ".well-known"));
             if !own.is_empty() && own != machine_host && !signing && matches!(request.method(), tiny_http::Method::Get | tiny_http::Method::Head) {
-                let rest = url.strip_prefix(&format!("/{first}")).unwrap_or("/");
+                let rest = url.strip_prefix(&base).unwrap_or("/");
                 let rest = if rest.is_empty() { "/" } else { rest };
                 let mut response = tiny_http::Response::from_string("").with_status_code(302);
                 if let Ok(h) = tiny_http::Header::from_bytes(&b"Location"[..], format!("https://{own}{rest}").as_bytes()) {
@@ -3184,7 +3201,20 @@ fn hosting_worker(server: &tiny_http::Server, dir: &Path, addr: &str, jobs: &Sha
                 let _ = request.respond(response);
                 continue;
             }
-            answer_org(&mut apps, jobs, &first, &first, &format!("/{first}"), dir, addr, &accounts, request);
+            answer_org(&mut apps, jobs, &org, &org, &base, dir, addr, &accounts, request);
+            continue;
+        }
+        // Where a world was until 2026-10-05, at /<name>/ with its trackers at t/: a page asked
+        // for there is sent where it is now. What a program sends there, a webhook or a proposal,
+        // is still taken there, as a program seldom follows.
+        if org_name(&first) && dir.join("orgs").join(&first).is_dir() {
+            let rest = url.strip_prefix(&format!("/{first}")).unwrap_or("");
+            if matches!(request.method(), tiny_http::Method::Get | tiny_http::Method::Head) {
+                let rest = if rest == "/t" || rest.starts_with("/t/") || rest.starts_with("/t?") { format!("/trackers{}", &rest[2..]) } else { rest.to_string() };
+                redirect_permanently(request, &format!("/{WORLDS}/{first}{rest}"));
+            } else {
+                answer_org(&mut apps, jobs, &format!("{first}#before"), &first, &format!("/{first}"), dir, addr, &accounts, request);
+            }
             continue;
         }
         // The machine's own pages are under `/app/`: the site, the hub and every organisation share
@@ -3219,6 +3249,9 @@ fn hosting_worker(server: &tiny_http::Server, dir: &Path, addr: &str, jobs: &Sha
 
 /// Where the machine's own pages are, on a name it shares with the site and the hub.
 const APP_PREFIX: &str = "app";
+
+/// Where the worlds the machine hosts are, each under its name.
+pub const WORLDS: &str = "worlds";
 
 /// The machine's own pages: what anybody can read here, signing in, and your organisations.
 /// One request for an organisation, by its app under `key`: `/<org>` on the machine's name, or the
@@ -3262,7 +3295,7 @@ fn answer_org(apps: &mut BTreeMap<String, App>, jobs: &SharedJobs, key: &str, or
                 .into_iter()
                 .map(|(o, _)| {
                     let t = crate::account::Site::load(&dir.join("orgs").join(&o)).title;
-                    (if t.is_empty() { o.clone() } else { t }, format!("{machine}/{o}/"))
+                    (if t.is_empty() { o.clone() } else { t }, format!("{machine}/{WORLDS}/{o}/"))
                 })
                 .collect()
         })
@@ -3330,7 +3363,7 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                 table { tbody {
                     @for (org, name, decl) in &public {
                         tr {
-                            td { a href={"/" (org) "/t/" (name) "/"} { strong { (decl.title) } } div.why { (decl.about) } }
+                            td { a href={"/worlds/" (org) "/trackers/" (name) "/"} { strong { (decl.title) } } div.why { (decl.about) } }
                             td.dim { (org) }
                         }
                     }
@@ -3340,7 +3373,7 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                         h2 { "Your organisations" }
                         @if mine.is_empty() { p.dim { (a.email) " belongs to none yet." } }
                         table { tbody {
-                            @for (org, role) in &mine { tr { td { a href={"/" (org) "/"} { strong { (org) } } } td.dim { (role) } } }
+                            @for (org, role) in &mine { tr { td { a href={"/worlds/" (org) "/"} { strong { (org) } } } td.dim { (role) } } }
                         } }
                         form.bar method="post" action=(serve::at("/signout")) { span.dim { "Signed in as " (a.email) } button type="submit" { "Sign out" } }
                     }
@@ -3420,7 +3453,7 @@ fn publish_moved(dir: &Path, org: &str) -> Result<usize, String> {
         for o in orgs_in(dir) {
             for (name, path) in crate::tracker::scope_registry(&dir.join("orgs").join(&o).join("trackers")) {
                 if let Some(d) = path.file_name() {
-                    answers.insert(name, format!("{app}/{o}/t/{}/", d.to_string_lossy()));
+                    answers.insert(name, format!("{app}/worlds/{o}/trackers/{}/", d.to_string_lossy()));
                 }
             }
         }
@@ -3506,7 +3539,7 @@ fn signed_in(request: &tiny_http::Request, accounts: &crate::account::Accounts) 
 
 /// Every public tracker on the machine as a link: its title, and where it answers.
 fn public_links(dir: &Path) -> Vec<(String, String)> {
-    public_trackers(dir).into_iter().map(|(org, name, decl)| (decl.title, format!("/{org}/t/{name}/"))).collect()
+    public_trackers(dir).into_iter().map(|(org, name, decl)| (decl.title, format!("/worlds/{org}/trackers/{name}/"))).collect()
 }
 
 /// The organisations somebody belongs to, by their titles, for the app's sidebar.
@@ -3516,7 +3549,7 @@ fn orgs_links(dir: &Path, email: &str) -> Vec<(String, String)> {
         .into_iter()
         .map(|(org, _)| {
             let t = crate::account::Site::load(&dir.join("orgs").join(&org)).title;
-            (if t.is_empty() { org.clone() } else { t }, format!("/{org}/"))
+            (if t.is_empty() { org.clone() } else { t }, format!("/{WORLDS}/{org}/"))
         })
         .collect()
 }
@@ -3687,9 +3720,20 @@ mod tests {
         let (_, _, doc) = raw(port, "GET", "acme.example", "/.well-known/zetlyn.json", None);
         assert_eq!(serde_json::from_slice::<serde_json::Value>(&doc).unwrap()["world"], "https://acme.example");
         // Under the machine's name, it sends everybody to its own.
-        let (status, head, _) = raw(port, "GET", &host, "/acme/t/x/?q=1", None);
+        let (status, head, _) = raw(port, "GET", &host, "/worlds/acme/trackers/x/?q=1", None);
         assert_eq!(status, 302);
-        assert!(head.contains("Location: https://acme.example/t/x/?q=1"), "{head}");
+        assert!(head.contains("Location: https://acme.example/trackers/x/?q=1"), "{head}");
+        // Where a world and its trackers were until 2026-10-05, a page says where it is now.
+        let (status, head, _) = raw(port, "GET", &host, "/plain/t/x/?q=1", None);
+        assert_eq!(status, 301);
+        assert!(head.contains("Location: /worlds/plain/trackers/x/?q=1"), "{head}");
+        let (status, head, _) = raw(port, "GET", &host, "/plain", None);
+        assert_eq!(status, 301);
+        assert!(head.lines().any(|l| l.trim() == "Location: /worlds/plain"), "{head}");
+        // Inside a world, the old name of the trackers' place says the new one.
+        let (status, head, _) = raw(port, "GET", &host, "/worlds/plain/t/x/", None);
+        assert_eq!(status, 301);
+        assert!(head.contains("Location: /worlds/plain/trackers/x/"), "{head}");
         // A name nobody here said is theirs is nothing, and no certificate is taken for it.
         assert_eq!(raw(port, "GET", "elsewhere.example", "/", None).0, 421);
         assert_eq!(raw(port, "GET", &host, "/app/domain-check?domain=acme.example", None).0, 200);
@@ -3703,19 +3747,19 @@ mod tests {
         let accounts = crate::account::Accounts::open(&dir).unwrap();
         let ann = accounts.ensure("ann@example.org").unwrap();
         let zs = format!("zs={}", accounts.new_session(ann.id, crate::account::Kind::Member).unwrap());
-        assert_ne!(raw(port, "GET", &host, "/plain/export.tar.gz", None).0, 200, "only its owner");
+        assert_ne!(raw(port, "GET", &host, "/worlds/plain/export.tar.gz", None).0, 200, "only its owner");
         // An editor edits, and does not take the world away; a reader is not in the app at all.
         let ed = accounts.ensure("ed@example.org").unwrap();
         let zs_ed = format!("zs={}", accounts.new_session(ed.id, crate::account::Kind::Member).unwrap());
-        assert_eq!(raw(port, "GET", &host, "/plain/export.tar.gz", Some(&zs_ed)).0, 403);
-        assert_eq!(raw(port, "GET", &host, "/plain/settings", Some(&zs_ed)).0, 200);
+        assert_eq!(raw(port, "GET", &host, "/worlds/plain/export.tar.gz", Some(&zs_ed)).0, 403);
+        assert_eq!(raw(port, "GET", &host, "/worlds/plain/settings", Some(&zs_ed)).0, 200);
         let rita = accounts.ensure("rita@example.org").unwrap();
         let zs_rita = format!("zs={}", accounts.new_session(rita.id, crate::account::Kind::Member).unwrap());
-        assert_ne!(raw(port, "GET", &host, "/plain/settings", Some(&zs_rita)).0, 200);
+        assert_ne!(raw(port, "GET", &host, "/worlds/plain/settings", Some(&zs_rita)).0, 200);
         // Nor is anybody whose session was made for reading.
         let zr = format!("zs={}", accounts.new_session(ann.id, crate::account::Kind::Reader).unwrap());
-        assert_ne!(raw(port, "GET", &host, "/plain/export.tar.gz", Some(&zr)).0, 200);
-        let (status, head, body) = raw(port, "GET", &host, "/plain/export.tar.gz", Some(&zs));
+        assert_ne!(raw(port, "GET", &host, "/worlds/plain/export.tar.gz", Some(&zr)).0, 200);
+        let (status, head, body) = raw(port, "GET", &host, "/worlds/plain/export.tar.gz", Some(&zs));
         assert_eq!(status, 200, "{head}");
         assert!(head.contains("attachment; filename=\"plain-"), "{head}");
         let mut names = Vec::new();
@@ -3727,7 +3771,7 @@ mod tests {
             use std::io::{Read, Write};
             let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
             let body = "to=http%3A%2F%2F127.0.0.1%3A1";
-            write!(s, "POST /plain/settings/moved HTTP/1.1\r\nHost: {host}\r\nCookie: {zs}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            write!(s, "POST /worlds/plain/settings/moved HTTP/1.1\r\nHost: {host}\r\nCookie: {zs}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
             let mut all = String::new();
             s.read_to_string(&mut all).unwrap();
             (all.split_whitespace().nth(1).unwrap().parse::<u16>().unwrap(), all.clone(), ())

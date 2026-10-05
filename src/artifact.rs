@@ -27,7 +27,9 @@ pub const SPEC_VERSION: &str = "2.1";
 /// A reference names a host or it does not, and one that does not means this one. Naming it in a
 /// flag as well would be saying the same thing twice, so `--from` and `--to` are for the other
 /// cases: a folder, a mount, a bucket, or somebody else's hub.
-pub const DEFAULT_HUB: &str = "https://zetlyn.com";
+/// The hub a reference naming no host means: zetlyn.com's, at /hub on the name it shares with the
+/// site and the worlds (before 2026-10-05 at its root, which still redirects).
+pub const DEFAULT_HUB: &str = "https://zetlyn.com/hub";
 
 /// `[host/]owner/name[@tag]`.
 #[derive(Debug, Clone)]

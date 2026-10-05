@@ -2783,12 +2783,12 @@ fn reader_of(scope: &Tracker, accounts: &Accounts, v: &Viewer, operator: bool) -
 }
 
 /// Where a reader's session holds: the workspace this tracker is in, which is the mount with its
-/// `/t/<tracker>` taken off. A reader signed in to one tracker is signed in to its workspace's
+/// `/trackers/<tracker>` taken off. A reader signed in to one tracker is signed in to its workspace's
 /// others, because they are one `accounts.db`, and to no other workspace's on the same host.
 fn workspace_path() -> String {
     let m = mounted();
-    let base = match m.rfind("/t/") {
-        Some(i) if !m[i + 3..].contains('/') => m[..i].to_string(),
+    let base = match m.rfind("/trackers/") {
+        Some(i) if !m[i + 10..].contains('/') => m[..i].to_string(),
         _ => m,
     };
     if base.is_empty() { "/".into() } else { base }
@@ -3145,14 +3145,14 @@ mod tests {
 
     #[test]
     fn a_reader_is_signed_in_to_the_workspace_a_tracker_is_mounted_in() {
-        for (mount, path) in [("", "/"), ("/t/cve", "/"), ("/zetlyn/t/cve", "/zetlyn"), ("/acme/t/prices", "/acme"), ("/zetlyn", "/zetlyn")] {
+        for (mount, path) in [("", "/"), ("/trackers/cve", "/"), ("/worlds/zetlyn/trackers/cve", "/worlds/zetlyn"), ("/worlds/acme/trackers/prices", "/worlds/acme"), ("/worlds/zetlyn", "/worlds/zetlyn")] {
             crate::serve::mount(mount);
             assert_eq!(workspace_path(), path, "mounted at {mount:?}");
         }
         crate::serve::mount("");
         let site = Site { url: "https://zetlyn.com".into(), ..Site::default() };
-        crate::serve::mount("/zetlyn/t/cve");
-        assert_eq!(reader_cookie(&site, "abc", 60), "zr=abc; Path=/zetlyn; Max-Age=60; HttpOnly; SameSite=Lax; Secure");
+        crate::serve::mount("/worlds/zetlyn/trackers/cve");
+        assert_eq!(reader_cookie(&site, "abc", 60), "zr=abc; Path=/worlds/zetlyn; Max-Age=60; HttpOnly; SameSite=Lax; Secure");
         crate::serve::mount("");
     }
 
@@ -3172,7 +3172,7 @@ mod tests {
         };
         assert_eq!(open(&org), "", "nothing names an address");
         std::fs::write(hosting.join("workspace.yaml"), "url: https://app.example.org\n").unwrap();
-        assert_eq!(open(&org), "https://app.example.org/acme", "the machine's, under its own name");
+        assert_eq!(open(&org), "https://app.example.org/worlds/acme", "the machine's, under its own name");
         std::fs::write(org.join("workspace.yaml"), "url: https://acme.example.org\n").unwrap();
         assert_eq!(open(&org), "https://acme.example.org", "its own, where it names one");
         let _ = std::fs::remove_dir_all(&hosting);

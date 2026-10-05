@@ -68,6 +68,8 @@ const REFUSED: &[&str] = &[
     "account",
     "proposals",
     "propose",
+    // Where the worlds a machine hosts are, beneath it.
+    "worlds",
     // The site's other pages, and the names it used to have.
     "hosting",
     "hub-about",
@@ -278,6 +280,16 @@ pub fn serve(dir: &Path, addr: &str, serving: &[String]) -> Result<(), String> {
             .unwrap_or("")
             .to_string();
         let method = request.method().as_str().to_string();
+        // Its pages link under /hub/, where a hub is on a name it shares with a site or a world;
+        // read here, that is the same hub. What subscribers ask for is at its root, as before.
+        let path = if matches!(method.as_str(), "GET" | "HEAD") {
+            match path.strip_prefix("hub") {
+                Some(rest) if rest.is_empty() || rest.starts_with('/') => rest.trim_start_matches('/').to_string(),
+                _ => path,
+            }
+        } else {
+            path
+        };
         let header = |name: &'static str| -> String {
             request
                 .headers()

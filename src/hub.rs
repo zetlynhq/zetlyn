@@ -310,7 +310,7 @@ pub fn serve(dir: &Path, addr: &str, serving: &[String]) -> Result<(), String> {
                 Ok(bytes) => (200, bytes),
                 // A hub with no stylesheet of its own still has to be readable, so that one
                 // address falls back to the product's own sheet. Nothing else does.
-                Err(_) if path == "style.css" => (200, crate::serve::STYLE.as_bytes().to_vec()),
+                Err(_) if path == "style.css" || path == "zetlyn.css" => (200, crate::serve::STYLE.as_bytes().to_vec()),
                 Err(_) => (404, b"nothing at that address\n".to_vec()),
             },
             "PUT" => {

@@ -534,7 +534,7 @@ impl App {
         // Except for its own people: they sign in, take it with them, and say it did not move after all,
         // here. And told so for now, not for good: a browser keeps a permanent answer past an undo.
         let owners_way = self.hosted.is_none()
-            || matches!(parts.first().map(String::as_str), Some("signin" | "signout" | "settings" | "export.tar.gz" | "style.css"))
+            || matches!(parts.first().map(String::as_str), Some("signin" | "signout" | "settings" | "export.tar.gz" | "style.css" | "zetlyn.css"))
             || self.member_signed_in(&request);
         if !moved.is_empty() && !owners_way {
             let query = url.split_once('?').map(|(_, q)| format!("?{q}")).unwrap_or_default();
@@ -589,7 +589,7 @@ impl App {
             return None;
         }
         match parts.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
-            ["style.css"] => Some(request),
+            ["style.css" | "zetlyn.css"] => Some(request),
             // Signed by its sender, so nobody signs in to push to a source.
             ["hook", source] if post => {
                 let sig = signature;
@@ -822,7 +822,7 @@ impl App {
         let (proposer, proposal_signature) = (signed_by("X-Zetlyn-Key"), signed_by("X-Zetlyn-Signature"));
 
         let (status, kind, text) = match (post, parts.iter().map(String::as_str).collect::<Vec<_>>().as_slice()) {
-            (false, ["style.css"]) => (200, "text/css; charset=utf-8", format!("{}{APP_STYLE}", serve::STYLE)),
+            (false, ["style.css" | "zetlyn.css"]) => (200, "text/css; charset=utf-8", format!("{}{APP_STYLE}", serve::STYLE)),
             (false, []) => (200, html_kind, self.start_page()),
             (true, ["new"]) => {
                 let title = form.get("title").cloned().unwrap_or_default();
@@ -3310,7 +3310,7 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
     serve::frame_section(None, Vec::new());
     serve::frame_app(None, None);
     match parts.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
-        ["style.css"] => respond(request, 200, "text/css; charset=utf-8", &format!("{}{APP_STYLE}", serve::STYLE)),
+        ["style.css" | "zetlyn.css"] => respond(request, 200, "text/css; charset=utf-8", &format!("{}{APP_STYLE}", serve::STYLE)),
         [] => {
             let public = public_trackers(dir);
             let mine = who.as_ref().map(|a| membership.orgs_of(&a.email)).unwrap_or_default();

@@ -95,144 +95,133 @@ details.receipt[open] { background: var(--panel); border-left: 3px solid var(--a
 .receipt pre { max-height: 18rem; overflow: auto; font-size: .78rem; background: var(--bg);
                padding: .5rem; border: 1px solid var(--line); }
 .receipt table { font-size: .82rem; }
-/* The frame: the website's header, then where the reader is. Its sizes are the website's
-   (zetlyn.com, assets/style.css: .shell, .site-header, .site-footer), so a reader moving between
-   the site, the hub and a tracker sees one header and one footer. */
-.wrap { width: min(1180px, calc(100% - 48px)); margin: 0 auto; }
-header.top { background: var(--bg); }
-header.top .wrap { height: 82px; display: flex; align-items: center; gap: 1.5rem;
-  border-bottom: 1px solid var(--line); }
+/* The frame every page of Zetlyn has: the website's header and footer, to the value
+   (zetlyn.com, assets/style.css: .shell, .site-header, .switcher, .site-footer). The site, the hub,
+   the app, a tracker and the directory of worlds are one Zetlyn: one header, one footer, one set of
+   colours. What a part has of its own is beneath the header, never instead of it. */
+.shell, .wrap { width: min(1180px, calc(100% - 48px)); margin: 0 auto; }
+.site-header { height: 82px; display: flex; align-items: center; border-bottom: 1px solid var(--line); }
 .brand { display: flex; align-items: center; gap: 10px; color: var(--fg); font-weight: 750;
   letter-spacing: -.03em; font-size: 20px; }
 .brand:hover { text-decoration: none; }
 .brand-mark { width: 26px; height: 26px; filter: var(--mark-filter); }
-nav.links { margin-left: auto; display: flex; gap: 28px; font-size: 14px; }
-nav.links a { color: var(--dim); }
-nav.links a:hover, nav.links a[aria-current] { color: var(--fg); text-decoration: none; }
-/* Where the reader is, marked where the header meets its line, as the website marks it. */
-header.top nav.links { align-self: stretch; }
-header.top nav.links a { display: flex; align-items: center; border-bottom: 2px solid transparent; margin-bottom: -1px; }
-header.top nav.links a[aria-current] { border-bottom-color: var(--accent); }
-/* Who is signed in, at the right of the header, where somebody can be. */
-header.top .account { margin-left: 28px; display: flex; align-items: center; gap: .6rem; font-size: 13px; }
-header.top a.account { border: 1px solid var(--fg); color: var(--fg); padding: 6px 12px; }
-header.top a.account:hover { background: var(--fg); color: var(--bg); text-decoration: none; }
-header.top form.account button { font: inherit; font-size: 13px; padding: 5px 10px; }
-/* Three parts, one brand: the website, the hub and the app. Each names itself beside the logo,
-   has an accent of its own, and keeps the other two a click away. */
-.brand-area { font-weight: 400; color: var(--accent); margin-left: 1px; }
-header.top .org-name, header.top .org-switch summary { font-size: 14px; color: var(--fg); border-left: 1px solid var(--line);
-  padding-left: 1rem; cursor: default; }
-header.top .org-switch { position: relative; }
-header.top .org-switch summary { cursor: pointer; list-style: none; }
-header.top .org-switch summary::after { content: " ▾"; color: var(--dim); }
-header.top .org-switch ul { position: absolute; top: 2rem; left: .6rem; z-index: 5; list-style: none; margin: 0; padding: .4rem 0;
-  background: var(--panel); border: 1px solid var(--line); min-width: 12rem; }
-header.top .org-switch li a { display: block; padding: .35rem .9rem; color: var(--fg); }
-header.top nav.areas { display: flex; gap: 8px; margin-left: 22px; }
-header.top a.area-link { font: 11px/normal ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; text-transform: uppercase;
-  letter-spacing: .08em; color: var(--dim); border: 1px solid var(--line-strong); padding: 6px 10px; }
-header.top a.area-link:hover { color: var(--fg); border-color: var(--fg); text-decoration: none; }
-body.area-app { --accent: #2f7d4f; }
-@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) body.area-app { --accent: #52c486; } }
-:root[data-theme="dark"] body.area-app { --accent: #52c486; }
-@media (max-width: 40rem) { header.top nav.areas { display: none; } header.top .org-name, header.top .org-switch summary { display: none; } }
-/* The switch between the three parts: the same control, in the same place, in each. */
-.switcher { position: relative; }
-/* Controls built on <details> are not the sections the page's own <details> rule spaces out. */
+.site-header nav { margin-left: auto; display: flex; gap: 28px; font-size: 14px; align-self: stretch; }
+.site-header nav a { color: var(--dim); display: flex; align-items: center; border-bottom: 2px solid transparent;
+  margin-bottom: -1px; }
+.site-header nav a:hover, .site-header nav a[aria-current] { color: var(--fg); text-decoration: none; }
+.site-header nav a[aria-current] { border-bottom-color: var(--accent); }
+.site-header nav a.nav-cta { align-self: center; border: 1px solid var(--fg); background: var(--fg); color: var(--bg);
+  padding: 8px 14px; margin-bottom: 0; }
+.site-header nav a.nav-cta:hover { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+/* Who is signed in, where the way into the app stands on every other page. */
+.site-header nav form.account { align-self: center; display: flex; align-items: center; gap: .6rem; font-size: 13px; color: var(--dim); }
+.site-header nav form.account span { max-width: 16rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.site-header nav form.account button { font: inherit; font-size: 13px; padding: 7px 12px; border-radius: 0;
+  border: 1px solid var(--fg); background: none; color: var(--fg); }
+.site-header nav form.account button:hover { background: var(--fg); color: var(--bg); }
+@media (max-width: 900px) { .site-header { height: auto; min-height: 82px; padding-block: 12px; }
+  .site-header nav { gap: 18px; align-self: center; flex-wrap: wrap; justify-content: flex-end; }
+  .site-header nav a { border-bottom: 0; margin-bottom: 0; }
+  .site-header nav a[aria-current] { text-decoration: underline 2px var(--accent); text-underline-offset: 7px; } }
+@media (max-width: 620px) { .shell, .wrap { width: min(100% - 28px, 1180px); }
+  .site-header { min-height: 70px; padding-block: 10px; } .site-header nav { gap: 14px; }
+  .site-header nav a { font-size: 12px; } .brand { font-size: 14px; } .brand-mark { width: 22px; height: 22px; }
+  .site-header nav a.nav-cta, .site-header nav form.account span { display: none; } .switcher { margin-right: 8px; } }
+/* The switch between the site, the hub and the app: the same control in the same place. */
+.switcher { position: relative; margin-right: 14px; }
 details.switcher, details.org-switch { margin: 0; }
 details.dash-org { margin: 0 0 10px; }
 details.switcher > summary, details.org-switch > summary, details.dash-org > summary { margin: 0; font-weight: inherit; }
 .switcher summary { list-style: none; cursor: pointer; width: 30px; height: 30px; display: grid; place-items: center;
-  border: 1px solid currentColor; opacity: .7; }
+  border: 1px solid var(--line-strong); color: var(--dim); }
 .switcher summary::-webkit-details-marker { display: none; }
-.switcher summary:hover, .switcher[open] summary { opacity: 1; }
+.switcher summary:hover, .switcher[open] summary { border-color: var(--fg); color: var(--fg); }
 .switcher svg rect { fill: currentColor; }
-.switcher-panel { position: absolute; top: 38px; left: 0; z-index: 30; width: 300px; background: var(--panel); color: var(--fg);
-  border: 1px solid var(--fg); box-shadow: 8px 8px 0 rgba(0,0,0,.12); }
-.switcher-panel a { display: block; padding: 12px 14px; border-bottom: 1px solid var(--line); color: var(--fg); }
+.switcher-panel { position: absolute; top: 40px; left: 0; z-index: 40; width: 310px; background: var(--panel); color: var(--fg);
+  border: 1px solid var(--fg); box-shadow: 10px 10px 0 var(--line); }
+.switcher-panel a { display: block; padding: 13px 15px; border-bottom: 1px solid var(--line); color: var(--fg); }
 .switcher-panel a:last-child { border-bottom: 0; }
 .switcher-panel a:hover { background: var(--wash); text-decoration: none; }
 .switcher-panel a.on { box-shadow: inset 3px 0 0 var(--accent); }
-.switcher-panel b { display: block; font-size: 14px; }
-.switcher-panel span { display: block; font-size: 12.5px; color: var(--dim); margin-top: 2px; }
+.switcher-panel b { display: block; font-size: 14px; font-weight: 600; }
+.switcher-panel span { display: block; font-size: 12.5px; color: var(--dim); margin-top: 3px; }
+/* Beneath the header, where a part has more to say: its organisation, its own pages, its state. */
+.context { border-bottom: 1px solid var(--line); }
+.context .shell { display: flex; align-items: center; gap: 1.5rem; min-height: 46px; flex-wrap: wrap; }
+.context .org-name, .context .org-switch summary { font-size: 14px; font-weight: 600; color: var(--fg); cursor: default; }
+.context .org-switch { position: relative; }
+.context .org-switch summary { cursor: pointer; list-style: none; }
+.context .org-switch summary::after { content: " ▾"; color: var(--dim); }
+.context .org-switch ul { position: absolute; top: 2rem; left: 0; z-index: 5; list-style: none; margin: 0; padding: .4rem 0;
+  background: var(--panel); border: 1px solid var(--line); min-width: 12rem; }
+.context .org-switch li a { display: block; padding: .35rem .9rem; color: var(--fg); }
+nav.links { display: flex; gap: 22px; font-size: 14px; align-self: stretch; flex-wrap: wrap; }
+nav.links a { color: var(--dim); display: flex; align-items: center; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+nav.links a:hover, nav.links a[aria-current] { color: var(--fg); text-decoration: none; }
+nav.links a[aria-current] { border-bottom-color: var(--accent); }
+.autoupdate { display: flex; align-items: center; gap: .45rem; font-size: .84rem; color: var(--dim);
+  border: 1px solid var(--line); padding: .25rem .75rem; background: var(--panel); }
+.context .autoupdate { margin-left: auto; }
+.autoupdate:hover { color: var(--fg); text-decoration: none; }
+.autoupdate .dot { width: .5rem; height: .5rem; border-radius: 50%; background: var(--line-strong); }
+.autoupdate.on .dot { background: #2e7d32; }
 
-/* The app, at zetlyn.com/app/ and every organisation's pages: software, not a page. A dark sidebar, and a light place to work beside it. */
-body.dash { background: var(--panel); }
-.dash-grid { display: grid; grid-template-columns: 248px minmax(0, 1fr); min-height: 100vh; }
-.dash-side { background: #10171c; color: #d5dce0; display: flex; flex-direction: column; gap: 4px; padding: 16px 14px;
-  position: sticky; top: 0; height: 100vh; overflow-y: auto; }
-.dash-side a { color: #d5dce0; }
-.dash-head { display: flex; align-items: center; gap: 12px; padding: 2px 4px 18px; }
-.dash-head .switcher summary { color: #d5dce0; }
-.dash-brand { display: flex; align-items: center; gap: 8px; font-weight: 750; letter-spacing: -.03em; font-size: 18px; }
-.dash-brand:hover { text-decoration: none; }
-.dash-brand .brand-mark { width: 22px; height: 22px; filter: invert(1); }
-.dash-brand .brand-area { color: #52c486; font-weight: 400; }
-.dash-org { display: flex; align-items: center; gap: 10px; padding: 9px 10px; margin-bottom: 10px; border: 1px solid #26323a;
-  font-weight: 600; font-size: 14px; position: relative; }
+/* The app, at zetlyn.com/app/ and every organisation's pages: under the same header, the
+   organisation and its pages at the left and a place to work beside them, in the same colours. */
+.dash-grid { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 0; min-height: calc(100vh - 172px); }
+.dash-side { display: flex; flex-direction: column; gap: 4px; padding: 22px 18px 22px 0; border-right: 1px solid var(--line); }
+.dash-side a { color: var(--fg); }
+.dash-org { display: flex; align-items: center; gap: 10px; padding: 9px 10px; margin-bottom: 10px; border: 1px solid var(--line);
+  background: var(--panel); font-weight: 600; font-size: 14px; position: relative; }
 details.dash-org summary { list-style: none; display: flex; align-items: center; gap: 10px; cursor: pointer; width: 100%; }
-details.dash-org summary::after { content: "▾"; margin-left: auto; color: #8b98a1; }
+details.dash-org summary::after { content: "▾"; margin-left: auto; color: var(--dim); }
 details.dash-org ul { position: absolute; top: 100%; left: -1px; right: -1px; z-index: 20; list-style: none; margin: 0; padding: 4px 0;
-  background: #172128; border: 1px solid #26323a; }
+  background: var(--panel); border: 1px solid var(--line); }
 details.dash-org li a { display: block; padding: 7px 12px; }
-.dash-org-mark { width: 22px; height: 22px; display: grid; place-items: center; background: #52c486; color: #10171c;
+.dash-org-mark { width: 22px; height: 22px; display: grid; place-items: center; background: var(--fg); color: var(--bg);
   font-size: 12px; font-weight: 750; }
 .dash-label { margin: 14px 10px 4px; font: 11px/normal ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  text-transform: uppercase; letter-spacing: .1em; color: #7f8c95; }
+  text-transform: uppercase; letter-spacing: .1em; color: var(--dim); }
 .dash-nav { display: flex; flex-direction: column; }
-.dash-nav a { padding: 8px 10px; font-size: 14px; border-left: 2px solid transparent; }
-.dash-nav a:hover { background: rgba(255,255,255,.05); text-decoration: none; }
-.dash-nav a[aria-current] { background: rgba(255,255,255,.07); border-left-color: #52c486; color: #fff; }
-.dash-foot { margin-top: auto; padding-top: 16px; border-top: 1px solid #26323a; display: flex; flex-direction: column; gap: 12px; }
-.dash-me { display: flex; flex-direction: column; gap: 8px; padding: 0 10px; }
-.dash-email { font-size: 13px; color: #aab6bd; overflow: hidden; text-overflow: ellipsis; }
-.dash-me button, a.dash-signin { font: inherit; font-size: 13px; background: none; color: #d5dce0; border: 1px solid #3a4851;
-  padding: 7px 10px; cursor: pointer; text-align: center; }
-a.dash-signin { margin: 0 10px; }
-.dash-me button:hover, a.dash-signin:hover { border-color: #d5dce0; text-decoration: none; }
-.dash-small { display: flex; align-items: center; justify-content: space-between; padding: 0 10px; font-size: 12.5px; }
-.dash-small .theme-toggle { color: #aab6bd; border-color: #3a4851; }
+.dash-nav a { padding: 8px 10px; font-size: 14px; border-left: 2px solid transparent; color: var(--dim); }
+.dash-nav a:hover { color: var(--fg); background: var(--wash); text-decoration: none; }
+.dash-nav a[aria-current] { color: var(--fg); background: var(--wash); border-left-color: var(--accent); }
 .dash-main { min-width: 0; display: flex; flex-direction: column; }
-.dash-top { display: flex; align-items: center; gap: 16px; min-height: 56px; padding: 0 36px; border-bottom: 1px solid var(--line);
-  background: var(--bg); }
+.dash-top { display: flex; align-items: center; gap: 16px; min-height: 52px; padding: 0 0 0 32px; border-bottom: 1px solid var(--line); }
 .dash-top nav.crumbs ol { padding: 0; }
-.dash-top .autoupdate { margin-left: auto; display: flex; align-items: center; gap: .45rem; font-size: .84rem; color: var(--dim);
-  border: 1px solid var(--line); border-radius: 999px; padding: .25rem .75rem; background: var(--panel); }
-.dash-top .autoupdate .dot { width: .5rem; height: .5rem; border-radius: 50%; background: var(--line-strong); }
-.dash-top .autoupdate.on .dot { background: #2e7d32; }
-.dash-tabs { display: flex; gap: .25rem; padding: 0 28px; border-bottom: 1px solid var(--line); background: var(--bg); }
+.dash-top .autoupdate { margin-left: auto; }
+.dash-tabs { display: flex; gap: .25rem; padding: 0 0 0 24px; border-bottom: 1px solid var(--line); }
 .dash-tabs a { padding: 12px .8rem 10px; color: var(--dim); font-size: .9rem; border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .dash-tabs a:hover { color: var(--fg); text-decoration: none; }
 .dash-tabs a.on { color: var(--fg); border-bottom-color: var(--accent); font-weight: 600; }
-.dash main.dash-body { width: auto; max-width: 1180px; margin: 0; padding: 30px 36px 72px; }
+.dash main.dash-body { width: auto; margin: 0; padding: 30px 0 72px 32px; }
 @media (max-width: 52rem) {
-  .dash-grid { grid-template-columns: 1fr; }
-  .dash-side { position: static; height: auto; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 14px; }
-  .dash-head { padding: 0; }
+  .dash-grid { grid-template-columns: 1fr; min-height: 0; }
+  .dash-side { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 0; border-right: 0;
+    border-bottom: 1px solid var(--line); }
   .dash-org { margin: 0; }
   .dash-label { display: none; }
   .dash-nav { flex-direction: row; overflow-x: auto; }
   .dash-nav a { border-left: 0; border-bottom: 2px solid transparent; }
-  .dash-nav a[aria-current] { border-bottom-color: #52c486; }
-  .dash-foot { margin: 0 0 0 auto; padding: 0; border: 0; flex-direction: row; }
-  .dash-small { display: none; }
-  .dash-top { padding: 0 16px; }
-  .dash-tabs { padding: 0 8px; overflow-x: auto; }
-  .dash main.dash-body { padding: 20px 16px 56px; }
+  .dash-nav a[aria-current] { border-bottom-color: var(--accent); }
+  .dash-top { padding: 0; }
+  .dash-tabs { padding: 0; overflow-x: auto; }
+  .dash main.dash-body { padding: 20px 0 56px; }
 }
-footer.site-footer { width: min(1180px, calc(100% - 48px)); margin: 0 auto; padding: 0; height: 90px;
-  border-top: 1px solid var(--line); display: flex; align-items: center; color: var(--dim);
+.site-footer { height: 90px; border-top: 1px solid var(--line); display: flex; align-items: center; color: var(--dim);
   font: 11px/normal ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
-footer.site-footer div { margin-left: auto; display: flex; gap: 22px; align-items: center; }
-footer.site-footer a { color: var(--dim); }
-footer.site-footer a:hover { color: var(--fg); text-decoration: none; }
+.site-footer div { margin-left: auto; display: flex; gap: 22px; align-items: center; }
+.site-footer a { color: var(--dim); }
+.site-footer a:hover { color: var(--fg); text-decoration: none; }
+.site-footer .theme-toggle { margin-left: 0; }
+@media (max-width: 620px) { .site-footer { height: auto; padding: 26px 0; align-items: flex-start; }
+  .site-footer div { display: grid; gap: 9px; } }
 .theme-toggle { border: 1px solid var(--line); background: none; color: var(--dim); cursor: pointer;
   padding: 7px 11px; font: 11px/normal ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  text-transform: uppercase; letter-spacing: .1em; }
+  text-transform: uppercase; letter-spacing: .1em; border-radius: 0; }
 .theme-toggle:hover { border-color: var(--fg); color: var(--fg); }
 .subbar { border-bottom: 1px solid var(--line); background: var(--panel); }
-.subbar .wrap { display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+.subbar .shell { display: flex; align-items: center; justify-content: space-between; gap: 1rem;
   flex-wrap: wrap; min-height: 46px; }
 nav.crumbs ol { list-style: none; margin: 0; padding: .7rem 0; display: flex; flex-wrap: wrap;
   gap: .35rem; font-size: .86rem; }
@@ -457,8 +446,7 @@ pub struct Frame {
     pub status: Option<(String, String, bool)>,
     /// Which of `nav` is where the reader is.
     pub current: Option<String>,
-    /// The footer: what it says at the left, and its links at the right, before the theme switch.
-    pub note: String,
+    /// What a page adds to the footer every page has, before its own links.
     pub footer: Vec<(String, String)>,
     /// Where the mark leads, where it is not this frame's home.
     pub brand: Option<String>,
@@ -504,6 +492,81 @@ pub fn switcher(current: &str) -> Markup {
     }
 }
 
+/// The one navigation every page of Zetlyn carries, the website's, the hub's, the app's and a
+/// world's alike, in this order. Absolute, so it leads to the same pages from a hub, a tracker or a
+/// world on a domain of its own. The website writes the same (zetlyn.com, src/main.rs).
+pub const SITE_NAV: &[(&str, &str, &str)] = &[
+    ("docs", "Docs", "https://zetlyn.com/docs"),
+    ("trackers", "Trackers", "https://zetlyn.com/trackers"),
+    ("sources", "Sources", "https://zetlyn.com/sources"),
+    ("api", "Interface", "https://zetlyn.com/api"),
+    ("hosting", "Hosting", "https://zetlyn.com/hosting"),
+    ("hub", "Hub", "https://zetlyn.com/hub/"),
+    ("worlds", "Worlds", "https://zetlyn.com/directory"),
+];
+
+/// The header of every page, to the markup the website's (zetlyn.com, src/page.html): the switch,
+/// the mark, the navigation with `current` marked, and `action` at its right.
+pub fn site_header(area: &str, current: &str, action: Markup) -> Markup {
+    html! {
+        header.site-header.shell {
+            (switcher(area))
+            a.brand href="https://zetlyn.com/" aria-label="Zetlyn home" {
+                img.brand-mark src={"data:image/png;base64," (MARK)} alt="";
+                span { "Zetlyn" }
+            }
+            nav {
+                @for (key, label, href) in SITE_NAV {
+                    @if *key == current { a href=(href) aria-current="page" { (label) } } @else { a href=(href) { (label) } }
+                }
+                (action)
+            }
+        }
+    }
+}
+
+/// At the right of the header wherever the reader is not in the app: the way into it.
+pub fn open_app() -> Markup {
+    html! { a.nav-cta href="https://zetlyn.com/app/" { "Open app" } }
+}
+
+/// At the right of the header in the app: who is signed in, or the way to sign in.
+fn account_action(account: &Option<Option<String>>) -> Markup {
+    match account {
+        Some(Some(email)) => html! {
+            form.account method="post" action="/app/signout" { span { (email) } button type="submit" { "Sign out" } }
+        },
+        Some(None) => html! { a.nav-cta href="/app/signin" { "Sign in" } },
+        None => html! {},
+    }
+}
+
+/// The footer of every page, the website's (zetlyn.com, src/page.html); `extra` is what a page
+/// adds of its own, before the rest.
+pub fn site_footer(extra: &[(String, String)]) -> Markup {
+    html! {
+        footer.site-footer.shell {
+            span { "© Zetlyn" }
+            div {
+                @for (label, href) in extra { a href=(href) { (label) } }
+                a href="mailto:hello@zetlyn.com" { "Contact" }
+                a href="https://zetlyn.com/privacy" { "Privacy" }
+                a href="https://zetlyn.com/legal" { "Legal" }
+                button.theme-toggle type="button" id="theme-toggle" { "Theme" }
+            }
+        }
+    }
+}
+
+/// Which entry of the navigation a page is under.
+fn nav_key(area: &str, title: &str) -> &'static str {
+    match (area, title) {
+        ("hub", _) => "hub",
+        (_, "Worlds") => "worlds",
+        _ => "",
+    }
+}
+
 /// The sidebar's heading above its links.
 pub fn frame_side(title: &str) {
     FRAME.with(|f| f.borrow_mut().side_title = title.to_string());
@@ -544,35 +607,14 @@ pub fn frame_hosted(above: Option<(String, String)>, account: Option<Option<Stri
     });
 }
 
-/// The website's header links and footer links, as zetlyn.com carries them (its `page.html` and
-/// the labels in its `PAGES`). Under the hub at zetlyn.com/hub/ the header and the footer are the
-/// website's, so a reader moving between them sees one site.
-pub const SITE_NAV: &[(&str, &str)] = &[
-    ("Docs", "https://zetlyn.com/docs"),
-    ("Trackers", "https://zetlyn.com/trackers"),
-    ("Sources", "https://zetlyn.com/sources"),
-    ("Interface", "https://zetlyn.com/api"),
-    ("Hub", "https://zetlyn.com/hub/"),
-    ("App", "https://zetlyn.com/app/"),
-];
-pub const SITE_FOOTER: &[(&str, &str)] = &[
-    ("Contact", "mailto:hello@zetlyn.com"),
-    ("Privacy", "https://zetlyn.com/privacy"),
-    ("Legal", "https://zetlyn.com/legal"),
-];
-
-fn owned(links: &[(&str, &str)]) -> Vec<(String, String)> {
-    links.iter().map(|(l, h)| (l.to_string(), h.to_string())).collect()
-}
-
-/// The website's header and footer, with `current` the header link where the reader is.
-pub fn frame_site(current: &str) {
+/// A page of zetlyn.com's own: the header and the footer every page has, and nothing of a part's
+/// own beneath it until the page says so. `_current` is kept for the callers that name where they are.
+pub fn frame_site(_current: &str) {
     FRAME.with(|f| {
         let mut f = f.borrow_mut();
-        f.nav = owned(SITE_NAV);
-        f.current = Some(current.to_string());
-        f.note = "© Zetlyn".into();
-        f.footer = owned(SITE_FOOTER);
+        f.nav = Vec::new();
+        f.current = None;
+        f.footer = Vec::new();
         f.brand = Some("https://zetlyn.com".into());
     });
 }
@@ -661,9 +703,6 @@ const THEME_TOGGLE: &str = r##"(function () {
 
 pub fn shell(title: &str, body: Markup) -> String {
     let f = frame();
-    // Standing alone (a tracker served by itself, a hub), the part it is in is its home.
-    let home_href = if !f.home.1.is_empty() { f.home.1.clone() } else { f.section.as_ref().map(|s| s.1.clone()).unwrap_or_else(|| "/".into()) };
-    let brand_href = f.brand.clone().unwrap_or_else(|| home_href.clone());
     // Home, the part this is in, and this page: each named once.
     let mut crumbs: Vec<(String, Option<String>)> = Vec::new();
     if let Some((label, href)) = &f.above {
@@ -687,7 +726,7 @@ pub fn shell(title: &str, body: Markup) -> String {
     }
     // The app is software, not a page: a sidebar and a place to work, and nothing of the website.
     if f.area == "app" {
-        return dashboard(title, body, &f, &crumbs, &brand_href);
+        return dashboard(title, body, &f, &crumbs);
     }
     let page = html! {
         (DOCTYPE)
@@ -698,68 +737,47 @@ pub fn shell(title: &str, body: Markup) -> String {
                 meta name="theme-color" content="#f2efe7";
                 // As the website does: a theme already chosen is applied before the first paint.
                 script { (maud::PreEscaped(THEME_EARLY)) }
-                title { (title) @if title != "Zetlyn" { " · Zetlyn" @if f.area == "app" { " App" } } }
+                title { (title) @if title != "Zetlyn" { " · Zetlyn" } }
                 link rel="icon" type="image/png" href={"data:image/png;base64," (FAVICON)};
-                link rel="stylesheet" href={(at("/style.css")) "?v=" (env!("CARGO_PKG_VERSION"))};
+                link rel="stylesheet" href={(at("/zetlyn.css")) "?v=" (env!("CARGO_PKG_VERSION"))};
             }
             body class=(if f.area.is_empty() { String::new() } else { format!("area-{}", f.area) }) {
-                header.top {
-                    div.wrap {
-                        a.brand href=(brand_href) aria-label="Zetlyn home" {
-                            img.brand-mark src={"data:image/png;base64," (MARK)} alt="";
-                            span { "Zetlyn" }
-                            @if let Some((_, name, _)) = AREAS.iter().find(|(a, _, _)| *a == f.area && *a != "site") {
-                                span.brand-area { (name) }
-                            }
-                        }
-                        // Which organisation this is, and the others whoever is signed in belongs to.
-                        @if let Some(org) = &f.org {
-                            @if f.orgs.len() > 1 {
-                                details.org-switch {
-                                    summary { (org) }
-                                    ul { @for (label, href) in &f.orgs { li { a href=(href) { (label) } } } }
+                (site_header(&f.area, nav_key(&f.area, title), if f.account.is_some() { account_action(&f.account) } else { open_app() }))
+                // What this part is, under the header every page has: the organisation, its own
+                // pages, whether it keeps itself current.
+                @if f.org.is_some() || !f.nav.is_empty() || f.status.is_some() {
+                    div.context {
+                        div.shell {
+                            @if let Some(org) = &f.org {
+                                @if f.orgs.len() > 1 {
+                                    details.org-switch {
+                                        summary { (org) }
+                                        ul { @for (label, href) in &f.orgs { li { a href=(href) { (label) } } } }
+                                    }
+                                } @else {
+                                    span.org-name { (org) }
                                 }
-                            } @else {
-                                span.org-name { (org) }
                             }
-                        }
-                        @if let Some((words, href, on)) = &f.status {
-                            a.autoupdate.on[*on] href=(href) title="Automatic updates" { span.dot {} (words) }
-                        }
-                        @if !f.nav.is_empty() {
-                            nav.links {
-                                @for (label, href) in &f.nav {
-                                    @if f.current.as_deref() == Some(label.as_str()) {
-                                        a href=(href) aria-current="page" { (label) }
-                                    } @else {
-                                        a href=(href) { (label) }
+                            @if !f.nav.is_empty() {
+                                nav.links {
+                                    @for (label, href) in &f.nav {
+                                        @if f.current.as_deref() == Some(label.as_str()) {
+                                            a href=(href) aria-current="page" { (label) }
+                                        } @else {
+                                            a href=(href) { (label) }
+                                        }
                                     }
                                 }
                             }
-                        }
-                        @match &f.account {
-                            Some(Some(email)) => {
-                                form.account method="post" action="/app/signout" {
-                                    span.dim { (email) }
-                                    button type="submit" { "Sign out" }
-                                }
-                            }
-                            Some(None) => { a.account href="/app/signin" { "Sign in" } }
-                            None => {}
-                        }
-                        // The other two parts of Zetlyn, a click away from wherever one is.
-                        @if !f.area.is_empty() {
-                            nav.areas aria-label="Zetlyn" {
-                                @for (key, name, href) in AREAS.iter().filter(|(a, _, _)| *a != f.area) {
-                                    a.area-link.{"to-" (key)} href=(href) { (name) }
-                                }
+                            @if let Some((words, href, on)) = &f.status {
+                                a.autoupdate.on[*on] href=(href) title="Automatic updates" { span.dot {} (words) }
                             }
                         }
                     }
                 }
                 @if crumbs.len() > 1 || !f.tabs.is_empty() {
                     div.subbar {
-                        div.wrap {
+                        div.shell {
                             nav.crumbs aria-label="Breadcrumb" {
                                 ol {
                                     @for (label, href) in &crumbs {
@@ -787,13 +805,7 @@ pub fn shell(title: &str, body: Markup) -> String {
                     }
                 }
                 main { (body) }
-                footer.site-footer {
-                    span { @if f.note.is_empty() { "Zetlyn " (env!("CARGO_PKG_VERSION")) } @else { (f.note) } }
-                    div {
-                        @for (label, href) in &f.footer { a href=(href) { (label) } }
-                        button.theme-toggle type="button" id="theme-toggle" { "Theme" }
-                    }
-                }
+                (site_footer(&f.footer))
                 script { (maud::PreEscaped(THEME_TOGGLE)) }
                 @if let Some(jobs) = &f.jobs {
                     div #jobs data-at=(jobs) hidden {}
@@ -808,7 +820,7 @@ pub fn shell(title: &str, body: Markup) -> String {
 
 /// The hosted app: a dark sidebar with the switch, the organisation and its pages, and beside it a
 /// slim bar with where the reader is, the tabs of what they are in, and the work.
-fn dashboard(title: &str, body: Markup, f: &Frame, crumbs: &[(String, Option<String>)], brand_href: &str) -> String {
+fn dashboard(title: &str, body: Markup, f: &Frame, crumbs: &[(String, Option<String>)]) -> String {
     let tab_on = |label: &String, href: &String| {
         label == title || (f.section.as_ref().is_some_and(|s| s.0 == title) && Some(href) == f.section.as_ref().map(|s| &s.1))
     };
@@ -818,22 +830,18 @@ fn dashboard(title: &str, body: Markup, f: &Frame, crumbs: &[(String, Option<Str
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
-                meta name="theme-color" content="#10171c";
+                meta name="theme-color" content="#f2efe7";
                 script { (maud::PreEscaped(THEME_EARLY)) }
-                title { @if title == "Zetlyn" { "Zetlyn App" } @else { (title) " · Zetlyn App" } }
+                title { @if title == "Zetlyn" { "Zetlyn" } @else { (title) " · Zetlyn" } }
                 link rel="icon" type="image/png" href={"data:image/png;base64," (FAVICON)};
-                link rel="stylesheet" href={(at("/style.css")) "?v=" (env!("CARGO_PKG_VERSION"))};
+                link rel="stylesheet" href={(at("/zetlyn.css")) "?v=" (env!("CARGO_PKG_VERSION"))};
             }
             body.area-app.dash {
-                div.dash-grid {
+                (site_header("app", nav_key("app", title), account_action(&f.account)))
+                // Under the header every page has: the organisation and its pages at the left, and
+                // the place to work beside them, in the same frame as the header above.
+                div.shell.dash-grid {
                     aside.dash-side {
-                        div.dash-head {
-                            (switcher("app"))
-                            a.dash-brand href=(brand_href) aria-label="Zetlyn App" {
-                                img.brand-mark src={"data:image/png;base64," (MARK)} alt="";
-                                span { "Zetlyn" } span.brand-area { "App" }
-                            }
-                        }
                         @if let Some(org) = &f.org {
                             @if f.orgs.len() > 1 {
                                 details.dash-org {
@@ -859,21 +867,6 @@ fn dashboard(title: &str, body: Markup, f: &Frame, crumbs: &[(String, Option<Str
                             p.dash-label { "Your organisations" }
                             nav.dash-nav { @for (label, href) in &f.orgs { a href=(href) { (label) } } }
                         }
-                        div.dash-foot {
-                            @match &f.account {
-                                Some(Some(email)) => {
-                                    div.dash-me {
-                                        span.dash-email { (email) }
-                                        form method="post" action="/app/signout" { button type="submit" { "Sign out" } }
-                                    }
-                                }
-                                _ => { a.dash-signin href="/app/signin" { "Sign in" } }
-                            }
-                            div.dash-small {
-                                a href="https://zetlyn.com/docs" { "Docs" }
-                                button.theme-toggle type="button" id="theme-toggle" { "Theme" }
-                            }
-                        }
                     }
                     div.dash-main {
                         header.dash-top {
@@ -898,6 +891,7 @@ fn dashboard(title: &str, body: Markup, f: &Frame, crumbs: &[(String, Option<Str
                         main.dash-body { (body) }
                     }
                 }
+                (site_footer(&f.footer))
                 script { (maud::PreEscaped(THEME_TOGGLE)) }
                 @if let Some(jobs) = &f.jobs {
                     div #jobs data-at=(jobs) hidden {}
@@ -1411,7 +1405,7 @@ pub fn serve(ds: Source, addr: &str) -> Result<(), String> {
         // The same rule as the tracker surface: a miss is a 404, and only the front page is the
         // front page. Every other address that matches nothing is nothing.
         let mut status = 200u16;
-        let (body, content_type) = if path == "/style.css" {
+        let (body, content_type) = if path == "/style.css" || path == "/zetlyn.css" {
             (STYLE.to_string(), "text/css; charset=utf-8")
         } else if path.starts_with("/api/") {
             let (answer, no_such_call) = api(&ds, &path, &url);
@@ -1539,13 +1533,20 @@ fn stamp(at: &str) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn the_app_says_its_name_once_in_a_title() {
+    fn the_app_is_one_zetlyn_in_its_title_its_header_and_its_footer() {
         let f = super::Frame::default();
-        let title = |t: &str| {
-            let page = super::dashboard(t, maud::html! {}, &f, &[], "/");
-            page.split("<title>").nth(1).and_then(|s| s.split("</title>").next()).unwrap_or("").to_string()
-        };
-        assert_eq!(title("Zetlyn"), "Zetlyn App");
-        assert_eq!(title("Proposals"), "Proposals · Zetlyn App");
+        let page = |t: &str| super::dashboard(t, maud::html! {}, &f, &[]);
+        let title = |t: &str| page(t).split("<title>").nth(1).and_then(|s| s.split("</title>").next()).unwrap_or("").to_string();
+        assert_eq!(title("Zetlyn"), "Zetlyn");
+        assert_eq!(title("Proposals"), "Proposals · Zetlyn");
+        // The website's header, its navigation and its footer, as on every other page.
+        let p = page("Worlds");
+        assert!(p.contains(r#"<header class="site-header shell">"#), "{p}");
+        for (_, label, href) in super::SITE_NAV {
+            assert!(p.contains(&format!(r#"href="{href}""#)) && p.contains(label), "{label}");
+        }
+        assert!(p.contains(r#"href="https://zetlyn.com/directory" aria-current="page""#), "Worlds is marked where it is");
+        assert!(p.contains(r#"<footer class="site-footer shell">"#) && p.contains("https://zetlyn.com/privacy"));
+        assert!(p.contains("/zetlyn.css?v="), "its own sheet, not the website's /style.css");
     }
 }

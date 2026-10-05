@@ -1324,7 +1324,7 @@ impl TrackerSite {
         // A private tracker, or one a source forbids showing in public, is its accounts' alone:
         // everything but signing in and what it costs is a page saying so.
         let closed = !*operator && (scope.private() || scope.licences().iter().any(|(_, r)| r == "no"));
-        let open_anyway = matches!(path.as_str(), "/style.css" | "/signin" | "/signout" | "/pricing" | "/terms" | "/account")
+        let open_anyway = matches!(path.as_str(), "/style.css" | "/zetlyn.css" | "/signin" | "/signout" | "/pricing" | "/terms" | "/account")
             || path.starts_with("/signin/");
         let path = if closed && !open_anyway && !v.entitled(&scope.decl.name) { "/private".to_string() } else { path };
         let post = request.method() == &tiny_http::Method::Post;
@@ -1339,7 +1339,7 @@ impl TrackerSite {
         let mut status = 200u16;
         let mut missing = false;
         let (body, kind, extra): (String, &str, Option<(String, String)>) = match path.as_str() {
-            "/style.css" => (
+            "/style.css" | "/zetlyn.css" => (
                 crate::serve::STYLE.to_string(),
                 "text/css; charset=utf-8",
                 None,

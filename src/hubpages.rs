@@ -182,35 +182,10 @@ fn frame(place: &dyn Place, title: &str, description: &str, body: Markup) -> Str
                 link rel="stylesheet" href={"/style.css?v=" (stamp("style.css"))};
             }
             body.area-hub {
-                header.site-header.shell {
-                    (crate::serve::switcher("hub"))
-                    a.brand href="/hub/" aria-label="Zetlyn Hub" {
-                        @if has("mark.png") { img src="/mark.png" alt="" class="brand-mark"; }
-                        span { "Zetlyn" } span.brand-area { "Hub" }
-                    }
-                    // Searched in the browser, over the list the hub keeps of itself: the hub
-                    // still answers no query.
-                    form.hub-search role="search" action="/" onsubmit="return false" {
-                        input #hub-q type="search" placeholder="Search trackers and sources…" aria-label="Search trackers and sources" autocomplete="off";
-                        div #hub-results hidden {}
-                    }
-                    nav {
-                        a href="/hub/#trackers" { "Trackers" }
-                        a href="/hub/#sources" { "Sources" }
-                        a href="/hub/#publish" { "Publish" }
-                        a href="https://zetlyn.com/docs" { "Docs" }
-                        // Accounts are the app's: signing in here is signing in there.
-                        a.hub-signin href="/app/signin" { "Sign in" }
-                    }
-                }
+                // The header and the footer every page of Zetlyn has (serve::site_header).
+                (crate::serve::site_header("hub", "hub", crate::serve::open_app()))
                 main { (body) }
-                footer.site-footer.shell {
-                    span { "© Zetlyn" }
-                    div {
-                        @for (label, href) in crate::serve::SITE_FOOTER { a href=(href) { (label) } }
-                        @if has("app.js") { button.theme-toggle type="button" id="theme-toggle" { "Theme" } }
-                    }
-                }
+                (crate::serve::site_footer(&[]))
                 @if has("app.js") { script src={"/app.js?v=" (stamp("app.js"))} {} }
                 script { (PreEscaped(SEARCH)) }
             }

@@ -96,7 +96,9 @@ fn hub_entry(scope: &Tracker, world: &Site) -> Option<String> {
     } else {
         return None;
     };
-    Some(format!("{hub}/trackers/{}/", scope.decl.name))
+    // Its page there is read owner first: /hub/<owner>/trackers/<name>/.
+    let (owner, name) = scope.decl.name.split_once('/')?;
+    Some(format!("{hub}/{owner}/trackers/{name}/"))
 }
 
 fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {

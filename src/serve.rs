@@ -98,7 +98,7 @@ details.receipt[open] { background: var(--panel); border-left: 3px solid var(--a
                padding: .5rem; border: 1px solid var(--line); }
 .receipt table { font-size: .82rem; }
 /* The frame every page of Zetlyn has: the website's header and footer, to the value
-   (zetlyn.com, assets/style.css: .shell, .site-header, .switcher, .site-footer). The site, the hub,
+   (zetlyn.com, assets/style.css: .shell, .site-header, .site-footer). The site, the hub,
    the app, a tracker and the directory of worlds are one Zetlyn: one header, one footer, one set of
    colours. What a part has of its own is beneath the header, never instead of it. */
 .shell, .wrap { width: min(1180px, calc(100% - 48px)); margin: 0 auto; }
@@ -107,47 +107,44 @@ details.receipt[open] { background: var(--panel); border-left: 3px solid var(--a
   letter-spacing: -.03em; font-size: 20px; }
 .brand:hover { text-decoration: none; }
 .brand-mark { width: 26px; height: 26px; filter: var(--mark-filter); }
-.site-header nav { margin-left: auto; display: flex; gap: 28px; font-size: 14px; align-self: stretch; }
-.site-header nav a { color: var(--dim); display: flex; align-items: center; border-bottom: 2px solid transparent;
-  margin-bottom: -1px; }
-.site-header nav a:hover, .site-header nav a[aria-current] { color: var(--fg); text-decoration: none; }
-.site-header nav a[aria-current] { border-bottom-color: var(--accent); }
-.site-header nav a.nav-cta { align-self: center; border: 1px solid var(--fg); background: var(--fg); color: var(--bg);
-  padding: 8px 14px; margin-bottom: 0; }
-.site-header nav a.nav-cta:hover { background: var(--accent); border-color: var(--accent); color: var(--bg); }
-/* Who is signed in, where the way into the app stands on every other page. */
-.site-header nav form.account { align-self: center; display: flex; align-items: center; gap: .6rem; font-size: 13px; color: var(--dim); }
-.site-header nav form.account span { max-width: 16rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.site-header nav form.account button { font: inherit; font-size: 13px; padding: 7px 12px; border-radius: 0;
-  border: 1px solid var(--fg); background: none; color: var(--fg); }
-.site-header nav form.account button:hover { background: var(--fg); color: var(--bg); }
+/* Beside the mark, what there is and how it works; at the right, the project, signing in and the
+   way to start. The website's to the value (zetlyn.com, assets/style.css). */
+.site-nav { margin-left: 40px; display: flex; gap: 28px; font-size: 14px; align-self: stretch; }
+.site-nav a { color: var(--dim); display: flex; align-items: center; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.site-nav a:hover, .site-nav a[aria-current] { color: var(--fg); text-decoration: none; }
+.site-nav a[aria-current] { border-bottom-color: var(--accent); }
+.site-actions { margin-left: auto; display: flex; align-items: center; gap: 18px; font-size: 14px; }
+.site-actions a.nav-gh { color: var(--dim); }
+.site-actions a.nav-gh:hover { color: var(--fg); text-decoration: none; }
+.site-actions a.nav-signin { border: 1px solid var(--fg); color: var(--fg); padding: 8px 14px; }
+.site-actions a.nav-signin:hover { background: var(--fg); color: var(--bg); text-decoration: none; }
+.site-actions a.nav-cta { border: 1px solid var(--fg); background: var(--fg); color: var(--bg); padding: 8px 14px; }
+.site-actions a.nav-cta:hover { background: var(--accent); border-color: var(--accent); text-decoration: none; }
+/* Who is signed in, and what they belong to, where signing in stands for everybody else. */
+details.account-menu { position: relative; margin: 0; }
+details.account-menu > summary { list-style: none; cursor: pointer; margin: 0; font-weight: inherit; border: 1px solid var(--line-strong);
+  padding: 8px 14px; color: var(--fg); max-width: 18rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+details.account-menu > summary::-webkit-details-marker { display: none; }
+details.account-menu > summary::after { content: " ▾"; color: var(--dim); }
+details.account-menu[open] > summary, details.account-menu > summary:hover { border-color: var(--fg); }
+.account-panel { position: absolute; right: 0; top: calc(100% + 6px); z-index: 40; min-width: 15rem; background: var(--panel);
+  border: 1px solid var(--fg); box-shadow: 10px 10px 0 var(--line); padding: 6px 0; }
+.account-panel a { display: block; padding: 9px 14px; color: var(--fg); }
+.account-panel a:hover { background: var(--wash); text-decoration: none; }
+.account-label { margin: 6px 14px 4px; font: 11px/normal ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  text-transform: uppercase; letter-spacing: .1em; color: var(--dim); }
+.account-panel form { margin: 6px 0 0; padding: 6px 14px 4px; border-top: 1px solid var(--line); }
+.account-panel button { width: 100%; padding: 7px 10px; border: 1px solid var(--fg); background: none; color: var(--fg); }
+.account-panel button:hover { background: var(--fg); color: var(--bg); }
+/* Narrower, the project goes first and then the way to start; signing in stays. */
 @media (max-width: 900px) { .site-header { height: auto; min-height: 82px; padding-block: 12px; }
-  .site-header nav { gap: 18px; align-self: center; flex-wrap: wrap; justify-content: flex-end; }
-  .site-header nav a { border-bottom: 0; margin-bottom: 0; }
-  .site-header nav a[aria-current] { text-decoration: underline 2px var(--accent); text-underline-offset: 7px; } }
+  .site-nav { margin-left: 28px; gap: 18px; align-self: center; } .site-nav a { border-bottom: 0; margin-bottom: 0; }
+  .site-nav a[aria-current] { text-decoration: underline 2px var(--accent); text-underline-offset: 7px; }
+  .site-actions a.nav-gh { display: none; } }
 @media (max-width: 620px) { .shell, .wrap { width: min(100% - 28px, 1180px); }
-  .site-header { min-height: 70px; padding-block: 10px; } .site-header nav { gap: 14px; }
-  .site-header nav a { font-size: 12px; } .brand { font-size: 14px; } .brand-mark { width: 22px; height: 22px; }
-  .site-header nav a.nav-cta, .site-header nav form.account span { display: none; } details.switcher { margin-right: 8px; } }
-/* The switch between the site, the hub and the app: the same control in the same place. */
-.switcher { position: relative; margin-right: 14px; }
-details.org-switch { margin: 0; }
-details.switcher { margin: 0 14px 0 0; }
-details.dash-org { margin: 0 0 10px; }
-details.switcher > summary, details.org-switch > summary, details.dash-org > summary { margin: 0; font-weight: inherit; }
-.switcher summary { list-style: none; cursor: pointer; width: 30px; height: 30px; display: grid; place-items: center;
-  border: 1px solid var(--line-strong); color: var(--dim); }
-.switcher summary::-webkit-details-marker { display: none; }
-.switcher summary:hover, .switcher[open] summary { border-color: var(--fg); color: var(--fg); }
-.switcher svg rect { fill: currentColor; }
-.switcher-panel { position: absolute; top: 40px; left: 0; z-index: 40; width: 310px; background: var(--panel); color: var(--fg);
-  border: 1px solid var(--fg); box-shadow: 10px 10px 0 var(--line); }
-.switcher-panel a { display: block; padding: 13px 15px; border-bottom: 1px solid var(--line); color: var(--fg); }
-.switcher-panel a:last-child { border-bottom: 0; }
-.switcher-panel a:hover { background: var(--wash); text-decoration: none; }
-.switcher-panel a.on { box-shadow: inset 3px 0 0 var(--accent); }
-.switcher-panel b { display: block; font-size: 14px; font-weight: 600; }
-.switcher-panel span { display: block; font-size: 12.5px; color: var(--dim); margin-top: 3px; }
+  .site-header { min-height: 70px; padding-block: 10px; } .site-nav { margin-left: 18px; gap: 14px; }
+  .site-nav a, .site-actions { font-size: 12px; } .brand { font-size: 14px; } .brand-mark { width: 22px; height: 22px; }
+  .site-actions a.nav-cta { display: none; } .site-actions a.nav-signin, details.account-menu > summary { padding: 6px 10px; } }
 /* Beneath the header, where a part has more to say: its organisation, its own pages, its state. */
 .context { border-bottom: 1px solid var(--line); }
 .context .shell { display: flex; align-items: center; gap: 1.5rem; min-height: 46px; flex-wrap: wrap; }
@@ -469,76 +466,77 @@ pub struct Frame {
     pub side_title: String,
 }
 
-/// What each part is for, one line each, in the switch every part carries.
-pub const AREA_ABOUT: &[(&str, &str)] = &[
-    ("site", "What Zetlyn is, and how it works"),
-    ("hub", "Public trackers and sources to take"),
-    ("app", "Your organisation's trackers, run for you"),
-];
-
-/// The switch between the three parts: the same control, in the same place, in each.
-pub fn switcher(current: &str) -> Markup {
-    html! {
-        details.switcher {
-            summary aria-label="Zetlyn, its hub and its app" title="Zetlyn, its hub and its app" {
-                svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" {
-                    @for y in [2, 7, 12] { @for x in [2, 7, 12] { rect x=(x) y=(y) width="3" height="3" {} } }
-                }
-            }
-            div.switcher-panel {
-                @for (key, name, href) in AREAS {
-                    @let about = AREA_ABOUT.iter().find(|(k, _)| k == key).map(|(_, a)| *a).unwrap_or("");
-                    a.on[*key == current] href=(href) { b { @if *key == "site" { "Zetlyn" } @else { "Zetlyn " (name) } } span { (about) } }
-                }
-            }
-        }
-    }
-}
-
 /// The one navigation every page of Zetlyn carries, the website's, the hub's, the app's and a
-/// world's alike, in this order. Absolute, so it leads to the same pages from a hub, a tracker or a
-/// world on a domain of its own. The website writes the same (zetlyn.com, src/main.rs).
+/// world's alike, beside the mark and in this order: what there is, how it works, having it run.
+/// Absolute, so it leads to the same pages from a hub, a tracker or a world on a domain of its own.
+/// The website writes the same (zetlyn.com, src/main.rs and src/page.html).
 pub const SITE_NAV: &[(&str, &str, &str)] = &[
-    // Trackers, sources and the interface are explained under Docs; the worlds there are are
-    // named beside what they publish, on the hub.
+    ("hub", "Hub", "https://zetlyn.com/hub/"),
     ("docs", "Docs", "https://zetlyn.com/docs"),
     ("hosting", "Hosting", "https://zetlyn.com/hosting"),
-    ("hub", "Hub", "https://zetlyn.com/hub/"),
 ];
 
-/// The header of every page, to the markup the website's (zetlyn.com, src/page.html): the switch,
-/// the mark, the navigation with `current` marked, and `action` at its right.
-pub fn site_header(area: &str, current: &str, action: Markup) -> Markup {
+/// Where the program is, at the right of the header beside signing in.
+pub const SOURCE_CODE: &str = "https://github.com/zetlynhq/zetlyn";
+
+/// Who is reading, for the right of the header: nobody signed in where nobody can be (a page
+/// that is no part of the app), nobody yet, or somebody and the organisations they belong to.
+pub enum Reader<'a> {
+    Anyone,
+    /// The app on somebody's own machine, where there are no accounts and nothing to start.
+    Local,
+    Nobody,
+    Somebody(&'a str, &'a [(String, String)]),
+}
+
+/// The header of every page, to the markup the website's (zetlyn.com, src/page.html): the mark,
+/// the navigation beside it with `current` marked, and at the right the project, signing in and
+/// the way to start.
+pub fn site_header(current: &str, reader: Reader) -> Markup {
     html! {
         header.site-header.shell {
-            (switcher(area))
             a.brand href="https://zetlyn.com/" aria-label="Zetlyn home" {
                 img.brand-mark src={"data:image/png;base64," (MARK)} alt="";
                 span { "Zetlyn" }
             }
-            nav {
+            nav.site-nav aria-label="Zetlyn" {
                 @for (key, label, href) in SITE_NAV {
                     @if *key == current { a href=(href) aria-current="page" { (label) } } @else { a href=(href) { (label) } }
                 }
-                (action)
+            }
+            div.site-actions {
+                a.nav-gh href=(SOURCE_CODE) { "GitHub" }
+                @match reader {
+                    Reader::Somebody(email, orgs) => {
+                        details.account-menu {
+                            summary { (email) }
+                            div.account-panel {
+                                @if !orgs.is_empty() {
+                                    p.account-label { "Your organisations" }
+                                    @for (label, href) in orgs { a href=(href) { (label) } }
+                                }
+                                form method="post" action="/app/signout" { button type="submit" { "Sign out" } }
+                            }
+                        }
+                    }
+                    Reader::Local => {}
+                    _ => {
+                        a.nav-signin href="https://zetlyn.com/app/signin" { "Sign in" }
+                        a.nav-cta href="https://zetlyn.com/docs#install" { "Get started" }
+                    }
+                }
             }
         }
     }
 }
 
-/// At the right of the header wherever the reader is not in the app: the way into it.
-pub fn open_app() -> Markup {
-    html! { a.nav-cta href="https://zetlyn.com/app/" { "Open app" } }
-}
-
-/// At the right of the header in the app: who is signed in, or the way to sign in.
-fn account_action(account: &Option<Option<String>>) -> Markup {
-    match account {
-        Some(Some(email)) => html! {
-            form.account method="post" action="/app/signout" { span { (email) } button type="submit" { "Sign out" } }
-        },
-        Some(None) => html! { a.nav-cta href="/app/signin" { "Sign in" } },
-        None => html! {},
+/// The reader a frame says is there.
+fn reader_of(f: &Frame) -> Reader<'_> {
+    match &f.account {
+        Some(Some(email)) => Reader::Somebody(email, &f.orgs),
+        Some(None) => Reader::Nobody,
+        None if f.area == "app" => Reader::Local,
+        None => Reader::Anyone,
     }
 }
 
@@ -571,13 +569,6 @@ fn nav_key(area: &str, _title: &str) -> &'static str {
 pub fn frame_side(title: &str) {
     FRAME.with(|f| f.borrow_mut().side_title = title.to_string());
 }
-
-/// The three parts of Zetlyn, each a site of its own: what it is called beside the logo, where it is.
-pub const AREAS: &[(&str, &str, &str)] = &[
-    ("site", "Zetlyn", "https://zetlyn.com/"),
-    ("hub", "Hub", "https://zetlyn.com/hub/"),
-    ("app", "App", "https://zetlyn.com/app/"),
-];
 
 /// This page is part of `area`, in `org`, whose reader belongs to `orgs` too. In the app the mark
 /// leads to the app's own front page, as the hub's leads to the hub's.
@@ -742,7 +733,7 @@ pub fn shell(title: &str, body: Markup) -> String {
                 link rel="stylesheet" href={(at("/zetlyn.css")) "?v=" (env!("CARGO_PKG_VERSION"))};
             }
             body class=(if f.area.is_empty() { String::new() } else { format!("area-{}", f.area) }) {
-                (site_header(&f.area, nav_key(&f.area, title), if f.account.is_some() { account_action(&f.account) } else { open_app() }))
+                (site_header(nav_key(&f.area, title), reader_of(&f)))
                 // What this part is, under the header every page has: the organisation, its own
                 // pages, whether it keeps itself current.
                 @if f.org.is_some() || !f.nav.is_empty() || f.status.is_some() {
@@ -837,7 +828,7 @@ fn dashboard(title: &str, body: Markup, f: &Frame, crumbs: &[(String, Option<Str
                 link rel="stylesheet" href={(at("/zetlyn.css")) "?v=" (env!("CARGO_PKG_VERSION"))};
             }
             body.area-app.dash {
-                (site_header("app", nav_key("app", title), account_action(&f.account)))
+                (site_header(nav_key("app", title), reader_of(&f)))
                 // Under the header every page has: the organisation and its pages at the left, and
                 // the place to work beside them, in the same frame as the header above.
                 div.shell.dash-grid {
@@ -1546,6 +1537,9 @@ mod tests {
             assert!(p.contains(&format!(r#"href="{href}""#)) && p.contains(label), "{label}");
         }
         assert!(!p.contains("Worlds") && !p.contains("https://zetlyn.com/directory"), "no page of worlds of its own any more");
+        // No switch beside the mark; at the right the project, signing in and the way to start.
+        assert!(!p.contains("switcher"), "{p}");
+        assert!(p.contains(super::SOURCE_CODE) && p.contains("Sign in") && p.contains("https://zetlyn.com/docs#install"), "{p}");
         assert!(p.contains(r#"<footer class="site-footer shell">"#) && p.contains("https://zetlyn.com/privacy"));
         assert!(p.contains("/zetlyn.css?v="), "its own sheet, not the website's /style.css");
     }

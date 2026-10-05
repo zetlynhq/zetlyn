@@ -3317,6 +3317,9 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
     serve::frame_app(None, None);
     match parts.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["style.css" | "zetlyn.css"] => respond(request, 200, "text/css; charset=utf-8", &format!("{}{APP_STYLE}", serve::STYLE)),
+        // Nobody signed in has nothing here the hub does not show better: what may be read is
+        // found there, each opening where it runs.
+        [] if who.is_none() && !post => redirect(request, "/hub/"),
         [] => {
             let public = public_trackers(dir);
             let mine = who.as_ref().map(|a| membership.orgs_of(&a.email)).unwrap_or_default();

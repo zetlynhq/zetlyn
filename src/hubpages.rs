@@ -200,7 +200,7 @@ fn frame(place: &dyn Place, title: &str, description: &str, body: Markup) -> Str
             }
             body.area-hub {
                 // The header and the footer every page of Zetlyn has (serve::site_header).
-                (crate::serve::site_header("hub", "hub", crate::serve::open_app()))
+                (crate::serve::site_header("hub", crate::serve::Reader::Anyone))
                 main { (body) }
                 (crate::serve::site_footer(&[]))
                 @if has("app.js") { script src={"/app.js?v=" (stamp("app.js"))} {} }

@@ -258,8 +258,9 @@ pub fn catalog(place: &dyn Place, rows: &[Row], opens: Opens) -> String {
         ("source", "Sources", sources.len()),
     ];
     let body = html! {
+        (trail(None))
         section.hub-top.shell {
-            p.overline { "THE HUB · PUBLIC" }
+            p.overline { "PUBLIC" }
             h1.hub-title { "Find a tracker or a source" }
             p.hub-sub { "Every one here is public and free to use: open it in the browser, or subscribe and keep a copy on your own machine that stays current." }
             input #hub-filter type="search" autocomplete="off" aria-label="Search the hub"
@@ -335,10 +336,30 @@ fn take(command: &str, note: &str) -> Markup {
     }
 }
 
+/// Where a page is, beneath the header: Zetlyn, the hub, and on a page about one thing, its kind
+/// and its name. The last is where the reader is and leads nowhere.
+fn trail(r: Option<&Row>) -> Markup {
+    html! {
+        nav.crumbs.shell aria-label="Breadcrumb" {
+            ol {
+                li { a href="https://zetlyn.com/" { "Zetlyn" } }
+                @match r {
+                    None => { li { span aria-current="page" { "Hub" } } }
+                    Some(r) => {
+                        li { a href="/hub/" { "Hub" } }
+                        li { a href={"/hub/#" (if r.is_tracker() { "trackers" } else { "sources" })} { (if r.is_tracker() { "Trackers" } else if r.tree == "packages" { "Packages" } else { "Sources" }) } }
+                        li { span aria-current="page" { (r.title()) } }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// What a page about one thing is, above its name: its kind and whether it is public.
 fn crumbs(r: &Row) -> Markup {
     html! {
         p.overline.hub-crumbs {
-            a href="/hub/" { "THE HUB" } " · "
             (kind_of(r).to_uppercase())
             " · " (badge(r).to_uppercase())
         }
@@ -403,6 +424,7 @@ fn source_page(place: &dyn Place, r: &Row, rows: &[Row], opens: Opens) -> String
         .unwrap_or_default();
     let examples: Vec<String> = m["read"]["search"]["examples"].as_array().map(|a| a.iter().filter_map(|e| e.as_str().map(str::to_string)).collect()).unwrap_or_default();
     let body = html! {
+        (trail(Some(r)))
         section.hub-detail-top.shell {
             (crumbs(r))
             h1 { (r.title()) }
@@ -497,6 +519,7 @@ fn tracker_page(place: &dyn Place, r: &Row, rows: &[Row], opens: Opens) -> Strin
         })
         .unwrap_or_default();
     let body = html! {
+        (trail(Some(r)))
         section.hub-detail-top.shell {
             (crumbs(r))
             h1 { (r.title()) }

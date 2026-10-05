@@ -81,6 +81,24 @@ fn cell(e: &Thing, name: &str) -> Markup {
     }
 }
 
+/// Where this tracker's entry in the hub is, where it has one: published by its world, public,
+/// and at the hub its world says it publishes to (zetlyn.com's for a world hosted there, a
+/// world's own at `<url>/hub` otherwise).
+fn hub_entry(scope: &Tracker, world: &Site) -> Option<String> {
+    let publish = world.publish.as_ref()?;
+    if scope.decl.visibility == "private" || !scope.dir.join(".published").exists() {
+        return None;
+    }
+    let hub = if !publish.read_at.trim().is_empty() {
+        publish.read_at.trim().trim_end_matches('/').to_string()
+    } else if !world.url.trim().is_empty() {
+        format!("{}/hub", world.url.trim().trim_end_matches('/'))
+    } else {
+        return None;
+    };
+    Some(format!("{hub}/trackers/{}/", scope.decl.name))
+}
+
 fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
     let bound = account::bound(v, &scope.decl.name);
     let p = params(url);
@@ -163,9 +181,17 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
     let last_shown = (page - 1) * limit + answer.entries.len();
     let pages = (answer.total as usize).div_ceil(limit).max(1);
 
+    // This is the tracker itself, running, and the page says so above its name; its entry in the
+    // hub, where somebody reads what it holds and takes a copy, is a link away.
+    let world = Site::for_workspace(&scope.root);
+    let entry = hub_entry(scope, &world);
     let body = html! {
+        p.overline { span.live-dot {} "Live" @if !world.title.is_empty() { " · run by " (world.title) } }
         h1 { (d.title) }
         @if !d.about.is_empty() { p.lede { (d.about) } }
+        @if let Some(entry) = &entry {
+            p.entry-link { a href=(entry) { "Its entry in the hub · take a copy →" } }
+        }
         div.meta {
             span.(if stale { "partial" } else { "current" }) { @if stale { "Behind" } @else { "Current" } }
             span { (plural(scope.members.len(), "source")) }

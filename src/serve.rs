@@ -236,6 +236,13 @@ nav.tabs a { display: flex; align-items: center; padding: 0 .8rem; color: var(--
 nav.tabs a:hover { color: var(--fg); text-decoration: none; }
 nav.tabs a.on { color: var(--fg); border-bottom-color: var(--accent); font-weight: 600; }
 /* The head of a page: its name, what it is, and the numbers that say how it stands. */
+/* Above a running tracker's name: that it is live, and whose. Beneath it, the way to its entry in the hub. */
+.overline { margin: 0 0 .5rem; font: 11px/normal ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  text-transform: uppercase; letter-spacing: .12em; color: var(--accent); display: flex; align-items: center; }
+.live-dot { display: inline-block; width: .5rem; height: .5rem; border-radius: 50%; background: #2e7d32; margin-right: .5rem; }
+.entry-link { margin: .5rem 0 0; font-size: .9rem; }
+.entry-link a { color: var(--fg); text-decoration: underline; text-underline-offset: 3px; }
+.entry-link a:hover { color: var(--accent); }
 .lede { font-size: 1.05rem; color: var(--dim); max-width: 46rem; margin: .4rem 0 0; }
 .meta { font-size: .85rem; color: var(--dim); margin: .8rem 0 0; display: flex; gap: .4rem 1rem; flex-wrap: wrap; }
 .meta .current::before, .meta .partial::before { content: ""; display: inline-block; width: .5rem; height: .5rem;
@@ -452,6 +459,8 @@ pub struct Frame {
     pub brand: Option<String>,
     /// A crumb before the home one: the machine an organisation's workspace is part of.
     pub above: Option<(String, String)>,
+    /// Between the home and this page: the part of the home it is in, as `Trackers`.
+    pub group: Option<(String, String)>,
     /// Who is signed in, at the right of the header, where somebody can be: `None` where nobody
     /// signs in (this machine's own app), `Some(None)` for a visitor, `Some(Some(email))` signed in.
     pub account: Option<Option<String>>,
@@ -563,6 +572,12 @@ fn nav_key(area: &str, _title: &str) -> &'static str {
         "hub" => "hub",
         _ => "",
     }
+}
+
+/// The part of the home this page is in, between the two in the crumbs. An empty address names
+/// a part nothing leads to.
+pub fn frame_group(group: Option<(String, String)>) {
+    FRAME.with(|f| f.borrow_mut().group = group);
 }
 
 /// The sidebar's heading above its links.
@@ -696,11 +711,15 @@ pub fn shell(title: &str, body: Markup) -> String {
     let f = frame();
     // Home, the part this is in, and this page: each named once.
     let mut crumbs: Vec<(String, Option<String>)> = Vec::new();
+    // An empty address is a crumb that leads nowhere: a part with no page of its own.
     if let Some((label, href)) = &f.above {
-        crumbs.push((label.clone(), Some(href.clone())));
+        crumbs.push((label.clone(), (!href.is_empty()).then(|| href.clone())));
     }
     if !f.home.1.is_empty() {
         crumbs.push((f.home.0.clone(), Some(f.home.1.clone())));
+    }
+    if let Some((label, href)) = &f.group {
+        crumbs.push((label.clone(), (!href.is_empty()).then(|| href.clone())));
     }
     if let Some((label, href)) = &f.section {
         crumbs.push((label.clone(), Some(href.clone())));
@@ -771,11 +790,12 @@ pub fn shell(title: &str, body: Markup) -> String {
                         div.shell {
                             nav.crumbs aria-label="Breadcrumb" {
                                 ol {
-                                    @for (label, href) in &crumbs {
+                                    @for (i, (label, href)) in crumbs.iter().enumerate() {
                                         li {
                                             @match href {
                                                 Some(h) => a href=(h) { (label) },
-                                                None => span aria-current="page" { (label) },
+                                                None if i + 1 == crumbs.len() => span aria-current="page" { (label) },
+                                                None => span { (label) },
                                             }
                                         }
                                     }
@@ -863,8 +883,8 @@ fn dashboard(title: &str, body: Markup, f: &Frame, crumbs: &[(String, Option<Str
                         header.dash-top {
                             nav.crumbs aria-label="Breadcrumb" {
                                 ol {
-                                    @for (label, href) in crumbs {
-                                        li { @match href { Some(h) => a href=(h) { (label) }, None => span aria-current="page" { (label) } } }
+                                    @for (i, (label, href)) in crumbs.iter().enumerate() {
+                                        li { @match href { Some(h) => a href=(h) { (label) }, None if i + 1 == crumbs.len() => span aria-current="page" { (label) }, None => span { (label) } } }
                                     }
                                 }
                             }

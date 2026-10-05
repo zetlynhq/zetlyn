@@ -317,8 +317,8 @@ pub fn catalog(place: &dyn Place, rows: &[Row], opens: Opens) -> String {
                             }
                         }
                         div.hub-row-act {
-                            @if let Some(open) = opens(r) { a.primary href=(open) target="_blank" rel="noopener" { "Open" } }
-                            a.secondary href=(r.href()) { "Details" }
+                            @if let Some(open) = opens(r) { a.primary href=(open) { "Live" } }
+                            a.secondary href=(r.href()) { "Entry" }
                         }
                     }
                 }
@@ -344,15 +344,16 @@ fn take(command: &str, note: &str) -> Markup {
 /// Where a page is, beneath the header: Zetlyn, the hub, and on a page about one thing, its kind
 /// and its name. The last is where the reader is and leads nowhere.
 fn trail(r: Option<&Row>) -> Markup {
+    // As the address says it: /hub/trackers/<owner>/<name>/ is Hub / Trackers / owner / name.
     html! {
         nav.crumbs.shell aria-label="Breadcrumb" {
             ol {
-                li { a href="https://zetlyn.com/" { "Zetlyn" } }
                 @match r {
                     None => { li { span aria-current="page" { "Hub" } } }
                     Some(r) => {
                         li { a href="/hub/" { "Hub" } }
                         li { a href={"/hub/#" (if r.is_tracker() { "trackers" } else { "sources" })} { (if r.is_tracker() { "Trackers" } else if r.tree == "packages" { "Packages" } else { "Sources" }) } }
+                        li { span { (r.owner) } }
                         li { span aria-current="page" { (r.title()) } }
                     }
                 }
@@ -361,12 +362,31 @@ fn trail(r: Option<&Row>) -> Markup {
     }
 }
 
-/// What a page about one thing is, above its name: its kind and whether it is public.
+/// What a page about one thing is, above its name: its kind, that this is its entry in the hub,
+/// and whether it is public.
 fn crumbs(r: &Row) -> Markup {
     html! {
         p.overline.hub-crumbs {
-            (kind_of(r).to_uppercase())
-            " · " (badge(r).to_uppercase())
+            (kind_of(r).to_uppercase()) " · IN THE HUB"
+            @if badge(r) != "Public" { " · " (badge(r).to_uppercase()) }
+        }
+    }
+}
+
+/// Beneath its name, what this page is and where the thing itself is: an entry is not the
+/// tracker, and a reader is told which of the two they are looking at.
+fn entry_note(r: &Row, rows: &[Row], opens: Opens) -> Markup {
+    let runs = opens(r).is_some();
+    html! {
+        @match instance(r, rows, opens) {
+            Some((world, shown)) => {
+                p.hub-entry {
+                    "This is its entry in the hub: what it holds and how to take a copy. "
+                    @if runs { "It runs at " } @else { "It is published from " }
+                    a href=(world) { (shown) } "."
+                }
+            }
+            None => { p.hub-entry { "This is its entry in the hub: what it holds and how to take a copy." } }
         }
     }
 }
@@ -434,6 +454,7 @@ fn source_page(place: &dyn Place, r: &Row, rows: &[Row], opens: Opens) -> String
             (crumbs(r))
             h1 { (r.title()) }
             @if !r.about().is_empty() { p.intro { (r.about()) } }
+            (entry_note(r, rows, opens))
             p.hub-stats {
                 span { (thousands(r.claims())) " claims" }
                 @for (scheme, n) in &identifiers { span { (thousands(*n)) " by " (scheme) } }
@@ -529,6 +550,7 @@ fn tracker_page(place: &dyn Place, r: &Row, rows: &[Row], opens: Opens) -> Strin
             (crumbs(r))
             h1 { (r.title()) }
             @if !r.about().is_empty() { p.intro { (r.about()) } }
+            (entry_note(r, rows, opens))
             p.hub-stats {
                 span { (plural(listed.len(), "source", "sources")) }
                 span { (thousands(claims_of(r, rows))) " claims" }
@@ -539,7 +561,7 @@ fn tracker_page(place: &dyn Place, r: &Row, rows: &[Row], opens: Opens) -> Strin
                 @if let Some((world, shown)) = instance(r, rows, opens) { span { "from " a.hub-from href=(world) { (shown) } } }
             }
             @if let Some(open) = opens(r) {
-                div.hero-actions { a.primary href=(open) target="_blank" rel="noopener" { "Open it" } }
+                div.hero-actions { a.primary href=(open) { "Open the live tracker →" } }
             }
         }
         (tabs(&[("overview", "Overview"), ("properties", "Properties"), ("versions", "Versions"), ("use", "Use it")]))

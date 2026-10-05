@@ -766,7 +766,10 @@ impl App {
             serve::frame_site("App");
             serve::frame_home(&title, &home, links);
             serve::frame_current(current);
-            serve::frame_hosted(Some(("App".into(), "/app/".into())), Some(self.who.clone()));
+            // A world on the machine is one of its worlds, as its address says (/worlds/<name>/);
+            // there is no page of them, so the crumb leads nowhere. At a domain of its own it is
+            // the whole site, and nothing is above it.
+            serve::frame_hosted((!self.base.is_empty()).then(|| ("Worlds".to_string(), String::new())), Some(self.who.clone()));
             serve::frame_area("app", Some(title.clone()), self.orgs_of_who.clone());
             serve::frame_side(if self.visitor { "Public trackers" } else { "" });
         } else {
@@ -782,6 +785,8 @@ impl App {
             let on = crate::autoupdate::every(&self.root).is_some();
             serve::frame_app(Some(home.clone()), Some((words, format!("{}/settings", self.base), on)));
         }
+        // A tracker's pages are under the world's trackers, as the address says (trackers/<name>/).
+        serve::frame_group((parts.first().map(String::as_str) == Some("trackers")).then(|| ("Trackers".to_string(), format!("{}/", self.base))));
         serve::frame_section(None, Vec::new());
         if let [first, tracker, ..] = parts.as_slice() {
             if first != "trackers" && first != "job" {

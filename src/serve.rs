@@ -522,7 +522,7 @@ pub fn site_header(current: &str, reader: Reader) -> Markup {
                     Reader::Local => {}
                     _ => {
                         a.nav-signin href="https://zetlyn.com/app/signin" { "Sign in" }
-                        a.nav-cta href="https://zetlyn.com/docs#install" { "Get started" }
+                        a.nav-cta href="https://zetlyn.com/docs/getting_started#install" { "Get started" }
                     }
                 }
             }
@@ -1539,7 +1539,7 @@ mod tests {
         assert!(!p.contains("Worlds") && !p.contains("https://zetlyn.com/directory"), "no page of worlds of its own any more");
         // No switch beside the mark; at the right the project, signing in and the way to start.
         assert!(!p.contains("switcher"), "{p}");
-        assert!(p.contains(super::SOURCE_CODE) && p.contains("Sign in") && p.contains("https://zetlyn.com/docs#install"), "{p}");
+        assert!(p.contains(super::SOURCE_CODE) && p.contains("Sign in") && p.contains("https://zetlyn.com/docs/getting_started#install"), "{p}");
         assert!(p.contains(r#"<footer class="site-footer shell">"#) && p.contains("https://zetlyn.com/privacy"));
         assert!(p.contains("/zetlyn.css?v="), "its own sheet, not the website's /style.css");
     }

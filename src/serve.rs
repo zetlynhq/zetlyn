@@ -12,6 +12,8 @@ use crate::claim::{Claim, Value};
 use crate::store::Hit;
 
 pub const STYLE: &str = r#"
+/* Square, as the website is: no rounded corner anywhere, so a field, a button or a card looks
+   the same here as on zetlyn.com. */
 /* The palette is the website's, to the value. A reader who arrives from zetlyn.com or from a hub
    should not be told by the colours that they have left. The layout is this program's own: a
    scope surface is a dense thing and the site's vocabulary has no rows, facets or chips in it. */
@@ -51,10 +53,10 @@ h3 { font-size: 1rem; margin: 1.4rem 0 .4rem; }
 .about { color: var(--dim); margin: 0 0 1.2rem; max-width: 48rem; }
 .bar { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; margin: 1rem 0; }
 input[type=search], input[type=text] { flex: 1 1 22rem; min-width: 0; padding: .55rem .7rem; font: inherit;
-  background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; }
-button { padding: .55rem .9rem; font: inherit; cursor: pointer; border-radius: 6px;
+  background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 0; }
+button { padding: .55rem .9rem; font: inherit; cursor: pointer; border-radius: 0;
   border: 1px solid var(--line); background: var(--panel); color: var(--fg); }
-.chip { display: inline-block; padding: .12rem .5rem; border-radius: 999px;
+.chip { display: inline-block; padding: .12rem .5rem; border-radius: 0;
   background: var(--chip); color: var(--fg); font-size: .82rem; white-space: nowrap; }
 .chip.on { background: var(--accent); color: var(--bg); }
 .state { font-size: .82rem; }
@@ -68,7 +70,7 @@ td { padding: .5rem .6rem .5rem 0; border-bottom: 1px solid var(--line);
      vertical-align: top; }
 td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .grid { display: grid; gap: 1.2rem; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); }
-.card { border: 1px solid var(--line); border-radius: 8px; padding: .8rem 1rem;
+.card { border: 1px solid var(--line); border-radius: 0; padding: .8rem 1rem;
         background: var(--panel); }
 .card h4 { margin: 0 0 .4rem; font-size: .9rem; }
 .cover { color: var(--dim); font-size: .8rem; font-weight: 400; }
@@ -126,10 +128,11 @@ details.receipt[open] { background: var(--panel); border-left: 3px solid var(--a
 @media (max-width: 620px) { .shell, .wrap { width: min(100% - 28px, 1180px); }
   .site-header { min-height: 70px; padding-block: 10px; } .site-header nav { gap: 14px; }
   .site-header nav a { font-size: 12px; } .brand { font-size: 14px; } .brand-mark { width: 22px; height: 22px; }
-  .site-header nav a.nav-cta, .site-header nav form.account span { display: none; } .switcher { margin-right: 8px; } }
+  .site-header nav a.nav-cta, .site-header nav form.account span { display: none; } details.switcher { margin-right: 8px; } }
 /* The switch between the site, the hub and the app: the same control in the same place. */
 .switcher { position: relative; margin-right: 14px; }
-details.switcher, details.org-switch { margin: 0; }
+details.org-switch { margin: 0; }
+details.switcher { margin: 0 14px 0 0; }
 details.dash-org { margin: 0 0 10px; }
 details.switcher > summary, details.org-switch > summary, details.dash-org > summary { margin: 0; font-weight: inherit; }
 .switcher summary { list-style: none; cursor: pointer; width: 30px; height: 30px; display: grid; place-items: center;
@@ -245,7 +248,7 @@ nav.tabs a.on { color: var(--fg); border-bottom-color: var(--accent); font-weigh
 .meta form.update { margin-left: auto; }
 .meta form.update button { padding: .3rem .8rem; font-size: .85rem; }
 .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: 1px; background: var(--line);
-  margin: 1.8rem 0 1.4rem; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  margin: 1.8rem 0 1.4rem; border: 1px solid var(--line); border-radius: 0; overflow: hidden; }
 .stats > * { padding: 1rem 1.2rem; background: var(--panel); color: var(--fg); display: block; }
 .stats a:hover { background: var(--bg); text-decoration: none; }
 .stats b { display: block; font-size: 1.9rem; font-weight: 750; letter-spacing: -.03em; line-height: 1.1;
@@ -261,18 +264,18 @@ table.things td.thing a:hover { color: var(--accent); text-decoration: none; }
 table.things tbody tr:hover { background: var(--wash); }
 table.things td:first-child, table.things th:first-child { padding-left: .6rem; }
 .pager { display: flex; justify-content: space-between; align-items: center; gap: 1rem; margin: 1.2rem 0; font-size: .9rem; }
-.pager a, .pager span.off { padding: .45rem .9rem; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--fg); }
+.pager a, .pager span.off { padding: .45rem .9rem; border: 1px solid var(--line); border-radius: 0; background: var(--panel); color: var(--fg); }
 .pager a:hover { border-color: var(--fg); text-decoration: none; }
 .pager span.off { color: var(--dim); opacity: .5; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: .92em; }
 button.primary, .button.primary { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600; }
-a.button { display: inline-block; padding: .55rem .9rem; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); }
+a.button { display: inline-block; padding: .55rem .9rem; border-radius: 0; border: 1px solid var(--line); background: var(--panel); color: var(--fg); }
 a.button:hover { text-decoration: none; border-color: var(--fg); }
 a.button.primary:hover { color: #fff; }
 button:hover { border-color: var(--fg); }
 input[type=file] { font: inherit; font-size: .88rem; color: var(--dim); }
 input[type=file]::file-selector-button { font: inherit; padding: .45rem .9rem; margin-right: .7rem; cursor: pointer;
-  border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); }
+  border-radius: 0; border: 1px solid var(--line); background: var(--panel); color: var(--fg); }
 input[type=file]::file-selector-button:hover { border-color: var(--fg); }
 #jobs { position: fixed; left: 0; right: 0; bottom: 0; background: var(--panel); border-top: 1px solid var(--line);
   padding: .6rem 1rem calc(.6rem + env(safe-area-inset-bottom, 0px)); font-size: .9rem; }
@@ -280,16 +283,16 @@ input[type=file]::file-selector-button:hover { border-color: var(--fg); }
 #jobs progress, main progress { flex: 1 1 10rem; min-width: 6rem; width: 100%; }
 body.busy main { padding-bottom: 6rem; }
 header.top .autoupdate { margin-left: auto; display: flex; align-items: center; gap: .45rem; font-size: .84rem;
-  color: var(--dim); border: 1px solid var(--line); border-radius: 999px; padding: .25rem .75rem; background: var(--panel); }
+  color: var(--dim); border: 1px solid var(--line); border-radius: 0; padding: .25rem .75rem; background: var(--panel); }
 header.top .autoupdate:hover { color: var(--fg); border-color: var(--fg); text-decoration: none; }
 header.top .autoupdate .dot { width: .5rem; height: .5rem; border-radius: 50%; background: var(--line-strong); }
 header.top .autoupdate.on .dot { background: #2e7d32; }
 header.top .autoupdate + nav.links { margin-left: 1.4rem; }
 label.choice { display: flex; gap: .7rem; align-items: baseline; max-width: 34rem; margin: .45rem 0; padding: .65rem .9rem;
-  border: 1px solid var(--line); border-radius: 8px; background: var(--panel); cursor: pointer; }
+  border: 1px solid var(--line); border-radius: 0; background: var(--panel); cursor: pointer; }
 label.choice:has(input:checked) { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 details { margin: 2rem 0; } details > summary { cursor: pointer; font-weight: 600; margin-bottom: .6rem; }
-.offer { display: flex; gap: .8rem; align-items: center; flex-wrap: wrap; border: 1px solid var(--accent); border-radius: 10px;
+.offer { display: flex; gap: .8rem; align-items: center; flex-wrap: wrap; border: 1px solid var(--accent); border-radius: 0;
   padding: .9rem 1.1rem; background: var(--panel); margin: 1.2rem 0; }
 .offer p { margin: 0; flex: 1 1 18rem; } .offer form { margin: 0; }
 @media (max-width: 40rem) {

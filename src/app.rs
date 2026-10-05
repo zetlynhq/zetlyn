@@ -2633,10 +2633,10 @@ fn redirect(request: tiny_http::Request, to: &str) {
 const APP_STYLE: &str = r#"
 h1.big { font-size: 2rem; margin-top: 3rem; }
 input.wide { flex: 1 1 26rem; min-width: 0; width: 100%; padding: .65rem .8rem; font: inherit;
-  background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; }
+  background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 0; }
 button.primary { background: var(--accent); color: var(--bg); border-color: var(--accent); font-weight: 600; }
 .example { margin-top: 2.5rem; max-width: 40rem; }
-pre#log { background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+pre#log { background: var(--panel); border: 1px solid var(--line); border-radius: 0;
   padding: .7rem .9rem; font-size: .85rem; white-space: pre-wrap; }
 .grid .card h4 { font-size: 1.6rem; margin: 0; }
 "#;
@@ -3153,6 +3153,12 @@ fn hosting_worker(server: &tiny_http::Server, dir: &Path, addr: &str, jobs: &Sha
         // The examples the docs and the app point at: a shop's list and a bookshop's page, made as
         // they are asked for, because one of them changes every two minutes. "examples" is a
         // reserved name, so no organisation is here.
+        // The sheet the machine's own pages at its root name (the directory of worlds, a page that
+        // is not here): its own, under a name the website's /style.css does not answer for.
+        if parts.len() == 1 && first == "zetlyn.css" {
+            respond(request, 200, "text/css; charset=utf-8", &format!("{}{APP_STYLE}", serve::STYLE));
+            continue;
+        }
         if first == "examples" && matches!(request.method(), tiny_http::Method::Get | tiny_http::Method::Head) {
             let asked = path.trim_start_matches('/');
             match crate::examples::file(asked) {

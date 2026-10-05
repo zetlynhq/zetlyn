@@ -243,12 +243,11 @@ fn claims_of(r: &Row, rows: &[Row]) -> u64 {
 }
 
 /// The front page: a registry. Search first, the facets beside it, every tracker, package and
-/// source as one list, and what the hub says about itself beneath.
+/// source as one list, and one line beneath on how the hub works, which the docs say.
 pub fn catalog(place: &dyn Place, rows: &[Row], opens: Opens) -> String {
     let trackers: Vec<&Row> = rows.iter().filter(|r| r.is_tracker()).collect();
     let sources: Vec<&Row> = rows.iter().filter(|r| !r.is_tracker()).collect();
     let packages = rows.iter().filter(|r| r.tree == "packages").count();
-    let about = place.get("hub-about.html").ok().map(|b| String::from_utf8_lossy(&b).into_owned());
     let total: u64 = sources.iter().map(|r| r.claims()).sum();
     let mut items: Vec<&Row> = trackers.iter().chain(sources.iter()).copied().collect();
     items.dedup_by(|a, b| a.page() == b.page());
@@ -321,7 +320,8 @@ pub fn catalog(place: &dyn Place, rows: &[Row], opens: Opens) -> String {
                 p.hub-none #hub-none hidden { "Nothing here matches. " a href="/hub/" { "Show everything" } }
             }
         }
-        @if let Some(about) = about { (PreEscaped(about)) }
+        // What taking one and publishing one are is the docs' to say, not the catalog's.
+        p.hub-how.shell { "Keep a copy that stays current, or publish your own: " a href="https://zetlyn.com/docs/hub" { "how the hub works" } "." }
         script { (PreEscaped(FILTER)) }
     };
     frame(place, "Zetlyn Hub", "Public trackers and sources: search them, open one, or subscribe and keep a copy that stays current.", body)

@@ -1,5 +1,6 @@
-//! A tracker. It holds no index and searches nothing: it rewrites a query per source, fans out,
-//! merges ranked lists, gathers the hits into things, and renders.
+//! A tracker. It rewrites a query per source, fans out, merges ranked lists, gathers the hits into
+//! things, and renders. A filter of clicked values is the exception: its own store (`thingstore`)
+//! already holds every thing and what each source says, and answers it by index.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -703,8 +704,8 @@ impl Tracker {
             let Pred::Cmp { left, op: Op::Eq, right } = p else { return None };
             let want = right.display();
             match left.as_str() {
-                "kind" => clauses.push("exists(select 1 from speaks s where s.key = t.key and lower(s.kind) = lower(?))".into()),
-                "source" => clauses.push("exists(select 1 from speaks s where s.key = t.key and lower(s.source) = lower(?))".into()),
+                "kind" => clauses.push("t.key in (select key from speaks where lower(kind) = lower(?))".into()),
+                "source" => clauses.push("t.key in (select key from speaks where lower(source) = lower(?))".into()),
                 // Answered over the claims themselves, which the store does not keep word for word.
                 "title" | "known" | "url" | "id" => return None,
                 field => {
@@ -713,22 +714,26 @@ impl Tracker {
                     if matches!(right, Lit::Num(_)) || want.parse::<f64>().is_ok() {
                         return None;
                     }
-                    clauses.push("exists(select 1 from said d, json_each(d.means) j where d.key = t.key and d.property = ? and lower(j.value) = lower(?))".into());
+                    clauses.push("t.key in (select key from word where property = ? and word = ?)".into());
                     params.push(field.to_string());
+                    params.push(want.to_lowercase());
+                    continue;
                 }
             }
             params.push(want);
         }
         if let Some(kind) = &q.kind {
-            clauses.push("exists(select 1 from speaks s where s.key = t.key and lower(s.kind) = lower(?))".into());
+            clauses.push("t.key in (select key from speaks where lower(kind) = lower(?))".into());
             params.push(kind.clone());
         }
         // The paywall: a thing a free reader may see is one some source spoke of before it.
         if let Some(edge) = &q.seen_before {
-            clauses.push("exists(select 1 from speaks s where s.key = t.key and s.first_seen <= ?)".into());
+            clauses.push("t.key in (select key from speaks where first_seen <= ?)".into());
             params.push(edge.clone());
         }
         let store = crate::thingstore::ThingStore::open(&self.dir).ok()?;
+        // Only a store whose words are written answers by them.
+        store.meta("words")?;
         let wher = clauses.join(" and ");
         let total: i64 = store
             .db

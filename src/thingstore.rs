@@ -215,6 +215,12 @@ create table if not exists reader(
   reader text not null, key text not null, property text not null, state text not null,
   at text not null, primary key(reader, key, property));
 create table if not exists meta(key text primary key, value text not null);
+-- Which things a source says a property is a word of, the word case folded: the index a filter is
+-- answered by, written again with `said` on every refresh.
+create table if not exists word(property text not null, word text not null, key text not null);
+create index if not exists word_at on word(property, word);
+create index if not exists speaks_source on speaks(lower(source));
+create index if not exists speaks_kind on speaks(lower(kind));
 ";
 
 pub struct ThingStore {
@@ -485,8 +491,11 @@ impl ThingStore {
             })
             .unwrap_or_default();
         let tx = self.db.transaction().map_err(|e| e.to_string())?;
-        tx.execute_batch("delete from said; delete from speaks; delete from conflict; delete from related;")
+        tx.execute_batch("delete from said; delete from word; delete from speaks; delete from conflict; delete from related;")
             .map_err(|e| e.to_string())?;
+        // Said once the words are written in this same transaction: a store from before they were
+        // kept is not asked by them.
+        tx.execute("insert or replace into meta(key, value) values('words', '1')", []).map_err(|e| e.to_string())?;
         if rebuild {
             // A rebuild starts the log again but not its numbering: a watch or a reader holds the
             // last signal it saw by number, and one reused would hide what comes after it.
@@ -505,6 +514,9 @@ impl ThingStore {
                      values(?1, ?2, ?3, ?4, ?5, ?5)
                      on conflict(key) do update set title = excluded.title",
                 )
+                .map_err(|e| e.to_string())?;
+            let mut put_word = tx
+                .prepare("insert into word(property, word, key) values(?1, ?2, ?3)")
                 .map_err(|e| e.to_string())?;
             let mut put_said = tx
                 .prepare(
@@ -535,6 +547,10 @@ impl ThingStore {
                                 said.understood,
                             ])
                             .map_err(|e| e.to_string())?;
+                        let words: BTreeSet<String> = said.means.iter().map(|w| w.to_lowercase()).collect();
+                        for w in words {
+                            put_word.execute(rusqlite::params![property, w, key]).map_err(|e| e.to_string())?;
+                        }
                     }
                 }
                 for (name, targets) in &snap.related {

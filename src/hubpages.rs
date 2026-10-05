@@ -389,8 +389,10 @@ fn owner_page(place: &dyn Place, owner: &str, rows: &[Row], opens: Opens) -> Str
             p.hub-sub { "Everything " (owner) " publishes in this hub: open it where it runs, or read its entry and take a copy." }
         }
         @for tree in &trees {
+            // The catalog's two columns: what the list is at the left, the list beside it.
             section.hub-registry.shell id=(tree) {
-                p.overline { (tree_label(tree)) }
+                aside.hub-facets { p.overline { (tree_label(tree)) } }
+                div.hub-list {
                 @for r in theirs.iter().filter(|r| r.tree == *tree) {
                     article.hub-row {
                         div.hub-row-main {
@@ -408,6 +410,7 @@ fn owner_page(place: &dyn Place, owner: &str, rows: &[Row], opens: Opens) -> Str
                             a.secondary href=(r.href()) { "Entry" }
                         }
                     }
+                }
                 }
             }
         }

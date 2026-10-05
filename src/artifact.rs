@@ -145,6 +145,8 @@ pub fn manifest_of(
         // first fetch, so a key that changes under them afterwards is caught; on that first
         // fetch there is nothing to catch it with, which is what pinning by hand is for.
         "signed_by": crate::identity::or_local(&ds.dir, KEY_FILE),
+        // Where it runs: the world it is published from, which a hub names beside it.
+        "world": world_of(&ds.dir),
         "source": d.name,
         "version": version_of(content),
         "built_at": crate::now(),
@@ -764,6 +766,14 @@ fn declaration(
 /// A tracker holds no index and has no claims, so what it publishes is the statement and the
 /// statement is the whole of it. Its version is the content hash of that statement, which makes
 /// two publications of the same composition one version.
+/// The world a thing is published from: the address its workspace names (a hosted one's, on the
+/// machine it is hosted on), for a hub to say where it runs. None where the workspace names none.
+fn world_of(dir: &Path) -> Option<String> {
+    let ws = dir.ancestors().find(|p| p.join(crate::account::WORKSPACE).exists())?;
+    let url = crate::account::Site::for_workspace(ws).url;
+    (!url.is_empty()).then(|| url.trim_end_matches('/').to_string())
+}
+
 pub fn publish_scope(
     dir: &Path,
     datasets: &Path,
@@ -811,6 +821,7 @@ pub fn publish_scope(
         "spec_version": SPEC_VERSION,
         "built_by": concat!("zetlyn ", env!("CARGO_PKG_VERSION")),
         "signed_by": crate::identity::key_at(dir),
+        "world": world_of(dir),
         "tracker": decl.name,
         "version": version,
         "built_at": crate::now(),

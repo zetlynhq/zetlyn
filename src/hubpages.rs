@@ -161,6 +161,21 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 /// Where a tracker can be opened and asked, where somewhere answers for it.
 pub type Opens<'a> = &'a dyn Fn(&Row) -> Option<String>;
 
+/// Where a thing runs, as a hub says it beside it: the world it was published from, as its
+/// manifest names it. One published before manifests named it is placed by where its owner's
+/// trackers open (`…/<org>/t/<name>/` runs at `…/<org>`). The address, and the words shown for it.
+fn instance(r: &Row, rows: &[Row], opens: Opens) -> Option<(String, String)> {
+    let from_open = |row: &Row| opens(row).and_then(|o| o.trim_end_matches('/').rsplit_once("/t/").map(|(world, _)| world.to_string()));
+    let world = r.manifest["world"]
+        .as_str()
+        .filter(|w| w.starts_with("https://") || w.starts_with("http://"))
+        .map(|w| w.trim_end_matches('/').to_string())
+        .or_else(|| from_open(r))
+        .or_else(|| rows.iter().filter(|o| o.owner == r.owner).find_map(from_open))?;
+    let shown = world.split_once("://").map(|(_, rest)| rest.to_string()).unwrap_or_else(|| world.clone());
+    Some((world, shown))
+}
+
 /// The page around a body: the website's header with the hub where the reader is, and its footer.
 fn frame(place: &dyn Place, title: &str, description: &str, body: Markup) -> String {
     let has = |name: &str| place.exists(name);
@@ -293,6 +308,7 @@ pub fn catalog(place: &dyn Place, rows: &[Row], opens: Opens) -> String {
                                 " · " (thousands(claims)) " claims"
                                 @if !r.is_tracker() { " · " (shown(&r.republish())) }
                                 @if r.built_at() > 0 { " · published " (ago(r.built_at())) }
+                                @if let Some((world, shown)) = instance(r, rows, opens) { " · from " a.hub-from href=(world) { (shown) } }
                             }
                         }
                         div.hub-row-act {
@@ -397,6 +413,7 @@ fn source_page(place: &dyn Place, r: &Row, rows: &[Row], opens: Opens) -> String
                 @if let (Some(a), Some(b)) = (m["known"]["first"].as_str(), m["known"]["last"].as_str()) { span { (a) " – " (b) } }
                 @if let Some(e) = m["every"].as_str() { span { "read every " (e) } }
                 span { "published " (ago(r.built_at())) }
+                @if let Some((world, shown)) = instance(r, rows, opens) { span { "from " a.hub-from href=(world) { (shown) } } }
                 @if m["complete"].as_bool() == Some(false) { span { "partial: not every claim was reached" } }
             }
         }
@@ -491,6 +508,7 @@ fn tracker_page(place: &dyn Place, r: &Row, rows: &[Row], opens: Opens) -> Strin
                     span { "joined on " (keys.iter().filter_map(|k| k.as_str()).collect::<Vec<_>>().join(", ")) }
                 }
                 span { "published " (ago(r.built_at())) }
+                @if let Some((world, shown)) = instance(r, rows, opens) { span { "from " a.hub-from href=(world) { (shown) } } }
             }
             @if let Some(open) = opens(r) {
                 div.hero-actions { a.primary href=(open) target="_blank" rel="noopener" { "Open it" } }
@@ -700,3 +718,29 @@ const SEARCH: &str = r##"(function () {
   });
   document.addEventListener("click", function (e) { if (!box.contains(e.target) && e.target !== q) box.hidden = true; });
 })();"##;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn row(tree: &'static str, owner: &str, name: &str, manifest: J) -> Row {
+        Row { tree, owner: owner.into(), name: name.into(), tag: "latest".into(), version: "v1".into(), manifest, versions: vec!["v1".into()] }
+    }
+
+    #[test]
+    fn a_thing_says_the_world_it_runs_in() {
+        let tracker = row("trackers", "zetlyn", "cve", json!({}));
+        let source = row("sources", "zetlyn", "cve-kev", json!({}));
+        let named = row("sources", "ann", "prices", json!({ "world": "https://prices.example/" }));
+        let stranger = row("sources", "bob", "x", json!({ "world": "javascript:alert(1)" }));
+        let rows = vec![row("trackers", "zetlyn", "cve", json!({})), row("sources", "zetlyn", "cve-kev", json!({}))];
+        let opens = |r: &Row| (r.reference() == "zetlyn/cve").then(|| "https://zetlyn.com/zetlyn/t/cve/".to_string());
+        // Its manifest says it; or where its own tracker opens; or where its owner's does.
+        assert_eq!(instance(&named, &rows, &opens), Some(("https://prices.example".into(), "prices.example".into())));
+        assert_eq!(instance(&tracker, &rows, &opens), Some(("https://zetlyn.com/zetlyn".into(), "zetlyn.com/zetlyn".into())));
+        assert_eq!(instance(&source, &rows, &opens), Some(("https://zetlyn.com/zetlyn".into(), "zetlyn.com/zetlyn".into())));
+        // Nothing that is not an address, and nothing where nothing says.
+        assert_eq!(instance(&stranger, &rows, &opens), None);
+    }
+}

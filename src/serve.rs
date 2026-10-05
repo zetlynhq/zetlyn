@@ -499,13 +499,11 @@ pub fn switcher(current: &str) -> Markup {
 /// world's alike, in this order. Absolute, so it leads to the same pages from a hub, a tracker or a
 /// world on a domain of its own. The website writes the same (zetlyn.com, src/main.rs).
 pub const SITE_NAV: &[(&str, &str, &str)] = &[
+    // Trackers, sources and the interface are explained under Docs; the worlds there are are
+    // named beside what they publish, on the hub.
     ("docs", "Docs", "https://zetlyn.com/docs"),
-    ("trackers", "Trackers", "https://zetlyn.com/trackers"),
-    ("sources", "Sources", "https://zetlyn.com/sources"),
-    ("api", "Interface", "https://zetlyn.com/api"),
     ("hosting", "Hosting", "https://zetlyn.com/hosting"),
     ("hub", "Hub", "https://zetlyn.com/hub/"),
-    ("worlds", "Worlds", "https://zetlyn.com/directory"),
 ];
 
 /// The header of every page, to the markup the website's (zetlyn.com, src/page.html): the switch,
@@ -562,10 +560,9 @@ pub fn site_footer(extra: &[(String, String)]) -> Markup {
 }
 
 /// Which entry of the navigation a page is under.
-fn nav_key(area: &str, title: &str) -> &'static str {
-    match (area, title) {
-        ("hub", _) => "hub",
-        (_, "Worlds") => "worlds",
+fn nav_key(area: &str, _title: &str) -> &'static str {
+    match area {
+        "hub" => "hub",
         _ => "",
     }
 }
@@ -1543,12 +1540,12 @@ mod tests {
         assert_eq!(title("Zetlyn"), "Zetlyn");
         assert_eq!(title("Proposals"), "Proposals · Zetlyn");
         // The website's header, its navigation and its footer, as on every other page.
-        let p = page("Worlds");
+        let p = page("Proposals");
         assert!(p.contains(r#"<header class="site-header shell">"#), "{p}");
         for (_, label, href) in super::SITE_NAV {
             assert!(p.contains(&format!(r#"href="{href}""#)) && p.contains(label), "{label}");
         }
-        assert!(p.contains(r#"href="https://zetlyn.com/directory" aria-current="page""#), "Worlds is marked where it is");
+        assert!(!p.contains("Worlds") && !p.contains("https://zetlyn.com/directory"), "no page of worlds of its own any more");
         assert!(p.contains(r#"<footer class="site-footer shell">"#) && p.contains("https://zetlyn.com/privacy"));
         assert!(p.contains("/zetlyn.css?v="), "its own sheet, not the website's /style.css");
     }

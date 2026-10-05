@@ -570,7 +570,7 @@ impl Source {
 // The interface is six calls. A tracker uses four of them today and reaches for `changes` and
 // `mark` at M3, so the two are defined and not yet called.
 #[allow(dead_code)]
-pub trait Interface {
+pub trait Interface: Send {
     fn name(&self) -> &str;
     fn describe(&self) -> J;
     fn search(&self, q: &Query) -> Result<(u64, Vec<Hit>, Unanswered), String>;

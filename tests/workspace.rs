@@ -1162,3 +1162,42 @@ fn a_sealed_package_answers_as_its_tracker_does_and_says_nothing_of_how_it_was_m
     assert!(!root.join("third/trackers").exists(), "nothing written from a package that did not hold");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// What a filtered listing names, case folded and in order: the store and the sources may spell a
+/// key as different claims did, and order things differently.
+fn things_in(listing: &str) -> (String, Vec<String>) {
+    let count = listing.lines().next().unwrap_or("").split(" over ").next().unwrap_or("").to_string();
+    let mut keys: Vec<String> = listing
+        .lines()
+        .filter_map(|l| l.rsplit_once('[').and_then(|(_, r)| r.strip_suffix(']')).map(str::to_lowercase))
+        .collect();
+    keys.sort();
+    (count, keys)
+}
+
+#[test]
+fn a_filter_is_answered_from_the_trackers_store_as_the_sources_answer_it() {
+    let ws = Workspace::new("indexed");
+    let db = ws.root.join("trackers/cve/tracker.db");
+    for filter in [
+        "severity=critical",
+        "severity=Critical",
+        "severity=medium",
+        "source=test/exploits",
+        "kind=exploit",
+        "kind=vulnerability",
+        "exploited=yes",
+        "severity=high source=test/vendor-b",
+        "severity=critical and exploited=yes",
+        "severity=nothing",
+    ] {
+        for f in ["tracker.db", "tracker.db-wal", "tracker.db-shm"] {
+            let _ = std::fs::remove_file(db.with_file_name(f));
+        }
+        let from_sources = things_in(&ws.z(&["tracker", "search", &ws.scope(), filter, "--limit", "50"]));
+        ws.z(&["tracker", "refresh", &ws.scope()]);
+        assert!(db.exists());
+        let from_store = things_in(&ws.z(&["tracker", "search", &ws.scope(), filter, "--limit", "50"]));
+        assert_eq!(from_sources, from_store, "{filter}");
+    }
+}

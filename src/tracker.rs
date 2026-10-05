@@ -545,6 +545,15 @@ impl Tracker {
             )
             .collect();
 
+        // A filter of the kinds a reader clicks (a value of a property, a source, a kind) is
+        // answered from the tracker's own store, where every thing and what each source says of
+        // it is already one row: the count and the page by index, and only the page's things
+        // assembled. Reading every source's candidates and assembling them all, up to twenty
+        // thousand from each, took most of a second and most of the memory per filtered page.
+        if let Some(answer) = self.indexed(q, &full, limit) {
+            return answer;
+        }
+
         // With no predicate, a page is a page and each source's own total is the truth. With one,
         // the count is what survives the second pass over the assembled thing, so every candidate
         // that could survive has to be read: a source asked for fifty and filtered afterwards
@@ -662,6 +671,105 @@ impl Tracker {
             truncated: truncated && !full.is_empty(),
             subjects: !full.is_empty(),
         }
+    }
+
+    /// The filtered page from the tracker's store, where every clause is one it answers exactly:
+    /// `property=value`, `source=…`, `kind=…`, joined by `and`, with no words to search for. `None`
+    /// for anything else (and where there is no store yet), which the sources answer as before.
+    fn indexed(&self, q: &TrackerQuery, full: &[Pred], limit: usize) -> Option<Answer> {
+        if !q.text.trim().is_empty() || full.is_empty() || !self.dir.join("tracker.db").exists() {
+            return None;
+        }
+        // Each clause as SQL over one thing `t`, with its parameters.
+        let mut clauses: Vec<String> = Vec::new();
+        let mut params: Vec<String> = Vec::new();
+        fn conjuncts<'a>(p: &'a Pred, out: &mut Vec<&'a Pred>) -> bool {
+            match p {
+                Pred::And(a, b) => conjuncts(a, out) && conjuncts(b, out),
+                Pred::Or(..) => false,
+                cmp => {
+                    out.push(cmp);
+                    true
+                }
+            }
+        }
+        let mut cmps = Vec::new();
+        for p in full {
+            if !conjuncts(p, &mut cmps) {
+                return None;
+            }
+        }
+        for p in cmps {
+            let Pred::Cmp { left, op: Op::Eq, right } = p else { return None };
+            let want = right.display();
+            match left.as_str() {
+                "kind" => clauses.push("exists(select 1 from speaks s where s.key = t.key and lower(s.kind) = lower(?))".into()),
+                "source" => clauses.push("exists(select 1 from speaks s where s.key = t.key and lower(s.source) = lower(?))".into()),
+                // Answered over the claims themselves, which the store does not keep word for word.
+                "title" | "known" | "url" | "id" => return None,
+                field => {
+                    // A number is compared as a number (9.80 is 9.8), which the store's words are
+                    // not; those go to the sources.
+                    if matches!(right, Lit::Num(_)) || want.parse::<f64>().is_ok() {
+                        return None;
+                    }
+                    clauses.push("exists(select 1 from said d, json_each(d.means) j where d.key = t.key and d.property = ? and lower(j.value) = lower(?))".into());
+                    params.push(field.to_string());
+                }
+            }
+            params.push(want);
+        }
+        if let Some(kind) = &q.kind {
+            clauses.push("exists(select 1 from speaks s where s.key = t.key and lower(s.kind) = lower(?))".into());
+            params.push(kind.clone());
+        }
+        // The paywall: a thing a free reader may see is one some source spoke of before it.
+        if let Some(edge) = &q.seen_before {
+            clauses.push("exists(select 1 from speaks s where s.key = t.key and s.first_seen <= ?)".into());
+            params.push(edge.clone());
+        }
+        let store = crate::thingstore::ThingStore::open(&self.dir).ok()?;
+        let wher = clauses.join(" and ");
+        let total: i64 = store
+            .db
+            .query_row(&format!("select count(*) from thing t where {wher}"), rusqlite::params_from_iter(params.iter()), |r| r.get(0))
+            .ok()?;
+        let mut page_params = params.clone();
+        page_params.push(limit.to_string());
+        page_params.push(q.offset.to_string());
+        let ids: Vec<Id> = {
+            let mut stmt = store
+                .db
+                .prepare(&format!("select scheme, value from thing t where {wher} order by t.changed desc, t.key limit cast(? as integer) offset cast(? as integer)"))
+                .ok()?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(page_params.iter()), |r| Ok(Id { scheme: r.get(0)?, value: r.get(1)? }))
+                .ok()?;
+            rows.flatten().collect()
+        };
+        // Only the page is assembled: each thing's claims fetched by its identifier from every
+        // source, folded, and held against the filter once more, as a page from the sources is.
+        let mut entries: Vec<Thing> = ids
+            .into_iter()
+            .map(|id| Thing { key: Some(id), rank: 0, title: String::new(), parts: Vec::new(), fields: BTreeMap::new(), why: Vec::new() })
+            .collect();
+        let keys = self.decl.keys();
+        self.complete(&mut entries, &keys);
+        for e in entries.iter_mut() {
+            self.fold_fields(e);
+        }
+        entries.retain(|e| !e.parts.is_empty() && full.iter().all(|p| self.entry_holds(e, p)));
+        for (i, e) in entries.iter_mut().enumerate() {
+            e.rank = q.offset + i + 1;
+        }
+        Some(Answer {
+            total: total.max(0) as u64,
+            entries,
+            answered: self.members.iter().map(|m| m.name().to_string()).collect(),
+            unanswered: Vec::new(),
+            truncated: false,
+            subjects: true,
+        })
     }
 
     fn new_entry(&self, key: Option<Id>, hit: &Hit) -> Thing {

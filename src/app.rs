@@ -58,7 +58,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     if !args.iter().any(|a| a == "--no-open") {
         open_browser(&url);
     }
-    let mut app = App { root, addr, sites: BTreeMap::new(), jobs: Arc::new(Mutex::new(Jobs::default())), base: String::new(), hosted: None, visitor: false, who: None, orgs_of_who: Vec::new(), public_of_machine: Vec::new() };
+    let mut app = App { root, addr, jobs: Arc::new(Mutex::new(Jobs::default())), base: String::new(), hosted: None, visitor: false, who: None, orgs_of_who: Vec::new(), public_of_machine: Vec::new() };
     {
         let (root, jobs) = (app.root.clone(), app.jobs.clone());
         std::thread::spawn(move || background(&root, &jobs));
@@ -361,11 +361,35 @@ struct Job {
     then: String,
 }
 
+/// Every tracker opened in this process, by its directory, for every thread: opened once on its
+/// first visit and again after it changes. A copy for each thread was eight copies of the largest
+/// tracker on the machine, and more memory than the machine had (2026-10-05).
+type SharedSite = Arc<Mutex<TrackerSite>>;
+
+fn open_trackers() -> &'static Mutex<BTreeMap<PathBuf, SharedSite>> {
+    static OPEN: std::sync::OnceLock<Mutex<BTreeMap<PathBuf, SharedSite>>> = std::sync::OnceLock::new();
+    OPEN.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn tracker_site(dir: &Path, sources: &Path, addr: &str) -> Result<SharedSite, String> {
+    if let Some(site) = open_trackers().lock().unwrap_or_else(|e| e.into_inner()).get(dir) {
+        return Ok(site.clone());
+    }
+    // Opened outside the lock, so a tracker being opened holds up no other; two threads that
+    // open the same one at once keep the first.
+    let opened = Tracker::open(dir, sources).and_then(|t| TrackerSite::open(t, dir, sources, addr, true))?;
+    let mut all = open_trackers().lock().unwrap_or_else(|e| e.into_inner());
+    Ok(all.entry(dir.to_path_buf()).or_insert_with(|| Arc::new(Mutex::new(opened))).clone())
+}
+
+/// A tracker changed by its owner: opened afresh on its next visit.
+fn forget_tracker(dir: &Path) {
+    open_trackers().lock().unwrap_or_else(|e| e.into_inner()).remove(dir);
+}
+
 struct App {
     root: PathBuf,
     addr: String,
-    /// Each tracker, opened on first visit and opened again after it changes.
-    sites: BTreeMap<String, TrackerSite>,
     jobs: Arc<Mutex<Jobs>>,
     /// Where it is mounted: empty on this machine, `/<name>` hosted.
     base: String,
@@ -768,22 +792,18 @@ impl App {
         // A tracker's own pages, as a reader would see them published.
         if parts.first().map(String::as_str) == Some("t") && parts.len() >= 2 {
             let name = parts[1].clone();
-            if !self.sites.contains_key(&name) {
-                let dir = self.trackers().join(&name);
-                match Tracker::open(&dir, &self.sources())
-                    .and_then(|t| TrackerSite::open(t, &dir, &self.sources(), &self.addr, true))
-                {
-                    Ok(site) => {
-                        self.sites.insert(name.clone(), site);
-                    }
-                    Err(e) => return respond(request, 404, "text/html; charset=utf-8", &page("Not here", html! { p { (e) } })),
-                }
-            }
+            let dir = self.trackers().join(&name);
+            let site = match tracker_site(&dir, &self.sources(), &self.addr) {
+                Ok(site) => site,
+                Err(e) => return respond(request, 404, "text/html; charset=utf-8", &page("Not here", html! { p { (e) } })),
+            };
             serve::mount(&format!("{}/t/{name}", self.base));
-            if let Some(site) = self.sites.get_mut(&name) {
-                site.set_operator(!self.visitor);
-                site.answer(request);
-            }
+            // One request at a time for each tracker, whichever thread it came in on: what a
+            // tracker holds open is held once, and its expensive pages cannot run eight at once.
+            let mut site = site.lock().unwrap_or_else(|e| e.into_inner());
+            site.set_operator(!self.visitor);
+            site.answer(request);
+            drop(site);
             serve::mount(&self.base);
             return;
         }
@@ -1069,7 +1089,7 @@ impl App {
                     Some(v @ ("public" | "private")) => self.set_visibility(tracker, v),
                     _ => Err("public or private".into()),
                 };
-                self.sites.remove(*tracker);
+                forget_tracker(&self.trackers().join(tracker));
                 let said = said.unwrap_or_else(|e| e);
                 (200, html_kind, self.publish_page(tracker, Some(&said)))
             }
@@ -1101,7 +1121,7 @@ impl App {
                 }
                 match self.accept(tracker, source, &why, &form_title(&query)) {
                     Ok(next) => {
-                        self.sites.remove(*tracker);
+                        forget_tracker(&self.trackers().join(tracker));
                         return redirect(request, &next);
                     }
                     Err(e) => (400, html_kind, page("Not accepted", html! { div.note { (e) } })),
@@ -2784,7 +2804,6 @@ pub fn world_serve(args: &[String]) -> Result<(), String> {
                 let mut app = App {
                     root,
                     addr,
-                    sites: BTreeMap::new(),
                     jobs,
                     base: String::new(),
                     hosted: Some(Hosted { members: owners.clone(), owners, accounts, shared: false }),
@@ -2848,7 +2867,6 @@ pub fn host(args: &[String]) -> Result<(), String> {
     let mut app = App {
         root,
         addr,
-        sites: BTreeMap::new(),
         jobs: Arc::new(Mutex::new(Jobs::default())),
         base,
         hosted: Some(Hosted { members: vec![owner.clone()], owners: vec![owner], accounts, shared: false }),
@@ -3212,7 +3230,6 @@ fn answer_org(apps: &mut BTreeMap<String, App>, jobs: &SharedJobs, key: &str, or
         apps.insert(key.to_string(), App {
             root: dir.join("orgs").join(org),
             addr: addr.to_string(),
-            sites: BTreeMap::new(),
             jobs: jobs_of(jobs, key),
             base: base.to_string(),
             hosted: Some(Hosted { members: Vec::new(), owners: Vec::new(), accounts: own, shared: true }),

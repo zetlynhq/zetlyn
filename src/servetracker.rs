@@ -105,9 +105,26 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
         offset: (page - 1) * limit,
         seen_before: bound.clone(),
     };
+    // Each part timed, and said in the log where the page took longer than half a second: which
+    // part of a slow page is slow is otherwise a guess.
+    let started = std::time::Instant::now();
     let answer = scope.search(&sq);
+    let searched = started.elapsed();
     let columns = scope.columns(&sq);
     let facets = scope.facets(&sq);
+    let listed = started.elapsed();
+    let facet_counts: Vec<(String, (Vec<(String, u64)>, u64))> = facets.iter().map(|name| (name.clone(), scope.facet(&sq, name, 8))).collect();
+    let counted = started.elapsed();
+    if counted.as_millis() > 500 {
+        eprintln!(
+            "{}: slow page ({} ms: search {} ms, columns and facets {} ms, facet counts {} ms) for {url}",
+            scope.decl.name,
+            counted.as_millis(),
+            searched.as_millis(),
+            (listed - searched).as_millis(),
+            (counted - listed).as_millis()
+        );
+    }
     let d = &scope.decl;
 
     let mut active = Vec::new();
@@ -341,15 +358,14 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
 
         h2 { "Facets" }
         div.grid {
-            @for name in &facets {
-                @let (counts, coverage) = scope.facet(&sq, name, 8);
+            @for (name, (counts, coverage)) in &facet_counts {
                 @if !counts.is_empty() {
                     div.card {
                         h4 {
                             (label(name)) " "
                             span.cover { (coverage) " of " (scope.records()) " claims" }
                         }
-                        @for (v, n) in &counts {
+                        @for (v, n) in counts {
                             div.facet {
                                 @let term = format!("{name}={v}");
                                 @if q.split_whitespace().any(|t| t == term) { span.on { (v) } }

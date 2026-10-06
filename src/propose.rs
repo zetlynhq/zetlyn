@@ -81,20 +81,7 @@ pub struct Reader {
 /// they signed in through (`@zetlyn.com`, `@https://prices.example`), or their verified address's
 /// domain (`domain:example.com`).
 pub(crate) fn admits(readers: &[String], reader: &Reader) -> bool {
-    let host = |u: &str| u.split("://").nth(1).unwrap_or(u).trim_end_matches('/').to_string();
-    readers.iter().any(|r| {
-        let r = r.trim();
-        r == SIGNED_IN
-            || (!reader.email.is_empty() && r.eq_ignore_ascii_case(reader.email.trim()))
-            || r.strip_prefix('@').is_some_and(|world| {
-                let world = world.trim_end_matches('/');
-                reader.issuers.iter().any(|i| i.trim_end_matches('/') == world || host(i) == world)
-            })
-            || r.strip_prefix("domain:").is_some_and(|d| {
-                let d = d.trim().to_lowercase();
-                !d.is_empty() && !reader.email.ends_with(".invalid") && reader.email.to_lowercase().ends_with(&format!("@{d}"))
-            })
-    })
+    crate::account::admits(readers, &reader.email, &reader.issuers)
 }
 
 /// What the workspace signs for a reader: the proposal, and whose it is.
@@ -207,6 +194,14 @@ pub fn may(dir: &Path, reader: &Reader) -> Result<(), String> {
     }
     if admits(&readers, reader) {
         return Ok(());
+    }
+    // The world's own `access:`: its editors and owners propose anywhere in it, and its proposers
+    // to every source that names nobody of its own.
+    if let Some(root) = dir.parent().and_then(Path::parent) {
+        let site = crate::account::Site::load(root);
+        if admits(&site.all_editors(), reader) || (readers.is_empty() && admits(&site.access.proposers, reader)) {
+            return Ok(());
+        }
     }
     Err("this source takes no proposals from readers".into())
 }
@@ -778,6 +773,22 @@ mod tests {
         assert_ne!(pseudonym(&a, 1).unwrap(), pseudonym(&b, 1).unwrap(), "two workspaces, two strangers");
         let _ = std::fs::remove_dir_all(&a);
         let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn a_world_says_who_proposes_where_a_source_names_nobody_and_its_editors_propose_anywhere() {
+        let (root, dir) = workspace("access");
+        let ann = reader(&root, 7, "ann@example.org", "Ann");
+        assert!(may(&dir, &ann).is_err(), "nobody named anywhere: nobody proposes");
+        std::fs::write(root.join("workspace.yaml"), "access:\n  proposers: [\"domain:example.org\"]\n").unwrap();
+        assert!(may(&dir, &ann).is_ok(), "the world's proposers, for a source that names nobody");
+        set_readers(&dir, vec!["ben@example.org".into()]).unwrap();
+        assert!(may(&dir, &ann).is_err(), "a source that names its own readers is narrower");
+        std::fs::write(root.join("workspace.yaml"), "access:\n  editors: [ann@example.org]\n").unwrap();
+        assert!(may(&dir, &ann).is_ok(), "an editor proposes anywhere in the world");
+        assert!(crate::account::admits(&["@zetlyn.com".into()], "x@y.org", &["https://zetlyn.com".into()]));
+        assert!(!crate::account::admits(&["@zetlyn.com".into()], "x@y.org", &["https://other.example".into()]));
+        assert!(!crate::account::admits(&["domain:y.org".into()], "x@y.org.invalid", &[]));
     }
 
     #[test]

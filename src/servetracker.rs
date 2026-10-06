@@ -3047,13 +3047,16 @@ fn compared(scope: &Tracker) -> Vec<(String, Vec<(String, Option<String>)>)> {
 /// everybody else.
 fn proposable(scope: &Tracker, operator: bool) -> Vec<(String, std::path::PathBuf)> {
     let registry = crate::tracker::registry(&scope.root.join("sources"));
+    // A world that names proposers or editors of its own takes proposals where a source names nobody.
+    let access = crate::account::Site::load(&scope.root).access;
+    let world_takes = !access.proposers.is_empty() || !access.editors.is_empty();
     scope
         .members
         .iter()
         .filter_map(|m| {
             let dir = registry.get(m.name())?.clone();
             let readers = crate::propose::readers(&dir).ok()?;
-            (operator || !readers.is_empty()).then(|| (m.name().to_string(), dir))
+            (operator || world_takes || !readers.is_empty()).then(|| (m.name().to_string(), dir))
         })
         .collect()
 }

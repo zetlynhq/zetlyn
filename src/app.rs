@@ -2801,11 +2801,13 @@ struct Hosted {
 }
 
 impl Hosted {
+    // Addresses, `domain:` and `signed-in`, as `access:` writes them: a member signs in by a link to
+    // their address, so that is what they are known by here.
     fn is_member(&self, email: &str) -> bool {
-        self.members.iter().any(|m| m.eq_ignore_ascii_case(email.trim()))
+        crate::account::admits(&self.members, email, &[])
     }
     fn is_owner(&self, email: &str) -> bool {
-        self.owners.iter().any(|m| m.eq_ignore_ascii_case(email.trim()))
+        crate::account::admits(&self.owners, email, &[])
     }
 }
 
@@ -2816,9 +2818,9 @@ impl Hosted {
 pub fn world_serve(args: &[String]) -> Result<(), String> {
     let root = crate::positional(args, 2).first().map(|s| PathBuf::from(s.as_str())).ok_or("which workspace?")?;
     let addr = crate::flag(args, "--addr").unwrap_or("127.0.0.1:2500").to_string();
-    let owners = crate::account::Site::load(&root).owners;
+    let owners = crate::account::Site::load(&root).all_owners();
     if owners.is_empty() {
-        return Err(format!("{}: its workspace.yaml names no `owners:`, so nobody could sign in to run it", root.display()));
+        return Err(format!("{}: its workspace.yaml names no owners (`access: {{ owners: [...] }}`), so nobody could sign in to run it", root.display()));
     }
     let server = tiny_http::Server::http(&addr).map_err(|e| e.to_string())?;
     println!("{} on http://{addr}/, run by {}", root.display(), owners.join(", "));
@@ -2855,23 +2857,24 @@ pub fn world_serve(args: &[String]) -> Result<(), String> {
                     Ok(a) => a,
                     Err(e) => return eprintln!("accounts: {e}"),
                 };
+                let members = crate::account::Site::load(&root).all_editors();
                 let mut app = App {
                     root,
                     addr,
                     jobs,
                     base: String::new(),
-                    hosted: Some(Hosted { members: owners.clone(), owners, accounts, shared: false }),
+                    hosted: Some(Hosted { members, owners, accounts, shared: false }),
                     visitor: false,
                     who: None,
                     orgs_of_who: Vec::new(),
                     public_of_machine: Vec::new(),
                 };
                 for request in server.incoming_requests() {
-                    // Who runs it is read afresh each time: an owner added a minute ago is one now.
-                    let now = crate::account::Site::load(&app.root).owners;
+                    // Who runs it is read afresh each time: somebody added a minute ago is in now.
+                    let site = crate::account::Site::load(&app.root);
                     if let Some(h) = app.hosted.as_mut() {
-                        h.members = now.clone();
-                        h.owners = now;
+                        h.members = site.all_editors();
+                        h.owners = site.all_owners();
                     }
                     serve::mount("");
                     app.answer(request);
@@ -2969,6 +2972,9 @@ fn first_said<A, B: Clone + Default>(fields: &[(String, A, Vec<B>)]) -> Vec<&(St
 struct Membership {
     #[serde(flatten)]
     orgs: BTreeMap<String, Vec<Member>>,
+    /// The machine it was read from, so each world's own `access:` counts beside this file.
+    #[serde(skip)]
+    dir: PathBuf,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -2986,7 +2992,9 @@ const MEMBERS: &str = "members.yaml";
 
 impl Membership {
     fn load(dir: &Path) -> Membership {
-        crate::yaml::read_or_default(&dir.join(MEMBERS))
+        let mut m: Membership = crate::yaml::read_or_default(&dir.join(MEMBERS));
+        m.dir = dir.to_path_buf();
+        m
     }
     fn save(&self, dir: &Path) -> Result<(), String> {
         let path = dir.join(MEMBERS);
@@ -2997,10 +3005,26 @@ impl Membership {
     }
     /// The organisations somebody belongs to, with what they are in each.
     fn orgs_of(&self, email: &str) -> Vec<(String, String)> {
-        self.orgs
+        let mut out: Vec<(String, String)> = self
+            .orgs
             .iter()
             .filter_map(|(org, ms)| ms.iter().find(|m| m.email.eq_ignore_ascii_case(email)).map(|m| (org.clone(), m.role.clone())))
-            .collect()
+            .collect();
+        // And every world whose own `access:` names them, as owner before editor.
+        if !self.dir.as_os_str().is_empty() {
+            for org in orgs_in(&self.dir) {
+                if out.iter().any(|(o, _)| *o == org) {
+                    continue;
+                }
+                let site = crate::account::Site::load(&self.dir.join("orgs").join(&org));
+                if crate::account::admits(&site.all_owners(), email, &[]) {
+                    out.push((org, "owner".into()));
+                } else if crate::account::admits(&site.access.editors, email, &[]) {
+                    out.push((org, "editor".into()));
+                }
+            }
+        }
+        out
     }
 }
 
@@ -3315,7 +3339,12 @@ pub const WORLDS: &str = "worlds";
 fn answer_org(apps: &mut BTreeMap<String, App>, jobs: &SharedJobs, key: &str, org: &str, base: &str, dir: &Path, addr: &str, accounts: &crate::account::Accounts, request: tiny_http::Request) {
     let membership = Membership::load(dir);
     // A reader among them reads, as anybody may who is let read: the app is for who changes things.
-    let (members, owners) = (membership.of(org, &["owner", "editor"]), membership.of(org, &["owner"]));
+    // And whoever the world's own `access:` names, in the same words a self-hosted world uses.
+    let site = crate::account::Site::load(&dir.join("orgs").join(org));
+    let mut members = membership.of(org, &["owner", "editor"]);
+    members.extend(site.all_editors());
+    let mut owners = membership.of(org, &["owner"]);
+    owners.extend(site.all_owners());
     if !apps.contains_key(key) {
         let own = match crate::account::Accounts::open(dir) {
             Ok(a) => a,

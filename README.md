@@ -235,6 +235,25 @@ A source's `readers` may then name a world or a domain as well as `signed-in` an
 `["@zetlyn.com", "domain:example.com"]`. A proposal made that way says, signed, which world vouched
 for whoever made it.
 
+## Who may do what
+
+A world says itself who may do more than read it, in one list, `access:` in its workspace.yaml,
+with the same words as a source's `readers`: an address, `domain:<domain>`, `@<world>` for whoever
+that world vouches for, or `signed-in`.
+
+```yaml
+access:
+  owners:    [you@example.org]                 # everything, its settings and its export too
+  editors:   ["domain:acme.example"]           # its sources and trackers, and deciding proposals
+  proposers: ["@zetlyn.com", "domain:uni-leipzig.de"]   # rows for every source that names nobody itself
+```
+
+Everybody else reads what is public. A source that names `readers` of its own is narrower than
+the world's proposers; editors and owners propose anywhere. zetlyn.com, or any other world, only
+says who somebody is: what they may do is this world's, and a world that takes nobody's word but a
+link to an address runs on its own. A hosted world's members on the machine and its own `access:`
+count together; `owners:` as written before is an owner still.
+
 ## Letting somebody else run it
 
 A workspace can answer for itself, so that whoever keeps it current does not have to be at its

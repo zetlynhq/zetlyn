@@ -431,6 +431,12 @@ pub struct Site {
     /// a link to their address and may change everything. Everybody else reads what it publishes.
     #[serde(default)]
     pub owners: Vec<String>,
+    /// Who may do more than read, by the words a source's `readers` uses: owners change everything,
+    /// editors its sources and trackers and decide proposals, proposers propose. Everybody else reads
+    /// what is public. Here and nowhere else: zetlyn.com, or any other world, only says who somebody
+    /// is, and this world says what they may.
+    #[serde(default)]
+    pub access: Access,
     /// Where this world is now, once it has moved (`zetlyn world move`). Its document says so,
     /// signed with the same key, and every page redirects there.
     #[serde(default)]
@@ -1062,4 +1068,53 @@ mod tests {
         assert_eq!(Site::for_workspace(&org).url, "https://acme.example.org");
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// What people may do in a world beyond reading it, each a list of the words a source's
+/// `readers` uses: an address, `domain:example.com`, `@<world>` (whoever that world vouches for),
+/// or `signed-in`.
+#[derive(Debug, Default, Clone, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Access {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owners: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub editors: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proposers: Vec<String>,
+}
+
+impl Site {
+    /// Who owns the world: `owners:` as it was written before `access:`, and `access.owners`.
+    pub fn all_owners(&self) -> Vec<String> {
+        let mut out = self.owners.clone();
+        out.extend(self.access.owners.iter().cloned());
+        out
+    }
+    /// Who may change its sources and trackers: its owners and its editors.
+    pub fn all_editors(&self) -> Vec<String> {
+        let mut out = self.all_owners();
+        out.extend(self.access.editors.iter().cloned());
+        out
+    }
+}
+
+/// Whether one of `patterns` names somebody: `signed-in` for anybody signed in, their address,
+/// `domain:<domain>` for a verified address there, or `@<world>` for whoever that world, or that
+/// provider, vouched for. `issuers` are the worlds and providers they signed in through.
+pub fn admits(patterns: &[String], email: &str, issuers: &[String]) -> bool {
+    let host = |u: &str| u.split("://").nth(1).unwrap_or(u).trim_end_matches('/').to_string();
+    patterns.iter().any(|r| {
+        let r = r.trim();
+        r == "signed-in"
+            || (!email.is_empty() && r.eq_ignore_ascii_case(email.trim()))
+            || r.strip_prefix('@').is_some_and(|world| {
+                let world = world.trim_end_matches('/');
+                issuers.iter().any(|i| i.trim_end_matches('/') == world || host(i) == world)
+            })
+            || r.strip_prefix("domain:").is_some_and(|d| {
+                let d = d.trim().to_lowercase();
+                !d.is_empty() && !email.ends_with(".invalid") && email.to_lowercase().ends_with(&format!("@{d}"))
+            })
+    })
 }

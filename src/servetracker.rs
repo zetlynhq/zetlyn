@@ -1260,6 +1260,67 @@ pub struct TrackerSite {
     /// The person at the machine. Locally there are no readers and nothing is paid for: the
     /// operator sees every page, and the paywall is for what is published.
     operator: bool,
+    /// The pages drawn for somebody who carries no cookie and no key, by address, while the
+    /// store and its statement stand as they were when the first was drawn.
+    pages: Pages,
+}
+
+/// What a page drawn for nobody in particular is kept as: its body, its content type and the
+/// one header beside it, and when it was drawn.
+type Page = (String, String, Option<(String, String)>, i64);
+
+/// The pages kept for anonymous readers. A reading that finds the store or the statement moved
+/// empties it; so does every form sent, and an hour, for the "five minutes ago" a page says.
+#[derive(Default)]
+struct Pages {
+    stamp: String,
+    bytes: usize,
+    kept: BTreeMap<String, Page>,
+}
+
+/// At most this much is kept per tracker, and no page larger than an eighth of it.
+const PAGES_BYTES: usize = 32 << 20;
+const PAGE_AGE: i64 = 3600;
+
+impl Pages {
+    fn get(&self, url: &str) -> Option<&Page> {
+        self.kept.get(url).filter(|p| crate::now() - p.3 < PAGE_AGE)
+    }
+
+    fn keep(&mut self, url: &str, page: Page) {
+        let size = url.len() + page.0.len();
+        if size > PAGES_BYTES / 8 {
+            return;
+        }
+        if self.bytes + size > PAGES_BYTES {
+            self.forget();
+        }
+        self.bytes += size;
+        if let Some(old) = self.kept.insert(url.to_string(), page) {
+            self.bytes -= url.len() + old.0.len();
+        }
+    }
+
+    fn forget(&mut self) {
+        self.kept.clear();
+        self.bytes = 0;
+    }
+
+    /// Empties itself when what the pages are drawn from has moved: a source run (the mark), or
+    /// anything written in the tracker's directory, its statement and its store among them.
+    fn still(&mut self, scope: &Tracker) {
+        let written = std::fs::read_dir(&scope.dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| e.metadata().ok()?.modified().ok())
+            .max();
+        let stamp = format!("{}|{:?}", scope.mark(), written);
+        if stamp != self.stamp {
+            self.forget();
+            self.stamp = stamp;
+        }
+    }
 }
 
 impl TrackerSite {
@@ -1271,6 +1332,8 @@ impl TrackerSite {
         if let Err(e) = scope.refresh_if_moved() {
             eprintln!("{}: the tracker store was not refreshed: {e}", dir.display());
         }
+        let mut pages = Pages::default();
+        pages.still(&scope);
         Ok(TrackerSite {
             scope,
             dir: dir.to_path_buf(),
@@ -1280,6 +1343,7 @@ impl TrackerSite {
             read_at: crate::now(),
             addr: addr.to_string(),
             operator,
+            pages,
         })
     }
 
@@ -1309,7 +1373,7 @@ impl TrackerSite {
     }
 
     fn answer_or_fail(&mut self, mut request: tiny_http::Request) -> Result<(), String> {
-        let TrackerSite { scope, dir, datasets, accounts, site, read_at, addr: site_addr, operator } = self;
+        let TrackerSite { scope, dir, datasets, accounts, site, read_at, addr: site_addr, operator, pages } = self;
         let (dir, datasets) = (dir.as_path(), datasets.as_path());
         // Before anything is read off it, and only between requests, so no page is drawn from
         // two readings.
@@ -1325,6 +1389,7 @@ impl TrackerSite {
                 Err(e) => eprintln!("{}: read again failed, serving the last one: {e}", dir.display()),
             }
             *read_at = crate::now();
+            pages.still(scope);
         }
         let url = unmount(request.url());
         let path = url.split('?').next().unwrap_or("/").to_string();
@@ -1359,6 +1424,21 @@ impl TrackerSite {
         let mut form = String::new();
         if post {
             let _ = std::io::Read::read_to_string(request.as_reader(), &mut form);
+            // A form sent may change what every page shows; none drawn before it is kept.
+            pages.forget();
+        }
+        // Somebody who carries no cookie and no key sees what anybody would, so the page drawn
+        // for the last of them is theirs as well. Signing in, out and the account are not.
+        let anonymous = !*operator
+            && request.method() == &tiny_http::Method::Get
+            && cookie.is_none()
+            && authorization.is_none()
+            && !["/signin", "/signout", "/account", "/watch"].iter().any(|p| path.starts_with(p));
+        if anonymous {
+            if let Some((body, kind, extra, _)) = pages.get(&url).cloned() {
+                respond(request, 200, body, &kind, extra, "kept");
+                return Ok(());
+            }
         }
 
         // (body, content type, extra header)
@@ -1890,18 +1970,27 @@ impl TrackerSite {
         if missing {
             status = 404;
         }
-        let mut response = tiny_http::Response::from_string(body).with_status_code(status);
-        if let Ok(h) = tiny_http::Header::from_bytes(&b"Content-Type"[..], kind.as_bytes()) {
-            response = response.with_header(h);
+        // Kept only as anybody would see it: answered in full, and setting nobody's cookie.
+        let kind = kind.to_string();
+        if anonymous && status == 200 && !extra.as_ref().is_some_and(|(n, _)| n == "Set-Cookie") {
+            pages.keep(&url, (body.clone(), kind.clone(), extra.clone(), crate::now()));
         }
-        if let Some((name, value)) = extra {
-            if let Ok(h) = tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes()) {
-                response = response.with_header(h);
-            }
-        }
-        let _ = request.respond(response);
+        respond(request, status, body, &kind, extra, "drawn");
         Ok(())
     }
+}
+
+/// The answer, with its content type, the one header beside it, and whether it was drawn for
+/// this request or kept from an earlier one.
+fn respond(request: tiny_http::Request, status: u16, body: String, kind: &str, extra: Option<(String, String)>, page: &str) {
+    let mut response = tiny_http::Response::from_string(body).with_status_code(status);
+    let headers = [Some(("Content-Type".to_string(), kind.to_string())), extra, Some(("X-Zetlyn-Page".to_string(), page.to_string()))];
+    for (name, value) in headers.into_iter().flatten() {
+        if let Ok(h) = tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes()) {
+            response = response.with_header(h);
+        }
+    }
+    let _ = request.respond(response);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3059,6 +3148,34 @@ mod tests {
             }
         };
         (response.status().as_u16(), response.body_mut().read_to_string().unwrap_or_default())
+    }
+
+    #[test]
+    fn a_page_drawn_for_nobody_in_particular_is_kept_for_the_next_until_something_is_sent() {
+        let (base, root) = served("kept", "anyone");
+        let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).build().into();
+        let page = |path: &str, cookie: Option<&str>| {
+            let mut r = agent.get(&format!("{base}{path}"));
+            if let Some(c) = cookie {
+                r = r.header("Cookie", c);
+            }
+            let mut response = r.call().unwrap();
+            let how = response.headers().get("X-Zetlyn-Page").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+            (how, response.body_mut().read_to_string().unwrap())
+        };
+        let (first, drawn) = page("/", None);
+        let (second, kept) = page("/", None);
+        assert_eq!((first.as_str(), second.as_str()), ("drawn", "kept"));
+        assert_eq!(drawn, kept, "the page kept is the page drawn");
+        assert_eq!(page("/things?q=x", None).0, "drawn", "another address is another page");
+        // Whoever carries a cookie is drawn a page of their own, and it is not kept for others.
+        let cookie = session(&root, "a@example.com");
+        assert_eq!(page("/", Some(&cookie)).0, "drawn");
+        assert_eq!(page("/", None).0, "kept");
+        // A form sent may change any page: none drawn before it is kept.
+        ask("POST", &format!("{base}/signout"), None, "");
+        assert_eq!(page("/", None).0, "drawn");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

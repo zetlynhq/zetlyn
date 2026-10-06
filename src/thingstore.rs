@@ -886,18 +886,140 @@ impl ThingStore {
             .collect())
     }
 
-    /// The keys of every thing a question holds for, sorted.
+    /// The keys of every thing a question holds for, sorted. Each part of the question is answered
+    /// from the store's own tables and only the sets of keys are put together: a comparison reads
+    /// the one property it names. Reading every thing whole to ask it the question held the whole
+    /// tracker in memory for every request, and crawlers asked it twice a second (2026-10-06).
     pub fn matching(
         &self,
         q: &crate::thingquery::Q,
         cx: &crate::thingquery::Context,
     ) -> Result<Vec<String>, String> {
+        // The way it was, every thing read whole, where a test holds the two against each other.
+        if std::env::var_os("ZETLYN_THINGS_WHOLE").is_some() {
+            return Ok(self.views()?.iter().filter(|t| crate::thingquery::holds(q, t, cx)).map(|t| t.key.clone()).collect());
+        }
+        let mut every: Option<BTreeSet<String>> = None;
+        Ok(self.keys_for(q, cx, &mut every)?.into_iter().collect())
+    }
+
+    /// The keys a query of one column, the key, returns.
+    fn keys_of(&self, sql: &str, params: &[&dyn rusqlite::ToSql]) -> Result<BTreeSet<String>, String> {
+        let mut stmt = self.db.prepare(sql).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(params, |r| r.get::<_, String>(0)).map_err(|e| e.to_string())?;
+        Ok(rows.flatten().collect())
+    }
+
+    /// Key and one more column, for a part of a question the store cannot say in SQL alone.
+    fn pairs_of(&self, sql: &str, params: &[&dyn rusqlite::ToSql]) -> Result<Vec<(String, String)>, String> {
+        let mut stmt = self.db.prepare(sql).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params, |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?.unwrap_or_default())))
+            .map_err(|e| e.to_string())?;
+        Ok(rows.flatten().collect())
+    }
+
+    /// What one source says of one property, per thing, as the words it means.
+    fn means_of(&self, source: &str, property: &str) -> Result<BTreeMap<String, BTreeSet<String>>, String> {
         Ok(self
-            .views()?
-            .iter()
-            .filter(|t| crate::thingquery::holds(q, t, cx))
-            .map(|t| t.key.clone())
+            .pairs_of("select key, means from said where source = ?1 and property = ?2", &[&source, &property])?
+            .into_iter()
+            .map(|(k, m)| (k, serde_json::from_str::<BTreeSet<String>>(&m).unwrap_or_default()))
             .collect())
+    }
+
+    /// The things one part of a question holds for, as `thingquery::holds` would say of each.
+    fn keys_for(
+        &self,
+        q: &crate::thingquery::Q,
+        cx: &crate::thingquery::Context,
+        every: &mut Option<BTreeSet<String>>,
+    ) -> Result<BTreeSet<String>, String> {
+        use crate::thingquery::{seconds, Op, Q};
+        let recent = |at: &str, within: i64| seconds(at).is_some_and(|s| cx.now - s <= within);
+        Ok(match q {
+            Q::And(a, b) => {
+                let x = self.keys_for(a, cx, every)?;
+                if x.is_empty() {
+                    x
+                } else {
+                    let y = self.keys_for(b, cx, every)?;
+                    x.intersection(&y).cloned().collect()
+                }
+            }
+            Q::Or(a, b) => {
+                let mut x = self.keys_for(a, cx, every)?;
+                x.extend(self.keys_for(b, cx, every)?);
+                x
+            }
+            Q::Not(a) => {
+                let x = self.keys_for(a, cx, every)?;
+                if every.is_none() {
+                    *every = Some(self.keys_of("select key from thing", &[])?);
+                }
+                every.as_ref().map(|all| all.difference(&x).cloned().collect()).unwrap_or_default()
+            }
+            Q::Conflict(p) => self.keys_of("select key from conflict where property = ?1", &[p])?,
+            Q::Has(s) => self.keys_of("select distinct key from speaks where source = ?1", &[s])?,
+            Q::Only(s) => self.keys_of("select key from speaks group by key having count(*) = 1 and max(source) = ?1", &[s])?,
+            Q::Appeared(kind, within) => self
+                .pairs_of("select key, first_seen from speaks where kind = ?1", &[kind])?
+                .into_iter()
+                .filter(|(_, first)| recent(first, *within))
+                .map(|(k, _)| k)
+                .collect(),
+            Q::Changed(p, within) => self
+                .pairs_of("select key, at from signal where kind = 'changed' and key is not null and coalesce(property, '') = ?1", &[p])?
+                .into_iter()
+                .filter(|(_, at)| recent(at, *within))
+                .map(|(k, _)| k)
+                .collect(),
+            Q::Id(v) => self
+                .pairs_of("select key, value from thing", &[])?
+                .into_iter()
+                .filter(|(_, value)| value.eq_ignore_ascii_case(v))
+                .map(|(k, _)| k)
+                .collect(),
+            Q::Related(name, want) => {
+                let want = want.to_lowercase();
+                self.pairs_of("select key, target from related where name = ?1", &[name])?
+                    .into_iter()
+                    .filter(|(_, target)| match want.strip_suffix('*') {
+                        Some(prefix) => target.starts_with(prefix),
+                        None => *target == want,
+                    })
+                    .map(|(k, _)| k)
+                    .collect()
+            }
+            Q::Cmp { source, property, op, value } => {
+                let mut stmt = self
+                    .db
+                    .prepare("select key, source, means from said where property = ?1")
+                    .map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map([property], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
+                    .map_err(|e| e.to_string())?;
+                let mut out = BTreeSet::new();
+                for (key, said_by, means) in rows.flatten() {
+                    if source.as_ref().is_some_and(|want| *want != said_by) || out.contains(&key) {
+                        continue;
+                    }
+                    let words: Vec<String> = serde_json::from_str(&means).unwrap_or_default();
+                    if words.iter().any(|w| crate::thingquery::compare(cx, property, w, *op, value)) {
+                        out.insert(key);
+                    }
+                }
+                out
+            }
+            Q::Between { a, op, b } => {
+                let (x, y) = (self.means_of(&a.0, &a.1)?, self.means_of(&b.0, &b.1)?);
+                x.iter()
+                    .filter_map(|(k, words)| y.get(k).map(|other| (k, (words == other) == (*op == Op::Eq))))
+                    .filter(|(_, holds)| *holds)
+                    .map(|(k, _)| k.clone())
+                    .collect()
+            }
+        })
     }
 
 

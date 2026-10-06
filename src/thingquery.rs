@@ -384,7 +384,7 @@ pub fn holds(q: &Q, t: &ThingView, cx: &Context) -> bool {
 
 /// On the tracker's scale where it has one, as numbers or dates where both are, and as words
 /// otherwise, which compare for equality only.
-fn compare(cx: &Context, property: &str, have: &str, op: Op, want: &str) -> bool {
+pub(crate) fn compare(cx: &Context, property: &str, have: &str, op: Op, want: &str) -> bool {
     use std::cmp::Ordering;
     let ord: Option<Ordering> = match cx.decl.normalise_for(property).filter(|a| !a.scale.is_empty()) {
         // Best first, so `>= high` is a smaller position.

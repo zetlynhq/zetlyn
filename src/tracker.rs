@@ -701,8 +701,37 @@ impl Tracker {
             }
         }
         for p in cmps {
-            let Pred::Cmp { left, op: Op::Eq, right } = p else { return None };
+            let Pred::Cmp { left, op, right } = p else { return None };
             let want = right.display();
+            // An order on a declared scale is a set of its words: `severity>=high` is critical or
+            // high, best first, as `entry_holds` reads it. Any other order goes to the sources.
+            if *op != Op::Eq {
+                let scale = self.decl.normalise_for(left).filter(|n| !n.scale.is_empty())?;
+                let at = scale.position(&want)?;
+                let words: Vec<String> = scale
+                    .scale
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| match op {
+                        Op::Ge => *i <= at,
+                        Op::Gt => *i < at,
+                        Op::Le => *i >= at,
+                        Op::Lt => *i > at,
+                        Op::Ne => *i != at,
+                        Op::Eq => *i == at,
+                    })
+                    .map(|(_, w)| w.to_lowercase())
+                    .collect();
+                if words.is_empty() || *op == Op::Ne {
+                    // Not one of them, or every word but one, which a thing with no word at all
+                    // also is: the sources say that better than an index of words.
+                    return None;
+                }
+                clauses.push(format!("t.key in (select key from word where property = ? and word in ({}))", vec!["?"; words.len()].join(", ")));
+                params.push(left.to_string());
+                params.extend(words);
+                continue;
+            }
             match left.as_str() {
                 "kind" => clauses.push("t.key in (select key from speaks where lower(kind) = lower(?))".into()),
                 "source" => clauses.push("t.key in (select key from speaks where lower(source) = lower(?))".into()),

@@ -1190,6 +1190,11 @@ fn a_filter_is_answered_from_the_trackers_store_as_the_sources_answer_it() {
         "severity=high source=test/vendor-b",
         "severity=critical and exploited=yes",
         "severity=nothing",
+        "severity>=high",
+        "severity>high",
+        "severity<=medium",
+        "severity<medium",
+        "exploited=yes and severity>=high",
     ] {
         for f in ["tracker.db", "tracker.db-wal", "tracker.db-shm"] {
             let _ = std::fs::remove_file(db.with_file_name(f));
@@ -1199,5 +1204,43 @@ fn a_filter_is_answered_from_the_trackers_store_as_the_sources_answer_it() {
         assert!(db.exists());
         let from_store = things_in(&ws.z(&["tracker", "search", &ws.scope(), filter, "--limit", "50"]));
         assert_eq!(from_sources, from_store, "{filter}");
+    }
+}
+
+#[test]
+fn a_question_is_answered_from_the_store_as_from_every_thing_read_whole() {
+    let ws = Workspace::new("questions-sql");
+    ws.z(&["tracker", "refresh", &ws.scope()]);
+    ws.update();
+    ws.z(&["tracker", "refresh", &ws.scope()]);
+    let whole = |q: &str| -> String {
+        let out = Command::new(env!("CARGO_BIN_EXE_zetlyn"))
+            .args(["tracker", "things", &ws.scope(), q])
+            .env("ZETLYN_THINGS_WHOLE", "1")
+            .output()
+            .expect("the binary runs");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    for q in [
+        "conflict:severity",
+        "conflict:cvss or conflict:severity",
+        "has:kev",
+        "only:exploits",
+        "a.cvss>9",
+        "cvss>=9.8",
+        "severity=critical",
+        "severity>=high",
+        "severity<high",
+        "a.severity != b.severity",
+        "a.severity = b.severity",
+        "has:kev and not has:exploits",
+        "not conflict:severity",
+        "id=CVE-2026-0002",
+        "appeared:exploit<3650d",
+        "changed:cvss<3650d",
+        "(has:kev or has:exploits) and not severity=critical",
+    ] {
+        let from_store = ws.z(&["tracker", "things", &ws.scope(), q]);
+        assert_eq!(from_store, whole(q).replace(&ws.root.display().to_string(), "WORKSPACE"), "{q}");
     }
 }

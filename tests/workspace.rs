@@ -1208,6 +1208,61 @@ fn a_filter_is_answered_from_the_trackers_store_as_the_sources_answer_it() {
 }
 
 #[test]
+fn a_refresh_that_reads_only_what_moved_leaves_the_store_as_one_that_reads_everything() {
+    let ws = Workspace::new("piecemeal");
+    ws.z(&["tracker", "refresh", &ws.scope()]);
+    // One score moved, a rating changed, one advisory withdrawn and a new one.
+    std::fs::write(
+        ws.root.join("sources/vendor-a/advisories.csv"),
+        "cve,title,severity,cvss,published\n\
+         CVE-2026-0001,foo: remote code execution,important,8.1,2026-08-30\n\
+         CVE-2026-0004,baz: authentication bypass,critical,9.1,2026-09-02\n\
+         CVE-2026-0009,qux: path traversal,moderate,5.3,2026-09-04\n",
+    )
+    .unwrap();
+    ws.z(&["source", "update", &ws.dataset("vendor-a")]);
+    // The same store, beside it, to be refreshed whole from the same place.
+    let whole = ws.root.join("trackers/cve-whole");
+    copy(&ws.root.join("trackers/cve"), &whole);
+    let said = ws.z(&["tracker", "refresh", &ws.scope()]);
+    assert!(said.contains("things read again") && !said.contains(" 0 signals"), "{said}");
+
+    let held = |tracker: &str| -> Vec<String> {
+        let c = rusqlite::Connection::open(ws.root.join("trackers").join(tracker).join("tracker.db")).unwrap();
+        let mut out = Vec::new();
+        for q in [
+            "select key, scheme, value, title from thing order by 1",
+            "select key, source, property, raw, means, kind, understood from said order by 1, 2, 3",
+            "select property, word, key from word order by 1, 2, 3",
+            "select key, source, claims, kind from speaks order by 1, 2",
+            "select key, property, sources from conflict order by 1, 2",
+            "select key, name, target, sources from related order by 1, 2, 3",
+            "select source, record_id, key from claim order by 1, 2, 3",
+            "select value from meta where key = 'wording'",
+            "select kind, key, property, source, was, is_now from signal order by 1, 2, 3, 4",
+        ] {
+            let mut stmt = c.prepare(q).unwrap();
+            let n = stmt.column_count();
+            let rows = stmt
+                .query_map([], |r| Ok((0..n).map(|i| format!("{:?}", r.get::<_, rusqlite::types::Value>(i).unwrap())).collect::<Vec<_>>().join(" | ")))
+                .unwrap();
+            out.push(q.to_string());
+            out.extend(rows.flatten());
+        }
+        out
+    };
+    let piecemeal = held("cve");
+    assert!(piecemeal.iter().any(|r| r.contains("CVE-2026-0009")), "the new advisory is a thing");
+    let out = Command::new(env!("CARGO_BIN_EXE_zetlyn"))
+        .args(["tracker", "refresh", &whole.display().to_string()])
+        .env("ZETLYN_REFRESH_WHOLE", "1")
+        .output()
+        .expect("the binary runs");
+    assert!(out.status.success());
+    assert_eq!(piecemeal, held("cve-whole"));
+}
+
+#[test]
 fn a_question_is_answered_from_the_store_as_from_every_thing_read_whole() {
     let ws = Workspace::new("questions-sql");
     ws.z(&["tracker", "refresh", &ws.scope()]);

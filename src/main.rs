@@ -481,12 +481,13 @@ fn run(args: &[String]) -> Result<(), String> {
                 let started = std::time::Instant::now();
                 let r = t.refresh(args.iter().any(|a| a == "--rebuild"))?;
                 println!(
-                    "{} things, {} conflicts, {} that differ only in wording, {} signals{} in {:.1}s",
+                    "{} things, {} conflicts, {} that differ only in wording, {} signals{}{} in {:.1}s",
                     r.things,
                     r.conflicts,
                     r.wording,
                     r.signals,
                     if r.first { " (the first look, so none)" } else { "" },
+                    r.read_again.map(|n| format!(", {n} things read again")).unwrap_or_default(),
                     started.elapsed().as_secs_f64()
                 );
                 Ok(())
@@ -996,7 +997,13 @@ pub fn schedule_pass(root: &Path, deliver: bool, limits: &Limits) -> Option<i64>
                 }
             }
             match tracker::Tracker::open(dir, &root.join("sources")).and_then(|t| t.refresh_if_moved()) {
-                Ok(Some(r)) => println!("{}: {} signals, {} conflicts", dir.display(), r.signals, r.conflicts),
+                Ok(Some(r)) => println!(
+                    "{}: {} signals, {} conflicts{}",
+                    dir.display(),
+                    r.signals,
+                    r.conflicts,
+                    r.read_again.map(|n| format!(", {n} things read again")).unwrap_or_default()
+                ),
                 Ok(None) => {}
                 Err(e) => eprintln!("{}: {e}", dir.display()),
             }

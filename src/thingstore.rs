@@ -221,6 +221,13 @@ create table if not exists word(property text not null, word text not null, key 
 create index if not exists word_at on word(property, word);
 create index if not exists speaks_source on speaks(lower(source));
 create index if not exists speaks_kind on speaks(lower(kind));
+-- Which thing each claim of each source is about, so a refresh that reads only the claims moved
+-- since the last one finds the things they were about before they moved. Written with `speaks`.
+create table if not exists claim(source text not null, record_id text not null, key text not null);
+create index if not exists claim_at on claim(source, record_id);
+create index if not exists claim_key on claim(key);
+-- And the words found by thing, for the same refresh to take out what it writes again.
+create index if not exists word_key on word(key);
 ";
 
 pub struct ThingStore {
@@ -235,6 +242,8 @@ pub struct Refreshed {
     pub wording: u64,
     pub signals: u64,
     pub first: bool,
+    /// Where the refresh read only the things a moved claim is about: how many.
+    pub read_again: Option<u64>,
 }
 
 impl ThingStore {
@@ -259,12 +268,45 @@ impl ThingStore {
             .ok()
     }
 
+    /// The things these claims of this source were about at the last refresh.
+    pub fn about_claims(&self, source: &str, record_ids: &[String]) -> BTreeSet<String> {
+        let Ok(mut stmt) = self.db.prepare("select key from claim where source = ?1 and record_id = ?2") else {
+            return BTreeSet::new();
+        };
+        record_ids
+            .iter()
+            .flat_map(|id| {
+                stmt.query_map(rusqlite::params![source, id], |r| r.get::<_, String>(0))
+                    .map(|rows| rows.flatten().collect::<Vec<_>>())
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
+    /// Every claim each source spoke of these things with at the last refresh.
+    pub fn claims_about(&self, keys: &BTreeSet<String>) -> BTreeMap<String, BTreeSet<String>> {
+        let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let Ok(mut stmt) = self.db.prepare("select source, record_id from claim where key = ?1") else {
+            return out;
+        };
+        for k in keys {
+            if let Ok(rows) = stmt.query_map([k], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))) {
+                for (source, id) in rows.flatten() {
+                    out.entry(source).or_default().insert(id);
+                }
+            }
+        }
+        out
+    }
+
     /// The snapshot this store holds, as the last refresh left it.
-    fn held(&self) -> Result<Snapshot, String> {
+    fn held(&self, only: bool) -> Result<Snapshot, String> {
+        // Only the things in `temp.only_keys`, where a refresh reads only what moved.
+        let w = if only { " where key in (select key from temp.only_keys)" } else { "" };
         let mut snap = Snapshot::default();
         let mut stmt = self
             .db
-            .prepare("select key, scheme, value, title from thing")
+            .prepare(&format!("select key, scheme, value, title from thing{w}"))
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |r| {
@@ -284,7 +326,7 @@ impl ThingStore {
         }
         let mut stmt = self
             .db
-            .prepare("select key, name, target, sources from related")
+            .prepare(&format!("select key, name, target, sources from related{w}"))
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?)))
@@ -297,7 +339,7 @@ impl ThingStore {
         }
         let mut stmt = self
             .db
-            .prepare("select key, source, property, raw, means, kind, understood from said")
+            .prepare(&format!("select key, source, property, raw, means, kind, understood from said{w}"))
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |r| {
@@ -327,7 +369,7 @@ impl ThingStore {
         }
         let mut stmt = self
             .db
-            .prepare("select key, source, claims from speaks")
+            .prepare(&format!("select key, source, claims from speaks{w}"))
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |r| {
@@ -348,17 +390,43 @@ impl ThingStore {
     /// The store made to hold `now`, and every difference from what it held written down as a
     /// signal. The first refresh, and a rebuild, write none: there is nothing to have changed
     /// from, and a feed that opened with sixty thousand things appearing would say nothing.
+    ///
+    /// With `only`, `now` holds those things and no others, read again because a claim about
+    /// them moved; the rest of the store stands as it is. Everything below is said of the things
+    /// in `now` and in `before`, which then are those things alone.
     pub fn refresh(
         &mut self,
         decl: &TrackerDecl,
         now: &Snapshot,
         rebuild: bool,
+        only: Option<&BTreeSet<String>>,
     ) -> Result<Refreshed, String> {
         let at = crate::iso_stamp(crate::now());
         let first = rebuild || self.meta("refreshed").is_none();
-        let before = if first { Snapshot::default() } else { self.held()? };
+        let only = if first { None } else { only };
+        if let Some(keys) = only {
+            self.db
+                .execute_batch("create temp table if not exists only_keys(key text primary key); delete from temp.only_keys;")
+                .map_err(|e| e.to_string())?;
+            let mut put = self.db.prepare("insert or ignore into temp.only_keys(key) values(?1)").map_err(|e| e.to_string())?;
+            for k in keys {
+                put.execute([k]).map_err(|e| e.to_string())?;
+            }
+        }
+        let before = if first { Snapshot::default() } else { self.held(only.is_some())? };
         let held_conflicts: BTreeMap<(String, String), String> = if rebuild {
             BTreeMap::new()
+        } else if only.is_some() {
+            let mut stmt = self
+                .db
+                .prepare("select key, property, since from conflict where key in (select key from temp.only_keys)")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+                })
+                .map_err(|e| e.to_string())?;
+            rows.flatten().map(|(k, p, s)| ((k, p), s)).collect()
         } else {
             let mut stmt = self
                 .db
@@ -393,6 +461,17 @@ impl ThingStore {
                     Verdict::Agree => {}
                 }
             }
+        }
+        // Read in part, the count is the store's, less what these things counted before.
+        if only.is_some() {
+            let before_wording = before
+                .things
+                .values()
+                .flat_map(|s| s.verdicts(decl))
+                .filter(|(_, v, _)| matches!(v, Verdict::Wording))
+                .count() as u64;
+            let held_wording: u64 = self.meta("wording").and_then(|w| w.parse().ok()).unwrap_or(before_wording);
+            wording = (held_wording + wording).saturating_sub(before_wording);
         }
 
         for (key, snap) in &now.things {
@@ -484,15 +563,33 @@ impl ThingStore {
         // When each source first spoke of each thing, which a refresh keeps: `appeared:` asks it.
         let spoke: BTreeMap<(String, String), String> = self
             .db
-            .prepare("select key, source, first_seen from speaks where first_seen is not null")
+            .prepare(if only.is_some() {
+                "select key, source, first_seen from speaks where first_seen is not null and key in (select key from temp.only_keys)"
+            } else {
+                "select key, source, first_seen from speaks where first_seen is not null"
+            })
             .and_then(|mut s| {
                 s.query_map([], |r| Ok(((r.get::<_, String>(0)?, r.get::<_, String>(1)?), r.get::<_, String>(2)?)))
                     .map(|rows| rows.flatten().collect())
             })
             .unwrap_or_default();
         let tx = self.db.transaction().map_err(|e| e.to_string())?;
-        tx.execute_batch("delete from said; delete from word; delete from speaks; delete from conflict; delete from related;")
+        if only.is_some() {
+            tx.execute_batch(
+                "delete from said where key in (select key from temp.only_keys);
+                 delete from word where key in (select key from temp.only_keys);
+                 delete from speaks where key in (select key from temp.only_keys);
+                 delete from conflict where key in (select key from temp.only_keys);
+                 delete from related where key in (select key from temp.only_keys);
+                 delete from claim where key in (select key from temp.only_keys);",
+            )
             .map_err(|e| e.to_string())?;
+        } else {
+            tx.execute_batch("delete from said; delete from word; delete from speaks; delete from conflict; delete from related; delete from claim;")
+                .map_err(|e| e.to_string())?;
+            // Which thing each claim is about is held from here on, and a refresh may read in part.
+            tx.execute("insert or replace into meta(key, value) values('claims', '1')", []).map_err(|e| e.to_string())?;
+        }
         // Said once the words are written in this same transaction: a store from before they were
         // kept is not asked by them.
         tx.execute("insert or replace into meta(key, value) values('words', '1')", []).map_err(|e| e.to_string())?;
@@ -529,6 +626,9 @@ impl ThingStore {
                 .map_err(|e| e.to_string())?;
             let mut put_speaks = tx
                 .prepare("insert into speaks(key, source, claims, first_seen, kind) values(?1, ?2, ?3, ?4, ?5)")
+                .map_err(|e| e.to_string())?;
+            let mut put_claim = tx
+                .prepare("insert into claim(source, record_id, key) values(?1, ?2, ?3)")
                 .map_err(|e| e.to_string())?;
             for (key, snap) in &now.things {
                 put_thing
@@ -570,6 +670,9 @@ impl ThingStore {
                             now.kinds.get(source).cloned().unwrap_or_default(),
                         ])
                         .map_err(|e| e.to_string())?;
+                    for record_id in claims {
+                        put_claim.execute(rusqlite::params![source, record_id, key]).map_err(|e| e.to_string())?;
+                    }
                 }
             }
             // A thing no source speaks of any more is gone from the store; the signal saying so
@@ -635,11 +738,18 @@ impl ThingStore {
                 [json!(now.shapes).to_string()],
             )
             .map_err(|e| e.to_string())?;
+            tx.execute("insert or replace into meta(key, value) values('wording', ?1)", [wording.to_string()])
+                .map_err(|e| e.to_string())?;
         }
         tx.commit().map_err(|e| e.to_string())?;
+        // Read in part, what the store holds is counted in the store.
+        let count = |table: &str| -> u64 {
+            self.db.query_row(&format!("select count(*) from {table}"), [], |r| r.get::<_, i64>(0)).unwrap_or(0) as u64
+        };
         Ok(Refreshed {
-            things: now.things.len() as u64,
-            conflicts: conflicts.len() as u64,
+            things: if only.is_some() { count("thing") } else { now.things.len() as u64 },
+            conflicts: if only.is_some() { count("conflict") } else { conflicts.len() as u64 },
+            read_again: only.map(|_| now.things.len().max(before.things.len()) as u64),
             wording,
             signals: signals.len() as u64,
             first,
@@ -821,7 +931,7 @@ impl ThingStore {
 impl ThingStore {
     /// Every thing, as a question about things is asked of it.
     pub fn views(&self) -> Result<Vec<crate::thingquery::ThingView>, String> {
-        let held = self.held()?;
+        let held = self.held(false)?;
         let mut speaks: BTreeMap<String, BTreeMap<String, (String, String)>> = BTreeMap::new();
         let mut stmt = self
             .db

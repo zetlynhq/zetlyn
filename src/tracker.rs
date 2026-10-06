@@ -1091,6 +1091,36 @@ pub fn registry(datasets: &Path) -> BTreeMap<String, PathBuf> {
     out
 }
 
+/// The things a refresh reads again, and per source the claims it reads them from.
+struct Piecemeal {
+    keys: BTreeSet<String>,
+    claims: BTreeMap<String, BTreeSet<String>>,
+}
+
+/// From this many moved claims on, a refresh reads every thing rather than the ones they are
+/// about: one pass over the sources is then shorter than a lookup per claim.
+const PIECEMEAL: usize = 20_000;
+
+/// The shape of what a source says: its properties and their types, and the identifier schemes
+/// it names things by. Counts are not in it, so an update does not change it.
+fn shape(m: &Resolved) -> String {
+    let mut props: Vec<String> = m.described["properties"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|p| format!("{}:{}", p["name"].as_str().unwrap_or(""), p["type"].as_str().unwrap_or("")))
+        .collect();
+    props.sort();
+    let mut schemes: Vec<String> = m.described["schemes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|s| s["scheme"].as_str().map(str::to_string))
+        .collect();
+    schemes.sort();
+    format!("{} | {}", props.join(","), schemes.join(","))
+}
+
 /// A tracker counts in its sources' marks, because each of them runs on its own cadence.
 fn parse_marks(raw: &str) -> BTreeMap<String, i64> {
     raw.split(',')
@@ -1640,30 +1670,29 @@ impl Tracker {
     /// property, the words, what the tracker makes of them, and whether it understood them. Read
     /// through `search`, the call a reader has, as `measure` reads it.
     pub fn snapshot(&self) -> crate::thingstore::Snapshot {
-        use crate::thingstore::{kind_of, Said, Snap, Snapshot};
+        self.snapshot_of(None)
+    }
+
+    /// The snapshot, or with `only` the part of it about the things a moved claim is about.
+    fn snapshot_of(&self, only: Option<&Piecemeal>) -> crate::thingstore::Snapshot {
+        use crate::thingstore::Snapshot;
         let keys = self.decl.keys();
         let mut snap = Snapshot::default();
         // Sources in priority order, so a thing's title is its highest-priority source's.
         for m in &self.members {
             snap.states.insert(m.name().to_string(), m.state().to_string());
             snap.kinds.insert(m.name().to_string(), m.kind());
-            // The shape of what it says: its properties and their types, and the identifier
-            // schemes it names things by. Counts are not in it, so an update does not change it.
-            let mut props: Vec<String> = m.described["properties"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|p| format!("{}:{}", p["name"].as_str().unwrap_or(""), p["type"].as_str().unwrap_or("")))
-                .collect();
-            props.sort();
-            let mut schemes: Vec<String> = m.described["schemes"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|s| s["scheme"].as_str().map(str::to_string))
-                .collect();
-            schemes.sort();
-            snap.shapes.insert(m.name().to_string(), format!("{} | {}", props.join(","), schemes.join(",")));
+            snap.shapes.insert(m.name().to_string(), shape(m));
+            // In part: the claims named, and of what they are about only the things named.
+            if let Some(p) = only {
+                let ids: Vec<String> = p.claims.get(m.name()).into_iter().flatten().cloned().collect();
+                for chunk in ids.chunks(200) {
+                    for c in m.member.fetch(chunk, false) {
+                        self.take(&mut snap, &keys, m, &c.record_id, &c.title, &c.ids, &c.fields, Some(&p.keys));
+                    }
+                }
+                continue;
+            }
             let mut offset = 0usize;
             loop {
                 let q = Query {
@@ -1683,68 +1712,7 @@ impl Tracker {
                     break;
                 }
                 for hit in &hits {
-                    // A thing for every value of the first of the tracker's schemes the claim
-                    // carries: an exploit for two CVEs is about both. Other schemes it carries are
-                    // shown on the thing and make no thing of their own.
-                    for id in about(&keys, &hit.ids) {
-                    let key = crate::schemes::key(&id.scheme, &id.value);
-                    let thing = snap.things.entry(key).or_insert_with(|| Snap {
-                        scheme: id.scheme.clone(),
-                        value: id.value.clone(),
-                        title: hit.title.clone(),
-                        ..Snap::default()
-                    });
-                    thing
-                        .claims
-                        .entry(m.name().to_string())
-                        .or_default()
-                        .insert(hit.record_id.clone());
-                    // What this claim says the thing is to something else: every other
-                    // identifier it states of a scheme a relation names.
-                    for r in &self.decl.relations {
-                        for other in hit.ids.iter().filter(|i| i.scheme == r.to) {
-                            if let Some(target) = r.target(&other.value) {
-                                thing.related.entry(r.name.clone()).or_default().entry(target).or_default().insert(m.name().to_string());
-                            }
-                        }
-                    }
-                    let props = thing.by.entry(m.name().to_string()).or_default();
-                    for (name, value) in &hit.fields {
-                        let property = self.field_out(m.name(), name);
-                        let align = self.decl.normalise_for(&property);
-                        let words: Vec<String> = match value {
-                            crate::claim::Value::List(items) => items.iter().map(|v| v.display()).collect(),
-                            v => vec![v.display()],
-                        };
-                        let said = props.entry(property.clone()).or_insert_with(|| Said {
-                            kind: kind_of(value).to_string(),
-                            understood: true,
-                            ..Said::default()
-                        });
-                        for w in words {
-                            let mapped = match align {
-                                Some(a) => a.means(m.name(), &w),
-                                None => w.clone(),
-                            };
-                            // Understood where the map names the word or the scale holds what it
-                            // became. A word that passed through unchanged and is on no scale is
-                            // one nobody has said the meaning of.
-                            let named = align
-                                .map(|a| {
-                                    a.position(&mapped).is_some()
-                                        || a.members.get(m.name()).is_some_and(|map| {
-                                            map.contains_key(&w) || map.contains_key(&w.to_lowercase())
-                                        })
-                                })
-                                .unwrap_or(false);
-                            if !named {
-                                said.understood = false;
-                            }
-                            said.raw.insert(w);
-                            said.means.insert(mapped);
-                        }
-                    }
-                    }
+                    self.take(&mut snap, &keys, m, &hit.record_id, &hit.title, &hit.ids, &hit.fields, None);
                 }
                 offset += hits.len();
                 if hits.len() < 5000 {
@@ -1761,6 +1729,90 @@ impl Tracker {
         snap
     }
 
+    /// One claim taken into the snapshot: a thing for each of what it is about, its title, what
+    /// it says of each property in the tracker's words, and what it says the thing is to another.
+    /// With `only`, the things outside it are left as they are.
+    #[allow(clippy::too_many_arguments)]
+    fn take(
+        &self,
+        snap: &mut crate::thingstore::Snapshot,
+        keys: &[&str],
+        m: &Resolved,
+        record_id: &str,
+        title: &str,
+        ids: &[Id],
+        fields: &BTreeMap<String, crate::claim::Value>,
+        only: Option<&BTreeSet<String>>,
+    ) {
+        use crate::thingstore::{kind_of, Said, Snap};
+        // A thing for every value of the first of the tracker's schemes the claim
+        // carries: an exploit for two CVEs is about both. Other schemes it carries are
+        // shown on the thing and make no thing of their own.
+        for id in about(keys, ids) {
+        let key = crate::schemes::key(&id.scheme, &id.value);
+        if only.is_some_and(|o| !o.contains(&key)) {
+            continue;
+        }
+        let thing = snap.things.entry(key).or_insert_with(|| Snap {
+            scheme: id.scheme.clone(),
+            value: id.value.clone(),
+            title: title.to_string(),
+            ..Snap::default()
+        });
+        thing
+            .claims
+            .entry(m.name().to_string())
+            .or_default()
+            .insert(record_id.to_string());
+        // What this claim says the thing is to something else: every other
+        // identifier it states of a scheme a relation names.
+        for r in &self.decl.relations {
+            for other in ids.iter().filter(|i| i.scheme == r.to) {
+                if let Some(target) = r.target(&other.value) {
+                    thing.related.entry(r.name.clone()).or_default().entry(target).or_default().insert(m.name().to_string());
+                }
+            }
+        }
+        let props = thing.by.entry(m.name().to_string()).or_default();
+        for (name, value) in fields {
+            let property = self.field_out(m.name(), name);
+            let align = self.decl.normalise_for(&property);
+            let words: Vec<String> = match value {
+                crate::claim::Value::List(items) => items.iter().map(|v| v.display()).collect(),
+                v => vec![v.display()],
+            };
+            let said = props.entry(property.clone()).or_insert_with(|| Said {
+                kind: kind_of(value).to_string(),
+                understood: true,
+                ..Said::default()
+            });
+            for w in words {
+                let mapped = match align {
+                    Some(a) => a.means(m.name(), &w),
+                    None => w.clone(),
+                };
+                // Understood where the map names the word or the scale holds what it
+                // became. A word that passed through unchanged and is on no scale is
+                // one nobody has said the meaning of.
+                let named = align
+                    .map(|a| {
+                        a.position(&mapped).is_some()
+                            || a.members.get(m.name()).is_some_and(|map| {
+                                map.contains_key(&w) || map.contains_key(&w.to_lowercase())
+                            })
+                    })
+                    .unwrap_or(false);
+                if !named {
+                    said.understood = false;
+                }
+                said.raw.insert(w);
+                said.means.insert(mapped);
+            }
+        }
+        }
+    }
+
+
     /// The tracker's own store, made to hold what the sources say now.
     pub fn refresh(&self, rebuild: bool) -> Result<crate::thingstore::Refreshed, String> {
         if let Some(p) = self.decl.package.as_ref().filter(|p| p.sealed) {
@@ -1769,11 +1821,93 @@ impl Tracker {
                 self.decl.name, p.version
             ));
         }
-        let now = self.snapshot();
         let mut store = crate::thingstore::ThingStore::open(&self.dir)?;
-        let r = store.refresh(&self.decl, &now, rebuild)?;
+        // Only the things a claim moved about since the last refresh, where that can be said;
+        // every thing otherwise.
+        let piecemeal = if rebuild || std::env::var_os("ZETLYN_REFRESH_WHOLE").is_some() { None } else { self.moved(&store) };
+        let r = match &piecemeal {
+            Some(p) => store.refresh(&self.decl, &self.snapshot_of(Some(p)), false, Some(&p.keys))?,
+            None => store.refresh(&self.decl, &self.snapshot(), rebuild, None)?,
+        };
         store.set_meta("mark", &self.mark())?;
+        store.set_meta("stated", &self.stated())?;
         Ok(r)
+    }
+
+    /// What the store was made from besides the sources' claims: the statement, and the matches
+    /// people signed. Either changed, every thing is read again.
+    fn stated(&self) -> String {
+        let statement = std::fs::read_to_string(self.dir.join(crate::trackerdecl::FILE)).unwrap_or_default();
+        let matches = std::fs::read_to_string(self.dir.join(crate::matches::FILE)).unwrap_or_default();
+        format!("{}|{}", crate::place::sha256(statement.as_bytes()), crate::place::sha256(matches.as_bytes()))
+    }
+
+    /// The things a claim moved about since the store's mark, and the claims to read them from,
+    /// or None where the whole must be read: a store that does not hold which claim is about
+    /// what, a statement, a match or a source's shape that changed, a source more or less, a
+    /// source that started again, or so much moved that reading everything is the shorter way.
+    fn moved(&self, store: &crate::thingstore::ThingStore) -> Option<Piecemeal> {
+        if store.meta("refreshed").is_none() || store.meta("claims").as_deref() != Some("1") || store.meta("words").as_deref() != Some("1") {
+            return None;
+        }
+        if store.meta("stated")? != self.stated() {
+            return None;
+        }
+        let shapes: BTreeMap<String, String> = serde_json::from_str(&store.meta("shapes")?).ok()?;
+        let marks = parse_marks(&store.meta("mark")?);
+        if marks.len() != self.members.len() || !self.missing.is_empty() {
+            return None;
+        }
+        let keys = self.decl.keys();
+        let mut moved: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut things = BTreeSet::new();
+        let mut count = 0usize;
+        for m in &self.members {
+            if shapes.get(m.name()) != Some(&shape(m)) {
+                return None;
+            }
+            let was = *marks.get(m.name())?;
+            let is = m.member.mark();
+            if is == was {
+                continue;
+            }
+            if is < was {
+                return None;
+            }
+            let said = m.member.changes(was, PIECEMEAL);
+            let changed = said["changed"].as_array()?;
+            let removed = said["removed"].as_array()?;
+            if changed.len() >= PIECEMEAL || removed.len() >= PIECEMEAL {
+                return None;
+            }
+            count += changed.len() + removed.len();
+            let ids: Vec<String> = changed
+                .iter()
+                .chain(removed)
+                .filter_map(|c| c["claim_id"].as_str().map(str::to_string))
+                .collect();
+            // What they were about, and what the changed ones are about now.
+            things.extend(store.about_claims(m.name(), &ids));
+            for c in changed {
+                let ids: Vec<Id> = c["ids"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|i| Some(Id { scheme: i["scheme"].as_str()?.to_string(), value: i["value"].as_str()?.to_string() }))
+                    .collect();
+                things.extend(about(&keys, &ids).into_iter().map(|i| crate::schemes::key(&i.scheme, &i.value)));
+            }
+            moved.insert(m.name().to_string(), ids);
+        }
+        if count >= PIECEMEAL {
+            return None;
+        }
+        // Every claim about those things, the ones that stayed as well as the ones that moved.
+        let mut claims = store.claims_about(&things);
+        for (source, ids) in moved {
+            claims.entry(source).or_default().extend(ids);
+        }
+        Some(Piecemeal { keys: things, claims })
     }
 
     /// Refreshed where a source has moved since the last refresh, and left alone otherwise, so a

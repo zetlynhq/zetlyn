@@ -259,6 +259,29 @@ nav.tabs a.on { color: var(--fg); border-bottom-color: var(--accent); font-weigh
   font-variant-numeric: tabular-nums; }
 .stats span { color: var(--dim); font-size: .82rem; }
 .stats .hot b { color: var(--accent); }
+/* A thing's page as its tracker says it reads: what is said first, how far it has got, by day. */
+dl.thing-summary { display: grid; grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr)); gap: 0; background: var(--panel);
+  border-top: 1px solid var(--line); border-left: 1px solid var(--line); margin: 1.2rem 0 1.6rem; }
+dl.thing-summary > div { background: var(--panel); padding: .7rem .9rem; margin: 0; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+dl.thing-summary .src { color: var(--dim); font-size: .8rem; }
+dl.thing-summary > div.hot { box-shadow: inset 3px 0 0 var(--accent); }
+dl.thing-summary dt { font: 11px/normal ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; text-transform: uppercase;
+  letter-spacing: .08em; color: var(--dim); margin-bottom: .35rem; }
+dl.thing-summary dd { margin: 0; font-size: .92rem; }
+dl.thing-summary dd div + div { margin-top: .15rem; }
+ol.ladder { list-style: none; padding: 0; margin: .4rem 0 1.6rem; border-left: 2px solid var(--line); }
+ol.ladder li { position: relative; padding: .35rem 0 .35rem 1.1rem; color: var(--dim); font-size: .92rem; }
+ol.ladder li::before { content: ""; position: absolute; left: -6px; top: .75rem; width: 10px; height: 10px; border-radius: 50%;
+  background: var(--bg); border: 2px solid var(--line); }
+ol.ladder li.reached { color: var(--fg); }
+ol.ladder li.reached::before { background: var(--fg); border-color: var(--fg); }
+ol.ladder li.here { color: var(--fg); font-weight: 600; }
+ol.ladder li.here::before { background: var(--accent); border-color: var(--accent); }
+ol.ladder li.here span.dim, ol.ladder li.reached span.dim { font-weight: 400; }
+table.vector-diff tr.hot td { background: var(--wash); }
+table.vector-diff tr.hot td:first-child { box-shadow: inset 3px 0 0 var(--accent); padding-left: .7rem; }
+table.timeline td.when { width: 7rem; white-space: nowrap; font-variant-numeric: tabular-nums; }
+details.claims-all { margin: 1.6rem 0; border-top: 1px solid var(--line); padding-top: .8rem; }
 /* The list of things. */
 .list-head { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
 .list-head h2 { margin-bottom: .5rem; }

@@ -32,6 +32,10 @@ pub struct TrackerDecl {
     pub view: Views,
     #[serde(default, skip_serializing_if = "Promise::is_empty")]
     pub promise: Promise,
+    /// How a thing's own page reads before its claims: what is said first, a ladder of how far it
+    /// has got, and which dates make its timeline. Without it, the page is the claims.
+    #[serde(default, skip_serializing_if = "ThingView::is_empty")]
+    pub thing: ThingView,
     /// Set on a tracker that arrived as a package: where from, which version, whose key. A sealed
     /// one is never built here, because it holds no recipe to build it with; a newer package
     /// replaces it.
@@ -314,4 +318,44 @@ impl Relation {
             .collect::<Vec<_>>()
             .join("/")
     }
+}
+
+/// What a thing's page says first, declared by the tracker, since only it knows which of its
+/// properties answer the first question somebody asks of one of its things. Every line still
+/// names the source that said it: this orders what the sources say, and says nothing itself.
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThingView {
+    /// The properties shown first, in this order, each with every source that says it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub summary: Vec<String>,
+    /// Steps a thing climbs, each reached when what it names is said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ladder: Option<Ladder>,
+    /// Date properties that are events, beside the day each source first spoke of the thing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub timeline: Vec<String>,
+}
+
+impl ThingView {
+    pub fn is_empty(&self) -> bool {
+        self.summary.is_empty() && self.ladder.is_none() && self.timeline.is_empty()
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Ladder {
+    pub title: String,
+    pub steps: Vec<Step>,
+}
+
+/// One rung. `when` is terms joined by `and`: `has:<source>`, `<property>=<value>` said by any
+/// source, or `<source>.<property>=<value>`. Empty, the rung every thing stands on.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Step {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub when: String,
 }

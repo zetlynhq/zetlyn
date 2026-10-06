@@ -552,8 +552,99 @@ fn entry_page(scope: &Tracker, scheme: &str, value: &str, operator: bool, said: 
             .or_else(|| parts.iter().find(|p| p.fields.contains_key(name)))
             .and_then(|p| held.get(&(p.member.clone(), p.record_id.clone())))
     };
+    // What the tracker says a page of one of its things reads first. Every value in it is one a
+    // source said, named; the ladder and the timeline only order what the sources said.
+    let view = &d.thing;
+    let shaped = !view.is_empty();
+    let conflicted = |name: &str| judged.as_ref().map(|j| j.iter().any(|c| c == name)).unwrap_or(false);
+    let summary_rows: Vec<(&String, &crate::tracker::PropertyView)> = view.summary.iter().filter_map(|p| entry.fields.get(p).map(|f| (p, f))).collect();
+    let ladder: Vec<(&crate::trackerdecl::Step, Option<Vec<String>>)> = view
+        .ladder
+        .as_ref()
+        .map(|l| l.steps.iter().map(|s| (s, step_holds(&entry, &s.when))).collect())
+        .unwrap_or_default();
+    // The rung with no condition is where a thing stands while nothing above it holds, and only then:
+    // "no public code" is not true of a thing with code.
+    let above = |i: usize| ladder.iter().skip(i + 1).any(|(s, held)| held.is_some() && !s.when.trim().is_empty());
+    let ladder: Vec<(&crate::trackerdecl::Step, Option<Vec<String>>)> = ladder
+        .iter()
+        .enumerate()
+        .map(|(i, (s, held))| (*s, if s.when.trim().is_empty() && above(i) { None } else { held.clone() }))
+        .collect();
+    let top = ladder.iter().rposition(|(_, held)| held.is_some());
+    let timeline = if shaped { timeline_of(scope, &entry, &view.timeline) } else { Vec::new() };
+    // Where two sources score a thing differently and each wrote its vector, the metrics that differ.
+    let explained: Vec<(String, Vec<(String, Vec<(String, String)>)>)> = entry
+        .fields
+        .keys()
+        .filter(|name| shaped && conflicted(name))
+        .filter_map(|name| {
+            let vectors = entry.fields.get(&format!("{name}_vector"))?;
+            let per: Vec<(String, Vec<(String, String)>)> = vectors.by.iter().filter_map(|(m, v)| Some((m.clone(), metrics_of(v.first()?)))).collect();
+            (per.len() > 1).then(|| (name.clone(), per))
+        })
+        .collect();
+    // A source that has no title of its own gives its description as one: shown whole further down.
+    let long = entry.title.chars().count() > 140;
+    let heading: String = if long { format!("{}…", entry.title.chars().take(140).collect::<String>().trim_end()) } else { entry.title.clone() };
+    let values_table = html! {
+    table {
+        thead { tr { th { "Property" } th { "Source" } th { "Said" } th { "Means here" } } }
+        tbody {
+            @for (name, f) in &entry.fields {
+                @for (member, said) in &f.by {
+                    @let mapped = f.means.get(member).cloned().unwrap_or_default();
+                    @for (i, raw) in said.iter().enumerate() {
+                        tr {
+                            td { (label(name)) div.why.mono { (name) }
+                                @if judged.as_ref().map(|j| j.contains(name)).unwrap_or(f.divergent && f.by.len() > 1 && d.normalise_for(name).is_some()) { " " span.chip.on { "conflict" } }
+                                @else if f.divergent && f.by.len() > 1 && d.normalise_for(name).is_none() { " " span.chip { "not compared" } }
+                                @else if f.divergent && f.by.len() > 1 {
+                                    @if f.means.values().flatten().all(|v| v.parse::<f64>().is_ok()) { " " span.chip { "within tolerance" } }
+                                    @else { " " span.chip { "different words" } }
+                                } }
+                            td.dim { @if i == 0 { (title_of(scope, member)) } }
+                            td { (raw)
+                                @if let Some(means) = definition(scope, member, raw) {
+                                    div.why { (means) }
+                                }
+                                @if let Some(c) = saying(member, name, raw) {
+                                    @let (source, answered) = said_by(scope, member);
+                                    (crate::serve::receipt(c, name, &source, answered.as_deref()))
+                                }
+                            }
+                            td {
+                                @let m = mapped.get(i).cloned().unwrap_or_default();
+                                @if f.mapped && m != *raw { (m) } @else { span.dim { "—" } }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    };
+    let claims_by_kind = html! {
+@for (kind, parts) in entry.by_kind() {
+    h2 { (kind) }
+    table { tbody {
+        @for p in parts {
+            tr {
+                td {
+                    a href={(at("/claim/")) (urlencode(&p.member)) "/" (p.record_id)} { (p.title) }
+                    div.why { (p.member) " · " (p.known) }
+                }
+                td {
+                    @for (k, v) in &p.fields { span.chip { (k) " " (v) } " " }
+                }
+                td { @if let Some(u) = &p.url { a href=(u) { "source" } } }
+            }
+        }
+    } }
+}
+    };
     let body = html! {
-        h1 { (entry.title) }
+        h1 { (heading) }
         p.state { span.chip { (scheme) " " (value) } " "
             span.dim { (plural(entry.members().len(), "source")) ", " (plural(entry.parts.len(), "claim")) " · " }
             a href={(at("/thing/")) (urlencode(scheme)) "/" (urlencode(value)) ".atom"} { "Watch" } }
@@ -566,63 +657,71 @@ fn entry_page(scope: &Tracker, scheme: &str, value: &str, operator: bool, said: 
             }
         }
 
-        (relations_section(scope, &key, scheme, value, operator, said))
-        @if !entry.fields.is_empty() {
-            h2 { "What each source says" }
-            table {
-                thead { tr { th { "Property" } th { "Source" } th { "Said" } th { "Means here" } } }
-                tbody {
-                    @for (name, f) in &entry.fields {
-                        @for (member, said) in &f.by {
-                            @let mapped = f.means.get(member).cloned().unwrap_or_default();
-                            @for (i, raw) in said.iter().enumerate() {
-                                tr {
-                                    td { (label(name)) div.why.mono { (name) }
-                                        @if judged.as_ref().map(|j| j.contains(name)).unwrap_or(f.divergent && f.by.len() > 1 && d.normalise_for(name).is_some()) { " " span.chip.on { "conflict" } }
-                                        @else if f.divergent && f.by.len() > 1 && d.normalise_for(name).is_none() { " " span.chip { "not compared" } }
-                                        @else if f.divergent && f.by.len() > 1 {
-                                            @if f.means.values().flatten().all(|v| v.parse::<f64>().is_ok()) { " " span.chip { "within tolerance" } }
-                                            @else { " " span.chip { "different words" } }
-                                        } }
-                                    td.dim { @if i == 0 { (title_of(scope, member)) } }
-                                    td { (raw)
-                                        @if let Some(means) = definition(scope, member, raw) {
-                                            div.why { (means) }
-                                        }
-                                        @if let Some(c) = saying(member, name, raw) {
-                                            @let (source, answered) = said_by(scope, member);
-                                            (crate::serve::receipt(c, name, &source, answered.as_deref()))
-                                        }
-                                    }
-                                    td {
-                                        @let m = mapped.get(i).cloned().unwrap_or_default();
-                                        @if f.mapped && m != *raw { (m) } @else { span.dim { "—" } }
-                                    }
+        @if shaped {
+            @if !summary_rows.is_empty() {
+                dl.thing-summary {
+                    @for (name, f) in &summary_rows {
+                        div.(if conflicted(name) { "hot" } else { "" }) {
+                            dt { (label(name)) @if conflicted(name) { " " span.chip.on { "they disagree" } } }
+                            dd { @for (member, said) in &f.by {
+                                div { strong { (said.join(", ")) } " " span.src { (title_of(scope, member)) } }
+                            } }
+                        }
+                    }
+                }
+            }
+            @if let Some(l) = &view.ladder {
+                h2 { (l.title) }
+                ol.ladder {
+                    @for (i, (step, held)) in ladder.iter().enumerate() {
+                        li.(if Some(i) == top { "here" } else if held.is_some() { "reached" } else { "" }) {
+                            span.rung { (step.name) }
+                            @if let Some(who) = held {
+                                @for m in who {
+                                    span.dim { " · " (title_of(scope, m)) @if let Some((day, _)) = first_said(&entry, m) { " " (day) } }
                                 }
                             }
                         }
                     }
                 }
             }
+            @for (name, per) in &explained {
+                h2 { "Why the " (label(name)) " differs" }
+                @let keys: Vec<String> = per.first().map(|(_, ms)| ms.iter().map(|(k, _)| k.clone()).collect()).unwrap_or_default();
+                table.vector-diff {
+                    thead { tr { th { "Metric" } @for (m, _) in per { th { (title_of(scope, m)) } } } }
+                    tbody { @for k in &keys {
+                        @let vals: Vec<String> = per.iter().map(|(_, ms)| ms.iter().find(|(mk, _)| mk == k).map(|(_, v)| v.clone()).unwrap_or_default()).collect();
+                        @let differs = vals.windows(2).any(|w| w[0] != w[1]);
+                        tr.(if differs { "hot" } else { "" }) {
+                            td { (metric_words(k, "").0) span.dim { " " (k) } }
+                            @for v in &vals { td { (metric_words(k, v).1) span.dim { " " (v) } } }
+                        }
+                    } }
+                }
+                p.dim { "Each source scores the same vulnerability from what it judges the attack to need. The rows marked are where they judge it differently." }
+            }
+            @if !timeline.is_empty() {
+                h2 { "Timeline" }
+                table.timeline { tbody { @for (day, who, what) in &timeline { tr { td.when { (day) } td { (what) } td.dim { (who) } } } } }
+            }
+            @if long { p.dim { (entry.title) } }
         }
 
-        @for (kind, parts) in entry.by_kind() {
-            h2 { (kind) }
-            table { tbody {
-                @for p in parts {
-                    tr {
-                        td {
-                            a href={(at("/claim/")) (urlencode(&p.member)) "/" (p.record_id)} { (p.title) }
-                            div.why { (p.member) " · " (p.known) }
-                        }
-                        td {
-                            @for (k, v) in &p.fields { span.chip { (k) " " (v) } " " }
-                        }
-                        td { @if let Some(u) = &p.url { a href=(u) { "source" } } }
-                    }
-                }
-            } }
+        (relations_section(scope, &key, scheme, value, operator, said))
+        @if shaped && !entry.fields.is_empty() {
+            details.claims-all {
+                summary { "Every value, with what each source said and its receipt" }
+                (values_table)
+            }
         }
+        @if !shaped && !entry.fields.is_empty() {
+            h2 { "What each source says" }
+            (values_table)
+        }
+
+        @if shaped { details.claims-all { summary { "Every claim, by kind" } (claims_by_kind) } }
+        @if !shaped { (claims_by_kind) }
     };
     Some(shell(&entry.title, body))
 }
@@ -3408,5 +3507,175 @@ mod tests {
         assert_eq!(open(&org), "https://acme.example.org", "its own, where it names one");
         let _ = std::fs::remove_dir_all(&hosting);
         let _ = std::fs::remove_dir_all(&made);
+    }
+}
+
+/// Whether a source's name is what a term names: `zetlyn/cve-kev`, or `cve-kev` for short.
+fn names_member(member: &str, said: &str) -> bool {
+    member == said || member.rsplit('/').next() == Some(said)
+}
+
+/// The sources that make a ladder's step true of this thing, or None where it is not. Terms are
+/// joined by `and`: `has:<source>`, `<property>=<value>`, `<source>.<property>=<value>`. The
+/// empty step is every thing's, and nobody had to say it.
+fn step_holds(entry: &crate::tracker::Thing, when: &str) -> Option<Vec<String>> {
+    let mut who: Vec<String> = Vec::new();
+    for term in when.split(" and ").map(str::trim).filter(|t| !t.is_empty()) {
+        if let Some(source) = term.strip_prefix("has:") {
+            let found: Vec<String> = entry.members().into_iter().filter(|m| names_member(m, source)).map(str::to_string).collect();
+            if found.is_empty() {
+                return None;
+            }
+            who.extend(found);
+            continue;
+        }
+        let (lhs, value) = term.split_once('=')?;
+        let (source, property) = match lhs.trim().rsplit_once('.') {
+            Some((s, p)) => (Some(s), p),
+            None => (None, lhs.trim()),
+        };
+        let field = entry.fields.get(property)?;
+        let value = value.trim().to_lowercase();
+        let found: Vec<String> = field
+            .by
+            .iter()
+            .filter(|(m, _)| source.map_or(true, |s| names_member(m, s)))
+            .filter(|(m, said)| {
+                said.iter().chain(field.means.get(*m).into_iter().flatten()).any(|v| v.to_lowercase() == value)
+            })
+            .map(|(m, _)| m.clone())
+            .collect();
+        if found.is_empty() {
+            return None;
+        }
+        who.extend(found);
+    }
+    who.sort();
+    who.dedup();
+    Some(who)
+}
+
+/// The day a source first spoke of this thing, and of which of its claims.
+fn first_said(entry: &crate::tracker::Thing, member: &str) -> Option<(String, String)> {
+    entry
+        .parts
+        .iter()
+        .filter(|p| p.member == member && !p.known.is_empty())
+        .min_by(|a, b| a.known.cmp(&b.known))
+        .map(|p| (p.known.get(..10).unwrap_or(&p.known).to_string(), p.title.clone()))
+}
+
+/// What happened to a thing, by day: when each source first spoke of it, and every date a
+/// declared property says, each with whose it is. Oldest first.
+fn timeline_of(scope: &Tracker, entry: &crate::tracker::Thing, dated: &[String]) -> Vec<(String, String, String)> {
+    let mut out: Vec<(String, String, String)> = Vec::new();
+    for m in entry.members() {
+        if let Some((day, title)) = first_said(entry, m) {
+            out.push((day, title_of(scope, m), format!("first spoke of it: {title}")));
+        }
+    }
+    for property in dated {
+        let Some(f) = entry.fields.get(property) else { continue };
+        for (m, said) in &f.by {
+            for v in said {
+                let day = v.get(..10).unwrap_or(v);
+                if day.len() == 10 && day.as_bytes()[4] == b'-' && day.as_bytes()[7] == b'-' {
+                    out.push((day.to_string(), title_of(scope, m), label(property)));
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// A CVSS vector as its metrics, `AV` to `N`, in the order the vector writes them.
+fn metrics_of(vector: &str) -> Vec<(String, String)> {
+    let body = vector.split_once('/').filter(|(v, _)| v.starts_with("CVSS:")).map(|(_, rest)| rest).unwrap_or(vector);
+    body.split('/').filter_map(|m| m.split_once(':')).map(|(k, v)| (k.to_string(), v.to_string())).collect()
+}
+
+/// A CVSS metric and its value in words, as the specification names them.
+fn metric_words(metric: &str, value: &str) -> (String, String) {
+    let name = match metric {
+        "AV" => "Attack vector",
+        "AC" => "Attack complexity",
+        "AT" => "Attack requirements",
+        "PR" => "Privileges required",
+        "UI" => "User interaction",
+        "S" => "Scope",
+        "C" | "VC" => "Confidentiality",
+        "I" | "VI" => "Integrity",
+        "A" | "VA" => "Availability",
+        "SC" => "Subsequent confidentiality",
+        "SI" => "Subsequent integrity",
+        "SA" => "Subsequent availability",
+        other => other,
+    };
+    let word = match (metric, value) {
+        ("AV", "N") => "network",
+        ("AV", "A") => "adjacent",
+        ("AV", "L") => "local",
+        ("AV", "P") => "physical",
+        ("UI", "N") | ("PR", "N") | ("AT", "N") => "none",
+        ("UI", "R") => "required",
+        ("UI", "P") => "passive",
+        ("UI", "A") => "active",
+        ("S", "U") => "unchanged",
+        ("S", "C") => "changed",
+        ("AT", "P") => "present",
+        (_, "L") => "low",
+        (_, "H") => "high",
+        (_, "N") => "none",
+        (_, v) => v,
+    };
+    (name.to_string(), word.to_string())
+}
+
+#[cfg(test)]
+mod ladder_tests {
+    use super::*;
+
+    fn thing(members: &[&str], fields: &[(&str, &str, &str)]) -> crate::tracker::Thing {
+        let parts = members
+            .iter()
+            .map(|m| crate::tracker::ClaimRef {
+                member: m.to_string(),
+                priority: 0,
+                kind: "vulnerability".into(),
+                record_id: format!("{m}-1"),
+                title: format!("{m} says"),
+                url: None,
+                known: "2021-12-10".into(),
+                fields: BTreeMap::new(),
+            })
+            .collect();
+        let mut by_name: BTreeMap<String, crate::tracker::PropertyView> = BTreeMap::new();
+        for (member, name, value) in fields {
+            let f = by_name.entry(name.to_string()).or_insert_with(|| crate::tracker::PropertyView { by: BTreeMap::new(), means: BTreeMap::new(), divergent: false, mapped: false });
+            f.by.entry(member.to_string()).or_default().push(value.to_string());
+        }
+        crate::tracker::Thing { key: None, rank: 0, title: "t".into(), parts, fields: by_name, why: Vec::new() }
+    }
+
+    #[test]
+    fn a_step_holds_where_a_source_says_what_it_names_and_names_who_said_it() {
+        let t = thing(&["zetlyn/cve-kev", "zetlyn/cve-exploitdb"], &[("zetlyn/cve-kev", "exploited", "yes"), ("zetlyn/cve-exploitdb", "verified", "false")]);
+        assert_eq!(step_holds(&t, ""), Some(vec![]), "the bottom rung needs nobody");
+        assert_eq!(step_holds(&t, "has:cve-exploitdb"), Some(vec!["zetlyn/cve-exploitdb".to_string()]), "a source by its short name");
+        assert_eq!(step_holds(&t, "has:cve-metasploit"), None);
+        assert_eq!(step_holds(&t, "exploited=Yes"), Some(vec!["zetlyn/cve-kev".to_string()]), "case aside");
+        assert_eq!(step_holds(&t, "cve-exploitdb.verified=true"), None, "what the source said, not what is wished");
+        assert_eq!(step_holds(&t, "cve-kev.verified=false"), None, "only that source");
+        assert_eq!(step_holds(&t, "has:cve-kev and exploited=yes"), Some(vec!["zetlyn/cve-kev".to_string()]));
+        assert_eq!(step_holds(&t, "has:cve-kev and has:cve-metasploit"), None, "every term");
+    }
+
+    #[test]
+    fn a_vector_is_its_metrics_and_each_metric_has_words() {
+        assert_eq!(metrics_of("CVSS:3.1/AV:N/UI:R")[1], ("UI".to_string(), "R".to_string()));
+        assert_eq!(metric_words("UI", "R"), ("User interaction".to_string(), "required".to_string()));
+        assert_eq!(metric_words("S", "C").1, "changed");
     }
 }

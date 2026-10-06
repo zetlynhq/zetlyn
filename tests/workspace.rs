@@ -593,7 +593,7 @@ fn a_question_about_things_is_answered_or_refused_by_name() {
     let ws = Workspace::new("questions");
     ws.z(&["tracker", "refresh", &ws.scope()]);
     let ask = |q: &str| -> Vec<String> {
-        ws.z(&["tracker", "things", &ws.scope(), q]).lines().map(str::to_string).collect()
+        ws.z(&["tracker", "things", &ws.scope(), q]).lines().map(|l| l.split('\t').next().unwrap_or("").to_string()).collect()
     };
     assert_eq!(ask("conflict:severity"), ["cve:cve-2026-0002"]);
     assert_eq!(ask("has:kev"), ["cve:cve-2026-0001", "cve:cve-2026-0004"]);
@@ -660,7 +660,7 @@ fn a_claim_about_two_things_is_part_of_both() {
     let with_code: Vec<String> = ws
         .z(&["tracker", "things", &ws.scope(), "has:exploits"])
         .lines()
-        .map(str::to_string)
+        .map(|l| l.split('\t').next().unwrap_or("").to_string())
         .collect();
     assert_eq!(
         with_code,
@@ -783,7 +783,7 @@ fn a_relation_is_what_a_claim_states_or_a_person_signs() {
     let text = std::fs::read_to_string(&file).unwrap();
     std::fs::write(&file, format!("{text}relations:\n- name: listed_as\n  to: edb\n")).unwrap();
     ws.z(&["tracker", "refresh", &ws.scope()]);
-    let ask = |q: &str| -> Vec<String> { ws.z(&["tracker", "things", &ws.scope(), q]).lines().map(str::to_string).collect() };
+    let ask = |q: &str| -> Vec<String> { ws.z(&["tracker", "things", &ws.scope(), q]).lines().map(|l| l.split('\t').next().unwrap_or("").to_string()).collect() };
     assert_eq!(ask("listed_as:*"), ["cve:cve-2026-0001", "cve:cve-2026-0002", "cve:cve-2026-0003"]);
     assert_eq!(ask("listed_as:102"), ["cve:cve-2026-0003"]);
 

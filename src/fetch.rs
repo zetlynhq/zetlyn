@@ -48,6 +48,37 @@ pub fn resolve(raw: &str) -> Result<Option<String>, String> {
     out.push_str(rest);
     Ok(Some(out))
 }
+/// The values `${NAME}` in `raw` stands for here, each with the words it was written as, so what
+/// is kept about a fetch can say `apikey=${KEY}` and never the key. A receipt travels with its
+/// claim to a hub and to every subscriber; a key in it is a key published.
+pub fn secrets(raw: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut rest = raw;
+    while let Some(at) = rest.find("${") {
+        let Some(end) = rest[at..].find('}') else { break };
+        let name = rest[at + 2..at + end].trim_end_matches('?');
+        if let Ok(value) = std::env::var(name) {
+            // A value this short is more likely a word of the address than a secret.
+            if value.len() >= 4 {
+                out.push((value, format!("${{{name}}}")));
+            }
+        }
+        rest = &rest[at + end + 1..];
+    }
+    // The longest first, so a value inside another is not half replaced.
+    out.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    out
+}
+
+/// `s` with every secret in it written as the variable it came from.
+pub fn redact(s: &str, secrets: &[(String, String)]) -> String {
+    let mut out = s.to_string();
+    for (value, written) in secrets {
+        out = out.replace(value.as_str(), written);
+    }
+    out
+}
+
 const BODY_LIMIT: u64 = 128 * 1024 * 1024;
 
 pub struct Fetcher {
@@ -703,4 +734,21 @@ pub fn unchanged(url: &str, agent: &str, held: Option<&str>) -> Result<Option<St
         return Ok(Some(String::new()));
     }
     Ok(Some(validators_of(etag.as_deref(), modified.as_deref())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_key_in_an_address_is_kept_as_the_variable_it_came_from() {
+        std::env::set_var("ZETLYN_TEST_KEY_A", "s3cr3t-0000-key");
+        std::env::set_var("ZETLYN_TEST_SHORT", "de");
+        let raw = "https://example.org/list?lang=${ZETLYN_TEST_SHORT}&apikey=${ZETLYN_TEST_KEY_A}&t=${ZETLYN_TEST_UNSET?}";
+        let s = secrets(raw);
+        assert_eq!(s, vec![("s3cr3t-0000-key".to_string(), "${ZETLYN_TEST_KEY_A}".to_string())]);
+        let resolved = "https://example.org/list?lang=de&apikey=s3cr3t-0000-key";
+        assert_eq!(redact(resolved, &s), "https://example.org/list?lang=de&apikey=${ZETLYN_TEST_KEY_A}");
+        assert_eq!(redact("https://example.org/list?apikey=s3cr3t-0000-key: http status: 403", &s), "https://example.org/list?apikey=${ZETLYN_TEST_KEY_A}: http status: 403");
+    }
 }

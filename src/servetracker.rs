@@ -3004,13 +3004,20 @@ fn propose_page(
                                 input.wide type="text" inputmode="decimal" name={"f." (f.name)} value=(get(&format!("f.{}", f.name))) required[f.identifies];
                             } @else if f.kind == crate::sourcedecl::PropertyType::Date {
                                 input.wide type="date" name={"f." (f.name)} value=(get(&format!("f.{}", f.name))) required[f.identifies];
+                            } @else if f.kind == crate::sourcedecl::PropertyType::Bool {
+                                @let said = get(&format!("f.{}", f.name)).to_lowercase();
+                                select name={"f." (f.name)} required[f.identifies] {
+                                    option value="" { "" }
+                                    option value="yes" selected[matches!(said.as_str(), "yes" | "true" | "ja")] { "yes" }
+                                    option value="no" selected[matches!(said.as_str(), "no" | "false" | "nein")] { "no" }
+                                }
                             } @else {
                                 input.wide type="text" name={"f." (f.name)} value=(get(&format!("f.{}", f.name))) required[f.identifies];
                             }
                         } }
                     }
                     h2 { "Where you read it" }
-                    p { label { "Address *" br; input.wide type="url" name="read_from" placeholder="https://…" value=(get("read_from")) required; } }
+                    p { label { "The page it was read on *" br; input.wide type="url" name="read_from" placeholder="https://…" value=(get("read_from")) required; } }
                     p { label { "On *" br; input type="date" name="read_at" value=(if get("read_at").is_empty() { today.clone() } else { get("read_at") }) required; } }
                     p { label { input type="radio" name="attest" value="read" checked[get("attest") != "relayed"]; " I read it there myself" } }
                     p { label { input type="radio" name="attest" value="relayed" checked[get("attest") == "relayed"]; " Somebody who read it passed it on, and allows it (name them below)" } }

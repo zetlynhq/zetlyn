@@ -30,6 +30,10 @@ pub struct WatchDecl {
     pub query: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deliver: Vec<Deliver>,
+    /// Words, any of which a thing's title must hold for what happens to it to be told: a
+    /// query asks what a thing is, and a title is what it says. Case does not count.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub words: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -167,6 +171,17 @@ impl Watch {
             } else {
                 (fresh, Vec::new())
             };
+            let words: Vec<String> = self.decl.words.iter().map(|w| w.to_lowercase()).filter(|w| !w.is_empty()).collect();
+            let kept: Vec<J> = if words.is_empty() {
+                kept
+            } else {
+                kept.into_iter()
+                    .filter(|s| {
+                        let title = s["title"].as_str().unwrap_or("").to_lowercase();
+                        words.iter().any(|w| title.contains(w.as_str()))
+                    })
+                    .collect()
+            };
             return Ok((
                 json!({ "watch": self.decl.name, "tracker": name, "since": since,
                         "signals": J::Array(kept), "members": members }),
@@ -288,7 +303,7 @@ impl Watch {
         Ok(done)
     }
 
-    fn remember(&self, report: &J, mark: &str, entries: &[J]) -> Result<(), String> {
+    pub fn remember(&self, report: &J, mark: &str, entries: &[J]) -> Result<(), String> {
         let mut state = self.state();
         state.mark = mark.to_string();
         state.delivered.extend(entries.iter().cloned());

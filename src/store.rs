@@ -1094,6 +1094,28 @@ impl Store {
         Some(claim)
     }
 
+    /// The claims a thing's key names, `isbn:9780441172719` as a tracker writes it, however this
+    /// source spells the value: `978-0-441-17271-9` is the same book.
+    pub fn by_key(&self, key: &str) -> Vec<String> {
+        let Some((written, value)) = key.split_once(':') else {
+            return Vec::new();
+        };
+        let scheme = written.to_lowercase();
+        let scheme = scheme.as_str();
+        let wanted = crate::schemes::key(scheme, value);
+        let Ok(mut stmt) = self.db.prepare("select record_id, value from ident where scheme = ?1") else {
+            return Vec::new();
+        };
+        stmt.query_map(rusqlite::params![scheme], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map(|rows| {
+                rows.flatten()
+                    .filter(|(_, v)| crate::schemes::key(scheme, v) == wanted)
+                    .map(|(id, _)| id)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn by_identifier(&self, value: &str) -> Vec<String> {
         let Ok(mut stmt) = self
             .db

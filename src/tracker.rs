@@ -1555,7 +1555,9 @@ impl Tracker {
                 .collect();
             match carrying.len() {
                 0 => wrong.push(format!("the identifier {key} is carried by no source")),
-                1 => wrong.push(format!(
+                // A tracker of one source has nothing to join yet: the pages of a list are what it is
+                // for, and saying it is untrue would stop every CI it is checked in.
+                1 if self.members.len() > 1 => wrong.push(format!(
                     "the join key {key} is carried only by {}, so it joins nothing",
                     carrying[0]
                 )),

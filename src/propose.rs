@@ -294,6 +294,12 @@ pub fn row_from(fields: &[Field], said: &BTreeMap<String, String>) -> Result<ser
                     serde_json::Number::from_f64(n).map(J::Number).ok_or_else(|| format!("`{}`: {v} is not a number", f.name))?
                 }
             }
+            // A yes or a no, as a form's choice or a person types it.
+            PropertyType::Bool => match v.to_lowercase().as_str() {
+                "yes" | "true" | "ja" | "1" => J::Bool(true),
+                "no" | "false" | "nein" | "0" => J::Bool(false),
+                _ => return Err(format!("`{}`: {v} is neither yes nor no", f.name)),
+            },
             _ => J::String(v.to_string()),
         };
         row.insert(f.name.clone(), value);

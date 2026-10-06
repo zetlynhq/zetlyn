@@ -37,9 +37,24 @@ pub(crate) fn walk(value: &J, path: &str) -> Vec<J> {
         };
     }
     for raw in path.split('.') {
-        let (key, explode) = match raw.strip_suffix("[]") {
-            Some(k) => (k, true),
-            None => (raw, false),
+        // `a[]` is every element of a list; `a[type=Primary]` only those whose `type` is that,
+        // which is how NVD's own score is told from a score somebody else gave the same CVE.
+        let (key, explode, only) = match raw.strip_suffix(']').and_then(|r| r.split_once('[')) {
+            Some((k, "")) => (k, true, None),
+            Some((k, f)) => match f.split_once('=') {
+                Some((fk, fv)) => (k, true, Some((fk, fv))),
+                None => (raw, false, None),
+            },
+            None => (raw, false, None),
+        };
+        let keep = |e: &J| match only {
+            None => true,
+            Some((fk, fv)) => match e.get(fk) {
+                Some(J::String(s)) => s == fv,
+                Some(J::Number(n)) => n.to_string() == fv,
+                Some(J::Bool(b)) => b.to_string() == fv,
+                _ => false,
+            },
         };
         let mut next = Vec::new();
         for v in &here {
@@ -52,7 +67,7 @@ pub(crate) fn walk(value: &J, path: &str) -> Vec<J> {
                 }
             };
             match picked {
-                Some(J::Array(a)) if explode => next.extend(a),
+                Some(J::Array(a)) if explode => next.extend(a.into_iter().filter(|e| keep(e))),
                 Some(other) => next.push(other),
                 None => {}
             }
@@ -120,6 +135,17 @@ const FILE_WORDS: [&str; 8] = [
 
 /// Every value an expression yields. Empty where the source has none.
 pub fn eval(expr: &str, row: &Row) -> Vec<J> {
+    // `a || b`: what `a` says, and `b` only where `a` says nothing. A pattern may hold `||`
+    // itself, so text: is never split.
+    if !expr.starts_with("text:") && expr.contains(" || ") {
+        for alt in expr.split(" || ") {
+            let got = eval(alt.trim(), row);
+            if !got.is_empty() {
+                return got;
+            }
+        }
+        return Vec::new();
+    }
     let (prefix, rest) = match expr.split_once(':') {
         // `field:` is the default, and a bare string with no prefix is one.
         Some((p, r)) if matches!(p, "field" | "file" | "meta" | "text" | "const") => (p, r),
@@ -473,5 +499,29 @@ pub fn fields_named(pred: &Pred, out: &mut Vec<String>) {
             fields_named(b, out);
         }
         Pred::Cmp { left, .. } => out.push(left.clone()),
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    fn row(value: J) -> Row<'static> {
+        Row { value, meta: BTreeMap::new(), file: None, text: String::new(), root: Path::new(".") }
+    }
+
+    #[test]
+    fn a_list_is_narrowed_by_a_field_and_an_expression_falls_back_only_on_nothing() {
+        let both = row(serde_json::json!({"m": [
+            {"type": "Secondary", "s": 9.8},
+            {"type": "Primary", "s": 5.5}
+        ]}));
+        assert_eq!(eval("field:m[type=Primary].s", &both), vec![serde_json::json!(5.5)]);
+        assert_eq!(eval("field:m[].s", &both).len(), 2);
+        let pick = "field:m[type=Primary].s || field:m[].s";
+        assert_eq!(eval(pick, &both), vec![serde_json::json!(5.5)]);
+        let only_secondary = row(serde_json::json!({"m": [{"type": "Secondary", "s": 9.8}]}));
+        assert_eq!(eval(pick, &only_secondary), vec![serde_json::json!(9.8)]);
+        assert!(eval(pick, &row(serde_json::json!({}))).is_empty());
     }
 }

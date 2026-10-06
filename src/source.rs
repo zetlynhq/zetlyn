@@ -71,6 +71,18 @@ impl Source {
         if let crate::sourcedecl::Fetch::Package { tracker, .. } = &self.decl.source {
             return Err(format!("it came in the package {tracker}. `zetlyn tracker pull` takes a newer version"));
         }
+        // A claim is held under the name its identifier gives it. Named another way now, every
+        // claim held is under a name no update gives any more, so this update reads from the
+        // start and sweeps, rather than keeping each claim beside its twin.
+        let naming_now = serde_json::to_string(&self.decl.identified_by).unwrap_or_default();
+        let renamed = self.store.meta("identified_by").is_some_and(|was| was != naming_now);
+        if renamed {
+            eprintln!(
+                "{}: what names a claim changed, so this update reads from the start and removes the claims held under the old names",
+                self.decl.name
+            );
+        }
+        let from_start = from_start || renamed;
         let reread = reread || from_start;
         // Where the source is one address and says it has not changed, there is nothing to read.
         // An hourly cadence against a file that changes twice a week is mostly this.
@@ -199,6 +211,7 @@ impl Source {
             if let Some(h) = &high {
                 self.store.set_meta("mark", h)?;
             }
+            self.store.set_meta("identified_by", &naming_now)?;
         }
         self.store
             .db
@@ -652,7 +665,11 @@ impl Source {
             }
         }
         if self.store.count() == 0 {
-            wrong.push("holds no claims, so nothing below could be checked".into());
+            // A list people propose to holds nothing until its owner accepts a row, and is not
+            // wrong for it.
+            if !matches!(self.decl.source, crate::sourcedecl::Fetch::Proposals { .. } | crate::sourcedecl::Fetch::Webhook { .. }) {
+                wrong.push("holds no claims, so nothing below could be checked".into());
+            }
             return wrong;
         }
 

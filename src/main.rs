@@ -173,7 +173,7 @@ zetlyn
 
   zetlyn tracker refresh <dir> [--rebuild]
   zetlyn tracker things <dir> <question>
-      conflict:severity and has:kev, nvd.severity=critical, only:nvd, appeared:exploit<7d
+      conflict:severity and has:kev, redhat.severity=critical, nvd.cvss>=9, only:nvd, appeared:exploit<7d
   zetlyn tracker conflicts <dir>
   zetlyn tracker signals <dir> [--since <id>]
       A tracker holds no index. It rewrites the query per source, fans out, merges ranked
@@ -211,7 +211,7 @@ zetlyn
       claims, so a subscriber needs none of the publisher's credentials.
 
   zetlyn run [<workspace>]
-  zetlyn watch [list | check [--deliver]] [<workspace>]
+  zetlyn watch [list | check [--deliver | --from-now] [--watch <name>]] [<workspace>]
       Every source that is due, updated, and every watch replayed. A source without its own
       schedule: every: follows workspace.yaml's update: { every: 1h }, which the app sets under
       Auto-update; without either, it is updated only when asked. Without a workspace named, the
@@ -253,7 +253,7 @@ fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
 
 /// The options that stand alone: every other `--option` takes the argument after it as its value.
 const SWITCHES: &[&str] = &[
-    "--all", "--apply", "--deliver", "--from-start", "--go-on", "--help", "--links", "--no-deliver", "--no-open", "--once",
+    "--all", "--apply", "--deliver", "--from-now", "--from-start", "--go-on", "--help", "--links", "--no-deliver", "--no-open", "--once",
     "--open", "--rebuild", "--reread", "--revoke", "--sealed", "--send", "--withdraw",
 ];
 
@@ -310,8 +310,10 @@ fn run(args: &[String]) -> Result<(), String> {
                 Ok(())
             }
             Some("check") => {
-                let ds = Source::open(&dir_at(args, 2)?)?;
-                let wrong = ds.check();
+                let at = dir_at(args, 2)?;
+                let ds = Source::open(&at)?;
+                let mut wrong = ds.check();
+                wrong.extend(workspace_wrong(&at));
                 for w in &wrong {
                     println!("{}: {w}", ds.decl.name);
                 }
@@ -350,7 +352,10 @@ fn run(args: &[String]) -> Result<(), String> {
                 let dir = PathBuf::from(rest.first().ok_or("which source directory?")?.as_str());
                 let name = rest.get(1).ok_or("which proposal? its file name, as `zetlyn source proposals` lists it")?;
                 let me = identity::read();
-                let by = flag(args, "--by").map(str::to_string).or_else(|| Some(me.name).filter(|n| !n.is_empty())).or_else(identity::key).unwrap_or_default();
+                let by = flag(args, "--by").map(str::to_string).or_else(|| Some(me.name).filter(|n| !n.is_empty())).or_else(identity::key)
+                    // With no key made here yet, the person at the machine, by the name it knows them by.
+                    .or_else(|| std::env::var("USER").ok().filter(|u| !u.is_empty()))
+                    .unwrap_or_default();
                 propose::decide(&dir, name, word == "accept", &by, flag(args, "--why").unwrap_or(""))?;
                 // A reader who proposed from the browser hears what was decided, as from the app.
                 propose::tell_proposer(&workspace_of(&dir), &dir, name, word == "accept", flag(args, "--why").unwrap_or(""));
@@ -393,6 +398,17 @@ fn run(args: &[String]) -> Result<(), String> {
                 };
                 ids = ds.search(&q)?.1.into_iter().map(|h| h.record_id).collect();
             }
+            // As a tracker writes it, `isbn:9780441172719`: the scheme, and the value as the
+            // scheme compares it, which is not always how this source spells it.
+            if ids.is_empty() {
+                ids = ds.store.by_key(wanted);
+            }
+            // Or the bare value of an identifier this source declares, in any spelling of it.
+            if ids.is_empty() && !wanted.contains(':') {
+                for scheme in ds.decl.identified_by.keys().chain(ds.decl.refers_to.keys()) {
+                    ids.extend(ds.store.by_key(&format!("{scheme}:{wanted}")));
+                }
+            }
             let claims = ds.fetch(&ids, true);
             if claims.is_empty() {
                 return Err(format!("{wanted}: no claim here says that"));
@@ -430,7 +446,8 @@ fn run(args: &[String]) -> Result<(), String> {
             Some("check") => {
                 let (dir, datasets) = scope_at(args, 2)?;
                 let scope = tracker::Tracker::open(&dir, &datasets)?;
-                let wrong = scope.check();
+                let mut wrong = scope.check();
+                wrong.extend(workspace_wrong(&dir));
                 for w in &wrong {
                     println!("{}: {w}", scope.decl.name);
                 }
@@ -503,8 +520,12 @@ fn run(args: &[String]) -> Result<(), String> {
                 // A reader that stops reading (`| head`) is an ending, not a failure.
                 use std::io::Write;
                 let mut out = std::io::stdout().lock();
+                // One line a thing: its key, and its title where it has one, tab between, so `cut -f1` is
+                // the keys and `wc -l` the count.
                 for key in store.matching(&q, &cx)? {
-                    if writeln!(out, "{key}").is_err() {
+                    let title = store.named(&key).map(|(t, _, _)| t).filter(|t| !t.is_empty() && *t != key);
+                    let line = match title { Some(t) => format!("{key}\t{t}"), None => key.clone() };
+                    if writeln!(out, "{line}").is_err() {
                         break;
                     }
                 }
@@ -514,11 +535,12 @@ fn run(args: &[String]) -> Result<(), String> {
                 let (dir, _) = scope_at(args, 2)?;
                 let store = thingstore::ThingStore::open(&dir)?;
                 let limit = flag(args, "--limit").and_then(|s| s.parse().ok()).unwrap_or(1000);
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!(store.conflicts(None, limit)))
-                        .unwrap_or_default()
-                );
+                let all = store.conflicts(None, limit);
+                // Cut off is said where it happens, on the side a pipe does not read.
+                if all.len() == limit {
+                    eprintln!("the first {limit}; there may be more. --limit <n> for more");
+                }
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!(all)).unwrap_or_default());
                 Ok(())
             }
             Some("signals") => {
@@ -622,6 +644,26 @@ fn run(args: &[String]) -> Result<(), String> {
             println!("zetlyn {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
+        // `zetlyn help watch`, `zetlyn help source update`: only the entries for that command,
+        // each a usage line and what it does beneath. Nothing that matches is the whole of it.
+        Some("help") if args.len() > 1 => {
+            let asked = format!("  zetlyn {}", args[1..].join(" "));
+            let mut out = String::new();
+            let mut keep = false;
+            for line in USAGE.lines() {
+                if line.starts_with("  zetlyn") {
+                    keep = line.starts_with(&asked);
+                } else if !line.starts_with("      ") {
+                    keep = false;
+                }
+                if keep {
+                    out.push_str(line);
+                    out.push('\n');
+                }
+            }
+            if out.is_empty() { print!("{USAGE}") } else { print!("{out}") }
+            Ok(())
+        }
         _ => {
             print!("{USAGE}");
             Ok(())
@@ -685,7 +727,8 @@ fn dataset_new(args: &[String]) -> Result<(), String> {
         };
         println!("{}\n", dir.join(crate::sourcedecl::FILE).display());
         print!("{proposed}");
-        return Ok(());
+        println!();
+        return preview(&dir);
     }
     let from = Path::new(from);
     let stem = from
@@ -703,9 +746,13 @@ fn dataset_new(args: &[String]) -> Result<(), String> {
     println!();
     print!("{proposed}");
     println!();
+    preview(&dir)
+}
 
-    // Three claims, because a creator who agrees changes nothing and a creator who does not needs
-    // to see why before a run writes anything.
+/// Three claims, because a creator who agrees changes nothing and a creator who does not needs to
+/// see why before a run writes anything.
+fn preview(dir: &Path) -> Result<(), String> {
+    let dir = dir.to_path_buf();
     let ds = Source::open(&dir)?;
     let root = ds.decl.source.root(&dir);
     let mut notes = build::Notes::default();
@@ -736,6 +783,11 @@ fn dataset_new(args: &[String]) -> Result<(), String> {
 fn dataset_run(args: &[String]) -> Result<(), String> {
     let dir = dir_at(args, 2)?;
     let ds = Source::open(&dir)?;
+    // Subscribed: what a newer version is, the hub says. An update here is a pull, rather than a
+    // read that cannot happen and is then recorded as the source failing.
+    if matches!(&ds.decl.source, sourcedecl::Fetch::Hub { .. }) {
+        return dataset_update(args);
+    }
     // Nothing to read, and nothing to record as a read that did not happen.
     if let sourcedecl::Fetch::Package { tracker, .. } = &ds.decl.source {
         return Err(format!("{} came in the package {tracker}. `zetlyn tracker pull` takes a newer version", ds.decl.name));
@@ -797,6 +849,18 @@ fn dataset_run(args: &[String]) -> Result<(), String> {
     if let Some(e) = &r.error {
         println!("  the update did not finish: {e}");
         println!("  nothing was removed, because a partial update has not seen the source");
+    }
+    // A script and a CI read the exit status, not the words: an update that did not take what it
+    // read says so there too.
+    if r.refused.is_some() {
+        return Err(format!("update {} was refused, and the store kept what it had", r.id));
+    }
+    if r.error.is_some() {
+        return Err(format!("update {} is partial", r.id));
+    }
+    // Read nothing and failed at nothing: an inbox nobody has written to yet, which is no fault.
+    if !r.complete {
+        println!("  it read nothing, so it removed nothing");
     }
     Ok(())
 }
@@ -1058,9 +1122,24 @@ fn watch_cmd(args: &[String]) -> Result<(), String> {
         }
         _ => {
             let deliver = args.iter().any(|a| a == "--deliver");
-            for w in &watches {
+            // From now: what a watch would tell of the past is set aside, unsaid, and the next
+            // check tells only what happens after this one. A new watch on a tracker that has been
+            // running would otherwise begin with its whole history.
+            let from_now = args.iter().any(|a| a == "--from-now");
+            let only = flag(args, "--watch");
+            if let Some(name) = only {
+                if !watches.iter().any(|w| w.decl.name == name) {
+                    return Err(format!("no watch called {name} here"));
+                }
+            }
+            for w in watches.iter().filter(|w| only.map_or(true, |n| w.decl.name == n)) {
                 let (report, mark) = w.check(&root)?;
                 let n = report["signals"].as_array().or_else(|| report["things"].as_array()).map(Vec::len).unwrap_or(0);
+                if from_now {
+                    w.remember(&report, &mark, &[])?;
+                    println!("{}: {n} set aside; from now on it tells what is new", w.decl.name);
+                    continue;
+                }
                 println!("{}: {n} to tell since {}", w.decl.name, report["since"]);
                 // Delivered, or at least remembered: a look that told nothing still moves the mark
                 // and keeps what a view held.
@@ -1210,6 +1289,20 @@ fn scope_search(args: &[String]) -> Result<(), String> {
     let scope = tracker::Tracker::open(&dir, &datasets)?;
     let rest = positional(args, 2);
     let terms: Vec<String> = rest.iter().skip(1).map(|s| s.to_string()).collect();
+    // What a thing is (`has:`, `conflict:`, …) is asked of the tracker's things; read here as
+    // words, it would find nothing and say so as if that were the answer.
+    let thing_terms: Vec<&str> = terms
+        .iter()
+        .flat_map(|t| t.split_whitespace())
+        .filter(|w| ["has:", "only:", "conflict:", "appeared:", "changed:"].iter().any(|p| w.trim_start_matches(['(', '!']).starts_with(p)))
+        .collect();
+    if !thing_terms.is_empty() {
+        return Err(format!(
+            "{} is asked of the things: `zetlyn tracker things {} \"…\"`. `tracker search` takes words and name=value",
+            thing_terms.join(" "),
+            dir.display()
+        ));
+    }
     let (text, pred) = expr::parse_query(&terms.join(" "));
     let q = tracker::TrackerQuery {
         text,
@@ -2225,4 +2318,12 @@ mod tests {
         let a = words("watch check --deliver bookshops");
         assert_eq!(super::positional(&a, 2), vec!["bookshops"]);
     }
+}
+
+/// What the workspace's own file says that it cannot be read as: a key it does not take is
+/// otherwise found only when a mail is to be sent, and every check before that passed.
+fn workspace_wrong(dir: &Path) -> Option<String> {
+    let start = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let file = start.ancestors().map(|p| p.join("workspace.yaml")).find(|f| f.exists())?;
+    yaml::read::<account::Site>(&file).err()
 }

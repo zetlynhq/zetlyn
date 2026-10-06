@@ -489,7 +489,19 @@ pub fn each_row(
                 limit: if *limit > 0 { *limit } else { *top },
                 each: decl.records.each.as_deref(),
             };
-            let high = crate::fetch::http_rows(&f, &spec, mark, root, &mut on_row)?;
+            // What is kept about each row says where it was read as the declaration writes it:
+            // `apikey=${KEY}`, never the key, since a receipt is published with its claim.
+            let secrets = crate::fetch::secrets(list);
+            let mut redacted = |mut p: Produced| -> Result<(), String> {
+                if let Some(u) = p.origin.url.as_mut() {
+                    *u = crate::fetch::redact(u, &secrets);
+                }
+                for v in p.row.meta.values_mut() {
+                    *v = crate::fetch::redact(v, &secrets);
+                }
+                on_row(p)
+            };
+            let high = crate::fetch::http_rows(&f, &spec, mark, root, &mut redacted).map_err(|e| crate::fetch::redact(&e, &secrets))?;
             Ok(high)
         }
         Fetch::Webhook { .. } => crate::hook::rows(base, root, "webhook", &mut on_row),

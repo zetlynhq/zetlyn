@@ -496,6 +496,11 @@ pub struct Frame {
     /// In the app's sidebar, what the links under the organisation are: its pages, or what anybody
     /// may read.
     pub side_title: String,
+    /// More of the sidebar beneath its links: a heading and its own links, each marked where the
+    /// reader is by its address.
+    pub side_more: Vec<(String, Vec<(String, String)>)>,
+    /// The address of the page, to mark it in `side_more`.
+    pub side_here: Option<String>,
 }
 
 /// The one navigation every page of Zetlyn carries, the website's, the hub's, the app's and a
@@ -606,6 +611,15 @@ pub fn frame_group(group: Option<(String, String)>) {
 /// The sidebar's heading above its links.
 pub fn frame_side(title: &str) {
     FRAME.with(|f| f.borrow_mut().side_title = title.to_string());
+}
+
+/// Another part of the sidebar, beneath the first: a world's public sources beside its trackers.
+pub fn frame_side_more(more: Vec<(String, Vec<(String, String)>)>, here: Option<String>) {
+    FRAME.with(|f| {
+        let mut f = f.borrow_mut();
+        f.side_more = more;
+        f.side_here = here;
+    });
 }
 
 /// This page is part of `area`, in `org`, whose reader belongs to `orgs` too. In the app the mark
@@ -893,6 +907,14 @@ fn dashboard(title: &str, body: Markup, f: &Frame, crumbs: &[(String, Option<Str
                                     a href=(href) aria-current="page" { (label) }
                                 } @else {
                                     a href=(href) { (label) }
+                                }
+                            }
+                        }
+                        @for (heading, links) in &f.side_more {
+                            p.dash-label { (heading) }
+                            nav.dash-nav {
+                                @for (label, href) in links {
+                                    @if f.side_here.as_deref() == Some(href.as_str()) { a href=(href) aria-current="page" { (label) } } @else { a href=(href) { (label) } }
                                 }
                             }
                         }

@@ -682,11 +682,13 @@ impl App {
             }
             // A source of the world, for anybody where it may be shown; the rest of it is its owners'.
             ["sources", name] | ["sources", name, ""] if !owner && !post => {
-                match public_source_page(&self.root, &self.base, name) {
-                    Some(body) => respond(request, 200, html_kind, &body),
-                    None => redirect(request, &serve::at("/signin")),
+                if shown_source(&self.root, name).is_some() {
+                    self.visitor = true;
+                    Some(request)
+                } else {
+                    redirect(request, &serve::at("/signin"));
+                    None
                 }
-                None
             }
             // What the world is, where it went, all of it at once: its owners', not every editor's.
             ["export.tar.gz"] | ["settings", "moved"] | ["assist"] if owner && (post || parts.len() == 1 && parts[0] == "export.tar.gz") && !self.who.as_deref().is_some_and(|e| h.is_owner(e)) => {
@@ -774,14 +776,30 @@ impl App {
             serve::frame_site("App");
             serve::frame_home(&title, &home, links);
             serve::frame_current(current);
-            // A world on the machine is one of its worlds, as its address says (/worlds/<name>/);
-            // there is no page of them, so the crumb leads nowhere. At a domain of its own it is
-            // the whole site, and nothing is above it.
-            serve::frame_hosted((!self.base.is_empty()).then(|| ("Worlds".to_string(), String::new())), Some(self.who.clone()));
+            // A world is at /<name>/ on the machine as it would be at the root of a domain of its own,
+            // and nothing is above it in either.
+            serve::frame_hosted(None, Some(self.who.clone()));
             serve::frame_area("app", Some(title.clone()), self.orgs_of_who.clone());
             serve::frame_side(if self.visitor { "Public trackers" } else { "" });
+            // Beside them, what anybody may read of this world's sources, each at its own page.
+            let sources: Vec<(String, String)> = if self.visitor {
+                crate::tracker::registry(&self.root.join("sources"))
+                    .into_keys()
+                    .filter_map(|name| {
+                        let short = name.rsplit('/').next().unwrap_or(&name).to_string();
+                        let (ds, _) = shown_source(&self.root, &short)?;
+                        let title = if ds.decl.title.is_empty() { short.clone() } else { ds.decl.title.clone() };
+                        Some((title, format!("{}/sources/{short}/", self.base)))
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let here = format!("/{}/", parts.join("/"));
+            serve::frame_side_more(if sources.is_empty() { Vec::new() } else { vec![("Public sources".to_string(), sources)] }, Some(format!("{}{here}", self.base)));
         } else {
             serve::frame_area("", None, Vec::new());
+            serve::frame_side_more(Vec::new(), None);
         }
         if self.visitor {
             serve::frame_app(None, None);
@@ -796,6 +814,15 @@ impl App {
         // A tracker's pages are under the world's trackers, as the address says (trackers/<name>/).
         serve::frame_group((parts.first().map(String::as_str) == Some("trackers")).then(|| ("Trackers".to_string(), format!("{}/", self.base))));
         serve::frame_section(None, Vec::new());
+        // A source's own page, for a visitor: under the world's sources, which is no page of its own.
+        if self.visitor && parts.first().map(String::as_str) == Some("sources") && parts.len() >= 2 {
+            serve::frame_group(Some(("Sources".to_string(), String::new())));
+            match public_source_page(&self.root, &self.base, &parts[1]) {
+                Some(body) => respond(request, 200, "text/html; charset=utf-8", &body),
+                None => redirect(request, &serve::at("/signin")),
+            }
+            return;
+        }
         if let [first, tracker, ..] = parts.as_slice() {
             if first != "trackers" && first != "job" {
                 let dir = self.trackers().join(tracker);

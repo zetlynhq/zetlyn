@@ -2918,7 +2918,13 @@ fn label(name: &str) -> String {
             }
         }
     }
-    let words = s.replace(['_', '-'], " ");
+    // The initials a field is named by are written as the initials they are: CVSS, not Cvss.
+    let words = s
+        .replace(['_', '-'], " ")
+        .split(' ')
+        .map(|w| if ["cvss", "epss", "cwe", "cwes", "cpe", "cve", "kev", "ssvc", "url", "id", "nvd", "ghsa"].contains(&w) { w.to_uppercase() } else { w.to_string() })
+        .collect::<Vec<_>>()
+        .join(" ");
     let mut c = words.chars();
     match c.next() {
         Some(first) => first.to_uppercase().chain(c).collect(),

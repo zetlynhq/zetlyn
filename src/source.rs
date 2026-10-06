@@ -276,6 +276,66 @@ impl Source {
     pub fn describe(&self) -> J {
         let d = &self.decl;
         let last = self.store.run_report(self.store.last_run());
+        let fields = self.fields_described();
+        json!({
+            "source": d.name,
+            "kind": d.kind,
+            "title": d.title,
+            "about": d.about,
+            "claims": self.store.count(),
+            "state": self.state(),
+            "last_update": last.as_ref().map(|r| json!({
+                "id": r.id, "at": r.started, "finished": r.finished, "complete": r.complete,
+                "added": r.added, "changed": r.changed, "removed": r.removed,
+                "unchanged": r.unchanged,
+            })),
+            "next_update": self.next_run(),
+            "cadence": d.schedule.every,
+            "licence": d.licence,
+
+            "history": d.retention.history,
+            "schemes": J::Array(self.store.schemes().iter()
+                .map(|(s, n)| json!({ "scheme": s, "claims": n })).collect()),
+            "properties": fields,
+            "vocabulary": json!(d.vocabulary),
+            // The whole shape, because a tracker that adopts one reaches it only through here.
+            "views": J::Array(d.view.iter().map(|v| json!({
+                "name": v.name,
+                "title": if v.title.is_empty() { v.name.clone() } else { v.title.clone() },
+                "default": v.default,
+                "group": v.group,
+                "where": v.filter,
+                "columns": v.columns,
+                "facets": v.facets,
+                "sort": v.sort,
+            })).collect()),
+            "search": json!({
+                "text": d.search.text,
+                "compare": d.search.compare,
+                "suggest": d.search.suggest,
+                "examples": d.search.examples,
+            }),
+            "can": self.can(),
+        })
+    }
+
+    /// Every property with its count, its values and its range: a pass over every claim, so it
+    /// is kept in the store beside what it was counted from, and counted again only when a run,
+    /// a claim more or less, or the declared properties say it may have moved. A tracker opens
+    /// its sources every minute it is served.
+    fn fields_described(&self) -> J {
+        let d = &self.decl;
+        let stamp = format!(
+            "{}|{}|{}",
+            self.store.last_run(),
+            self.store.count(),
+            serde_json::to_string(&d.records.fields).unwrap_or_default()
+        );
+        if self.store.meta("described_at").as_deref() == Some(stamp.as_str()) {
+            if let Some(kept) = self.store.meta("described").and_then(|s| serde_json::from_str::<J>(&s).ok()) {
+                return kept;
+            }
+        }
         let fields: Vec<J> = self
             .store
             .fields(d)
@@ -302,46 +362,11 @@ impl Source {
                 o
             })
             .collect();
-        json!({
-            "source": d.name,
-            "kind": d.kind,
-            "title": d.title,
-            "about": d.about,
-            "claims": self.store.count(),
-            "state": self.state(),
-            "last_update": last.as_ref().map(|r| json!({
-                "id": r.id, "at": r.started, "finished": r.finished, "complete": r.complete,
-                "added": r.added, "changed": r.changed, "removed": r.removed,
-                "unchanged": r.unchanged,
-            })),
-            "next_update": self.next_run(),
-            "cadence": d.schedule.every,
-            "licence": d.licence,
-
-            "history": d.retention.history,
-            "schemes": J::Array(self.store.schemes().iter()
-                .map(|(s, n)| json!({ "scheme": s, "claims": n })).collect()),
-            "properties": J::Array(fields),
-            "vocabulary": json!(d.vocabulary),
-            // The whole shape, because a tracker that adopts one reaches it only through here.
-            "views": J::Array(d.view.iter().map(|v| json!({
-                "name": v.name,
-                "title": if v.title.is_empty() { v.name.clone() } else { v.title.clone() },
-                "default": v.default,
-                "group": v.group,
-                "where": v.filter,
-                "columns": v.columns,
-                "facets": v.facets,
-                "sort": v.sort,
-            })).collect()),
-            "search": json!({
-                "text": d.search.text,
-                "compare": d.search.compare,
-                "suggest": d.search.suggest,
-                "examples": d.search.examples,
-            }),
-            "can": self.can(),
-        })
+        let fields = J::Array(fields);
+        // Kept where it may be kept; a store being written by its update is read again next time.
+        let _ = self.store.set_meta("described", &fields.to_string());
+        let _ = self.store.set_meta("described_at", &stamp);
+        fields
     }
 
     pub fn can(&self) -> Vec<&'static str> {

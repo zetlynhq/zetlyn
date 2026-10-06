@@ -185,6 +185,23 @@ its vector (`cvss_vector`), the page says which metrics they judge differently. 
 written by the program: it orders what the sources said, and every value with its receipt is
 beneath.
 
+## Checking what you run
+
+A tracker can check a list of what somebody runs against what its sources say is fixed where:
+an SBOM (CycloneDX or SPDX), the output of `rpm -qa`, package URLs, CPEs or `name==version`.
+Its page says, for each package, which things it is below the fix for and the version with the
+fix, the most urgent first. What is sent is checked and dropped; nothing of it is kept.
+
+```yaml
+inventory:
+  rpm: packages          # Red Hat's fixed packages, openssl-1:3.0.7-27.el9
+  packages: affected     # npm lodash < 4.17.21; fixed in 4.17.21, one per package
+  products: affects      # the relation a CPE is looked up by
+```
+
+A source writes `affected` that way with a template over each element of a list:
+`field:vulnerabilities[].{package.ecosystem} {package.name} {vulnerable_version_range}; fixed in {first_patched_version}`.
+
 ## People as a source
 
 Some things are read by many people and published as data by nobody. A source of

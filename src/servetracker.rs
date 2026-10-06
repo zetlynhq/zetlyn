@@ -1546,6 +1546,9 @@ impl TrackerSite {
                 tabs.push((format!("{}{}", plural.get(..1).unwrap_or("").to_uppercase(), plural.get(1..).unwrap_or("")), at(&format!("/{plural}/"))));
             }
         }
+        if self.scope.decl.inventory.is_some() {
+            tabs.push(("Check yours".to_string(), at("/inventory")));
+        }
         if hub_of(&self.scope, &Site::for_workspace(&self.scope.root)).is_some() {
             tabs.push(("Versions".to_string(), at("/versions")));
         }
@@ -1607,9 +1610,13 @@ impl TrackerSite {
         let post = request.method() == &tiny_http::Method::Post;
         let mut form = String::new();
         if post {
-            let _ = std::io::Read::read_to_string(request.as_reader(), &mut form);
-            // A form sent may change what every page shows; none drawn before it is kept.
-            pages.forget();
+            // At most 16 MB: an SBOM of a large image, sent as a form, and not a disk's worth.
+            let _ = std::io::Read::read_to_string(&mut std::io::Read::take(request.as_reader(), 16 << 20), &mut form);
+            // A form sent may change what every page shows; none drawn before it is kept. A list
+            // checked against the tracker changes nothing.
+            if path != "/inventory" {
+                pages.forget();
+            }
         }
         // Somebody who carries no cookie and no key sees what anybody would, so the page drawn
         // for the last of them is theirs as well. Signing in, out and the account are not.
@@ -2103,6 +2110,11 @@ impl TrackerSite {
                         (page, "text/html; charset=utf-8", None)
                     }
                 }
+            }
+            "/inventory" if scope.decl.inventory.is_some() => {
+                let decl = scope.decl.inventory.clone().unwrap_or_default();
+                let sent = post.then(|| form_field(&form, "list"));
+                (inventory_page(&scope, &decl, sent.as_deref()), "text/html; charset=utf-8", None)
             }
             _ if !parts.is_empty() && relation_at(&scope, &parts[0]).is_some() => {
                 let r = relation_at(&scope, &parts[0]).expect("matched above");
@@ -2929,6 +2941,160 @@ fn related_page(scope: &Tracker, r: &crate::trackerdecl::Relation, target: &str,
         }
     };
     Some(shell(&name, body))
+}
+
+/// The tracker's kind of thing, counted: one vulnerability, two vulnerabilities.
+fn kind_word(scope: &Tracker, n: usize) -> String {
+    // The kind its first source, the primary one, says: what the tracker is about, not what is written about it.
+    let kind = scope.members.first().map(|m| m.kind().to_string()).filter(|k| !k.is_empty()).unwrap_or_else(|| "thing".into());
+    match (n, kind.strip_suffix('y')) {
+        (1, _) => kind,
+        (_, Some(stem)) if !stem.ends_with(['a', 'e', 'o', 'u']) => format!("{stem}ies"),
+        _ => format!("{kind}s"),
+    }
+}
+
+/// What somebody runs, checked against the tracker: a form, and once sent, every thing of the
+/// tracker a package or product of it is affected by, the version with the fix, and who says so.
+/// What was sent is read, answered and dropped; nothing of it is written anywhere.
+fn inventory_page(scope: &Tracker, decl: &crate::trackerdecl::Inventory, sent: Option<&str>) -> String {
+    let list = sent.unwrap_or("");
+    let form = html! {
+        form method="post" action=(at("/inventory")) {
+            p { textarea.wide #inv-list name="list" rows="12" spellcheck="false"
+                placeholder="openssl-libs-3.0.7-27.el9.x86_64\npkg:npm/lodash@4.17.20\ncpe:2.3:a:apache:http_server:2.4.57:*:*:*:*:*:*:*" { (list) } }
+            p.bar {
+                input #inv-file type="file" accept=".json,.txt,.csv,.spdx,.cdx,text/plain,application/json";
+                button type="submit" { "Check" }
+            }
+        }
+        script { (maud::PreEscaped(r#"document.getElementById("inv-file").addEventListener("change",function(e){var f=e.target.files[0];if(f){f.text().then(function(t){document.getElementById("inv-list").value=t;});}});"#)) }
+        p.dim {
+            "A CycloneDX or SPDX SBOM as JSON, the output of " code { "rpm -qa" } ", package URLs ("
+            code { "pkg:npm/lodash@4.17.20" } "), CPEs, " code { "name==version" } " from requirements.txt, or "
+            code { "name version" } " a line. What you send is checked and dropped: nothing of it is kept, here or anywhere."
+        }
+    };
+    let Some(text) = sent.filter(|t| !t.trim().is_empty()) else {
+        let body = html! {
+            h1 { "Check what you run" }
+            @if !decl.about.is_empty() { p.lede { (decl.about) } }
+            (form)
+        };
+        return shell("Check what you run", body);
+    };
+    let read = crate::inventory::read(text);
+    let store = crate::thingstore::ThingStore::open(&scope.dir).ok();
+    let findings = store
+        .as_ref()
+        .map(|s| crate::inventory::Known::of(s, decl).check(s, &read.items))
+        .unwrap_or_default();
+    let keys: Vec<String> = findings.iter().map(|f| f.key.clone()).collect::<BTreeSet<_>>().into_iter().collect();
+    // What each thing is, by the tracker's scaled properties: the worst any source says.
+    let props = scaled(scope);
+    let words: Vec<(String, Vec<String>, BTreeMap<String, BTreeSet<String>>)> = props
+        .iter()
+        .map(|(p, scale)| (p.clone(), scale.clone(), store.as_ref().map(|s| s.words_of(&keys, p)).unwrap_or_default()))
+        .collect();
+    let worst = |key: &str| -> Vec<(String, usize, String, bool)> {
+        words
+            .iter()
+            .filter_map(|(p, scale, w)| {
+                let at = scale.iter().position(|v| w.get(key).is_some_and(|ws| ws.contains(v)))?;
+                Some((p.clone(), at, scale[at].clone(), at == 0))
+            })
+            .collect()
+    };
+    // A yes-or-no property (exploited) orders first, then the others in the summary's order.
+    let urgency = |key: &str| -> Vec<usize> {
+        let w = worst(key);
+        let rank = |p: &str, scale: &[String]| w.iter().find(|(q, ..)| q == p).map(|(_, at, ..)| *at).unwrap_or(scale.len());
+        let mut order: Vec<usize> = props.iter().filter(|(_, s)| s.first().map(String::as_str) == Some("yes")).map(|(p, s)| rank(p, s)).collect();
+        order.extend(props.iter().filter(|(_, s)| s.first().map(String::as_str) != Some("yes")).map(|(p, s)| rank(p, s)));
+        order
+    };
+    let mut sure: Vec<&crate::inventory::Finding> = findings.iter().filter(|f| f.below_fix).collect();
+    let mut unsure: Vec<&crate::inventory::Finding> = findings.iter().filter(|f| !f.below_fix).collect();
+    sure.sort_by_cached_key(|f| (urgency(&f.key), f.item, f.key.clone()));
+    unsure.sort_by_cached_key(|f| (urgency(&f.key), f.item, f.key.clone()));
+    let affected_items = sure.iter().map(|f| f.item).collect::<BTreeSet<_>>().len();
+    let sure_keys: Vec<String> = sure.iter().map(|f| f.key.clone()).collect::<BTreeSet<_>>().into_iter().collect();
+    let counts: Vec<(String, Vec<(String, usize)>)> = words
+        .iter()
+        .map(|(p, scale, _)| {
+            let n = scale
+                .iter()
+                .map(|v| (v.clone(), sure_keys.iter().filter(|k| worst(k).iter().any(|(q, _, w, _)| q == p && w == v)).count()))
+                .filter(|(_, n)| *n > 0)
+                .collect();
+            (p.clone(), n)
+        })
+        .filter(|(_, n): &(String, Vec<(String, usize)>)| !n.is_empty())
+        .collect();
+    let row = |f: &crate::inventory::Finding| -> Markup {
+        let item = &read.items[f.item];
+        let named = store.as_ref().and_then(|s| s.named(&f.key));
+        html! {
+            tr {
+                td { b { (item.label()) } div.why { (item.version()) } }
+                td {
+                    @if let Some((title, scheme, value)) = &named {
+                        a href={(at("/thing/")) (urlencode(scheme)) "/" (urlencode(value))} { (value) }
+                        div.why { (clipped(title, 100)) }
+                    } @else { (f.key) }
+                }
+                td { @for (p, _, w, first) in worst(&f.key) { span.chip.on[first] { (label(&p)) " " (w) } " " } }
+                td { @if f.fixed.is_empty() { span.dim { "—" } } @else { code { (f.fixed) } } }
+                td.dim { (title_of(scope, &f.source)) }
+            }
+        }
+    };
+    let body = html! {
+        h1 { "What you run" }
+        div.meta {
+            span { (plural(read.items.len(), "package")) " read" @if !read.format.is_empty() { " (" (read.format) ")" } }
+            span { (affected_items) " affected" }
+            span { (sure_keys.len()) " " (kind_word(scope, sure_keys.len())) }
+            @if !read.unread.is_empty() { span { (read.unread.len()) " lines not understood" } }
+        }
+        @if !counts.is_empty() {
+            div.thing-summary {
+                @for (p, n) in &counts {
+                    div { div.dim { (label(p)) } div { @for (w, c) in n { span.chip { (w) " " (c) } " " } } }
+                }
+            }
+        }
+        @if sure.is_empty() {
+            p { "Nothing you run is below a fix any source here names." }
+        } @else {
+            h2 { "Below the fix" }
+            p.dim { "The version you run is older than the one each source says fixes it. Most urgent first." }
+            table {
+                thead { tr { th { "Package" } th { "Vulnerability" } th {} th { "Fixed in" } th { "Said by" } } }
+                tbody { @for f in &sure { (row(f)) } }
+            }
+        }
+        @if !unsure.is_empty() {
+            h2 { "Named, not compared" }
+            p.dim { "A source names the product, or you gave no version, so which of its versions are affected is for you to look up on the vulnerability's page." }
+            details {
+                summary { "Show " (unsure.len()) }
+                table {
+                    thead { tr { th { "Package" } th { "Vulnerability" } th {} th { "Fixed in" } th { "Said by" } } }
+                    tbody { @for f in unsure.iter().take(500) { (row(f)) } }
+                }
+            }
+        }
+        @if !read.unread.is_empty() {
+            details {
+                summary { "Lines not understood" }
+                pre { @for l in read.unread.iter().take(50) { (l) "\n" } }
+            }
+        }
+        h2 { "Check again" }
+        (form)
+    };
+    shell("What you run", body)
 }
 
 /// A filter's parts joined by `and` at its top level, which is what a chip can take away without

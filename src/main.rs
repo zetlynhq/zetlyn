@@ -23,6 +23,7 @@ mod hub;
 mod hubpages;
 mod hook;
 mod identity;
+mod inventory;
 mod jwt;
 mod key;
 mod place;

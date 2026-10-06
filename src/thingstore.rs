@@ -1192,6 +1192,30 @@ impl ThingStore {
             .unwrap_or_default()
     }
 
+    /// Every thing's words for one property, per source, as the source wrote them.
+    pub fn said_all(&self, property: &str) -> Vec<(String, String, Vec<String>)> {
+        let Ok(mut stmt) = self.db.prepare("select key, source, raw from said where property = ?1") else {
+            return Vec::new();
+        };
+        stmt.query_map([property], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
+            .map(|rows| rows.flatten().map(|(k, s, raw)| (k, s, serde_json::from_str(&raw).unwrap_or_default())).collect())
+            .unwrap_or_default()
+    }
+
+    /// The things related to one other side, and who says so.
+    pub fn related_to(&self, name: &str, target: &str) -> Vec<(String, String)> {
+        let Ok(mut stmt) = self.db.prepare("select key, sources from related where name = ?1 and target = ?2") else {
+            return Vec::new();
+        };
+        stmt.query_map([name, target], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map(|rows| {
+                rows.flatten()
+                    .map(|(k, s)| (k, serde_json::from_str::<Vec<String>>(&s).unwrap_or_default().join(", ")))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// The sources that relate anything to one other side.
     pub fn relating(&self, name: &str, target: &str) -> BTreeSet<String> {
         let Ok(mut stmt) = self.db.prepare("select sources from related where name = ?1 and target = ?2") else {

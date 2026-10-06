@@ -36,6 +36,10 @@ pub struct TrackerDecl {
     /// has got, and which dates make its timeline. Without it, the page is the claims.
     #[serde(default, skip_serializing_if = "ThingView::is_empty")]
     pub thing: ThingView,
+    /// What a list of what somebody runs is checked against: an SBOM, `rpm -qa`, CPEs. Each
+    /// names a property, or the relation, that says which packages or products a thing is in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inventory: Option<Inventory>,
     /// Set on a tracker that arrived as a package: where from, which version, whose key. A sealed
     /// one is never built here, because it holds no recipe to build it with; a newer package
     /// replaces it.
@@ -358,4 +362,24 @@ pub struct Step {
     pub name: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub when: String,
+}
+
+/// Where a tracker finds what an inventory is checked against.
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Inventory {
+    /// A property holding the packages a fix was shipped in, as RPMs name them:
+    /// `openssl-1:3.0.7-27.el9`. An installed package of that name and stream below it is affected.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub rpm: String,
+    /// A property holding, per package, `<ecosystem> <name> <range>; fixed in <version>`, as
+    /// GitHub's advisories say it: `npm lodash < 4.17.21; fixed in 4.17.21`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub packages: String,
+    /// A relation to products as vendor/product, which a CPE in the inventory is looked up by.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub products: String,
+    /// What the page says first, about where the lists come from.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub about: String,
 }

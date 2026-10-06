@@ -27,6 +27,16 @@ pub struct Row<'a> {
 
 /// Walks `a.b.c`, expanding `a[]` into every element of a list.
 pub(crate) fn walk(value: &J, path: &str) -> Vec<J> {
+    // `a[].{b} {c.d}`: one text per element, its fields put in their places, so what belongs
+    // together in a list stays together: GitHub's package, its range and its fix, per package.
+    if let Some(i) = path.find(".{") {
+        let (head, template) = (&path[..i], &path[i + 1..]);
+        return walk(value, head)
+            .iter()
+            .map(|element| J::String(fill_each(template, element)))
+            .filter(|s| s.as_str().is_some_and(|s| !s.trim().is_empty()))
+            .collect();
+    }
     let mut here = vec![value.clone()];
     if path == "*" {
         // Every value of an object, which is how a file keyed by name hands over its claims.
@@ -104,6 +114,27 @@ pub fn fill(s: &str, row: &Row) -> String {
         };
         let inner = &rest[open + 1..open + close];
         if let Some(v) = eval(inner, row).first() {
+            out.push_str(&as_string(v));
+        }
+        rest = &rest[open + close + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A template over one element of a list: each `{path}` is that field of the element, and
+/// nothing where it has none.
+fn fill_each(template: &str, element: &J) -> String {
+    let mut out = String::new();
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let Some(close) = rest[open..].find('}') else {
+            out.push_str(&rest[open..]);
+            return out;
+        };
+        let inner = &rest[open + 1..open + close];
+        if let Some(v) = walk(element, inner).first() {
             out.push_str(&as_string(v));
         }
         rest = &rest[open + close + 1..];
@@ -523,5 +554,15 @@ mod path_tests {
         let only_secondary = row(serde_json::json!({"m": [{"type": "Secondary", "s": 9.8}]}));
         assert_eq!(eval(pick, &only_secondary), vec![serde_json::json!(9.8)]);
         assert!(eval(pick, &row(serde_json::json!({}))).is_empty());
+    }
+
+    #[test]
+    fn a_template_over_a_list_keeps_each_element_together() {
+        let advisory = row(serde_json::json!({"vulnerabilities": [
+            {"package": {"ecosystem": "npm", "name": "payload"}, "vulnerable_version_range": "< 3.90.0", "first_patched_version": "3.90.0"},
+            {"package": {"ecosystem": "npm", "name": "other"}, "vulnerable_version_range": "<= 1.0", "first_patched_version": null}
+        ]}));
+        let got = eval("field:vulnerabilities[].{package.ecosystem} {package.name} {vulnerable_version_range}; fixed in {first_patched_version}", &advisory);
+        assert_eq!(got, vec![serde_json::json!("npm payload < 3.90.0; fixed in 3.90.0"), serde_json::json!("npm other <= 1.0; fixed in ")]);
     }
 }

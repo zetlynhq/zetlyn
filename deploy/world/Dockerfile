@@ -22,6 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
  && useradd --system --home-dir /world --shell /usr/sbin/nologin zetlyn \
  && mkdir -p /world && chown zetlyn:zetlyn /world
 COPY --from=build /zetlyn /usr/local/bin/zetlyn
+COPY --from=build /src/LICENSE /src/NOTICE /src/THIRD_PARTY_LICENSES /usr/share/doc/zetlyn/
 USER zetlyn
 ENV HOME=/world ZETLYN_HOME=/world/.zetlyn
 VOLUME /world

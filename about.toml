@@ -1,0 +1,17 @@
+# What `cargo about generate about.hbs` may find in the binary, for THIRD_PARTY_LICENSES. A crate
+# under any other licence stops the release until somebody has read it and added it here.
+# Where a crate offers a choice, the first of these it offers is the one taken.
+accepted = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "CDLA-Permissive-2.0",
+]
+# The three a release carries; a crate only another platform builds is not in any of them.
+targets = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-apple-darwin"]
+ignore-build-dependencies = false
+ignore-dev-dependencies = true

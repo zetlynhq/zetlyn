@@ -12,6 +12,16 @@ set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT="$ROOT/dist/release/linux"
 
+# The licences of what the binary is built from travel with it, and the copy in the repository is
+# the one that travels. Regenerated first, so a dependency changed since the last release stops it
+# here rather than shipping a list that no longer says what is inside.
+cd "$ROOT"
+cargo about generate about.hbs -o THIRD_PARTY_LICENSES
+if [ -n "$(git status --porcelain -- THIRD_PARTY_LICENSES)" ]; then
+	echo "THIRD_PARTY_LICENSES changed with the dependencies. Read it, commit it, run this again." >&2
+	exit 1
+fi
+
 CONTEXT=$(mktemp -d)
 trap 'rm -rf "$CONTEXT"' EXIT
 tar -c -C "$ROOT" --exclude target --exclude dist --exclude .git . | tar -x -C "$CONTEXT"
@@ -44,7 +54,7 @@ cargo build --release -q --target aarch64-apple-darwin
 cargo build --release -q --target x86_64-apple-darwin
 R="$ROOT/dist/release"
 pack() {
-	d=$(mktemp -d); cp "$2" "$d/zetlyn"; cp LICENSE "$d/" 2>/dev/null || true
+	d=$(mktemp -d); cp "$2" "$d/zetlyn"; cp LICENSE NOTICE THIRD_PARTY_LICENSES "$d/"
 	# Without macOS's extended attributes, which a Linux tar warns about on every extract.
 	COPYFILE_DISABLE=1 tar --no-xattrs -czf "$R/zetlyn-$1.tar.gz" -C "$d" .; rm -rf "$d"
 }

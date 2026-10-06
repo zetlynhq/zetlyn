@@ -1091,15 +1091,16 @@ impl ThingStore {
                 .map(|(k, _)| k)
                 .collect(),
             Q::Related(name, want) => {
+                // By the index on (name, target): one product is a lookup, a vendor's every product
+                // a range, and neither reads the relation's other targets.
                 let want = want.to_lowercase();
-                self.pairs_of("select key, target from related where name = ?1", &[name])?
-                    .into_iter()
-                    .filter(|(_, target)| match want.strip_suffix('*') {
-                        Some(prefix) => target.starts_with(prefix),
-                        None => *target == want,
-                    })
-                    .map(|(k, _)| k)
-                    .collect()
+                match want.strip_suffix('*') {
+                    Some(prefix) => {
+                        let end = format!("{prefix}\u{10ffff}");
+                        self.keys_of("select key from related where name = ?1 and target >= ?2 and target < ?3", &[name, &prefix, &end])?
+                    }
+                    None => self.keys_of("select key from related where name = ?1 and target = ?2", &[name, &want])?,
+                }
             }
             Q::Cmp { source, property, op, value } => {
                 let mut stmt = self

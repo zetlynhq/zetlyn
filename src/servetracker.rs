@@ -2547,6 +2547,14 @@ fn signal_atom(title: &str, self_url: &str, signals: &[J]) -> String {
 }
 
 /// The things a question holds for, from the tracker's store, and the signals about them.
+/// The keys a question holds for, and nothing else: a page that lists things has no use for the
+/// signals `view_of` reads beside them, twenty thousand of them for every page a crawler asks.
+fn keys_where(scope: &Tracker, store: &crate::thingstore::ThingStore, question: &str) -> Result<Vec<String>, String> {
+    let cx = scope.context();
+    let q = crate::thingquery::parse(question, &cx)?;
+    store.matching(&q, &cx)
+}
+
 fn view_of(scope: &Tracker, question: &str) -> Result<(Vec<String>, Vec<J>), String> {
     let cx = scope.context();
     let q = crate::thingquery::parse(question, &cx)?;
@@ -2795,14 +2803,14 @@ fn related_page(scope: &Tracker, r: &crate::trackerdecl::Relation, target: &str,
     let part = r.part.clone().unwrap_or_default();
     let store = crate::thingstore::ThingStore::open(&scope.dir).ok()?;
     let base = format!("{}:{target}", r.name);
-    let (all, _) = view_of(scope, &base).ok()?;
+    let all = keys_where(scope, &store, &base).ok()?;
     if all.is_empty() {
         return None;
     }
     let p = params(url);
     let filter = p.get("where").cloned().unwrap_or_default();
     let question = if filter.trim().is_empty() { base.clone() } else { format!("{base} and ({filter})") };
-    let mut keys = if filter.trim().is_empty() { all.clone() } else { view_of(scope, &question).map(|(k, _)| k).unwrap_or_default() };
+    let mut keys = if filter.trim().is_empty() { all.clone() } else { keys_where(scope, &store, &question).unwrap_or_default() };
     let values: BTreeMap<String, String> = keys.iter().filter_map(|k| Some((k.clone(), store.named(k)?.2))).collect();
     keys.sort_by(|a, b| natural(values.get(b).map(String::as_str).unwrap_or(b), values.get(a).map(String::as_str).unwrap_or(a)));
     // Over every thing of it, whatever the filter: what each source says, counted once per word.

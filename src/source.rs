@@ -597,7 +597,8 @@ impl Source {
     /// The current mark, to be handed back to `changes` later. A run number, because that is what
     /// this source counts in.
     pub fn mark(&self) -> i64 {
-        self.store.last_run()
+        // The last run that finished: one still writing holds claims nobody can read yet.
+        self.store.last_finished_run()
     }
 }
 

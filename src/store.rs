@@ -221,6 +221,15 @@ impl Store {
             .unwrap_or(0)
     }
 
+    /// The last run that finished. A run's row is written when it starts and its claims only when
+    /// it commits, so a tracker that took a started run as its mark looked at a source in the
+    /// middle of an update, saw none of its claims, and never looked again (2026-10-06).
+    pub fn last_finished_run(&self) -> i64 {
+        self.db
+            .query_row("select coalesce(max(id), 0) from run where finished is not null", [], |r| r.get(0))
+            .unwrap_or(0)
+    }
+
     pub fn count(&self) -> u64 {
         self.db
             .query_row("select count(*) from record", [], |r| r.get(0))
@@ -1625,6 +1634,21 @@ mod tests {
         (Store::open(&dir).unwrap(), dir)
     }
 
+
+    /// A tracker takes a source's mark to know whether to look again. A run that has started and
+    /// not finished is not the mark: its claims are in a transaction nobody else can read yet.
+    #[test]
+    fn a_run_still_writing_is_not_the_mark() {
+        let (s, dir) = store("mark");
+        let none = std::collections::BTreeSet::new();
+        let first = s.begin_run().unwrap();
+        s.finish_run(first, true, 1, 0, 0, 0, &none, &crate::build::Notes::default(), None).unwrap();
+        let second = s.begin_run().unwrap();
+        assert_eq!((s.last_run(), s.last_finished_run()), (second, first));
+        s.finish_run(second, true, 1, 0, 0, 0, &none, &crate::build::Notes::default(), None).unwrap();
+        assert_eq!(s.last_finished_run(), second);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     /// A slice is not the whole, and nine claims need not carry every property twenty thousand do.
     #[test]
     fn a_slice_is_not_held_to_every_property() {

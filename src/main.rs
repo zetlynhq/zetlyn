@@ -240,8 +240,8 @@ zetlyn
       An archive made a world again; saying where it went, or that it did not; being listed.
 
   zetlyn hosting serve <dir> [--no-updates] | run <dir> | org <dir> <name> | member <dir> <org> <email> [--role owner|editor|reader]
-      Many worlds on one machine, each at /<name> or a domain of its own, signed in to once at
-      /app/; with --no-updates, `hosting run` on a timer does the reading.
+      Many worlds on one machine, each at /<name> or a domain of its own, each signed in to at
+      /<name>/signin; with --no-updates, `hosting run` on a timer does the reading.
 ";
 
 fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {

@@ -815,15 +815,7 @@ impl App {
             serve::frame_side(if self.visitor { "Public trackers" } else { "" });
             // Beside them, what anybody may read of this world's sources, each at its own page.
             let sources: Vec<(String, String)> = if self.visitor {
-                crate::tracker::registry(&self.root.join("sources"))
-                    .into_keys()
-                    .filter_map(|name| {
-                        let short = name.rsplit('/').next().unwrap_or(&name).to_string();
-                        let (ds, _) = shown_source(&self.root, &short)?;
-                        let title = if ds.decl.title.is_empty() { short.clone() } else { ds.decl.title.clone() };
-                        Some((title, format!("{}/sources/{short}/", self.base)))
-                    })
-                    .collect()
+                shown_sources(&self.root).into_iter().map(|s| (s.title, format!("{}/sources/{}/", self.base, s.short))).collect()
             } else {
                 Vec::new()
             };
@@ -3528,7 +3520,7 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
     // The app's own frame: its sidebar lists what anybody may read here, and where whoever is
     // signed in belongs.
     serve::frame_site("App");
-    serve::frame_home("App", &serve::at("/"), public_links(dir));
+    serve::frame_home("Account", &serve::at("/"), public_links(dir));
     serve::frame_current(None);
     serve::frame_hosted(None, Some(who.as_ref().map(|a| a.email.clone())));
     serve::frame_area("app", None, who.as_ref().map(|a| orgs_links(dir, &a.email)).unwrap_or_default());
@@ -3991,26 +3983,62 @@ mod tests {
     }
 }
 
-/// A source a world shows anybody, and the public trackers of it that hold it: one that said it may
-/// be shown, in a tracker that is not private.
-fn shown_source(root: &Path, asked: &str) -> Option<(Source, Vec<(String, TrackerDecl)>)> {
-    // By the name it is published under, `cve-redhat` of `zetlyn/cve-redhat`, which is how the hub
-    // and every link say it; or by its folder, `redhat`.
-    let dir = crate::tracker::registry(&root.join("sources"))
-        .into_iter()
-        .find(|(name, _)| name.rsplit('/').next() == Some(asked))
-        .map(|(_, p)| p)
-        .unwrap_or_else(|| root.join("sources").join(asked));
-    let ds = Source::open(&dir).ok()?;
-    if !matches!(ds.decl.licence.republish.as_str(), "yes" | "summary") {
-        return None;
+/// A source a world shows anybody: its short name, its folder, its title, and the public trackers
+/// that hold it, by folder and title.
+#[derive(Clone)]
+struct Shown {
+    short: String,
+    dir: PathBuf,
+    title: String,
+    holding: Vec<(String, String)>,
+}
+
+/// The sources a world shows anybody: one that said it may be shown, in a tracker that is not
+/// private. Every page a visitor sees lists them, so they are read off the declarations alone and
+/// kept a minute; opening each store for each page was seconds a page (2026-10-06).
+fn shown_sources(root: &Path) -> Vec<Shown> {
+    static KEPT: std::sync::OnceLock<Mutex<BTreeMap<PathBuf, (i64, Vec<Shown>)>>> = std::sync::OnceLock::new();
+    let kept = KEPT.get_or_init(|| Mutex::new(BTreeMap::new()));
+    if let Some((at, list)) = kept.lock().unwrap_or_else(|e| e.into_inner()).get(root) {
+        if crate::now() - at < 60 {
+            return list.clone();
+        }
     }
-    let holding: Vec<(String, TrackerDecl)> = listed(&root.join("trackers"))
+    let trackers: Vec<(String, TrackerDecl)> = std::fs::read_dir(root.join("trackers"))
         .into_iter()
-        .filter(|(_, t, _)| t.visibility != "private" && t.members.iter().any(|m| m.dataset == ds.decl.name))
-        .map(|(name, t, _)| (name, t))
+        .flatten()
+        .flatten()
+        .filter_map(|e| Some((e.file_name().to_string_lossy().into_owned(), TrackerDecl::load(&e.path()).ok()?)))
+        .filter(|(_, t)| t.visibility != "private")
         .collect();
-    (!holding.is_empty()).then_some((ds, holding))
+    let list: Vec<Shown> = crate::tracker::registry(&root.join("sources"))
+        .into_iter()
+        .filter_map(|(name, dir)| {
+            let d = crate::sourcedecl::SourceDecl::load(&dir).ok()?;
+            if !matches!(d.licence.republish.as_str(), "yes" | "summary") {
+                return None;
+            }
+            let mut holding: Vec<(String, String)> = trackers
+                .iter()
+                .filter(|(_, t)| t.members.iter().any(|m| m.dataset == name))
+                .map(|(folder, t)| (folder.clone(), if t.title.is_empty() { folder.clone() } else { t.title.clone() }))
+                .collect();
+            holding.sort_by(|a, b| a.1.cmp(&b.1));
+            let short = name.rsplit('/').next().unwrap_or(&name).to_string();
+            let title = if d.title.is_empty() { short.clone() } else { d.title.clone() };
+            (!holding.is_empty()).then_some(Shown { short, dir, title, holding })
+        })
+        .collect();
+    kept.lock().unwrap_or_else(|e| e.into_inner()).insert(root.to_path_buf(), (crate::now(), list.clone()));
+    list
+}
+
+/// One of them, by the name it is published under, `cve-redhat` of `zetlyn/cve-redhat`, which is
+/// how the hub and every link say it; or by its folder, `redhat`.
+fn shown_source(root: &Path, asked: &str) -> Option<Shown> {
+    shown_sources(root)
+        .into_iter()
+        .find(|s| s.short == asked || s.dir.file_name().is_some_and(|f| f == asked))
 }
 
 /// A source's own page in its world, for anybody, where the source said it may be shown and a
@@ -4018,7 +4046,8 @@ fn shown_source(root: &Path, asked: &str) -> Option<(Source, Vec<(String, Tracke
 /// trackers it is in, and its versions on the hub. None for any other, which a visitor is then
 /// asked to sign in for, as before, so the page says nothing about a source it may not show.
 fn public_source_page(root: &Path, base: &str, dir_name: &str) -> Option<String> {
-    let (ds, holding) = shown_source(root, dir_name)?;
+    let shown = shown_source(root, dir_name)?;
+    let ds = Source::open(&shown.dir).ok()?;
     let d = &ds.decl;
     let described = ds.describe();
     let site = crate::account::Site::load(root);
@@ -4045,7 +4074,7 @@ fn public_source_page(root: &Path, base: &str, dir_name: &str) -> Option<String>
             @if !d.licence.terms.is_empty() { " " a href=(d.licence.terms) { "Its terms" } "." }
         }
         h2 { "In" }
-        ul { @for (name, t) in &holding { li { a href={(base) "/trackers/" (name) "/"} { (if t.title.is_empty() { name.clone() } else { t.title.clone() }) } } } }
+        ul { @for (name, t) in &shown.holding { li { a href={(base) "/trackers/" (name) "/"} { (t) } } } }
         @if !properties.is_empty() {
             h2 { "What one claim carries" }
             table { thead { tr { th { "Property" } th { "Type" } th { "Claims" } } }

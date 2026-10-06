@@ -301,6 +301,10 @@ a.button:hover { text-decoration: none; border-color: var(--fg); }
 a.button.primary:hover { color: #fff; }
 button:hover { border-color: var(--fg); }
 input[type=file] { font: inherit; font-size: .88rem; color: var(--dim); }
+textarea.wide { display: block; width: 100%; max-width: 36rem; box-sizing: border-box; margin-top: .3rem; padding: .55rem .7rem;
+  font: .9rem/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; border: 1px solid var(--line);
+  border-radius: 0; background: var(--panel); color: var(--fg); resize: vertical; }
+textarea.wide:focus { outline: none; border-color: var(--fg); }
 input[type=file]::file-selector-button { font: inherit; padding: .45rem .9rem; margin-right: .7rem; cursor: pointer;
   border-radius: 0; border: 1px solid var(--line); background: var(--panel); color: var(--fg); }
 input[type=file]::file-selector-button:hover { border-color: var(--fg); }

@@ -691,7 +691,7 @@ impl App {
                 }
             }
             // What the world is, where it went, all of it at once: its owners', not every editor's.
-            ["export.tar.gz"] | ["settings", "moved"] | ["assist"] if owner && (post || parts.len() == 1 && parts[0] == "export.tar.gz") && !self.who.as_deref().is_some_and(|e| h.is_owner(e)) => {
+            ["export.tar.gz"] | ["settings", "moved"] | ["settings", "access"] | ["assist"] if owner && (post || parts.len() == 1 && parts[0] == "export.tar.gz") && !self.who.as_deref().is_some_and(|e| h.is_owner(e)) => {
                 respond(request, 403, html_kind, &page("Owners only", html! { h1 { "Only an owner of this world changes that" } p { a href=(serve::at("/")) { "Back" } } }));
                 None
             }
@@ -1040,6 +1040,29 @@ impl App {
                     }
                 });
                 return;
+            }
+            // Who may do what here, from the three lists of the form, one word to a line.
+            (true, ["settings", "access"]) => {
+                let list = |k: &str| -> Vec<String> { form.get(k).map(|t| t.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect()).unwrap_or_default() };
+                let access = crate::account::Access { owners: list("owners"), editors: list("editors"), proposers: list("proposers") };
+                let wrong: Vec<String> = access.owners.iter().chain(&access.editors).chain(&access.proposers).filter_map(|p| crate::account::pattern_problem(p)).collect();
+                let me = self.who.clone().unwrap_or_default();
+                let site = crate::account::Site::load(&self.root);
+                let mut owners_after = site.owners.clone();
+                owners_after.extend(access.owners.iter().cloned());
+                // An owner the machine names in members.yaml stays one whatever this list says.
+                let machine_owner = self.root.parent().and_then(Path::parent).zip(self.root.file_name()).is_some_and(|(m, org)| Membership::load(m).of(&org.to_string_lossy(), &["owner"]).iter().any(|e| e.eq_ignore_ascii_case(&me)));
+                let said = if !wrong.is_empty() {
+                    format!("Not saved. {}", wrong.join("; "))
+                } else if !machine_owner && !crate::account::admits(&owners_after, &me, &[]) {
+                    "Not saved: you would no longer be an owner of this world, and nobody could give it back from here.".to_string()
+                } else {
+                    match crate::account::set_access(&self.root, &access) {
+                        Ok(()) => "Saved. Who may do what here is as the lists say now.".to_string(),
+                        Err(e) => e,
+                    }
+                };
+                return redirect(request, &serve::at(&format!("/settings?saved={}#access", urlencode(&said))));
             }
             (true, ["settings", "moved"]) => {
                 let to = form.get("to").cloned().unwrap_or_default();
@@ -1951,6 +1974,25 @@ impl App {
                     input type="hidden" name="to" value="";
                     button type="submit" { "It did not move: answer here again" }
                 }
+            }
+            @if self.hosted.is_some() {
+                @let access = crate::account::Site::load(&self.root).access;
+                @let lines = |l: &[String]| l.join("\n");
+                h2 #access { "Who may do what" }
+                p.lede { "Everybody reads what this world makes public. These lists say who may do more. One to a line: an address, "
+                    code { "domain:example.org" } " for every confirmed address there, " code { "@zetlyn.com" } " for whoever that world vouches for, or "
+                    code { "signed-in" } " for anybody signed in." }
+                @if let Some(s) = query.get("saved").filter(|s| s.contains("lists") || s.starts_with("Not saved")) { div.note { (s) } }
+                form.settings method="post" action=(serve::at("/settings/access")) {
+                    p { label { strong { "Owners" } span.dim { " · everything, its settings and its export too" } br;
+                        textarea.wide name="owners" rows="3" { (lines(&access.owners)) } } }
+                    p { label { strong { "Editors" } span.dim { " · its sources and trackers, and deciding proposals" } br;
+                        textarea.wide name="editors" rows="3" { (lines(&access.editors)) } } }
+                    p { label { strong { "Proposers" } span.dim { " · rows for every source that names no readers of its own" } br;
+                        textarea.wide name="proposers" rows="3" { (lines(&access.proposers)) } } }
+                    p { button.primary type="submit" { "Save who may do what" } }
+                }
+                p.dim { "Only an owner changes these. Whoever this machine's own list of members names counts besides; an owner named there stays one whatever these lists say. Another world, zetlyn.com among them, only says who somebody is: what they may do here, this world says." }
             }
         };
         page("Automatic updates", body)

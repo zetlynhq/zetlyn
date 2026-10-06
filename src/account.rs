@@ -1118,3 +1118,80 @@ pub fn admits(patterns: &[String], email: &str, issuers: &[String]) -> bool {
             })
     })
 }
+
+/// Whether a word may stand in `access:` or `readers`: an address, `domain:<domain>`, `@<world>`,
+/// or `signed-in`. What it is not is said, so a page can say it back.
+pub fn pattern_problem(p: &str) -> Option<String> {
+    let p = p.trim();
+    if p.is_empty() || p == "signed-in" {
+        return None;
+    }
+    if let Some(d) = p.strip_prefix("domain:") {
+        return (!d.contains('.') || d.contains('@') || d.contains(' ')).then(|| format!("{p}: a domain is written domain:example.org"));
+    }
+    if let Some(w) = p.strip_prefix('@') {
+        return (w.is_empty() || w.contains(' ') || !w.contains('.')).then(|| format!("{p}: a world is written @zetlyn.com or @https://prices.example"));
+    }
+    let ok = p.split_once('@').is_some_and(|(local, host)| !local.is_empty() && host.contains('.') && !p.contains(' '));
+    (!ok).then(|| format!("{p}: not an address, domain:…, @… or signed-in"))
+}
+
+/// The world's `access:` written into its workspace.yaml in place of the one there, everything
+/// else in the file as it was. Read back before it is kept: a file that would not load is not.
+pub fn set_access(root: &Path, access: &Access) -> Result<(), String> {
+    let path = root.join(WORKSPACE);
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut kept: Vec<&str> = Vec::new();
+    let mut skipping = false;
+    for l in text.lines() {
+        if l.starts_with("access:") {
+            skipping = true;
+            continue;
+        }
+        if skipping && (l.starts_with(' ') || l.is_empty()) {
+            continue;
+        }
+        skipping = false;
+        kept.push(l);
+    }
+    let quoted = |list: &[String]| list.iter().map(|p| serde_json::to_string(p.trim()).unwrap_or_default()).collect::<Vec<_>>().join(", ");
+    let mut block = String::new();
+    if !access.owners.is_empty() || !access.editors.is_empty() || !access.proposers.is_empty() {
+        block.push_str("access:\n");
+        for (key, list) in [("owners", &access.owners), ("editors", &access.editors), ("proposers", &access.proposers)] {
+            if !list.is_empty() {
+                block.push_str(&format!("  {key}: [{}]\n", quoted(list)));
+            }
+        }
+    }
+    let t = format!("{}\n{block}", kept.join("\n").trim_end());
+    let _: Site = crate::yaml::parse(&t)?;
+    std::fs::write(&path, format!("{}\n", t.trim())).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+#[cfg(test)]
+mod access_tests {
+    use super::*;
+
+    #[test]
+    fn a_world_s_access_is_written_in_place_and_only_its_words_are_taken() {
+        assert_eq!(pattern_problem("ann@example.org"), None);
+        assert_eq!(pattern_problem("domain:example.org"), None);
+        assert_eq!(pattern_problem("@zetlyn.com"), None);
+        assert_eq!(pattern_problem("signed-in"), None);
+        assert!(pattern_problem("partner").is_some());
+        assert!(pattern_problem("domain:ann@example.org").is_some());
+        let dir = std::env::temp_dir().join(format!("zetlyn-access-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(WORKSPACE), "title: Acme\n# kept\naccess:\n  owners: [old@example.org]\nupdate:\n  every: 1h\n").unwrap();
+        let access = Access { owners: vec!["ann@example.org".into()], editors: vec!["domain:example.org".into()], proposers: Vec::new() };
+        set_access(&dir, &access).unwrap();
+        let text = std::fs::read_to_string(dir.join(WORKSPACE)).unwrap();
+        assert!(text.contains("# kept") && text.contains("every: 1h") && !text.contains("old@example.org"), "{text}");
+        let site = Site::load(&dir);
+        assert_eq!(site.access.editors, vec!["domain:example.org".to_string()]);
+        assert!(admits(&site.all_owners(), "ann@example.org", &[]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

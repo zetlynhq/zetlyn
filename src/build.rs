@@ -54,7 +54,11 @@ fn values(spec: &Spec, row: &Row) -> Vec<String> {
             out.retain(|s| re.is_match(s));
         }
     }
-    if !spec.all {
+    if spec.all {
+        // NVD and the CNA it carries often name the same CWE or version: twice says nothing more.
+        let mut seen = std::collections::HashSet::new();
+        out.retain(|s| seen.insert(s.clone()));
+    } else {
         out.truncate(1);
     }
     if out.is_empty() {

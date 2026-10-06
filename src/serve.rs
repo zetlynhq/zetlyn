@@ -673,6 +673,13 @@ pub fn frame_site(_current: &str) {
         f.current = None;
         f.footer = Vec::new();
         f.brand = Some("https://zetlyn.com".into());
+        // The frame lives with the thread, so what the request before drew in it, its group, its
+        // section and its sidebar, starts out gone here and not in each caller.
+        f.group = None;
+        f.section = None;
+        f.tabs = Vec::new();
+        f.side_more = Vec::new();
+        f.side_here = None;
     });
 }
 

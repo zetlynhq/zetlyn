@@ -1,0 +1,39 @@
+name: Bug
+description: Something Zetlyn does that it should not, or does not do that it should.
+labels: [bug]
+body:
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How can we reproduce it?
+      description: The commands, and the source.yaml or tracker.yaml if one is involved.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Zetlyn version
+      description: "`zetlyn --version`"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output or logs
+      render: text

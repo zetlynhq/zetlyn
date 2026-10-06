@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: A vulnerability
+    url: mailto:security@zetlyn.com
+    about: Not an issue. Write to security@zetlyn.com.
+  - name: A question
+    url: https://github.com/zetlynhq/zetlyn/discussions
+    about: How to do something with Zetlyn.

@@ -1,48 +1,84 @@
 # Zetlyn
 
-Pick a topic. Zetlyn keeps it current.
+[![Licence](https://img.shields.io/github/license/zetlynhq/zetlyn)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/zetlynhq/zetlyn)](https://github.com/zetlynhq/zetlyn/releases/latest)
+[![CI](https://github.com/zetlynhq/zetlyn/actions/workflows/ci.yml/badge.svg)](https://github.com/zetlynhq/zetlyn/actions/workflows/ci.yml)
+[![Rust 1.82+](https://img.shields.io/badge/rust-1.82%2B-orange)](https://www.rust-lang.org)
 
-Everything published about one subject is scattered across the people who publish it. Zetlyn
-collects those sources, joins them on the number they already share, and serves the result as one
-thing you can search, browse and be notified about.
+**Know when the facts change.**
 
-Two words carry the whole idea.
+The same thing is said by many sources: shops, registers, web pages, and the people who look.
+Zetlyn follows them, connects what belongs together, and shows you what each one says, what
+changed, and where they disagree. It does not decide who is right: every value keeps the source
+that said it. It runs on your own machine.
 
-A **source** is one place that publishes: a file, a feed, an API, a list on a web page. A file describes it; after that it
-fetches itself on its own clock, indexes itself, notices what changed since last time, and says what
-it holds and how to ask.
+```
+Book      Leafline   Lindenhof   Market stall
+Dune      11.99      13.49       4.50          ⚡ Lindenhof changed 11.99 → 13.49
+Gatsby    10.99      10.99       —
+Hobbit    10.49      —           3.00
+```
 
-A **tracker** is a topic: several sources, joined on a shared identifier, with a sentence for each
-saying what it contributes that the others do not.
+Two shops publish their prices. The third has no list and no page: the people who buy there
+read the prices and propose them. See one with real data:
+[security flaws from six sources](https://zetlyn.com/zetlyn/trackers/cve/), running at zetlyn.com.
 
-One binary. SQLite underneath. No database to run, no account to create, nothing sent anywhere you
-did not point it at.
+## What can I track?
 
-## Install
+Anything that changes, wherever it is said.
+
+| Topic | Sources | Joined on |
+|---|---|---|
+| [Security flaws](https://zetlyn.com/zetlyn/trackers/cve/) | CISA, NVD, Red Hat, GitHub, Metasploit, Exploit-DB | the CVE number |
+| [AI models you can run](https://zetlyn.com/zetlyn/trackers/local-models/) | Hugging Face, GGUF files | the model's name |
+| [Flights](https://zetlyn.com/docs/sources#proposals) | you, your friends, anybody you invite | flight number and date |
+| [Flats](https://zetlyn.com/docs/sources#proposals) | everybody searching | the address |
+| [Fuel prices](https://zetlyn.com/docs/sources) | Tankerkönig, MTS-K | the station |
+| [Companies](https://zetlyn.com/docs/sources) | GLEIF, your records | the LEI |
+| [Books](https://zetlyn.com/docs/getting_started#first) | shops, a market stall | the ISBN |
+| [Anything else](https://zetlyn.com/docs/getting_started) | what you point it at | what they share |
+
+## Try it in five minutes
 
 ```
 curl -fsSL https://zetlyn.com/install.sh | sh
+zetlyn
 ```
 
-macOS (Apple silicon or Intel) or Linux on x86-64: the binary of the latest release, checked
-against its checksums, in `~/.local/bin` (or `$ZETLYN_BIN`). Each archive carries LICENSE, NOTICE
-and THIRD_PARTY_LICENSES. From source:
+The first line puts the binary of the latest release in `~/.local/bin` (or `$ZETLYN_BIN`), checked
+against its checksums; macOS (Apple silicon or Intel) or Linux on x86-64. The second opens a
+workspace in your browser and asks what you want to track. The
+[getting started guide](https://zetlyn.com/docs/getting_started) goes on from there, and
+[the tutorials](https://zetlyn.com/docs/tutorials) build two whole trackers.
+
+From source, with Rust 1.82 or later (SQLite is compiled in; `git` only for a source that is a
+checkout):
 
 ```
 cargo install --git https://github.com/zetlynhq/zetlyn
 ```
 
-Or from a checkout:
-
-```
-cargo build --release      # target/release/zetlyn
-```
-
-Rust 1.82 or later. `git` on the machine, for a source that is a checkout. Nothing else: SQLite is
-compiled in.
-
 With an assistant, give it <https://zetlyn.com/llms.txt>: what Zetlyn is, its files, its commands,
 and three tasks as they ran, tried by agents that had nothing else.
+
+## How it works
+
+```
+sources → claims → things → tracker → changes → watches
+```
+
+- A **source** is one place that publishes: a file, a feed, an API, a list on a web page, or people
+  who propose rows. A file describes it; after that it reads itself on its own clock.
+- Each row it reads is a **claim**, with a receipt: who said it, in which words, since when.
+- Claims that name the same CVE, ISBN or address are one **thing**.
+- A **tracker** is a topic: several sources joined on what they share, each with a sentence saying
+  what it adds.
+- Every update notices what **changed**, and where sources disagree.
+- A **watch** tells you: by mail, a feed, a webhook or a program of yours.
+
+One binary. SQLite underneath. No database to run, no account to create, nothing sent anywhere you
+did not point it at. The rest of this page is the detail; [SPEC.md](SPEC.md) is the hub's layout,
+and [CONTRIBUTING.md](CONTRIBUTING.md) how to help.
 
 ## No command at all
 

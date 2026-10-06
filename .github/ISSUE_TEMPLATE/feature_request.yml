@@ -1,0 +1,21 @@
+name: Something you are trying to do
+description: A topic you want to track, a source that will not read, a question Zetlyn cannot answer yet.
+labels: [use case]
+body:
+  - type: textarea
+    id: trying
+    attributes:
+      label: What are you trying to do?
+      description: The topic and the sources, as you would tell a colleague.
+    validations:
+      required: true
+  - type: textarea
+    id: today
+    attributes:
+      label: Why can't you do it today?
+    validations:
+      required: true
+  - type: textarea
+    id: good
+    attributes:
+      label: What would a good solution look like?

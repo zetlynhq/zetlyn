@@ -63,10 +63,16 @@ impl Here {
         }
     }
 
-    /// The machine a hosting directory is: issuer its address, endpoints under `/app`.
+    /// The machine a hosting directory is: issuer its address, endpoints at it, `/oauth/…`.
     pub fn machine(dir: &std::path::Path) -> Here {
+        Here::machine_at(dir, "")
+    }
+
+    /// The machine with its endpoints under `mount`: `/app`, where they were until 2026-10-06 and a
+    /// world that read them then still asks.
+    pub fn machine_at(dir: &std::path::Path, mount: &str) -> Here {
         let issuer = Site::load(dir).url.trim_end_matches('/').to_string();
-        Here { root: dir.to_path_buf(), endpoints: format!("{issuer}/app"), issuer, mount: "/app".into(), reader_path: "/".into() }
+        Here { root: dir.to_path_buf(), endpoints: format!("{issuer}{mount}"), issuer, mount: mount.to_string(), reader_path: "/".into() }
     }
 
     fn at(&self, path: &str) -> String {
@@ -248,8 +254,11 @@ fn served_by(dir: &std::path::Path, url: &str) -> Option<(Here, String)> {
     if path.starts_with("/.well-known/openid-configuration") {
         return Some((Here::machine(&dir), path));
     }
+    if path.starts_with("/oauth") {
+        return Some((Here::machine(&dir), path));
+    }
     if let Some(under) = path.strip_prefix("/app") {
-        return Some((Here::machine(&dir), under.to_string()));
+        return Some((Here::machine_at(&dir, "/app"), under.to_string()));
     }
     // A world on the machine is at /<name>, and was at /worlds/<name>: another world that
     // registered with it there still signs in there.
@@ -1255,33 +1264,33 @@ mod tests {
         up(pm);
         let (_, disc, _, _) = ask("GET", &format!("{url_m}/.well-known/openid-configuration"), None, None);
         let disc: J = serde_json::from_str(&disc).unwrap();
-        assert_eq!((disc["issuer"].as_str(), disc["authorization_endpoint"].as_str()), (Some(url_m.as_str()), Some(format!("{url_m}/app/oauth/authorize").as_str())));
+        assert_eq!((disc["issuer"].as_str(), disc["authorization_endpoint"].as_str()), (Some(url_m.as_str()), Some(format!("{url_m}/oauth/authorize").as_str())));
         // A world that takes the machine, and nothing else, and registered with nobody.
         let pb = free_port();
         let b = tmp("chain-b");
         let url_b = world(&b, pb, &format!("identity:\n- zetlyn: {url_m}\n"));
 
         let (_, _, to_m, started_b) = ask("GET", &format!("{url_b}/oauth/login?with=zetlyn:{url_m}&next=/t/x/"), None, None);
-        assert!(to_m.starts_with(&format!("{url_m}/app/oauth/authorize?")), "{to_m}");
+        assert!(to_m.starts_with(&format!("{url_m}/oauth/authorize?")), "{to_m}");
         // The machine asks who it is, and offers GitHub.
         let (_, page, _, _) = ask("GET", &to_m, None, None);
-        let start = page.find("/app/oauth/login?with=github").expect("GitHub offered");
+        let start = page.find("/oauth/login?with=github").expect("GitHub offered");
         let href: String = page[start..].chars().take_while(|c| *c != '"').collect::<String>().replace("&amp;", "&");
         let (status, _, to_github, started_m) = ask("GET", &format!("{url_m}{href}"), None, None);
         assert_eq!(status, 303);
         assert!(to_github.starts_with(&format!("{github}/login/oauth/authorize?")), "{to_github}");
         // GitHub sends them back to the machine, which signs them in there and returns to asking.
         let state = query_of(&to_github)["state"].clone();
-        let (status, page, back_to_authorize, zo) = ask("GET", &format!("{url_m}/app/oauth/callback?code=c&state={}", crate::serve::urlencode(&state)), Some(&zp(&started_m)), None);
+        let (status, page, back_to_authorize, zo) = ask("GET", &format!("{url_m}/oauth/callback?code=c&state={}", crate::serve::urlencode(&state)), Some(&zp(&started_m)), None);
         assert_eq!(status, 303, "{page}");
-        assert!(zo.starts_with("zo=") && zo.contains("Path=/app/oauth"), "{zo}");
-        assert!(back_to_authorize.starts_with("/app/oauth/authorize?"), "{back_to_authorize}");
+        assert!(zo.starts_with("zo=") && zo.contains("Path=/oauth"), "{zo}");
+        assert!(back_to_authorize.starts_with("/oauth/authorize?"), "{back_to_authorize}");
         let zo = zo.split(';').next().unwrap().to_string();
         let (_, consent, _, _) = ask("GET", &format!("{url_m}{back_to_authorize}"), Some(&zo), None);
         assert!(consent.contains("asks who you are"), "{consent}");
         let mut form: Vec<String> = query_of(&to_m).iter().map(|(k, v)| format!("{k}={}", crate::serve::urlencode(v))).collect();
         form.push("allow=1".into());
-        let (status, _, back_to_b, _) = ask("POST", &format!("{url_m}/app/oauth/authorize"), Some(&zo), Some(&form.join("&")));
+        let (status, _, back_to_b, _) = ask("POST", &format!("{url_m}/oauth/authorize"), Some(&zo), Some(&form.join("&")));
         assert_eq!(status, 303);
         // And at the world: a reader, the machine's word for who, the name GitHub gave.
         let (status, page, next, cookie) = ask("GET", &back_to_b, Some(&zp(&started_b)), None);
@@ -1316,7 +1325,7 @@ mod tests {
         let started = std::time::Instant::now();
         let (status, page, to_m, signing_in) = ask("GET", &format!("{url_m}/acme/oauth/login?with=zetlyn:{url_m}&next=/acme/"), None, None);
         assert_eq!(status, 303, "{page}");
-        assert!(to_m.starts_with(&format!("{url_m}/app/oauth/authorize?")), "{to_m}");
+        assert!(to_m.starts_with(&format!("{url_m}/oauth/authorize?")), "{to_m}");
         let machine = Accounts::open(&m).unwrap();
         let ann = machine.ensure("ann@example.org").unwrap();
         let zo = format!("zo={}", machine.new_session(ann.id, Kind::Provider).unwrap());
@@ -1324,7 +1333,7 @@ mod tests {
         assert_eq!(status, 200, "the machine fetched the organisation's client document from itself: {consent}");
         let mut form: Vec<String> = query_of(&to_m).iter().map(|(k, v)| format!("{k}={}", crate::serve::urlencode(v))).collect();
         form.push("allow=1".into());
-        let (_, _, back, _) = ask("POST", &format!("{url_m}/app/oauth/authorize"), Some(&zo), Some(&form.join("&")));
+        let (_, _, back, _) = ask("POST", &format!("{url_m}/oauth/authorize"), Some(&zo), Some(&form.join("&")));
         assert!(back.starts_with(&format!("{url_m}/acme/oauth/callback?")), "{back}");
         let (status, page, next, cookie) = ask("GET", &back, Some(&zp(&signing_in)), None);
         assert_eq!((status, next.as_str()), (303, "/acme/"), "{page}");

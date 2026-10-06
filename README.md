@@ -350,6 +350,11 @@ says who somebody is: what they may do is this world's, and a world that takes n
 link to an address runs on its own. A hosted world's members on the machine and its own `access:`
 count together; `owners:` as written before is an owner still.
 
+Everybody signs in at the world's own `/signin`, `https://zetlyn.com/acme/signin` or
+`https://prices.example/signin`: one link to their address, or another world's word for them. It
+signs them in as a reader, and whoever `access:` names as that too. Somebody in several worlds on
+zetlyn.com finds them at `https://zetlyn.com/account/`; zetlyn.com as a provider is at `/oauth/`.
+
 ## Letting somebody else run it
 
 A workspace can answer for itself, so that whoever keeps it current does not have to be at its

@@ -588,11 +588,6 @@ impl App {
         self.who = signed_in;
         let post = request.method() == &tiny_http::Method::Post;
         let html_kind = "text/html; charset=utf-8";
-        // One sign-in for every workspace on the machine: the machine's, under /app/, not here.
-        if h.shared && parts.first().is_some_and(|p| p == "signin" || p == "signout") {
-            redirect(request, "/app/signin");
-            return None;
-        }
         match parts.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
             ["style.css" | "zetlyn.css"] => Some(request),
             // Signed by its sender, so nobody signs in to push to a source.
@@ -629,50 +624,87 @@ impl App {
                 respond(request, status, "application/json", &answer);
                 None
             }
+            // One sign-in for everybody in this world, at its own address: a reader, and whoever
+            // `access:` or the machine's members name, who is signed in as that too by the same link.
             ["signin"] if post => {
                 let mut body = String::new();
                 let _ = std::io::Read::read_to_string(request.as_reader(), &mut body);
-                let email = parse_form(&body).get("email").cloned().unwrap_or_default();
-                // The same words whoever asks, so the page does not say whose workspace it is.
-                if h.is_member(&email) {
-                    let email = email.trim().to_lowercase();
-                    let sent = h.accounts.ensure(&email).and_then(|a| h.accounts.new_link(a.id)).and_then(|raw| {
-                        let site = crate::account::Site::for_workspace(&self.root);
-                        let link = site.link(&serve::at(&format!("/signin/{raw}")));
-                        site.send(&email, "Your Zetlyn sign-in link", &format!("{link}\n\nGood for a quarter of an hour, and once."))
-                    });
-                    if let Err(e) = sent {
-                        eprintln!("sign-in mail: {e}");
-                    }
+                let form = parse_form(&body);
+                let email = form.get("email").cloned().unwrap_or_default().trim().to_lowercase();
+                let next = form.get("next").and_then(|n| crate::servetracker::next_of(n)).map(|n| format!("?next={}", urlencode(&n))).unwrap_or_default();
+                let site = crate::account::Site::for_workspace(&self.root);
+                let sent = crate::account::Accounts::open(&self.root).and_then(|readers| {
+                    let raw = readers.ensure(&email).and_then(|a| readers.new_link(a.id))?;
+                    let link = site.link(&serve::at(&format!("/signin/{raw}{next}")));
+                    site.send(&email, "Your Zetlyn sign-in link", &format!("{link}\n\nGood for a quarter of an hour, and once."))
+                });
+                if let Err(e) = sent {
+                    eprintln!("sign-in mail: {e}");
                 }
-                respond(request, 200, html_kind, &page("Sign in", html! { h1 { "Check your mail" } p { "If that address owns this workspace, a link to sign in is on its way. It is good for a quarter of an hour, and once." } }));
+                respond(request, 200, html_kind, &page("Sign in", html! { h1 { "Check your mail" } p { "A link to sign in is on its way to " (email) ". It is good for a quarter of an hour, and once." } }));
                 None
             }
             ["signin"] => {
-                respond(request, 200, html_kind, &page("Sign in", html! {
-                    h1 { "Sign in" }
-                    p.about { "The owner of this workspace signs in with a link sent to their address." }
-                    form.bar method="post" action=(serve::at("/signin")) {
-                        input.wide type="email" name="email" placeholder="you@example.org" required;
-                        button.primary type="submit" { "Send me a link" }
-                    }
-                }));
+                let site = crate::account::Site::for_workspace(&self.root);
+                let next = serve::params(url).get("next").and_then(|n| crate::servetracker::next_of(n));
+                respond(request, 200, html_kind, &crate::servetracker::signin_page_to(&site, None, next.as_deref()));
                 None
             }
             ["signin", raw] => {
-                match h.accounts.spend_link(raw, crate::account::Kind::Member) {
-                    Some(session) => {
-                        let cookie = format!("zs={session}; Path={}; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000", if self.base.is_empty() { "/" } else { &self.base });
-                        let mut response = tiny_http::Response::from_string("").with_status_code(303);
-                        for (k, v) in [("Location", serve::at("/")), ("Set-Cookie", cookie)] {
-                            if let Ok(hd) = tiny_http::Header::from_bytes(k.as_bytes(), v.as_bytes()) {
-                                response = response.with_header(hd);
-                            }
-                        }
-                        let _ = request.respond(response);
+                let site = crate::account::Site::for_workspace(&self.root);
+                let readers = crate::account::Accounts::open(&self.root).ok();
+                let session = readers.as_ref().and_then(|r| r.spend_link(raw, crate::account::Kind::Reader));
+                let Some(session) = session else {
+                    respond(request, 410, html_kind, &page("Sign in", html! { h1 { "That link is spent" } p { "It was used, or it is older than a quarter of an hour. " a href=(serve::at("/signin")) { "Ask for another" } } }));
+                    return None;
+                };
+                let email = readers.as_ref().and_then(|r| r.by_session(&session, crate::account::Kind::Reader)).map(|a| a.email).unwrap_or_default();
+                let mut cookies: Vec<String> = Vec::new();
+                // Somebody who runs it is signed in for that too: on the machine, for every world
+                // they belong to; on its own, for this one.
+                if h.is_member(&email) {
+                    let path = if h.shared || self.base.is_empty() { "/".to_string() } else { self.base.clone() };
+                    if let Ok(member) = h.accounts.ensure(&email).and_then(|a| h.accounts.new_session(a.id, crate::account::Kind::Member)) {
+                        cookies.push(format!("zs={member}; Path={path}; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000"));
                     }
-                    None => respond(request, 410, html_kind, &page("Sign in", html! { h1 { "That link is spent" } p { a href=(serve::at("/signin")) { "Ask for another" } } })),
                 }
+                cookies.push(crate::servetracker::reader_cookie(&site, &session, 2_592_000));
+                let next = serve::params(url).get("next").and_then(|n| crate::servetracker::next_of(n)).unwrap_or_else(|| "/".to_string());
+                let mut response = tiny_http::Response::from_string("").with_status_code(303);
+                if let Ok(hd) = tiny_http::Header::from_bytes(&b"Location"[..], serve::at(&next).as_bytes()) {
+                    response = response.with_header(hd);
+                }
+                for c in cookies {
+                    if let Ok(hd) = tiny_http::Header::from_bytes(&b"Set-Cookie"[..], c.as_bytes()) {
+                        response = response.with_header(hd);
+                    }
+                }
+                let _ = request.respond(response);
+                None
+            }
+            ["signout"] => {
+                let site = crate::account::Site::for_workspace(&self.root);
+                let path = if h.shared || self.base.is_empty() { "/".to_string() } else { self.base.clone() };
+                let mut response = tiny_http::Response::from_string("").with_status_code(303);
+                for (k, v) in [
+                    ("Location".to_string(), serve::at("/")),
+                    ("Set-Cookie".to_string(), crate::servetracker::reader_cookie(&site, "", 0)),
+                    ("Set-Cookie".to_string(), format!("zs=; Path={path}; HttpOnly; Secure; SameSite=Lax; Max-Age=0")),
+                ] {
+                    if let Ok(hd) = tiny_http::Header::from_bytes(k.as_bytes(), v.as_bytes()) {
+                        response = response.with_header(hd);
+                    }
+                }
+                let _ = request.respond(response);
+                None
+            }
+            // A tracker's own sign-in was where a reader signed in until 2026-10-06; it is the
+            // world's now. A link it mailed before is still spent there.
+            ["trackers", tracker, "signin"] if !post => {
+                // Where the tracker would have sent them back to, within the tracker.
+                let within = serve::params(url).get("next").and_then(|n| crate::servetracker::next_of(n)).unwrap_or_else(|| "/".to_string());
+                let next = format!("/trackers/{tracker}{within}");
+                redirect(request, &serve::at(&format!("/signin?next={}", urlencode(&next))));
                 None
             }
             // The trackers answer for themselves, the owner as their operator.
@@ -3274,9 +3306,9 @@ fn hosting_worker(server: &tiny_http::Server, dir: &Path, addr: &str, jobs: &Sha
         let machine_host = crate::account::Site::load(dir).url.split("://").nth(1).unwrap_or("").split(['/', ':']).next().unwrap_or("").to_lowercase();
         if !host.is_empty() && !machine_host.is_empty() && host != machine_host && host != "127.0.0.1" && host != "localhost" {
             match org_by_domain(dir, &host) {
-                Some(org) if first == APP_PREFIX => {
+                Some(org) if first == APP_PREFIX || first == ACCOUNT => {
                     // Signing in to it happens at its own name, so the cookie is for that name.
-                    serve::mount(&format!("/{APP_PREFIX}"));
+                    serve::mount(&format!("/{first}"));
                     hosting_root(request, dir, &accounts, &parts[1..], &format!("https://{host}"));
                     let _ = org;
                 }
@@ -3356,20 +3388,49 @@ fn hosting_worker(server: &tiny_http::Server, dir: &Path, addr: &str, jobs: &Sha
             }
             continue;
         }
-        if first == APP_PREFIX {
-            serve::mount(&format!("/{APP_PREFIX}"));
+        // The machine's own pages: whoever is signed in, and the worlds they belong to.
+        if first == ACCOUNT {
+            serve::mount(&format!("/{ACCOUNT}"));
+            hosting_root(request, dir, &accounts, &parts[1..], "");
+            continue;
+        }
+        // The machine as a provider, "Sign in with zetlyn.com", at /oauth/ as a world's is at its own.
+        if first == "oauth" {
+            serve::mount("");
             let here = crate::oidc::Here::machine(dir);
+            if let Some(request) = crate::oidc::answer(&here, request, &parts, &url) {
+                respond(request, 404, "text/plain; charset=utf-8", "nothing at that address");
+            }
+            continue;
+        }
+        // Where all of that was until 2026-10-06, under /app/: a page asked for there is sent where
+        // it is now. What a program sends there, a token asked for or a certificate checked, is
+        // still answered there, as a program seldom follows.
+        if first == APP_PREFIX {
+            let get = matches!(request.method(), tiny_http::Method::Get | tiny_http::Method::Head);
+            let rest = url.strip_prefix(&format!("/{APP_PREFIX}")).unwrap_or("").to_string();
+            let checked = parts.get(1).is_some_and(|p| p == "domain-check");
+            if get && !checked {
+                let to = if rest.starts_with("/oauth") { rest.clone() } else { format!("/{ACCOUNT}{}", if rest.is_empty() { "/".to_string() } else { rest.clone() }) };
+                redirect_permanently(request, &to);
+                continue;
+            }
+            serve::mount(&format!("/{APP_PREFIX}"));
+            let here = crate::oidc::Here::machine_at(dir, &format!("/{APP_PREFIX}"));
             let Some(request) = crate::oidc::answer(&here, request, &parts[1..], &url) else { continue };
             hosting_root(request, dir, &accounts, &parts[1..], "");
             continue;
         }
         serve::mount("");
-        respond(request, 404, "text/html; charset=utf-8", &page("Not here", html! { h1 { "Not here" } p { a href={"/" (APP_PREFIX) "/"} { "Every tracker on this machine" } } }));
+        respond(request, 404, "text/html; charset=utf-8", &page("Not here", html! { h1 { "Not here" } p { a href="/hub/" { "Every tracker on the hub" } } }));
     }
 }
 
 /// Where the machine's own pages are, on a name it shares with the site and the hub.
 const APP_PREFIX: &str = "app";
+
+/// Where the machine's own pages are now: whoever is signed in, and their worlds.
+const ACCOUNT: &str = "account";
 
 /// Where the worlds the machine hosts are, each under its name.
 pub const WORLDS: &str = "worlds";
@@ -3478,7 +3539,8 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
         ["style.css" | "zetlyn.css"] => respond(request, 200, "text/css; charset=utf-8", &format!("{}{APP_STYLE}", serve::STYLE)),
         // Nobody signed in has nothing here the hub does not show better: what may be read is
         // found there, each opening where it runs.
-        [] if who.is_none() && !post => redirect(request, "/hub/"),
+        // Nobody signed in at the account page: signing in is what it is for.
+        [] if who.is_none() && !post => redirect(request, &serve::at("/signin")),
         [] => {
             let public = public_trackers(dir);
             let mine = who.as_ref().map(|a| membership.orgs_of(&a.email)).unwrap_or_default();
@@ -3774,11 +3836,14 @@ mod tests {
         assert_eq!(status, 200);
         assert!(page.contains("Car prices") && page.contains("Sign in"), "{page}");
         assert!(!page.contains("What do you want to track?"));
-        // Somebody who is not an owner is told the same words, and no link is made for them.
+        // Somebody who is not an owner signs in too, as a reader of it, and runs nothing.
         let accounts = crate::account::Accounts::open(&root).unwrap();
         let (status, _, _) = ask(&format!("{base}/signin"), None, Some("email=mallory%40example.org"));
         assert_eq!(status, 200);
-        assert!(accounts.by_email("mallory@example.org").is_none());
+        let mallory = accounts.by_email("mallory@example.org").expect("a reader, with a link of their own");
+        let (status, _, cookie) = ask(&format!("{base}/signin/{}", accounts.new_link(mallory.id).unwrap()), None, None);
+        assert_eq!(status, 303);
+        assert!(cookie.as_deref().is_some_and(|c| c.starts_with("zr=")), "a reader's cookie and no member's: {cookie:?}");
         // The owner follows a link and runs it.
         let ann = accounts.ensure("ann@example.org").unwrap();
         let (status, _, cookie) = ask(&format!("{base}/signin/{}", accounts.new_link(ann.id).unwrap()), None, None);

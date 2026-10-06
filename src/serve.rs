@@ -534,6 +534,16 @@ pub enum Reader<'a> {
 /// the navigation beside it with `current` marked, and at the right the project, signing in and
 /// the way to start.
 pub fn site_header(current: &str, reader: Reader) -> Markup {
+    // Inside a world, signing in and out is the world's, at its own address; elsewhere the
+    // machine's account page, which lists the worlds somebody belongs to.
+    let world = FRAME.with(|f| {
+        let f = f.borrow();
+        f.org.as_ref().map(|_| format!("{}/", f.home.1.trim_end_matches('/')))
+    });
+    let (signin, signout) = match &world {
+        Some(w) => (format!("{w}signin"), format!("{w}signout")),
+        None => ("https://zetlyn.com/account/".to_string(), "/account/signout".to_string()),
+    };
     html! {
         header.site-header.shell {
             a.brand href="https://zetlyn.com/" aria-label="Zetlyn home" {
@@ -556,13 +566,13 @@ pub fn site_header(current: &str, reader: Reader) -> Markup {
                                     p.account-label { "Your organisations" }
                                     @for (label, href) in orgs { a href=(href) { (label) } }
                                 }
-                                form method="post" action="/app/signout" { button type="submit" { "Sign out" } }
+                                form method="post" action=(signout) { button type="submit" { "Sign out" } }
                             }
                         }
                     }
                     Reader::Local => {}
                     _ => {
-                        a.nav-signin href="https://zetlyn.com/app/signin" { "Sign in" }
+                        a.nav-signin href=(signin) { "Sign in" }
                         a.nav-cta href="https://zetlyn.com/docs/getting_started#install" { "Get started" }
                     }
                 }
@@ -635,7 +645,7 @@ pub fn frame_area(area: &str, org: Option<String>, orgs: Vec<(String, String)>) 
         f.org = org;
         f.orgs = orgs;
         if area == "app" {
-            f.brand = Some("/app/".into());
+            f.brand = Some("/account/".into());
         }
     });
 }

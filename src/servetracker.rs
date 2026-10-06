@@ -952,7 +952,7 @@ fn signin_page(site: &Site, message: Option<&str>) -> String {
 }
 
 /// The sign-in form, and where the link in the mail leads back to once it is followed.
-fn signin_page_to(site: &Site, message: Option<&str>, next: Option<&str>) -> String {
+pub(crate) fn signin_page_to(site: &Site, message: Option<&str>, next: Option<&str>) -> String {
     let body = html! {
         p { a href=(at("/")) { "←" } }
         h1 { "Sign in" }
@@ -3100,7 +3100,7 @@ fn workspace_path() -> String {
 
 /// The reader's cookie, set or (with no session and no age) cleared. Secure where the workspace
 /// says it is served over https.
-fn reader_cookie(site: &Site, session: &str, max_age: u32) -> String {
+pub(crate) fn reader_cookie(site: &Site, session: &str, max_age: u32) -> String {
     format!(
         "{}={session}; Path={}; Max-Age={max_age}; HttpOnly; SameSite=Lax{}",
         account::READER_COOKIE,
@@ -3117,7 +3117,7 @@ fn signin_elsewhere(id: &str, next: Option<&str>) -> String {
 }
 
 /// Where a signed-in reader comes back to: a path on this site, never another site.
-fn next_of(raw: &str) -> Option<String> {
+pub(crate) fn next_of(raw: &str) -> Option<String> {
     let raw = raw.trim();
     (raw.starts_with('/') && !raw.starts_with("//") && !raw.contains("://")).then(|| raw.to_string())
 }

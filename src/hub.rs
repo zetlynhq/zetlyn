@@ -57,6 +57,8 @@ const REFUSED: &[&str] = &[
     // The paths of zetlyn.com itself, where the hub, the website and every hosted organisation share
     // one name: an organisation called one of these would be a page of the site, or the machine.
     "app",
+    // The machine as a provider, at /oauth/ since 2026-10-06.
+    "oauth",
     "docs",
     "legal",
     "privacy",

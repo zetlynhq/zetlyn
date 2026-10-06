@@ -791,7 +791,7 @@ pub fn document(root: &Path) -> Result<serde_json::Value, String> {
             continue;
         }
         let at = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        trackers.push(json!({ "name": name, "title": decl.title, "at": format!("{url}/trackers/{at}/") }));
+        trackers.push(json!({ "name": name, "title": decl.title, "about": decl.about, "at": format!("{url}/trackers/{at}/") }));
     }
     Ok(json!({
         "zetlyn": DOCUMENT,

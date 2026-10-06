@@ -251,14 +251,20 @@ fn served_by(dir: &std::path::Path, url: &str) -> Option<(Here, String)> {
     if let Some(under) = path.strip_prefix("/app") {
         return Some((Here::machine(&dir), under.to_string()));
     }
-    // A world on the machine is at /worlds/<name>.
-    let under = path.strip_prefix(&format!("/{}/", crate::app::WORLDS))?;
+    // A world on the machine is at /<name>, and was at /worlds/<name>: another world that
+    // registered with it there still signs in there.
+    let legacy = path.strip_prefix(&format!("/{}/", crate::app::WORLDS));
+    let under = match legacy {
+        Some(u) => u,
+        None => path.strip_prefix('/')?,
+    };
     let org = under.split('/').next().unwrap_or("").to_string();
     let root = dir.join("orgs").join(&org);
     if org.is_empty() || !root.is_dir() {
         return None;
     }
-    Some((Here::world(&root, &format!("/{}/{org}", crate::app::WORLDS)), under[org.len()..].to_string()))
+    let base = if legacy.is_some() { format!("/{}/{org}", crate::app::WORLDS) } else { format!("/{org}") };
+    Some((Here::world(&root, &base), under[org.len()..].to_string()))
 }
 
 /// What this process would answer `url` with, where it serves it.
@@ -1308,7 +1314,7 @@ mod tests {
         std::thread::spawn(move || crate::app::hosting(&args));
         up(pm);
         let started = std::time::Instant::now();
-        let (status, page, to_m, signing_in) = ask("GET", &format!("{url_m}/worlds/acme/oauth/login?with=zetlyn:{url_m}&next=/worlds/acme/"), None, None);
+        let (status, page, to_m, signing_in) = ask("GET", &format!("{url_m}/acme/oauth/login?with=zetlyn:{url_m}&next=/acme/"), None, None);
         assert_eq!(status, 303, "{page}");
         assert!(to_m.starts_with(&format!("{url_m}/app/oauth/authorize?")), "{to_m}");
         let machine = Accounts::open(&m).unwrap();
@@ -1319,10 +1325,10 @@ mod tests {
         let mut form: Vec<String> = query_of(&to_m).iter().map(|(k, v)| format!("{k}={}", crate::serve::urlencode(v))).collect();
         form.push("allow=1".into());
         let (_, _, back, _) = ask("POST", &format!("{url_m}/app/oauth/authorize"), Some(&zo), Some(&form.join("&")));
-        assert!(back.starts_with(&format!("{url_m}/worlds/acme/oauth/callback?")), "{back}");
+        assert!(back.starts_with(&format!("{url_m}/acme/oauth/callback?")), "{back}");
         let (status, page, next, cookie) = ask("GET", &back, Some(&zp(&signing_in)), None);
-        assert_eq!((status, next.as_str()), (303, "/worlds/acme/"), "{page}");
-        assert!(cookie.starts_with("zr=") && cookie.contains("Path=/worlds/acme;"), "{cookie}");
+        assert_eq!((status, next.as_str()), (303, "/acme/"), "{page}");
+        assert!(cookie.starts_with("zr=") && cookie.contains("Path=/acme;"), "{cookie}");
         assert!(started.elapsed() < std::time::Duration::from_secs(10), "it waited for itself: {:?}", started.elapsed());
         let acme = Accounts::open(&m.join("orgs/acme")).unwrap();
         assert!(acme.by_identity(&url_m, &crate::propose::pseudonym(&m, ann.id).unwrap()).is_some());

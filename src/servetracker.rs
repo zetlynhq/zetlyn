@@ -85,20 +85,93 @@ fn cell(e: &Thing, name: &str) -> Markup {
 /// and at the hub its world says it publishes to (zetlyn.com's for a world hosted there, a
 /// world's own at `<url>/hub` otherwise).
 fn hub_entry(scope: &Tracker, world: &Site) -> Option<String> {
+    let hub = hub_of(scope, world)?;
+    // Its page there is read owner first: /hub/<owner>/trackers/<name>/.
+    let (owner, name) = scope.decl.name.split_once('/')?;
+    Some(format!("{hub}/{owner}/trackers/{name}/"))
+}
+
+/// The hub this tracker is published to, where it is: the address it is read at, or the world's
+/// own hub. None for a tracker that is private or was never published.
+fn hub_of(scope: &Tracker, world: &Site) -> Option<String> {
     let publish = world.publish.as_ref()?;
     if scope.decl.visibility == "private" || !scope.dir.join(".published").exists() {
         return None;
     }
-    let hub = if !publish.read_at.trim().is_empty() {
-        publish.read_at.trim().trim_end_matches('/').to_string()
+    if !publish.read_at.trim().is_empty() {
+        Some(publish.read_at.trim().trim_end_matches('/').to_string())
     } else if !world.url.trim().is_empty() {
-        format!("{}/hub", world.url.trim().trim_end_matches('/'))
+        Some(format!("{}/hub", world.url.trim().trim_end_matches('/')))
     } else {
-        return None;
+        None
+    }
+}
+
+/// Its versions on the hub and how to take a copy: what the hub's page about it showed, on the
+/// tracker's own, so a tracker is one page wherever it runs. The hub is read over HTTP, and
+/// what it says changes only when the tracker is published, so the answer is kept a while.
+fn versions_page(scope: &Tracker, world: &Site) -> String {
+    static KEPT: std::sync::Mutex<Option<BTreeMap<String, (std::time::Instant, String)>>> = std::sync::Mutex::new(None);
+    let name = scope.decl.name.clone();
+    let Some(hub) = hub_of(scope, world) else {
+        return shell("Versions", html! {
+            h1 { "Versions" }
+            p.dim { "This tracker is not published to a hub, so it has no versions anybody can take. Its owner publishes it with "
+                code { "zetlyn tracker publish" } "." }
+        });
     };
-    // Its page there is read owner first: /hub/<owner>/trackers/<name>/.
-    let (owner, name) = scope.decl.name.split_once('/')?;
-    Some(format!("{hub}/{owner}/trackers/{name}/"))
+    let key = format!("{hub} {name}");
+    if let Ok(kept) = KEPT.lock() {
+        if let Some((at, page)) = kept.as_ref().and_then(|k| k.get(&key)) {
+            if at.elapsed().as_secs() < 300 {
+                return page.clone();
+            }
+        }
+    }
+    let row = crate::place::at(&hub).ok().and_then(|place| crate::hubpages::read_entry(place.as_ref(), "trackers", &name));
+    let page = match row {
+        None => shell("Versions", html! {
+            h1 { "Versions" }
+            p.dim { "The hub at " a href={(hub) "/"} { (hub) } " did not answer with this tracker just now. Try again in a minute." }
+        }),
+        Some((row, held)) => {
+            let m = &row.manifest;
+            let reference = row.reference();
+            let manifest = format!("{hub}/{}/{reference}/versions/{}/manifest.json", row.tree, row.version);
+            shell("Versions", html! {
+                h1 { "Versions" }
+                p.lede { "Every version of " (scope.decl.title) " on the hub, and how to keep a copy of it on your own machine, current." }
+                h2 { "Take a copy" }
+                pre { code { "zetlyn tracker subscribe " (reference) } }
+                p.dim {
+                    @if row.sealed() { "One signed file: every claim, its history, the conflicts and what changed, in this tracker's words. " }
+                    @else { "Its statement, and every source it names, each with its claims and their receipts. " }
+                    "A subscriber is told of the next version and fetches only what changed."
+                }
+                h2 { "Versions" }
+                table { thead { tr { th { "Version" } th { "Published" } th { "Claims" } th {} } }
+                    tbody { @for (at, v, claims) in &held { tr {
+                        td { code { (v.get(..12).unwrap_or(v)) } }
+                        td { (crate::iso_date(*at)) }
+                        td { @if *claims > 0 { (thousands(*claims as i64)) } }
+                        td { @if *v == row.version { span.chip.on { (row.tag) } } }
+                    } } }
+                }
+                p.dim {
+                    "Version " code { (row.version.get(..12).unwrap_or(&row.version)) }
+                    @if let Some(k) = m["signed_by"].as_str() { " · signed " code { (k) } }
+                    " · " a href=(manifest) { "manifest.json" }
+                }
+                @if let Some(text) = m["declaration"].as_str() {
+                    details { summary { "Its statement" } pre { (text) } }
+                }
+            })
+        }
+    };
+    if let Ok(mut kept) = KEPT.lock() {
+        kept.get_or_insert_with(BTreeMap::new).insert(key, (std::time::Instant::now(), page.clone()));
+    }
+    page
 }
 
 fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
@@ -1365,6 +1438,11 @@ impl TrackerSite {
             }, at("/changes")),
             ("Conflicts".to_string(), at("/conflicts")),
         ];
+        // Published, it has versions anybody can take, and that is a page of the tracker too.
+        let mut tabs = tabs;
+        if hub_of(&self.scope, &Site::for_workspace(&self.scope.root)).is_some() {
+            tabs.push(("Versions".to_string(), at("/versions")));
+        }
         crate::serve::frame_section(Some((self.scope.decl.title.clone(), at("/"))), tabs);
         if let Err(e) = self.answer_or_fail(request) {
             eprintln!("{}: {e}", self.dir.display());
@@ -1648,6 +1726,7 @@ impl TrackerSite {
                 None,
             ),
             "/conflicts" => (conflicts_page(&scope, &url, &v, None), "text/html; charset=utf-8", None),
+            "/versions" => (versions_page(&scope, &Site::for_workspace(&scope.root)), "text/html; charset=utf-8", None),
             "/conflicts/mark" if post => {
                 let said = match (v.email(), crate::thingstore::ThingStore::open(&scope.dir)) {
                     (Some(reader), Ok(store)) => store
@@ -3324,7 +3403,7 @@ mod tests {
         };
         assert_eq!(open(&org), "", "nothing names an address");
         std::fs::write(hosting.join("workspace.yaml"), "url: https://app.example.org\n").unwrap();
-        assert_eq!(open(&org), "https://app.example.org/worlds/acme", "the machine's, under its own name");
+        assert_eq!(open(&org), "https://app.example.org/acme", "the machine's, under its own name");
         std::fs::write(org.join("workspace.yaml"), "url: https://acme.example.org\n").unwrap();
         assert_eq!(open(&org), "https://acme.example.org", "its own, where it names one");
         let _ = std::fs::remove_dir_all(&hosting);

@@ -619,7 +619,7 @@ impl Site {
             if let Some(hosting) = root.parent().filter(|p| p.file_name().is_some_and(|n| n == "orgs")).and_then(Path::parent) {
                 let machine = Site::load(hosting).url;
                 if !machine.is_empty() {
-                    site.url = format!("{}/{}/{org}", machine.trim_end_matches('/'), crate::app::WORLDS);
+                    site.url = format!("{}/{org}", machine.trim_end_matches('/'));
                 }
             }
         }
@@ -1054,8 +1054,8 @@ mod tests {
         assert_eq!(Site::for_workspace(&org).url, "");
         std::fs::write(dir.join(WORKSPACE), "url: https://app.example.org/\n").unwrap();
         let site = Site::for_workspace(&org);
-        assert_eq!(site.url, "https://app.example.org/worlds/acme");
-        assert_eq!(site.link("/worlds/acme/trackers/prices/signin/x"), "https://app.example.org/worlds/acme/trackers/prices/signin/x");
+        assert_eq!(site.url, "https://app.example.org/acme");
+        assert_eq!(site.link("/acme/trackers/prices/signin/x"), "https://app.example.org/acme/trackers/prices/signin/x");
         // Not an organisation: a workspace that names nothing has no address.
         assert_eq!(Site::for_workspace(&dir.join("orgs")).url, "");
         std::fs::write(org.join(WORKSPACE), "url: https://acme.example.org\n").unwrap();

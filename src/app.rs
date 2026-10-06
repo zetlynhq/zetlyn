@@ -3201,19 +3201,31 @@ fn hosting_worker(server: &tiny_http::Server, dir: &Path, addr: &str, jobs: &Sha
             }
             continue;
         }
-        // A world is at /worlds/<name>/, its trackers at /worlds/<name>/trackers/<tracker>/.
-        if first == WORLDS && parts.len() >= 2 && org_name(&parts[1]) && dir.join("orgs").join(&parts[1]).is_dir() {
-            let org = parts[1].clone();
-            let base = format!("/{WORLDS}/{org}");
+        // A world is at /<name>/, as it would be at the root of a domain of its own, its trackers at
+        // /<name>/trackers/<tracker>/. It was at /worlds/<name>/ from 2026-10-05 to 10-06, and at
+        // /<name>/ with its trackers under t/ before that: a page asked for at either is sent here,
+        // and what a program sends there, a webhook, a proposal or another world's sign-in, is
+        // still taken there, as a program seldom follows.
+        let legacy = first == WORLDS && parts.len() >= 2;
+        let org = if legacy { parts[1].clone() } else { first.clone() };
+        if org_name(&org) && dir.join("orgs").join(&org).is_dir() {
+            let base = if legacy { format!("/{WORLDS}/{org}") } else { format!("/{org}") };
+            let rest = url.strip_prefix(&base).unwrap_or("").to_string();
+            let get = matches!(request.method(), tiny_http::Method::Get | tiny_http::Method::Head);
+            let old_t = rest == "/t" || rest.starts_with("/t/") || rest.starts_with("/t?");
+            if get && (legacy || old_t) {
+                let rest = if old_t { format!("/trackers{}", &rest[2..]) } else { rest };
+                redirect_permanently(request, &format!("/{org}{rest}"));
+                continue;
+            }
             // A world with a domain of its own is there: a page asked for here goes to it.
             let own = crate::account::Site::load(&dir.join("orgs").join(&org)).domain.trim().to_lowercase();
             // Not its sign-in, which a world that knew it here before still asks for here; not the
             // machine's own name, which is no domain of its own. And for now, not for good: a
             // domain can be given up, and a browser keeps a permanent answer past that.
-            let signing = matches!(parts.get(2).map(String::as_str), Some("oauth" | ".well-known"));
-            if !own.is_empty() && own != machine_host && !signing && matches!(request.method(), tiny_http::Method::Get | tiny_http::Method::Head) {
-                let rest = url.strip_prefix(&base).unwrap_or("/");
-                let rest = if rest.is_empty() { "/" } else { rest };
+            let signing = rest.starts_with("/oauth") || rest.starts_with("/.well-known");
+            if !own.is_empty() && own != machine_host && !signing && get {
+                let rest = if rest.is_empty() { "/".to_string() } else { rest };
                 let mut response = tiny_http::Response::from_string("").with_status_code(302);
                 if let Ok(h) = tiny_http::Header::from_bytes(&b"Location"[..], format!("https://{own}{rest}").as_bytes()) {
                     response = response.with_header(h);
@@ -3221,20 +3233,8 @@ fn hosting_worker(server: &tiny_http::Server, dir: &Path, addr: &str, jobs: &Sha
                 let _ = request.respond(response);
                 continue;
             }
-            answer_org(&mut apps, jobs, &org, &org, &base, dir, addr, &accounts, request);
-            continue;
-        }
-        // Where a world was until 2026-10-05, at /<name>/ with its trackers at t/: a page asked
-        // for there is sent where it is now. What a program sends there, a webhook or a proposal,
-        // is still taken there, as a program seldom follows.
-        if org_name(&first) && dir.join("orgs").join(&first).is_dir() {
-            let rest = url.strip_prefix(&format!("/{first}")).unwrap_or("");
-            if matches!(request.method(), tiny_http::Method::Get | tiny_http::Method::Head) {
-                let rest = if rest == "/t" || rest.starts_with("/t/") || rest.starts_with("/t?") { format!("/trackers{}", &rest[2..]) } else { rest.to_string() };
-                redirect_permanently(request, &format!("/{WORLDS}/{first}{rest}"));
-            } else {
-                answer_org(&mut apps, jobs, &format!("{first}#before"), &first, &format!("/{first}"), dir, addr, &accounts, request);
-            }
+            let key = if legacy { format!("{org}#worlds") } else { org.clone() };
+            answer_org(&mut apps, jobs, &key, &org, &base, dir, addr, &accounts, request);
             continue;
         }
         // The machine's own pages are under `/app/`: the site, the hub and every organisation share
@@ -3315,7 +3315,7 @@ fn answer_org(apps: &mut BTreeMap<String, App>, jobs: &SharedJobs, key: &str, or
                 .into_iter()
                 .map(|(o, _)| {
                     let t = crate::account::Site::load(&dir.join("orgs").join(&o)).title;
-                    (if t.is_empty() { o.clone() } else { t }, format!("{machine}/{WORLDS}/{o}/"))
+                    (if t.is_empty() { o.clone() } else { t }, format!("{machine}/{o}/"))
                 })
                 .collect()
         })
@@ -3383,7 +3383,7 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                 table { tbody {
                     @for (org, name, decl) in &public {
                         tr {
-                            td { a href={"/worlds/" (org) "/trackers/" (name) "/"} { strong { (decl.title) } } div.why { (decl.about) } }
+                            td { a href={"/" (org) "/trackers/" (name) "/"} { strong { (decl.title) } } div.why { (decl.about) } }
                             td.dim { (org) }
                         }
                     }
@@ -3393,7 +3393,7 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                         h2 { "Your organisations" }
                         @if mine.is_empty() { p.dim { (a.email) " belongs to none yet." } }
                         table { tbody {
-                            @for (org, role) in &mine { tr { td { a href={"/worlds/" (org) "/"} { strong { (org) } } } td.dim { (role) } } }
+                            @for (org, role) in &mine { tr { td { a href={"/" (org) "/"} { strong { (org) } } } td.dim { (role) } } }
                         } }
                         form.bar method="post" action=(serve::at("/signout")) { span.dim { "Signed in as " (a.email) } button type="submit" { "Sign out" } }
                     }
@@ -3473,7 +3473,7 @@ fn publish_moved(dir: &Path, org: &str) -> Result<usize, String> {
         for o in orgs_in(dir) {
             for (name, path) in crate::tracker::scope_registry(&dir.join("orgs").join(&o).join("trackers")) {
                 if let Some(d) = path.file_name() {
-                    answers.insert(name, format!("{app}/worlds/{o}/trackers/{}/", d.to_string_lossy()));
+                    answers.insert(name, format!("{app}/{o}/trackers/{}/", d.to_string_lossy()));
                 }
             }
         }
@@ -3544,7 +3544,14 @@ pub(crate) fn publish_root(root: &Path, org: &str, answers: impl FnOnce(&str) ->
     if moved > 0 {
         let answers = if to.app.is_empty() { BTreeMap::new() } else { answers(to.app.trim_end_matches('/')) };
         let opens = |r: &crate::hubpages::Row| answers.get(&r.reference()).cloned();
-        let n = crate::hubpages::render(place.as_ref(), &opens)?;
+        // A world hosted here publishes beside a directory of worlds the machine keeps; what they
+        // run elsewhere is listed beneath the catalog, as each describes it, leading there.
+        let machine = root.parent().and_then(|p| p.parent()).filter(|m| m.join("orgs").is_dir());
+        let docs: Vec<(String, serde_json::Value)> = machine
+            .map(|m| crate::directory::list(m, "").into_iter().map(|e| (e.url, e.doc)).collect())
+            .unwrap_or_default();
+        let elsewhere = crate::hubpages::Elsewhere::from_documents(&docs);
+        let n = crate::hubpages::render_with(place.as_ref(), &opens, &elsewhere)?;
         println!("{org}: {n} pages in {}", place.describe());
     }
     Ok(moved)
@@ -3559,7 +3566,7 @@ fn signed_in(request: &tiny_http::Request, accounts: &crate::account::Accounts) 
 
 /// Every public tracker on the machine as a link: its title, and where it answers.
 fn public_links(dir: &Path) -> Vec<(String, String)> {
-    public_trackers(dir).into_iter().map(|(org, name, decl)| (decl.title, format!("/worlds/{org}/trackers/{name}/"))).collect()
+    public_trackers(dir).into_iter().map(|(org, name, decl)| (decl.title, format!("/{org}/trackers/{name}/"))).collect()
 }
 
 /// The organisations somebody belongs to, by their titles, for the app's sidebar.
@@ -3569,7 +3576,7 @@ fn orgs_links(dir: &Path, email: &str) -> Vec<(String, String)> {
         .into_iter()
         .map(|(org, _)| {
             let t = crate::account::Site::load(&dir.join("orgs").join(&org)).title;
-            (if t.is_empty() { org.clone() } else { t }, format!("/{WORLDS}/{org}/"))
+            (if t.is_empty() { org.clone() } else { t }, format!("/{org}/"))
         })
         .collect()
 }
@@ -3740,20 +3747,23 @@ mod tests {
         let (_, _, doc) = raw(port, "GET", "acme.example", "/.well-known/zetlyn.json", None);
         assert_eq!(serde_json::from_slice::<serde_json::Value>(&doc).unwrap()["world"], "https://acme.example");
         // Under the machine's name, it sends everybody to its own.
-        let (status, head, _) = raw(port, "GET", &host, "/worlds/acme/trackers/x/?q=1", None);
+        let (status, head, _) = raw(port, "GET", &host, "/acme/trackers/x/?q=1", None);
         assert_eq!(status, 302);
         assert!(head.contains("Location: https://acme.example/trackers/x/?q=1"), "{head}");
-        // Where a world and its trackers were until 2026-10-05, a page says where it is now.
+        // Where a world and its trackers were until 2026-10-05, and where it was until 10-06, a page
+        // says where it is now.
         let (status, head, _) = raw(port, "GET", &host, "/plain/t/x/?q=1", None);
         assert_eq!(status, 301);
-        assert!(head.contains("Location: /worlds/plain/trackers/x/?q=1"), "{head}");
-        let (status, head, _) = raw(port, "GET", &host, "/plain", None);
+        assert!(head.contains("Location: /plain/trackers/x/?q=1"), "{head}");
+        let (status, head, _) = raw(port, "GET", &host, "/worlds/plain", None);
         assert_eq!(status, 301);
-        assert!(head.lines().any(|l| l.trim() == "Location: /worlds/plain"), "{head}");
-        // Inside a world, the old name of the trackers' place says the new one.
+        assert!(head.lines().any(|l| l.trim() == "Location: /plain"), "{head}");
         let (status, head, _) = raw(port, "GET", &host, "/worlds/plain/t/x/", None);
         assert_eq!(status, 301);
-        assert!(head.contains("Location: /worlds/plain/trackers/x/"), "{head}");
+        assert!(head.contains("Location: /plain/trackers/x/"), "{head}");
+        let (status, head, _) = raw(port, "GET", &host, "/worlds/plain/trackers/x/?q=1", None);
+        assert_eq!(status, 301);
+        assert!(head.contains("Location: /plain/trackers/x/?q=1"), "{head}");
         // A name nobody here said is theirs is nothing, and no certificate is taken for it.
         assert_eq!(raw(port, "GET", "elsewhere.example", "/", None).0, 421);
         assert_eq!(raw(port, "GET", &host, "/app/domain-check?domain=acme.example", None).0, 200);
@@ -3767,19 +3777,19 @@ mod tests {
         let accounts = crate::account::Accounts::open(&dir).unwrap();
         let ann = accounts.ensure("ann@example.org").unwrap();
         let zs = format!("zs={}", accounts.new_session(ann.id, crate::account::Kind::Member).unwrap());
-        assert_ne!(raw(port, "GET", &host, "/worlds/plain/export.tar.gz", None).0, 200, "only its owner");
+        assert_ne!(raw(port, "GET", &host, "/plain/export.tar.gz", None).0, 200, "only its owner");
         // An editor edits, and does not take the world away; a reader is not in the app at all.
         let ed = accounts.ensure("ed@example.org").unwrap();
         let zs_ed = format!("zs={}", accounts.new_session(ed.id, crate::account::Kind::Member).unwrap());
-        assert_eq!(raw(port, "GET", &host, "/worlds/plain/export.tar.gz", Some(&zs_ed)).0, 403);
-        assert_eq!(raw(port, "GET", &host, "/worlds/plain/settings", Some(&zs_ed)).0, 200);
+        assert_eq!(raw(port, "GET", &host, "/plain/export.tar.gz", Some(&zs_ed)).0, 403);
+        assert_eq!(raw(port, "GET", &host, "/plain/settings", Some(&zs_ed)).0, 200);
         let rita = accounts.ensure("rita@example.org").unwrap();
         let zs_rita = format!("zs={}", accounts.new_session(rita.id, crate::account::Kind::Member).unwrap());
-        assert_ne!(raw(port, "GET", &host, "/worlds/plain/settings", Some(&zs_rita)).0, 200);
+        assert_ne!(raw(port, "GET", &host, "/plain/settings", Some(&zs_rita)).0, 200);
         // Nor is anybody whose session was made for reading.
         let zr = format!("zs={}", accounts.new_session(ann.id, crate::account::Kind::Reader).unwrap());
-        assert_ne!(raw(port, "GET", &host, "/worlds/plain/export.tar.gz", Some(&zr)).0, 200);
-        let (status, head, body) = raw(port, "GET", &host, "/worlds/plain/export.tar.gz", Some(&zs));
+        assert_ne!(raw(port, "GET", &host, "/plain/export.tar.gz", Some(&zr)).0, 200);
+        let (status, head, body) = raw(port, "GET", &host, "/plain/export.tar.gz", Some(&zs));
         assert_eq!(status, 200, "{head}");
         assert!(head.contains("attachment; filename=\"plain-"), "{head}");
         let mut names = Vec::new();
@@ -3791,7 +3801,7 @@ mod tests {
             use std::io::{Read, Write};
             let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
             let body = "to=http%3A%2F%2F127.0.0.1%3A1";
-            write!(s, "POST /worlds/plain/settings/moved HTTP/1.1\r\nHost: {host}\r\nCookie: {zs}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            write!(s, "POST /plain/settings/moved HTTP/1.1\r\nHost: {host}\r\nCookie: {zs}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
             let mut all = String::new();
             s.read_to_string(&mut all).unwrap();
             (all.split_whitespace().nth(1).unwrap().parse::<u16>().unwrap(), all.clone(), ())

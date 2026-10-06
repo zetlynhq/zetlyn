@@ -240,7 +240,7 @@ zetlyn
       An archive made a world again; saying where it went, or that it did not; being listed.
 
   zetlyn hosting serve <dir> [--no-updates] | run <dir> | org <dir> <name> | member <dir> <org> <email> [--role owner|editor|reader]
-      Many worlds on one machine, each at /worlds/<name> or a domain of its own, signed in to once at
+      Many worlds on one machine, each at /<name> or a domain of its own, signed in to once at
       /app/; with --no-updates, `hosting run` on a timer does the reading.
 ";
 
@@ -1684,11 +1684,22 @@ fn hub_command(args: &[String]) -> Result<(), String> {
                 Some(a) if serving.iter().any(|s| *s == r.reference()) => {
                     let reference = r.reference();
                     let (owner, name) = reference.split_once('/')?;
-                    Some(format!("{a}/worlds/{owner}/trackers/{name}/"))
+                    Some(format!("{a}/{owner}/trackers/{name}/"))
                 }
                 _ => None,
             };
-            let n = hubpages::render(place.as_ref(), &opens)?;
+            // Other worlds' trackers beneath the catalog, from a directory's list of worlds:
+            // `--directory https://zetlyn.com/directory.json`.
+            let docs: Vec<(String, serde_json::Value)> = match flag(args, "--directory") {
+                Some(at) => {
+                    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(30))).build().into();
+                    let listed: serde_json::Value = agent.get(at).call().map_err(|e| format!("{at}: {e}"))?.body_mut().read_json().map_err(|e| format!("{at}: {e}"))?;
+                    listed["worlds"].as_array().into_iter().flatten().filter_map(|w| Some((w["world"].as_str()?.to_string(), w.clone()))).collect()
+                }
+                None => Vec::new(),
+            };
+            let elsewhere = hubpages::Elsewhere::from_documents(&docs);
+            let n = hubpages::render_with(place.as_ref(), &opens, &elsewhere)?;
             println!("{n} pages in {}", place.describe());
             Ok(())
         }
@@ -1820,7 +1831,7 @@ const HUB_USAGE: &str = "\
       One hub into another, file for file, a folder into a bucket say. Run again, it writes
       only what differs.
 
-  zetlyn hub render <dir | s3://bucket/prefix> [--app <url> --serving owner/name,…]
+  zetlyn hub render <dir | s3://bucket/prefix> [--app <url> --serving owner/name,…] [--directory <url of directory.json>]
       The hub's pages, written into it: its catalog, and a page per source, tracker and
       package beside what each describes. A hub that is only storage then reads like a served
       one. --app is where the trackers named in --serving can be opened.

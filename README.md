@@ -113,7 +113,7 @@ zetlyn source pull sources/cve-kev
 A reference names a host or it does not, and one that does not means `zetlyn.com`. That is the
 whole of the default: `--from` and `--to` are for the other cases. It carries these, and serves two
 of the trackers it carries so you can see what one answers before subscribing:
-<https://zetlyn.com/worlds/zetlyn/trackers/cve/> and <https://zetlyn.com/worlds/zetlyn/trackers/local-models/>.
+<https://zetlyn.com/zetlyn/trackers/cve/> and <https://zetlyn.com/zetlyn/trackers/local-models/>.
 
 A hub is a directory layout over HTTPS and nothing more. A folder, a mounted drive, an S3 bucket
 or a web server is one:

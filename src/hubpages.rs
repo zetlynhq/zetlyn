@@ -252,6 +252,13 @@ fn claims_of(r: &Row, rows: &[Row]) -> u64 {
 /// The front page: a registry. Search first, the facets beside it, every tracker, package and
 /// source as one list, and one line beneath on how the hub works, which the docs say.
 pub fn catalog(place: &dyn Place, rows: &[Row], opens: Opens) -> String {
+    catalog_with(place, rows, opens, &[])
+}
+
+/// The catalog, and beneath it the trackers other worlds run that this hub does not carry: each
+/// as its world describes it, leading to where it runs.
+pub fn catalog_with(place: &dyn Place, rows: &[Row], opens: Opens, elsewhere: &[Elsewhere]) -> String {
+    let elsewhere: Vec<&Elsewhere> = elsewhere.iter().filter(|e| !rows.iter().any(|r| r.is_tracker() && r.reference() == e.name)).collect();
     let trackers: Vec<&Row> = rows.iter().filter(|r| r.is_tracker()).collect();
     let sources: Vec<&Row> = rows.iter().filter(|r| !r.is_tracker()).collect();
     let packages = rows.iter().filter(|r| r.tree == "packages").count();
@@ -307,7 +314,7 @@ pub fn catalog(place: &dyn Place, rows: &[Row], opens: Opens) -> String {
                         data-name=(r.title().to_lowercase())
                         data-text=(format!("{} {} {}", r.title(), r.reference(), r.about()).to_lowercase()) {
                         div.hub-row-main {
-                            h3 { a href=(r.href()) { (r.title()) } span.badge { (kind_of(r)) } @if r.is_tracker() && badge(r) != "Public" { span.badge { (badge(r)) } } }
+                            h3 { a href=(where_it_is(r, opens)) { (r.title()) } span.badge { (kind_of(r)) } @if r.is_tracker() && badge(r) != "Public" { span.badge { (badge(r)) } } }
                             @if !r.about().is_empty() { p { (r.about()) } }
                             p.hub-meta {
                                 (r.reference())
@@ -319,8 +326,10 @@ pub fn catalog(place: &dyn Place, rows: &[Row], opens: Opens) -> String {
                             }
                         }
                         div.hub-row-act {
-                            @if let Some(open) = opens(r) { a.primary href=(open) { "Live" } }
-                            a.secondary href=(r.href()) { "Entry" }
+                            @match opens(r) {
+                                Some(open) => { a.primary href=(open) { "Open" } a.secondary href={(open) "versions"} { "Versions" } }
+                                None => { a.secondary href=(r.href()) { "Entry" } }
+                            }
                         }
                     }
                 }
@@ -328,6 +337,22 @@ pub fn catalog(place: &dyn Place, rows: &[Row], opens: Opens) -> String {
             }
         }
         // What taking one and publishing one are is the docs' to say, not the catalog's.
+        @if !elsewhere.is_empty() {
+            section.hub-list.shell #elsewhere {
+                h2 { "Elsewhere" }
+                p.caption { "Trackers that worlds run and describe themselves, which this hub does not carry. Each opens where it runs." }
+                @for e in &elsewhere {
+                    article.hub-row {
+                        div.hub-row-main {
+                            h3 { a href=(e.at) { (e.title) } span.badge { "tracker" } }
+                            @if !e.about.is_empty() { p { (e.about) } }
+                            p.hub-row-meta { code { (e.name) } " · from " a.hub-from href=(e.world) { (e.world_shown()) } }
+                        }
+                        div.hub-row-act { a.primary href=(e.at) { "Open" } }
+                    }
+                }
+            }
+        }
         p.hub-how.shell { "Keep a copy that stays current, or publish your own: " a href="https://zetlyn.com/docs/hub" { "how the hub works" } "." }
         script { (PreEscaped(FILTER)) }
     };
@@ -396,7 +421,7 @@ fn owner_page(place: &dyn Place, owner: &str, rows: &[Row], opens: Opens) -> Str
                 @for r in theirs.iter().filter(|r| r.tree == *tree) {
                     article.hub-row {
                         div.hub-row-main {
-                            h3 { a href=(r.href()) { (r.title()) } span.badge { (kind_of(r)) } }
+                            h3 { a href=(where_it_is(r, opens)) { (r.title()) } span.badge { (kind_of(r)) } }
                             @if !r.about().is_empty() { p { (r.about()) } }
                             p.hub-meta {
                                 (r.reference())
@@ -406,8 +431,10 @@ fn owner_page(place: &dyn Place, owner: &str, rows: &[Row], opens: Opens) -> Str
                             }
                         }
                         div.hub-row-act {
-                            @if let Some(open) = opens(r) { a.primary href=(open) { "Live" } }
-                            a.secondary href=(r.href()) { "Entry" }
+                            @match opens(r) {
+                                Some(open) => { a.primary href=(open) { "Open" } a.secondary href={(open) "versions"} { "Versions" } }
+                                None => { a.secondary href=(r.href()) { "Entry" } }
+                            }
                         }
                     }
                 }
@@ -460,7 +487,9 @@ fn tabs(names: &[(&str, &str)]) -> Markup {
 }
 
 /// Every version a thing has on the hub, newest first, with when it was published and how much it held.
-fn versions(place: &dyn Place, r: &Row) -> Markup {
+/// Its versions on this hub, newest first: when each was published, which it is, and how many
+/// claims it held. A page that is not the hub's shows them in its own words.
+pub fn version_list(place: &dyn Place, r: &Row) -> Vec<(i64, String, u64)> {
     let mut held: Vec<(i64, String, u64)> = r
         .versions
         .iter()
@@ -474,6 +503,11 @@ fn versions(place: &dyn Place, r: &Row) -> Markup {
         })
         .collect();
     held.sort_by(|a, b| b.cmp(a));
+    held
+}
+
+pub fn versions(place: &dyn Place, r: &Row) -> Markup {
+    let held = version_list(place, r);
     html! {
         div.hub-scroll { table.hub-table {
             thead { tr { th { "Version" } th { "Published" } th.n { "Claims" } th {} } }
@@ -539,7 +573,7 @@ fn source_page(place: &dyn Place, r: &Row, rows: &[Row], opens: Opens) -> String
             h2 { "In trackers" }
             @if within.is_empty() { p.caption { "None on this hub: it is taken on its own, or into a tracker of yours." } }
             @else {
-                ul.hub-links { @for t in &within { li { a href=(t.href()) { (t.title()) } @if let Some(o) = opens(t) { " · " a href=(o) target="_blank" rel="noopener" { "open it" } } } } }
+                ul.hub-links { @for t in &within { li { a href=(where_it_is(t, opens)) { (t.title()) } } } }
             }
             @if !examples.is_empty() {
                 h2 { "Questions it answers" }
@@ -743,6 +777,11 @@ const TABS: &str = r##"(function () {
 
 /// The page for one row.
 pub fn page(place: &dyn Place, r: &Row, rows: &[Row], opens: Opens) -> String {
+    // A tracker that runs somewhere is described by itself, where it runs: its overview, and its
+    // versions as a tab of it. Its address here, kept for whoever has it, leads there.
+    if let (true, Some(open)) = (r.is_tracker(), opens(r)) {
+        return pointer(place, r, &open);
+    }
     if r.is_tracker() {
         tracker_page(place, r, rows, opens)
     } else {
@@ -768,9 +807,10 @@ pub fn page_at(place: &dyn Place, path: &str, opens: Opens) -> Option<String> {
 }
 
 /// Every page written into the place, beside what it describes, and `index.json` with them.
-pub fn render(place: &dyn Place, opens: Opens) -> Result<usize, String> {
+/// Every page of the hub, written into it, with the trackers of other worlds beneath the catalog.
+pub fn render_with(place: &dyn Place, opens: Opens, elsewhere: &[Elsewhere]) -> Result<usize, String> {
     let rows = shelf(place)?;
-    place.put("index.html", catalog(place, &rows, opens).as_bytes())?;
+    place.put("index.html", catalog_with(place, &rows, opens, elsewhere).as_bytes())?;
     place.put("index.json", &index_json(&rows))?;
     let mut written = 2;
     let mut seen = std::collections::BTreeSet::new();
@@ -782,6 +822,14 @@ pub fn render(place: &dyn Place, opens: Opens) -> Result<usize, String> {
             continue;
         }
         place.put(&format!("{}index.html", key.trim_start_matches('/')), page(place, latest, &rows, opens).as_bytes())?;
+        written += 1;
+        // Its versions, beside what it is made of, for a page that reads the hub over HTTP and so
+        // cannot list it: the tracker's own page shows them.
+        let held: Vec<J> = version_list(place, latest)
+            .into_iter()
+            .map(|(at, v, claims)| serde_json::json!({ "version": v, "built_at": at, "claims": claims }))
+            .collect();
+        place.put(&format!("{}/{}/{}/versions.json", latest.tree, latest.owner, latest.name), &serde_json::to_vec(&held).unwrap_or_default())?;
         written += 1;
     }
     // A page for each publisher, at /hub/<owner>/: everything they have here.
@@ -859,5 +907,106 @@ mod tests {
         assert_eq!(instance(&source, &rows, &opens), Some(("https://zetlyn.com/worlds/zetlyn".into(), "zetlyn.com/worlds/zetlyn".into())));
         // Nothing that is not an address, and nothing where nothing says.
         assert_eq!(instance(&stranger, &rows, &opens), None);
+    }
+}
+
+/// One thing a hub carries, read over HTTP, which cannot list: what `index.json` says of it, the
+/// manifest of the version its tag names, and the versions `versions.json` beside it holds (only
+/// that one where a render has not written them yet).
+pub fn read_entry(place: &dyn Place, tree: &str, reference: &str) -> Option<(Row, Vec<(i64, String, u64)>)> {
+    let index: J = serde_json::from_slice(&place.get("index.json").ok()?).ok()?;
+    let carries = index["carries"].as_array()?;
+    let mine: Vec<&J> = carries.iter().filter(|c| c["tree"] == tree && c["reference"] == reference).collect();
+    let entry = mine.iter().find(|c| c["tag"] == "latest").or(mine.first())?;
+    let (owner, name) = reference.split_once('/')?;
+    let version = entry["version"].as_str()?.to_string();
+    let manifest: J = serde_json::from_slice(&place.get(&format!("{tree}/{owner}/{name}/versions/{version}/manifest.json")).ok()?).ok()?;
+    let tree: &'static str = match tree { "trackers" => "trackers", "packages" => "packages", _ => "sources" };
+    let mut held: Vec<(i64, String, u64)> = place
+        .get(&format!("{tree}/{owner}/{name}/versions.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<Vec<J>>(&raw).ok())
+        .map(|list| {
+            list.iter()
+                .filter_map(|v| Some((v["built_at"].as_i64().unwrap_or(0), v["version"].as_str()?.to_string(), v["claims"].as_u64().unwrap_or(0))))
+                .collect()
+        })
+        .unwrap_or_default();
+    if held.is_empty() {
+        held.push((entry["built_at"].as_i64().unwrap_or(0), version.clone(), entry["claims"].as_u64().unwrap_or(0)));
+    }
+    let row = Row {
+        tree,
+        owner: owner.into(),
+        name: name.into(),
+        tag: entry["tag"].as_str().unwrap_or("latest").into(),
+        version,
+        manifest,
+        versions: held.iter().map(|(_, v, _)| v.clone()).collect(),
+    };
+    Some((row, held))
+}
+
+/// Where a thing is read: a tracker that runs somewhere, there; anything else, its entry here.
+fn where_it_is(r: &Row, opens: Opens) -> String {
+    opens(r).filter(|_| r.is_tracker()).unwrap_or_else(|| r.href())
+}
+
+/// A tracker's old address in the hub, kept: it says where the tracker is and goes there.
+fn pointer(place: &dyn Place, r: &Row, open: &str) -> String {
+    let body = html! {
+        section.hub-detail-top.shell {
+            h1 { (r.title()) }
+            p.intro { "This tracker runs at " a href=(open) { (open) } ". Its versions, and how to take a copy, are "
+                a href={(open) "versions"} { "a tab of it" } "." }
+        }
+        script { (PreEscaped(format!("location.replace({});", serde_json::to_string(open).unwrap_or_default()))) }
+    };
+    let page = frame(place, &format!("{} · Zetlyn Hub", r.title()), &r.about(), body);
+    // Before anything is drawn, for a reader without scripts too, and for a crawler, which keeps the
+    // tracker's own address rather than this one.
+    page.replacen(
+        "<head>",
+        &format!("<head><meta http-equiv=\"refresh\" content=\"0; url={open}\"><link rel=\"canonical\" href=\"{open}\">"),
+        1,
+    )
+}
+
+/// A tracker another world runs, as that world's own document describes it.
+pub struct Elsewhere {
+    pub name: String,
+    pub title: String,
+    pub about: String,
+    /// Where it runs.
+    pub at: String,
+    /// The world it is from.
+    pub world: String,
+}
+
+impl Elsewhere {
+    fn world_shown(&self) -> String {
+        self.world.split_once("://").map(|(_, rest)| rest.trim_end_matches('/').to_string()).unwrap_or_else(|| self.world.clone())
+    }
+
+    /// Every public tracker in the documents of the worlds a directory lists. One world listed
+    /// at two addresses, the old one not yet let go, is the one it says it is now.
+    pub fn from_documents(docs: &[(String, J)]) -> Vec<Elsewhere> {
+        let mut out: Vec<Elsewhere> = Vec::new();
+        for (world, doc) in docs {
+            for t in doc["trackers"].as_array().into_iter().flatten() {
+                let (Some(name), Some(at)) = (t["name"].as_str(), t["at"].as_str()) else { continue };
+                if out.iter().any(|e| e.name == name) {
+                    continue;
+                }
+                out.push(Elsewhere {
+                    name: name.to_string(),
+                    title: t["title"].as_str().filter(|s| !s.is_empty()).unwrap_or(name).to_string(),
+                    about: t["about"].as_str().unwrap_or("").to_string(),
+                    at: at.to_string(),
+                    world: world.clone(),
+                });
+            }
+        }
+        out
     }
 }

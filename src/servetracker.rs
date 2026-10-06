@@ -1539,6 +1539,13 @@ impl TrackerSite {
         ];
         // Published, it has versions anybody can take, and that is a page of the tracker too.
         let mut tabs = tabs;
+        // What its things are related to, each a tab: Vendors, Products.
+        for r in &self.scope.decl.relations {
+            if let Some(part) = r.part.as_deref().filter(|p| !p.is_empty()) {
+                let plural = format!("{part}s");
+                tabs.push((format!("{}{}", plural.get(..1).unwrap_or("").to_uppercase(), plural.get(1..).unwrap_or("")), at(&format!("/{plural}/"))));
+            }
+        }
         if hub_of(&self.scope, &Site::for_workspace(&self.scope.root)).is_some() {
             tabs.push(("Versions".to_string(), at("/versions")));
         }
@@ -2097,6 +2104,21 @@ impl TrackerSite {
                     }
                 }
             }
+            _ if !parts.is_empty() && relation_at(&scope, &parts[0]).is_some() => {
+                let r = relation_at(&scope, &parts[0]).expect("matched above");
+                let noindex = url.contains('?').then(|| ("X-Robots-Tag".to_string(), "noindex, nofollow".to_string()));
+                if parts.len() == 1 {
+                    (related_index(&scope, r, &url), "text/html; charset=utf-8", noindex)
+                } else {
+                    match related_page(&scope, r, &parts[1..].join("/"), &url, *operator) {
+                        Some(html) => (html, "text/html; charset=utf-8", noindex),
+                        None => {
+                            missing = true;
+                            (shell("Not here", html! { h1 { "Nothing is related to that here" } }), "text/html; charset=utf-8", None)
+                        }
+                    }
+                }
+            }
             _ if parts.len() == 3 && parts[0] == "claim" => {
                 match record_page(&scope, &parts[1], &parts[2], *operator) {
                     Some(html) => (html, "text/html; charset=utf-8", None),
@@ -2630,7 +2652,7 @@ fn things_page(scope: &Tracker, url: &str, operator: bool) -> String {
                         @if let Some((title, scheme, value)) = store.as_ref().and_then(|s| s.named(key)) {
                             tr {
                                 td {
-                                    a href={(at("/thing/")) (urlencode(&scheme)) "/" (urlencode(&value))} { (title) }
+                                    a href={(at("/thing/")) (urlencode(&scheme)) "/" (urlencode(&value))} { (clipped(&title, 140)) }
                                     div.why { (scheme) " " (value) }
                                 }
                                 td {
@@ -2647,6 +2669,266 @@ fn things_page(scope: &Tracker, url: &str, operator: bool) -> String {
         }
     };
     shell("Things", body)
+}
+
+/// A relation with `as:` has pages of its own, at the plural of what it is about: `/vendors/`
+/// for one `as: vendor`. One without names a whole identifier, and is asked on the things page.
+fn relation_at<'a>(scope: &'a Tracker, segment: &str) -> Option<&'a crate::trackerdecl::Relation> {
+    scope.decl.relations.iter().find(|r| r.part.as_deref().is_some_and(|p| !p.is_empty() && format!("{p}s") == segment))
+}
+
+/// Where the page of one other side of a relation is, or None where it has none.
+fn related_href(scope: &Tracker, name: &str, target: &str) -> Option<String> {
+    let r = scope.decl.relations.iter().find(|r| r.name == name)?;
+    let part = r.part.as_deref().filter(|p| !p.is_empty())?;
+    let path: Vec<String> = target.split('/').map(urlencode).collect();
+    Some(at(&format!("/{part}s/{}", path.join("/"))))
+}
+
+/// A title in a list, at most so many characters, cut at a word: NVD's titles are its whole
+/// description where nobody gave a shorter name.
+fn clipped(title: &str, at_most: usize) -> String {
+    if title.chars().count() <= at_most {
+        return title.to_string();
+    }
+    let cut: String = title.chars().take(at_most).collect();
+    let cut = cut.rsplit_once(' ').map(|(head, _)| head.to_string()).unwrap_or(cut);
+    format!("{}…", cut.trim_end_matches([',', ';', ':', '.', ' ']))
+}
+
+/// How a name spelled as an identifier reads: `palo_alto_networks` as palo alto networks.
+fn spelled_out(target: &str) -> String {
+    target.replace('_', " ")
+}
+
+/// The properties a list of things shows beside each, and counts over all of them: those of the
+/// thing page's summary (or the facets) that have a scale, so a value is one of a few words.
+fn scaled(scope: &Tracker) -> Vec<(String, Vec<String>)> {
+    let named = if scope.decl.thing.summary.is_empty() { scope.decl.view.facets.clone() } else { scope.decl.thing.summary.clone() };
+    named
+        .into_iter()
+        .filter_map(|p| {
+            let scale = scope.decl.normalise.get(&p)?.scale.clone();
+            (!scale.is_empty()).then_some((p, scale))
+        })
+        .collect()
+}
+
+/// Identifiers in the order a person counts them: CVE-2026-9999 before CVE-2026-10000.
+fn natural(a: &str, b: &str) -> std::cmp::Ordering {
+    fn runs(s: &str) -> Vec<(bool, String)> {
+        let mut out: Vec<(bool, String)> = Vec::new();
+        for c in s.chars() {
+            let digit = c.is_ascii_digit();
+            match out.last_mut() {
+                Some((d, run)) if *d == digit => run.push(c),
+                _ => out.push((digit, c.to_string())),
+            }
+        }
+        out
+    }
+    let (x, y) = (runs(a), runs(b));
+    for ((dx, rx), (dy, ry)) in x.iter().zip(y.iter()) {
+        let o = if *dx && *dy {
+            let (tx, ty) = (rx.trim_start_matches('0'), ry.trim_start_matches('0'));
+            tx.len().cmp(&ty.len()).then_with(|| tx.cmp(ty))
+        } else {
+            rx.to_lowercase().cmp(&ry.to_lowercase())
+        };
+        if o != std::cmp::Ordering::Equal {
+            return o;
+        }
+    }
+    x.len().cmp(&y.len())
+}
+
+/// Every other side of a relation: every vendor, with how many things each is related to.
+fn related_index(scope: &Tracker, r: &crate::trackerdecl::Relation, url: &str) -> String {
+    let part = r.part.clone().unwrap_or_default();
+    let plural = format!("{part}s");
+    let heading = format!("{}{}", plural.get(..1).unwrap_or("").to_uppercase(), plural.get(1..).unwrap_or(""));
+    let filter = params(url).get("q").cloned().unwrap_or_default();
+    let wanted = crate::trackerdecl::Relation::spell(&[filter.as_str()]);
+    let all = crate::thingstore::ThingStore::open(&scope.dir).map(|s| s.targets(&r.name)).unwrap_or_default();
+    let shown: Vec<&(String, u64)> = all.iter().filter(|(t, _)| wanted.is_empty() || t.contains(&wanted)).collect();
+    const AT_MOST: usize = 300;
+    let body = html! {
+        h1 { (heading) }
+        @if !r.about.is_empty() { p.lede { (r.about) } }
+        form.bar method="get" action=(at(&format!("/{plural}/"))) {
+            input type="search" name="q" value=(filter) placeholder={"Find a " (part)};
+            button type="submit" { "Find" }
+        }
+        @if shown.is_empty() {
+            p.dim { @if all.is_empty() { "No source relates anything here yet." } @else { "None has that in its name." } }
+        } @else {
+            table {
+                thead { tr { th { (part) } th { "Things" } } }
+                tbody { @for (target, n) in shown.iter().take(AT_MOST) { tr {
+                    td { a href=(related_href(scope, &r.name, target).unwrap_or_default()) { (spelled_out(target)) } }
+                    td { (thousands(*n as i64)) }
+                } } }
+            }
+            @if shown.len() > AT_MOST { p.dim { "The " (AT_MOST) " with the most things, of " (thousands(shown.len() as i64)) ". Find the others by name." } }
+        }
+    };
+    shell(&heading, body)
+}
+
+/// One other side of a relation and every thing related to it: a vendor and its vulnerabilities.
+/// Counts first, each a filter; then its products, where it is a vendor; then the things, newest
+/// first; and a way to be told, which is the things page's question for it.
+fn related_page(scope: &Tracker, r: &crate::trackerdecl::Relation, target: &str, url: &str, operator: bool) -> Option<String> {
+    let target = target.trim_matches('/').to_lowercase();
+    let part = r.part.clone().unwrap_or_default();
+    let store = crate::thingstore::ThingStore::open(&scope.dir).ok()?;
+    let base = format!("{}:{target}", r.name);
+    let (all, _) = view_of(scope, &base).ok()?;
+    if all.is_empty() {
+        return None;
+    }
+    let p = params(url);
+    let filter = p.get("where").cloned().unwrap_or_default();
+    let question = if filter.trim().is_empty() { base.clone() } else { format!("{base} and ({filter})") };
+    let mut keys = if filter.trim().is_empty() { all.clone() } else { view_of(scope, &question).map(|(k, _)| k).unwrap_or_default() };
+    let values: BTreeMap<String, String> = keys.iter().filter_map(|k| Some((k.clone(), store.named(k)?.2))).collect();
+    keys.sort_by(|a, b| natural(values.get(b).map(String::as_str).unwrap_or(b), values.get(a).map(String::as_str).unwrap_or(a)));
+    // Over every thing of it, whatever the filter: what each source says, counted once per word.
+    let props = scaled(scope);
+    let counts: Vec<(String, Vec<(String, usize)>)> = props
+        .iter()
+        .map(|(prop, scale)| {
+            let words = store.words_of(&all, prop);
+            let n: Vec<(String, usize)> = scale
+                .iter()
+                .map(|w| (w.clone(), words.values().filter(|ws| ws.contains(w)).count()))
+                .filter(|(_, n)| *n > 0)
+                .collect();
+            (prop.clone(), n)
+        })
+        .filter(|(_, n)| !n.is_empty())
+        .collect();
+    // A vendor's products, where the tracker relates things to products of the same identifier.
+    let sibling = |as_: &str| scope.decl.relations.iter().find(|o| o.to == r.to && o.part.as_deref() == Some(as_)).map(|o| o.name.clone());
+    let products_of = if part == "vendor" { sibling("product") } else { None };
+    let products: Vec<(String, u64)> = products_of
+        .as_ref()
+        .map(|o| store.targets(o).into_iter().filter(|(t, _)| t.starts_with(&format!("{target}/"))).collect())
+        .unwrap_or_default();
+    // A product's vendor, the part before the slash, and the product by its own name.
+    let vendor = match (part.as_str(), target.split_once('/')) {
+        ("product", Some((v, _))) => sibling("vendor").map(|n| (n, v.to_string())),
+        _ => None,
+    };
+    let name = match (part.as_str(), target.split_once('/')) {
+        ("product", Some((_, p))) => spelled_out(p),
+        _ => spelled_out(&target),
+    };
+    let said_by: Vec<String> = store.relating(&r.name, &target).iter().map(|s| title_of(scope, s)).collect();
+    const PAGE: usize = 100;
+    let page: usize = p.get("page").and_then(|n| n.parse().ok()).filter(|n| *n >= 1).unwrap_or(1);
+    let pages = keys.len().div_ceil(PAGE).max(1);
+    let here = related_href(scope, &r.name, &target).unwrap_or_default();
+    let link = |filter: &str, page: usize| -> String {
+        let mut q: Vec<String> = Vec::new();
+        if !filter.is_empty() { q.push(format!("where={}", urlencode(filter))); }
+        if page > 1 { q.push(format!("page={page}")); }
+        if q.is_empty() { here.clone() } else { format!("{here}?{}", q.join("&")) }
+    };
+    let shown: Vec<String> = keys.iter().skip((page - 1) * PAGE).take(PAGE).cloned().collect();
+    let beside: Vec<(String, Vec<String>, BTreeMap<String, BTreeSet<String>>)> =
+        props.iter().map(|(prop, scale)| (prop.clone(), scale.clone(), store.words_of(&shown, prop))).collect();
+    let body = html! {
+        p.overline {
+            (part)
+            @if let Some((vname, v)) = &vendor {
+                " of " a href=(related_href(scope, vname, v).unwrap_or_default()) { (spelled_out(v)) }
+            }
+        }
+        h1 { (name) }
+        div.meta {
+            span { (thousands(all.len() as i64)) " things" }
+            @if !said_by.is_empty() { span { "related by " (said_by.join(", ")) } }
+        }
+        @if !counts.is_empty() {
+            div.thing-summary {
+                @for (prop, n) in &counts {
+                    div {
+                        div.dim { (label(prop)) }
+                        div.bar {
+                            @for (w, c) in n {
+                                @let term = format!("{prop}={w}");
+                                @if filter == term {
+                                    a.chip.on href=(link("", 1)) rel="nofollow" { (w) " " (c) " ×" }
+                                } @else {
+                                    a.chip href=(link(&term, 1)) rel="nofollow" { (w) " " (c) }
+                                }
+                                " "
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        @if !products.is_empty() {
+            h2 { "Its products" }
+            p.bar {
+                @for (t, n) in products.iter().take(40) {
+                    a.chip href=(products_of.as_deref().and_then(|pn| related_href(scope, pn, t)).unwrap_or_default()) {
+                        (spelled_out(t.split_once('/').map(|(_, p)| p).unwrap_or(t))) " " (n)
+                    }
+                    " "
+                }
+            }
+            @if products.len() > 40 { p.dim { "The 40 with the most things, of " (products.len()) "." } }
+        }
+        h2 { "Being told" }
+        p.bar {
+            a.chip href={(at("/things.atom?q=")) (urlencode(&question))} { "Watch: its feed" }
+            " "
+            a.chip href={(at("/things?q=")) (urlencode(&question))} rel="nofollow" { "Ask more of it" }
+        }
+        @if operator {
+            form.bar method="post" action=(at("/things/watch")) {
+                input type="hidden" name="q" value=(question);
+                input type="text" name="title" value=(name) placeholder="What to call it";
+                button type="submit" { "Watch it" }
+            }
+        }
+        p.dim { "The feed says each thing that enters, leaves or changes; a reader adds its address, "
+            code { (at("/things.atom?q=")) "…" } ", to theirs." }
+        h2 {
+            @if filter.is_empty() { "Every thing" } @else { (thousands(keys.len() as i64)) " where " code { (filter) } }
+        }
+        table { tbody {
+            @for key in &shown {
+                @if let Some((title, scheme, value)) = store.named(key) {
+                    tr {
+                        td {
+                            a href={(at("/thing/")) (urlencode(&scheme)) "/" (urlencode(&value))} { (clipped(&title, 140)) }
+                            div.why { (value) }
+                        }
+                        td {
+                            @for (prop, scale, words) in &beside {
+                                // The worst any source says, as the scale orders it.
+                                @if let Some(w) = scale.iter().find(|w| words.get(key).is_some_and(|ws| ws.contains(*w))) {
+                                    span.chip.on[Some(w) == scale.first()] { (label(prop)) " " (w) } " "
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } }
+        @if pages > 1 {
+            p.bar {
+                @if page > 1 { a rel="nofollow" href=(link(&filter, page - 1)) { "← Previous" } } @else { span.off { "← Previous" } }
+                " " (page) " of " (pages) " "
+                @if page < pages { a rel="nofollow" href=(link(&filter, page + 1)) { "Next →" } } @else { span.off { "Next →" } }
+            }
+        }
+    };
+    Some(shell(&name, body))
 }
 
 /// A filter's parts joined by `and` at its top level, which is what a chip can take away without
@@ -2838,7 +3120,7 @@ fn relations_section(scope: &Tracker, key: &str, scheme: &str, value: &str, oper
                     tr {
                         td { (name) }
                         td {
-                            a href={(at("/things?q=")) (urlencode(&format!("{name}:{target}")))} { (target) }
+                            a href=(related_href(scope, name, target).unwrap_or_else(|| format!("{}{}", at("/things?q="), urlencode(&format!("{name}:{target}"))))) { (target) }
                             div.why { (who.iter().map(|w| title_of(w)).collect::<Vec<_>>().join(", ")) }
                             @for m in signed.iter().filter(|m| m.relation == *name && m.target == *target) {
                                 div.why { (m.at.get(..10).unwrap_or("")) @if !m.why.is_empty() { ": " (m.why) } }
@@ -3686,5 +3968,23 @@ mod ladder_tests {
         assert_eq!(metrics_of("CVSS:3.1/AV:N/UI:R")[1], ("UI".to_string(), "R".to_string()));
         assert_eq!(metric_words("UI", "R"), ("User interaction".to_string(), "required".to_string()));
         assert_eq!(metric_words("S", "C").1, "changed");
+    }
+}
+
+#[cfg(test)]
+mod related_tests {
+    use super::{clipped, natural};
+
+    #[test]
+    fn identifiers_sort_as_a_person_counts_them() {
+        let mut ids = vec!["CVE-2026-9999", "CVE-2025-10000", "CVE-2026-10000", "CVE-2026-0042"];
+        ids.sort_by(|a, b| natural(b, a));
+        assert_eq!(ids, ["CVE-2026-10000", "CVE-2026-9999", "CVE-2026-0042", "CVE-2025-10000"]);
+    }
+
+    #[test]
+    fn a_long_title_is_cut_at_a_word() {
+        assert_eq!(clipped("short", 140), "short");
+        assert_eq!(clipped("Buffer overflow in PDFium, in Chrome", 22), "Buffer overflow in…");
     }
 }

@@ -1182,6 +1182,44 @@ impl ThingStore {
         }
         out
     }
+    /// Every other side of one relation, with how many things are related to it, most first.
+    pub fn targets(&self, name: &str) -> Vec<(String, u64)> {
+        let Ok(mut stmt) = self.db.prepare("select target, count(*) from related where name = ?1 group by target order by 2 desc, 1") else {
+            return Vec::new();
+        };
+        stmt.query_map([name], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64)))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    }
+
+    /// The sources that relate anything to one other side.
+    pub fn relating(&self, name: &str, target: &str) -> BTreeSet<String> {
+        let Ok(mut stmt) = self.db.prepare("select sources from related where name = ?1 and target = ?2") else {
+            return BTreeSet::new();
+        };
+        stmt.query_map([name, target], |r| r.get::<_, String>(0))
+            .map(|rows| rows.flatten().flat_map(|s| serde_json::from_str::<BTreeSet<String>>(&s).unwrap_or_default()).collect())
+            .unwrap_or_default()
+    }
+
+    /// What every source says of one property of each of these things, as the words it means.
+    pub fn words_of(&self, keys: &[String], property: &str) -> BTreeMap<String, BTreeSet<String>> {
+        let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let Ok(mut stmt) = self.db.prepare("select means from said where key = ?1 and property = ?2") else {
+            return out;
+        };
+        for key in keys {
+            let words: BTreeSet<String> = stmt
+                .query_map([key.as_str(), property], |r| r.get::<_, String>(0))
+                .map(|rows| rows.flatten().flat_map(|m| serde_json::from_str::<Vec<String>>(&m).unwrap_or_default()).collect())
+                .unwrap_or_default();
+            if !words.is_empty() {
+                out.insert(key.clone(), words);
+            }
+        }
+        out
+    }
+
     /// The sources that speak about one thing.
     pub fn speakers(&self, key: &str) -> Vec<String> {
         let Ok(mut stmt) = self.db.prepare("select source from speaks where key = ?1 order by source") else {

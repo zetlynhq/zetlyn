@@ -680,6 +680,14 @@ impl App {
                 self.visitor = !owner;
                 Some(request)
             }
+            // A source of the world, for anybody where it may be shown; the rest of it is its owners'.
+            ["sources", name] | ["sources", name, ""] if !owner && !post => {
+                match public_source_page(&self.root, &self.base, name) {
+                    Some(body) => respond(request, 200, html_kind, &body),
+                    None => redirect(request, &serve::at("/signin")),
+                }
+                None
+            }
             // What the world is, where it went, all of it at once: its owners', not every editor's.
             ["export.tar.gz"] | ["settings", "moved"] | ["assist"] if owner && (post || parts.len() == 1 && parts[0] == "export.tar.gz") && !self.who.as_deref().is_some_and(|e| h.is_owner(e)) => {
                 respond(request, 403, html_kind, &page("Owners only", html! { h1 { "Only an owner of this world changes that" } p { a href=(serve::at("/")) { "Back" } } }));
@@ -3476,6 +3484,14 @@ fn publish_moved(dir: &Path, org: &str) -> Result<usize, String> {
                     answers.insert(name, format!("{app}/{o}/trackers/{}/", d.to_string_lossy()));
                 }
             }
+            // A source with a page of its own in its world is that page, as a tracker is.
+            let oroot = dir.join("orgs").join(&o);
+            for name in crate::tracker::registry(&oroot.join("sources")).into_keys() {
+                let short = name.rsplit('/').next().unwrap_or(&name).to_string();
+                if shown_source(&oroot, &short).is_some() {
+                    answers.insert(name, format!("{app}/{o}/sources/{short}/"));
+                }
+            }
         }
         answers
     })
@@ -3810,4 +3826,87 @@ mod tests {
         assert!(crate::account::Site::load(&dir.join("orgs/plain")).moved_to.is_empty(), "{head}");
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// A source a world shows anybody, and the public trackers of it that hold it: one that said it may
+/// be shown, in a tracker that is not private.
+fn shown_source(root: &Path, asked: &str) -> Option<(Source, Vec<(String, TrackerDecl)>)> {
+    // By the name it is published under, `cve-redhat` of `zetlyn/cve-redhat`, which is how the hub
+    // and every link say it; or by its folder, `redhat`.
+    let dir = crate::tracker::registry(&root.join("sources"))
+        .into_iter()
+        .find(|(name, _)| name.rsplit('/').next() == Some(asked))
+        .map(|(_, p)| p)
+        .unwrap_or_else(|| root.join("sources").join(asked));
+    let ds = Source::open(&dir).ok()?;
+    if !matches!(ds.decl.licence.republish.as_str(), "yes" | "summary") {
+        return None;
+    }
+    let holding: Vec<(String, TrackerDecl)> = listed(&root.join("trackers"))
+        .into_iter()
+        .filter(|(_, t, _)| t.visibility != "private" && t.members.iter().any(|m| m.dataset == ds.decl.name))
+        .map(|(name, t, _)| (name, t))
+        .collect();
+    (!holding.is_empty()).then_some((ds, holding))
+}
+
+/// A source's own page in its world, for anybody, where the source said it may be shown and a
+/// public tracker of the world holds it: what it is, where it reads, what one claim carries, the
+/// trackers it is in, and its versions on the hub. None for any other, which a visitor is then
+/// asked to sign in for, as before, so the page says nothing about a source it may not show.
+fn public_source_page(root: &Path, base: &str, dir_name: &str) -> Option<String> {
+    let (ds, holding) = shown_source(root, dir_name)?;
+    let d = &ds.decl;
+    let described = ds.describe();
+    let site = crate::account::Site::load(root);
+    let hub = site.publish.as_ref().map(|p| p.read_at.trim().trim_end_matches('/').to_string()).filter(|h| !h.is_empty());
+    let entry = hub.as_deref().and_then(|h| crate::place::at(h).ok()).and_then(|place| crate::hubpages::read_entry(place.as_ref(), "sources", &d.name));
+    let title = if d.title.is_empty() { d.name.clone() } else { d.title.clone() };
+    let finished = described["last_update"]["finished"].as_str().unwrap_or("");
+    let properties = described["properties"].as_array().cloned().unwrap_or_default();
+    let body = html! {
+        p.overline { "Source" @if !site.title.is_empty() { " · run by " (site.title) } }
+        h1 { (title) }
+        @if !d.about.is_empty() { p.lede { (d.about) } }
+        div.meta {
+            span.(if described["state"] == "current" { "current" } else { "partial" }) { (described["state"].as_str().unwrap_or("")) }
+            span { (described["claims"].as_u64().unwrap_or(0)) " claims" }
+            @if !d.kind.is_empty() { span { (d.kind) } }
+            @if !finished.is_empty() { span { "read " (finished.get(..16).unwrap_or(finished).replace('T', " ")) " UTC" } }
+            @if let Some(every) = &d.schedule.every { span { "every " (every) } }
+        }
+        h2 { "Where it reads" }
+        p { code { (d.source.address()) } }
+        p.dim {
+            @match d.licence.republish.as_str() { "yes" => { "It may be republished." } _ => { "Its titles and values may be shown, not its text." } }
+            @if !d.licence.terms.is_empty() { " " a href=(d.licence.terms) { "Its terms" } "." }
+        }
+        h2 { "In" }
+        ul { @for (name, t) in &holding { li { a href={(base) "/trackers/" (name) "/"} { (if t.title.is_empty() { name.clone() } else { t.title.clone() }) } } } }
+        @if !properties.is_empty() {
+            h2 { "What one claim carries" }
+            table { thead { tr { th { "Property" } th { "Type" } th { "Claims" } } }
+                tbody { @for p in &properties { tr {
+                    td { code { (p["name"].as_str().unwrap_or("")) } }
+                    td.dim { (p["type"].as_str().unwrap_or("")) }
+                    td { (p["claims"].as_u64().unwrap_or(0)) }
+                } } }
+            }
+        }
+        @if let Some((row, held)) = &entry {
+            h2 { "Take a copy" }
+            pre { code { "zetlyn source subscribe " (row.reference()) } }
+            p.dim { "Its claims and their receipts, signed; an update fetches only what changed." }
+            h2 { "Versions" }
+            table { thead { tr { th { "Version" } th { "Published" } th { "Claims" } th {} } }
+                tbody { @for (at, v, claims) in held { tr {
+                    td { code { (v.get(..12).unwrap_or(v)) } }
+                    td { (crate::iso_date(*at)) }
+                    td { @if *claims > 0 { (claims) } }
+                    td { @if *v == row.version { span.chip.on { (row.tag) } } }
+                } } }
+            }
+        }
+    };
+    Some(page(&title, body))
 }

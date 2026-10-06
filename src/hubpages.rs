@@ -327,7 +327,7 @@ pub fn catalog_with(place: &dyn Place, rows: &[Row], opens: Opens, elsewhere: &[
                         }
                         div.hub-row-act {
                             @match opens(r) {
-                                Some(open) => { a.primary href=(open) { "Open" } a.secondary href={(open) "versions"} { "Versions" } }
+                                Some(open) => { a.primary href=(open) { "Open" } @if r.is_tracker() { a.secondary href={(open) "versions"} { "Versions" } } }
                                 None => { a.secondary href=(r.href()) { "Entry" } }
                             }
                         }
@@ -432,7 +432,7 @@ fn owner_page(place: &dyn Place, owner: &str, rows: &[Row], opens: Opens) -> Str
                         }
                         div.hub-row-act {
                             @match opens(r) {
-                                Some(open) => { a.primary href=(open) { "Open" } a.secondary href={(open) "versions"} { "Versions" } }
+                                Some(open) => { a.primary href=(open) { "Open" } @if r.is_tracker() { a.secondary href={(open) "versions"} { "Versions" } } }
                                 None => { a.secondary href=(r.href()) { "Entry" } }
                             }
                         }
@@ -779,7 +779,7 @@ const TABS: &str = r##"(function () {
 pub fn page(place: &dyn Place, r: &Row, rows: &[Row], opens: Opens) -> String {
     // A tracker that runs somewhere is described by itself, where it runs: its overview, and its
     // versions as a tab of it. Its address here, kept for whoever has it, leads there.
-    if let (true, Some(open)) = (r.is_tracker(), opens(r)) {
+    if let Some(open) = opens(r) {
         return pointer(place, r, &open);
     }
     if r.is_tracker() {
@@ -949,7 +949,7 @@ pub fn read_entry(place: &dyn Place, tree: &str, reference: &str) -> Option<(Row
 
 /// Where a thing is read: a tracker that runs somewhere, there; anything else, its entry here.
 fn where_it_is(r: &Row, opens: Opens) -> String {
-    opens(r).filter(|_| r.is_tracker()).unwrap_or_else(|| r.href())
+    opens(r).unwrap_or_else(|| r.href())
 }
 
 /// A tracker's old address in the hub, kept: it says where the tracker is and goes there.
@@ -957,8 +957,12 @@ fn pointer(place: &dyn Place, r: &Row, open: &str) -> String {
     let body = html! {
         section.hub-detail-top.shell {
             h1 { (r.title()) }
-            p.intro { "This tracker runs at " a href=(open) { (open) } ". Its versions, and how to take a copy, are "
-                a href={(open) "versions"} { "a tab of it" } "." }
+            @if r.is_tracker() {
+                p.intro { "This tracker runs at " a href=(open) { (open) } ". Its versions, and how to take a copy, are "
+                    a href={(open) "versions"} { "a tab of it" } "." }
+            } @else {
+                p.intro { "This source has its page where it is read: " a href=(open) { (open) } "." }
+            }
         }
         script { (PreEscaped(format!("location.replace({});", serde_json::to_string(open).unwrap_or_default()))) }
     };

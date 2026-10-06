@@ -1684,7 +1684,8 @@ fn hub_command(args: &[String]) -> Result<(), String> {
                 Some(a) if serving.iter().any(|s| *s == r.reference()) => {
                     let reference = r.reference();
                     let (owner, name) = reference.split_once('/')?;
-                    Some(format!("{a}/{owner}/trackers/{name}/"))
+                    let tree = if r.is_tracker() { "trackers" } else { "sources" };
+                    Some(format!("{a}/{owner}/{tree}/{name}/"))
                 }
                 _ => None,
             };

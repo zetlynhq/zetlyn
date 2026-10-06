@@ -2991,6 +2991,12 @@ fn orgs_in(dir: &Path) -> Vec<String> {
 pub fn hosting(args: &[String]) -> Result<(), String> {
     match args.get(1).map(String::as_str) {
         Some("serve") => hosting_serve(args),
+        // One pass and out, for a timer: the updates in a process of their own.
+        Some("run") => {
+            let dir = PathBuf::from(crate::positional(args, 2).first().ok_or("which hosting directory?")?.as_str());
+            hosting_pass(&dir);
+            Ok(())
+        }
         // A new organisation: its workspace, empty, beside the others.
         Some("org") => {
             let dir = PathBuf::from(crate::positional(args, 2).first().ok_or("which hosting directory?")?.as_str());
@@ -3048,7 +3054,7 @@ pub fn hosting(args: &[String]) -> Result<(), String> {
             println!("{email} {} {org}", if removing { "is no longer in".to_string() } else { format!("is {role} in") });
             Ok(())
         }
-        _ => Err("zetlyn hosting serve <dir> [--addr 127.0.0.1:2400] | org <dir> <name> [--title …] | member <dir> <org> <email> [--role owner|editor|reader] [--remove]".into()),
+        _ => Err("zetlyn hosting serve <dir> [--addr 127.0.0.1:2400] [--no-updates] | run <dir> | org <dir> <name> [--title …] | member <dir> <org> <email> [--role owner|editor|reader] [--remove]".into()),
     }
 }
 
@@ -3065,6 +3071,26 @@ fn public_trackers(dir: &Path) -> Vec<(String, String, TrackerDecl)> {
     out
 }
 
+/// One pass over every organisation on the machine: what is due read, what moved published, the
+/// directory's worlds read again. When the next thing is due, where anything is.
+fn hosting_pass(dir: &Path) -> Option<i64> {
+    let mut soonest: Option<i64> = None;
+    for org in orgs_in(dir) {
+        let root = dir.join("orgs").join(&org);
+        if let Some(s) = crate::schedule_pass(&root, true, &crate::Limits::default()) {
+            soonest = Some(soonest.map_or(s, |x| x.min(s)));
+        }
+        if let Err(e) = publish_moved(dir, &org) {
+            eprintln!("{org}: not published: {e}");
+        }
+    }
+    // The directory's worlds, read again where they are due.
+    if let Err(e) = crate::directory::refresh(dir) {
+        eprintln!("directory: {e}");
+    }
+    soonest
+}
+
 fn hosting_serve(args: &[String]) -> Result<(), String> {
     let dir = PathBuf::from(crate::positional(args, 2).first().ok_or("which hosting directory?")?.as_str());
     std::fs::create_dir_all(dir.join("orgs")).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -3078,24 +3104,13 @@ fn hosting_serve(args: &[String]) -> Result<(), String> {
     println!("{} organisations from {} on http://{addr}/", orgs_in(&dir).len(), dir.display());
 
     // Every organisation's sources, trackers and watches, one after another, as `zetlyn run`
-    // does them for one workspace.
-    {
+    // does them for one workspace. With --no-updates that is somebody else's: `zetlyn hosting run`,
+    // a process of its own on a timer, whose reading every source whole is gone from memory when
+    // it ends, rather than kept by the process that answers pages (2026-10-05).
+    if !args.iter().any(|a| a == "--no-updates") {
         let dir = dir.clone();
         std::thread::spawn(move || loop {
-            let mut soonest: Option<i64> = None;
-            for org in orgs_in(&dir) {
-                let root = dir.join("orgs").join(&org);
-                if let Some(s) = crate::schedule_pass(&root, true, &crate::Limits::default()) {
-                    soonest = Some(soonest.map_or(s, |x| x.min(s)));
-                }
-                if let Err(e) = publish_moved(&dir, &org) {
-                    eprintln!("{org}: not published: {e}");
-                }
-            }
-            // The directory's worlds, read again where they are due.
-            if let Err(e) = crate::directory::refresh(&dir) {
-                eprintln!("directory: {e}");
-            }
+            let soonest = hosting_pass(&dir);
             let wait = soonest.map(|s| (s - crate::now()).clamp(60, 900)).unwrap_or(900);
             std::thread::sleep(std::time::Duration::from_secs(wait as u64));
         });

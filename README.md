@@ -21,6 +21,14 @@ did not point it at.
 ## Install
 
 ```
+curl -fsSL https://zetlyn.com/install.sh | sh
+```
+
+macOS (Apple silicon or Intel) or Linux on x86-64: the binary of the latest release, checked
+against its checksums, in `~/.local/bin` (or `$ZETLYN_BIN`). Each archive carries LICENSE, NOTICE
+and THIRD_PARTY_LICENSES. From source:
+
+```
 cargo install --git https://github.com/zetlynhq/zetlyn
 ```
 
@@ -30,8 +38,11 @@ Or from a checkout:
 cargo build --release      # target/release/zetlyn
 ```
 
-Rust 1.80 or later. `git` on the machine, for a source that is a checkout. Nothing else: SQLite is
+Rust 1.82 or later. `git` on the machine, for a source that is a checkout. Nothing else: SQLite is
 compiled in.
+
+With an assistant, give it <https://zetlyn.com/llms.txt>: what Zetlyn is, its files, its commands,
+and three tasks as they ran, tried by agents that had nothing else.
 
 ## No command at all
 
@@ -64,6 +75,11 @@ zetlyn serve sources/prices
 whole configuration. `serve` opens the source itself, with no tracker anywhere: an overview, the
 views it declares, browse with facets and columns, search by text and by property, a claim page.
 
+A file, a feed, a folder and a list on a web page are read that way, and so are a repository's
+releases or advisories (`--from github:<owner>/<repo>/releases`). A JSON API is not: its declaration
+is written, `claims: each: field:<list>[]` naming the list in its answer, or proposed by a model
+with `zetlyn assist teach <URL>`, which sends nothing before `--send`.
+
 ## Every value has a receipt
 
 ```
@@ -74,7 +90,9 @@ prints the claim, what its source handed over for it (the row, the JSON object, 
 per property the expression that read it and the words it read, and every version it was at with
 the time an update first saw it. The pages show the same under each value: who said it, in which
 words, since when, and what it said before. A subscriber holds the same receipts as the
-publisher, because they travel with the claims.
+publisher, because they travel with the claims. A thing is found by its key as a tracker writes it
+(`isbn:9780441172719`) or by its value in any spelling the source uses, and a key written into an
+address (`apikey=${KEY}`) is kept in every receipt as the variable, never its value.
 
 ## A topic
 
@@ -99,6 +117,78 @@ A tracker holds no index. It rewrites the query for each source, asks them in pa
 ranked lists, gathers the claims into one thing per identifier, and applies the whole filter again
 over the assembled thing — because a question like that one is answered by no source alone.
 
+`zetlyn tracker things trackers/vulns "conflict:severity and has:cve-kev"` asks what a thing is:
+which sources speak of it, where they disagree, what appeared or changed lately. It prints each
+key and title, a tab between.
+
+## A thing's own page
+
+What a page of one thing says first is the tracker's to declare, since only it knows which of its
+properties answer the first question about one of them:
+
+```yaml
+thing:
+  summary: [severity, cvss, epss, exploited, due_date, fixed_in]
+  ladder:
+    title: How far exploitation has got
+    steps:
+    - name: No public code known
+    - name: Proof of concept
+      when: has:cve-exploitdb
+    - name: A Metasploit module
+      when: has:cve-metasploit
+    - name: Exploited in the wild
+      when: exploited=yes
+  timeline: [due_date]
+```
+
+The summary shows each property with every source that says it, a disagreement marked; the ladder
+the steps a thing has reached, each with the source and the day; the timeline the day each source
+first spoke of it beside the dates declared. Where two sources score it differently and each wrote
+its vector (`cvss_vector`), the page says which metrics they judge differently. Nothing on it is
+written by the program: it orders what the sources said, and every value with its receipt is
+beneath.
+
+## People as a source
+
+Some things are read by many people and published as data by nobody. A source of
+`type: proposals` is those people: each proposes a row they read, with where and when, and the
+owner accepts it or does not. Only what is accepted is a claim, and its receipt names who read it.
+
+```yaml
+fetch:
+  type: proposals
+  readers: [signed-in]          # who may propose from the browser; or addresses, domain:…, @<world>
+identified_by:
+  flight: "const:{flight} {date}"
+```
+
+```
+zetlyn source proposals sources/flights
+zetlyn source accept sources/flights <file>.json
+```
+
+## Being told
+
+A watch keeps a thing or a question and tells what changed in its answer: to a feed, by mail,
+to a webhook, or to a program of yours, which gets the report as JSON on standard input.
+
+```yaml
+# watches/cheap-tokyo.yaml
+name: cheap-tokyo
+tracker: local/trip
+query: price < 600          # or thing: isbn:9780441172719
+words: [lh 714]             # only things whose title holds one of these
+deliver:
+- to: feed                  # served at /watch/cheap-tokyo by zetlyn serve
+- to: mail
+  address: you@example.org
+```
+
+`zetlyn watch check` says what it would tell; `--deliver` tells it; `--from-now` sets aside what
+happened before, which a new watch on a tracker that has been running would otherwise tell all of.
+`zetlyn run` updates every source on its rhythm, refreshes every tracker and asks every watch.
+
 ## Taking somebody else's
 
 A source travels as bytes: the claims, not the instructions for producing them. You need none of
@@ -107,13 +197,17 @@ the publisher's credentials and are not subject to the source's rate limits.
 ```
 zetlyn source subscribe zetlyn/cve-kev
 zetlyn tracker subscribe zetlyn/cve          # and its sources
-zetlyn source pull sources/cve-kev
+zetlyn source update sources/cve-kev      # a subscribed source pulls its next version
 ```
 
 A reference names a host or it does not, and one that does not means `zetlyn.com`. That is the
 whole of the default: `--from` and `--to` are for the other cases. It carries these, and serves two
 of the trackers it carries so you can see what one answers before subscribing:
 <https://zetlyn.com/zetlyn/trackers/cve/> and <https://zetlyn.com/zetlyn/trackers/local-models/>.
+A published tracker's Versions tab says how to take it and which versions there are, and every
+source that may be shown has its own page in its world, `https://zetlyn.com/zetlyn/sources/cve-kev/`.
+The hub's list leads to where each runs, and beneath it, Elsewhere, the trackers other worlds
+describe in their own documents.
 
 A hub is a directory layout over HTTPS and nothing more. A folder, a mounted drive, an S3 bucket
 or a web server is one:
@@ -165,13 +259,15 @@ zetlyn tracker check trackers/vulns
 ```
 
 An example that returns nothing, a column naming a property no claim carries, an identifier only one
-source has, a promise that no longer holds. None of it is wrong until somebody reads it, which is
-why an update never catches it.
+of several sources has, a promise that no longer holds, a key the workspace.yaml does not take.
+None of it is wrong until somebody reads it, which is why an update never catches it. Each exits
+non-zero when it finds any, and so does `zetlyn source update` when an update was partial or
+refused, so a CI stops either.
 
 ## A world of your own
 
 Your sources, your trackers and your readers, on a domain of yours, with nobody else's server in
-between. On an empty Ubuntu machine, as root, with the domain pointing at it:
+between. Run for you, the same world is at `https://zetlyn.com/<name>/`. On an empty Ubuntu machine, as root, with the domain pointing at it:
 
 ```
 curl -fsSL https://zetlyn.com/install.sh | ZETLYN_BIN=/usr/local/bin sh

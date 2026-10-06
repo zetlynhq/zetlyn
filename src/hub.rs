@@ -59,6 +59,8 @@ const REFUSED: &[&str] = &[
     "app",
     // The machine as a provider, at /oauth/ since 2026-10-06.
     "oauth",
+    // Stripe's webhook for the hosted worlds, since 2026-10-06.
+    "billing",
     "docs",
     "legal",
     "privacy",

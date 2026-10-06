@@ -163,7 +163,7 @@ fn pairwise_differ<T: Copy>(sets: &[Vec<T>], same: impl Fn(T, T) -> bool) -> boo
 }
 
 /// Days since the epoch, for `YYYY-MM-DD` and anything that starts with it.
-fn days(s: &str) -> Option<i64> {
+pub(crate) fn days(s: &str) -> Option<i64> {
     let d = s.get(..10)?;
     let mut parts = d.split('-');
     let (y, m, day) = (

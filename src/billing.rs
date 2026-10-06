@@ -32,6 +32,19 @@ pub struct Plan {
     /// Stripe's Payment Link for it. The workspace's name goes with it as `client_reference_id`.
     #[serde(default)]
     pub link: String,
+    /// Its Payment Link's id, `plink_…`: a checkout says which link it came from, and that is
+    /// the plan, whatever the link's metadata does or does not carry over.
+    #[serde(default)]
+    pub link_id: String,
+    /// Days free before the first payment, as the Payment Link is set up to give.
+    #[serde(default)]
+    pub trial_days: i64,
+    /// Whether a world on it may answer at a domain of its own.
+    #[serde(default)]
+    pub domain: bool,
+    /// What the plan page says it is for, one line.
+    #[serde(default)]
+    pub about: String,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -39,12 +52,27 @@ pub struct Plan {
 struct Plans {
     #[serde(default)]
     currency: String,
+    /// Stripe's customer portal, where an owner changes the card, the plan, or cancels.
+    #[serde(default)]
+    portal: String,
+    /// Days a world keeps being updated after what was paid for, while Stripe tries the card again.
+    #[serde(default = "seven")]
+    grace_days: i64,
     plans: BTreeMap<String, Plan>,
+}
+
+fn seven() -> i64 {
+    7
 }
 
 pub fn plans(dir: &Path) -> Result<(String, BTreeMap<String, Plan>), String> {
     let p: Plans = crate::yaml::read(&dir.join("plans.yaml"))?;
     Ok((p.currency, p.plans))
+}
+
+/// The portal's address, and the days of grace.
+pub fn terms(dir: &Path) -> (String, i64) {
+    crate::yaml::read::<Plans>(&dir.join("plans.yaml")).map(|p| (p.portal, p.grace_days)).unwrap_or((String::new(), 7))
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -59,11 +87,22 @@ pub struct Customer {
 }
 
 impl Customer {
-    /// Paid for today: active, or cancelled and not yet past what was paid for.
-    pub fn in_good_standing(&self) -> bool {
+    /// Paid for today: in its trial, active, or cancelled and not yet past what was paid for. A
+    /// payment that failed keeps it going for the days of grace past what was paid, while Stripe
+    /// tries the card again; a cancelled one ends where its payment does.
+    pub fn in_good_standing(&self, grace_days: i64) -> bool {
         let today = crate::iso_date(crate::now());
-        let paid = self.paid_until.as_deref().map_or(true, |u| u >= today.as_str());
-        matches!(self.state.as_str(), "active" | "cancelled") && paid
+        let until = |days: i64| {
+            self.paid_until.as_deref().map_or(true, |u| {
+                let last = crate::thingstore::days(u).map(|d| d + days);
+                last.map_or(u >= today.as_str(), |l| crate::thingstore::days(&today).is_some_and(|t| t <= l))
+            })
+        };
+        match self.state.as_str() {
+            "trialing" | "active" | "past_due" => until(grace_days),
+            "cancelled" => until(0),
+            _ => false,
+        }
     }
 }
 
@@ -72,7 +111,11 @@ create table if not exists customer(
   name text primary key, email text not null, plan text not null, state text not null,
   paid_until text, stripe_customer text, stripe_subscription text, updated text not null);
 create table if not exists event(id text primary key, kind text not null, at text not null);
+create table if not exists reservation(name text primary key, email text not null, title text not null, plan text not null, at integer not null);
 ";
+
+/// How long a name is held for a checkout.
+const RESERVED: i64 = 1800;
 
 pub struct Book {
     db: Connection,
@@ -128,6 +171,34 @@ impl Book {
         Ok(())
     }
 
+
+    /// A world's name held for whoever is on their way to pay for it, half an hour. The same
+    /// address may ask again; another may not until it has lapsed.
+    pub fn reserve(&self, name: &str, email: &str, title: &str, plan: &str) -> Result<(), String> {
+        let now = crate::now();
+        let held: Option<(String, i64)> = self.db.query_row("select email, at from reservation where name = ?1", [name], |r| Ok((r.get(0)?, r.get(1)?))).ok();
+        if let Some((by, at)) = held {
+            if !by.eq_ignore_ascii_case(email) && now - at < RESERVED {
+                return Err(format!("{name} is being taken by somebody else right now; try again in half an hour, or take another name"));
+            }
+        }
+        if self.get(name).is_some() {
+            return Err(format!("{name} is taken"));
+        }
+        self.db
+            .execute(
+                "insert into reservation(name, email, title, plan, at) values(?1, ?2, ?3, ?4, ?5)
+                 on conflict(name) do update set email = excluded.email, title = excluded.title, plan = excluded.plan, at = excluded.at",
+                rusqlite::params![name, email, title, plan, now],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Who a name was held for, and the title they gave it.
+    pub fn reservation(&self, name: &str) -> Option<(String, String)> {
+        self.db.query_row("select email, title from reservation where name = ?1", [name], |r| Ok((r.get(0)?, r.get(1)?))).ok()
+    }
     fn by_stripe(&self, customer: &str) -> Option<Customer> {
         let name: String = self.db.query_row("select name from customer where stripe_customer = ?1", [customer], |r| r.get(0)).ok()?;
         self.get(&name)
@@ -150,13 +221,18 @@ pub fn limits(dir: &Path, name: &str) -> (bool, crate::Limits, u64) {
     let Some(c) = book.get(name) else { return (false, crate::Limits::default(), 0) };
     let plan = plans(dir).ok().and_then(|(_, p)| p.get(&c.plan).cloned()).unwrap_or_default();
     let limits = crate::Limits { sources: Some(plan.sources), every: crate::fetch::duration(&plan.every).unwrap_or(0) };
-    (c.in_good_standing(), limits, plan.mails)
+    (c.in_good_standing(terms(dir).1), limits, plan.mails)
 }
 
 /// A Stripe event, checked and applied. `Stripe-Signature: t=<unix>,v1=<hex>`, signed over
 /// `<t>.<body>` with the endpoint's secret; older than five minutes is refused, as Stripe's own
 /// libraries refuse it, so a captured event cannot be replayed later.
 pub fn stripe(dir: &Path, body: &[u8], signature: &str, secret: &str) -> Result<String, String> {
+    apply(dir, &verified(body, signature, secret)?)
+}
+
+/// The event, where its signature holds and it is fresh.
+pub fn verified(body: &[u8], signature: &str, secret: &str) -> Result<J, String> {
     let mut t = "";
     let mut v1: Vec<&str> = Vec::new();
     for part in signature.split(',') {
@@ -177,8 +253,7 @@ pub fn stripe(dir: &Path, body: &[u8], signature: &str, secret: &str) -> Result<
     if !v1.iter().any(|g| crate::place::same(g, &want)) {
         return Err("the signature does not verify".into());
     }
-    let event: J = serde_json::from_slice(body).map_err(|e| format!("not JSON: {e}"))?;
-    apply(dir, &event)
+    serde_json::from_slice(body).map_err(|e| format!("not JSON: {e}"))
 }
 
 /// What an event moves. Checkout completed makes or renews a workspace's row; a subscription's
@@ -195,30 +270,38 @@ pub fn apply(dir: &Path, event: &J) -> Result<String, String> {
     match kind {
         "checkout.session.completed" => {
             let name = o["client_reference_id"].as_str().filter(|s| !s.is_empty()).ok_or("the checkout names no workspace (client_reference_id)")?;
-            let email = o["customer_details"]["email"].as_str().or(o["customer_email"].as_str()).unwrap_or("").to_string();
-            let plan = o["metadata"]["plan"].as_str().unwrap_or("").to_string();
-            let known = plans(dir).map(|(_, p)| p.contains_key(&plan)).unwrap_or(false);
-            if !known {
-                return Err(format!("{plan}: no such plan in plans.yaml"));
+            let email = o["customer_details"]["email"].as_str().or(o["customer_email"].as_str()).unwrap_or("").to_lowercase();
+            // The plan is the Payment Link it came through; the metadata where a link says it.
+            let all = plans(dir).map(|(_, p)| p).unwrap_or_default();
+            let by_link = o["payment_link"].as_str().and_then(|l| all.iter().find(|(_, p)| !p.link_id.is_empty() && p.link_id == l)).map(|(n, _)| n.clone());
+            let plan = by_link.or_else(|| o["metadata"]["plan"].as_str().map(str::to_string)).unwrap_or_default();
+            let Some(bought) = all.get(&plan) else {
+                return Err(format!("{plan}: no such plan in plans.yaml, and the checkout's link is none of theirs"));
+            };
+            // Who reserved the name, if not who paid, is told by the operator, not overwritten.
+            if let Some(held) = book.get(name).filter(|c| !c.email.eq_ignore_ascii_case(&email)) {
+                return Err(format!("{name}: belongs to {} already, and {email} paid for it; sort it out by hand", held.email));
             }
+            let trial = bought.trial_days > 0;
             let c = Customer {
                 name: name.to_string(),
                 email,
                 plan,
-                state: "active".into(),
-                // Until the first invoice says the period; a month is what was bought.
-                paid_until: Some(crate::iso_date(crate::now() + 31 * 86_400)),
+                state: if trial { "trialing" } else { "active" }.into(),
+                // Until the subscription says its period: the trial, or a month that was bought.
+                paid_until: Some(crate::iso_date(crate::now() + if trial { bought.trial_days } else { 31 } * 86_400)),
                 stripe_customer: o["customer"].as_str().map(str::to_string),
             };
             book.set(&c, o["subscription"].as_str())?;
-            Ok(format!("{name}: active on {}", c.plan))
+            Ok(format!("{name}: {} on {}", c.state, c.plan))
         }
-        "customer.subscription.updated" | "customer.subscription.deleted" => {
+        "customer.subscription.created" | "customer.subscription.updated" | "customer.subscription.deleted" => {
             let customer = o["customer"].as_str().unwrap_or("");
             let mut c = book.by_stripe(customer).ok_or_else(|| format!("{customer}: no workspace for this customer"))?;
             c.state = match (kind, o["status"].as_str().unwrap_or("")) {
                 ("customer.subscription.deleted", _) | (_, "canceled") => "cancelled",
-                (_, "active" | "trialing") => "active",
+                (_, "trialing") => "trialing",
+                (_, "active") => "active",
                 (_, "past_due" | "unpaid" | "incomplete") => "past_due",
                 (_, other) => other,
             }
@@ -342,7 +425,7 @@ mod tests {
         apply(&d, &gone).unwrap();
         let c = Book::open(&d).unwrap().get("acme").unwrap();
         assert_eq!(c.state, "cancelled");
-        assert!(!c.in_good_standing(), "cancelled and past what was paid for");
+        assert!(!c.in_good_standing(7), "cancelled and past what was paid for");
         let _ = std::fs::remove_dir_all(&d);
     }
 }

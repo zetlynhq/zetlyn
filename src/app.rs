@@ -3126,33 +3126,7 @@ pub fn hosting(args: &[String]) -> Result<(), String> {
         Some("org") => {
             let dir = PathBuf::from(crate::positional(args, 2).first().ok_or("which hosting directory?")?.as_str());
             let name = crate::positional(args, 2).get(1).map(|s| s.to_string()).ok_or("which organisation?")?;
-            if !org_name(&name) {
-                return Err(format!("{name}: an organisation's name is lower case letters, digits and hyphens"));
-            }
-            let root = dir.join("orgs").join(&name);
-            // One name for the site, the hub and every organisation: a name the hub refuses, or a
-            // path of the site, is refused here too. One already made stays reachable.
-            if !root.is_dir() {
-                if let Some(why) = crate::hub::why_not(&name) {
-                    return Err(format!("{name}: {why}"));
-                }
-            }
-            for d in ["sources", "trackers"] {
-                std::fs::create_dir_all(root.join(d)).map_err(|e| format!("{}: {e}", root.display()))?;
-            }
-            let file = root.join(crate::account::WORKSPACE);
-            if !file.exists() {
-                let title = crate::flag(args, "--title").unwrap_or(&name).to_string();
-                std::fs::write(&file, format!("title: {}\n", serde_json::to_string(&title).unwrap_or_default()))
-                    .map_err(|e| format!("{}: {e}", file.display()))?;
-            }
-            // Its own key to publish with, not the machine's: it is in its export, and what its
-            // subscribers pinned still holds where it goes.
-            let signs = root.join(".zetlyn");
-            if !signs.join(crate::identity::KEY_FILE).exists() {
-                let title = crate::account::Site::load(&root).title;
-                crate::identity::new_in(&signs, if title.is_empty() { &name } else { &title }, "")?;
-            }
+            let root = make_org(&dir, &name, crate::flag(args, "--title").unwrap_or(&name))?;
             println!("{name} in {}", root.display());
             Ok(())
         }
@@ -3168,19 +3142,139 @@ pub fn hosting(args: &[String]) -> Result<(), String> {
             if !matches!(role.as_str(), "owner" | "editor" | "reader") {
                 return Err(format!("{role}: an owner, an editor or a reader"));
             }
-            let mut m = Membership::load(&dir);
-            let list = m.orgs.entry(org.clone()).or_default();
-            list.retain(|x| !x.email.eq_ignore_ascii_case(&email));
             let removing = args.iter().any(|a| a == "--remove");
-            if !removing {
-                list.push(Member { email: email.clone(), role: role.clone() });
-            }
-            m.save(&dir)?;
+            set_member(&dir, &org, &email, (!removing).then_some(role.as_str()))?;
             println!("{email} {} {org}", if removing { "is no longer in".to_string() } else { format!("is {role} in") });
             Ok(())
         }
         _ => Err("zetlyn hosting serve <dir> [--addr 127.0.0.1:2400] [--no-updates] | run <dir> | org <dir> <name> [--title …] | member <dir> <org> <email> [--role owner|editor|reader] [--remove]".into()),
     }
+}
+
+/// Where the machine keeps its plans and its customers: `plans.yaml`, written by the operator, and
+/// `customers.db`, moved by Stripe's events.
+const BILLING: &str = "billing";
+
+/// What a world may run today: as much as it likes where nobody pays for it (the operator's own,
+/// or one granted by hand without a plan); its plan's where somebody does; nothing where that
+/// payment has lapsed past its grace.
+fn world_terms(dir: &Path, org: &str) -> (bool, crate::Limits) {
+    let billing = dir.join(BILLING);
+    let customer = crate::billing::Book::read(&billing).ok().and_then(|b| b.get(org));
+    match customer {
+        None => (true, crate::Limits::default()),
+        Some(_) => {
+            let (ok, limits, _mails) = crate::billing::limits(&billing, org);
+            (ok, limits)
+        }
+    }
+}
+
+/// Stripe's event, at `POST /billing/stripe`: checked by its signature, applied to the book, and
+/// a checkout that completed is a world, made for whoever paid, who is told where it is.
+fn stripe_webhook(mut request: tiny_http::Request, dir: &Path) {
+    let json_kind = "application/json";
+    let Ok(secret) = std::env::var("STRIPE_WEBHOOK_SECRET") else {
+        return respond(request, 503, json_kind, &json!({ "error": "STRIPE_WEBHOOK_SECRET is not set" }).to_string());
+    };
+    let signature = request.headers().iter().find(|h| h.field.equiv("Stripe-Signature")).map(|h| h.value.as_str().to_string()).unwrap_or_default();
+    let mut body = Vec::new();
+    let _ = std::io::Read::read_to_end(&mut std::io::Read::take(request.as_reader(), 1 << 20), &mut body);
+    let event = match crate::billing::verified(&body, &signature, &secret) {
+        Ok(e) => e,
+        // Refused, and Stripe gives up: it is not Stripe's, or not now.
+        Err(e) => return respond(request, 400, json_kind, &json!({ "error": e }).to_string()),
+    };
+    let billing = dir.join(BILLING);
+    let checkout = event["type"] == "checkout.session.completed";
+    let o = &event["data"]["object"];
+    let name = o["client_reference_id"].as_str().unwrap_or("").to_string();
+    let payer = o["customer_details"]["email"].as_str().or(o["customer_email"].as_str()).unwrap_or("").to_lowercase();
+    // A world already here that is not the payer's is not handed over: the payment is kept, and
+    // the operator is the one to sort it out.
+    if checkout && dir.join("orgs").join(&name).is_dir() && !Membership::load(dir).orgs.get(&name).is_some_and(|ms| ms.iter().any(|m| m.role == "owner" && m.email.eq_ignore_ascii_case(&payer))) {
+        eprintln!("billing: {payer} paid for {name}, which is somebody else's; nothing was made");
+        return respond(request, 200, json_kind, &json!({ "ok": "needs attention: the world is somebody else's" }).to_string());
+    }
+    let said = match crate::billing::apply(&billing, &event) {
+        Ok(s) => s,
+        // Anything else is 500, and Stripe sends it again, which a moment's failure wants.
+        Err(e) => {
+            eprintln!("billing: {e}");
+            return respond(request, 500, json_kind, &json!({ "error": e }).to_string());
+        }
+    };
+    if checkout {
+        if let Err(e) = provision(dir, &name, &payer) {
+            eprintln!("billing: {name}: {e}");
+            return respond(request, 500, json_kind, &json!({ "error": e }).to_string());
+        }
+    }
+    eprintln!("billing: {said}");
+    respond(request, 200, json_kind, &json!({ "ok": said }).to_string());
+}
+
+/// The world somebody paid for: made under the name they chose, with the title they gave it, them
+/// as its owner; and a mail saying where it is and how to sign in.
+fn provision(dir: &Path, name: &str, email: &str) -> Result<(), String> {
+    let book = crate::billing::Book::open(&dir.join(BILLING))?;
+    let title = book.reservation(name).map(|(_, t)| t).filter(|t| !t.is_empty()).unwrap_or_else(|| name.to_string());
+    let fresh = !dir.join("orgs").join(name).is_dir();
+    make_org(dir, name, &title)?;
+    set_member(dir, name, email, Some("owner"))?;
+    if fresh {
+        let site = crate::account::Site::load(dir);
+        let home = format!("{}/{name}/", site.url.trim_end_matches('/'));
+        let text = format!(
+            "{title} is ready at {home}\n\nSign in at {home}signin with this address: a link comes by mail, no password.\n\nThe plan, the card and the invoices are at {}/account/.\n",
+            site.url.trim_end_matches('/')
+        );
+        site.send(email, &format!("{title} is ready"), &text)?;
+    }
+    Ok(())
+}
+
+/// A new organisation: its workspace, empty, beside the others, with its own key to publish with.
+/// One already made is left as it is.
+fn make_org(dir: &Path, name: &str, title: &str) -> Result<PathBuf, String> {
+    if !org_name(name) {
+        return Err(format!("{name}: an organisation's name is lower case letters, digits and hyphens"));
+    }
+    let root = dir.join("orgs").join(name);
+    // One name for the site, the hub and every organisation: a name the hub refuses, or a
+    // path of the site, is refused here too. One already made stays reachable.
+    if !root.is_dir() {
+        if let Some(why) = crate::hub::why_not(name) {
+            return Err(format!("{name}: {why}"));
+        }
+    }
+    for d in ["sources", "trackers"] {
+        std::fs::create_dir_all(root.join(d)).map_err(|e| format!("{}: {e}", root.display()))?;
+    }
+    let file = root.join(crate::account::WORKSPACE);
+    if !file.exists() {
+        std::fs::write(&file, format!("title: {}\n", serde_json::to_string(title).unwrap_or_default()))
+            .map_err(|e| format!("{}: {e}", file.display()))?;
+    }
+    // Its own key to publish with, not the machine's: it is in its export, and what its
+    // subscribers pinned still holds where it goes.
+    let signs = root.join(".zetlyn");
+    if !signs.join(crate::identity::KEY_FILE).exists() {
+        let title = crate::account::Site::load(&root).title;
+        crate::identity::new_in(&signs, if title.is_empty() { name } else { &title }, "")?;
+    }
+    Ok(root)
+}
+
+/// Somebody in an organisation on the machine as owner, editor or reader; with no role, out of it.
+fn set_member(dir: &Path, org: &str, email: &str, role: Option<&str>) -> Result<(), String> {
+    let mut m = Membership::load(dir);
+    let list = m.orgs.entry(org.to_string()).or_default();
+    list.retain(|x| !x.email.eq_ignore_ascii_case(email));
+    if let Some(role) = role {
+        list.push(Member { email: email.to_lowercase(), role: role.to_string() });
+    }
+    m.save(dir)
 }
 
 /// Every public tracker on the machine, by organisation.
@@ -3202,7 +3296,13 @@ fn hosting_pass(dir: &Path) -> Option<i64> {
     let mut soonest: Option<i64> = None;
     for org in orgs_in(dir) {
         let root = dir.join("orgs").join(&org);
-        if let Some(s) = crate::schedule_pass(&root, true, &crate::Limits::default()) {
+        // A world nobody pays for any more is read no further; its pages stay, and its export.
+        let (go, limits) = world_terms(dir, &org);
+        if !go {
+            eprintln!("{org}: not paid for, so nothing is updated");
+            continue;
+        }
+        if let Some(s) = crate::schedule_pass(&root, true, &limits) {
             soonest = Some(soonest.map_or(s, |x| x.min(s)));
         }
         if let Err(e) = publish_moved(dir, &org) {
@@ -3284,6 +3384,11 @@ fn hosting_worker(server: &tiny_http::Server, dir: &Path, addr: &str, jobs: &Sha
         let path = url.split('?').next().unwrap_or("/").to_string();
         let parts: Vec<String> = path.split('/').filter(|s| !s.is_empty()).map(serve::urldecode).collect();
         let first = parts.first().cloned().unwrap_or_default();
+        // Stripe's events: a program's POST, from another site by nature, held by its signature.
+        if parts.len() == 2 && first == BILLING && parts[1] == "stripe" && request.method() == &tiny_http::Method::Post {
+            stripe_webhook(request, dir);
+            continue;
+        }
         // A form from another site is refused here too, before the machine's own pages and its
         // provider see it, as an organisation's app refuses one. A sign-in answer and a token are
         // what they are (Apple's answer is a form from Apple's page), held by state and code.
@@ -3497,7 +3602,18 @@ fn org_by_domain(dir: &Path, host: &str) -> Option<String> {
     if host.is_empty() {
         return None;
     }
-    orgs_in(dir).into_iter().find(|org| crate::account::Site::load(&dir.join("orgs").join(org)).domain.trim().eq_ignore_ascii_case(&host))
+    orgs_in(dir)
+        .into_iter()
+        .find(|org| crate::account::Site::load(&dir.join("orgs").join(org)).domain.trim().eq_ignore_ascii_case(&host))
+        .filter(|org| domain_allowed(dir, org))
+}
+
+/// Whether a world may answer at a domain of its own: always where nobody pays for it, and where
+/// somebody does, on a plan that has one.
+fn domain_allowed(dir: &Path, org: &str) -> bool {
+    let billing = dir.join(BILLING);
+    let Some(c) = crate::billing::Book::read(&billing).ok().and_then(|b| b.get(org)) else { return true };
+    crate::billing::plans(&billing).ok().and_then(|(_, p)| p.get(&c.plan).map(|p| p.domain)).unwrap_or(false)
 }
 
 /// `site_url` is the address it is asked at: the machine's, or a hosted world's own domain, where
@@ -3555,10 +3671,104 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                         table { tbody {
                             @for (org, role) in &mine { tr { td { a href={"/" (org) "/"} { strong { (org) } } } td.dim { (role) } } }
                         } }
+                        // What each world they own is on, where somebody pays for it, and where
+                        // the card, the plan and the invoices are: Stripe's portal.
+                        @let billing = dir.join(BILLING);
+                        @let book = crate::billing::Book::read(&billing).ok();
+                        @let (portal, grace) = crate::billing::terms(&billing);
+                        @let paid: Vec<crate::billing::Customer> = mine.iter().filter(|(_, r)| r == "owner").filter_map(|(o, _)| book.as_ref()?.get(o)).collect();
+                        @if !paid.is_empty() {
+                            h2 { "Plans" }
+                            table { tbody {
+                                @for c in &paid {
+                                    tr {
+                                        td { strong { (c.name) } div.why { (c.plan) } }
+                                        td { (match c.state.as_str() { "trialing" => "free trial", "active" => "active", "past_due" => "payment failed, being tried again", "cancelled" => "cancelled", other => other }) }
+                                        td.dim { @if let Some(u) = &c.paid_until { (if c.state == "trialing" { "free until " } else { "paid until " }) (u) } }
+                                        td { @if !c.in_good_standing(grace) { span.chip.on { "not updated" } } }
+                                    }
+                                }
+                            } }
+                            @if !portal.is_empty() {
+                                p { a href={(portal) (if portal.contains('?') { "&" } else { "?" }) "prefilled_email=" (urlencode(&a.email))} { "The card, the plan and the invoices, at Stripe" } }
+                            }
+                        }
+                        p { a href=(serve::at("/new")) { "Start a world of your own" } }
                         form.bar method="post" action=(serve::at("/signout")) { span.dim { "Signed in as " (a.email) } button type="submit" { "Sign out" } }
                     }
                     None => {
                         p { a href=(serve::at("/signin")) { "Sign in" } " to run your organisation's trackers." }
+                    }
+                }
+            }));
+        }
+        // A world of one's own, paid for at Stripe: a plan, a name and an address here, and the
+        // name held for half an hour while the payment is made.
+        ["new"] => {
+            let billing = dir.join(BILLING);
+            let (currency, plans) = crate::billing::plans(&billing).unwrap_or_default();
+            let mut said: Option<String> = None;
+            let mut form: BTreeMap<String, String> = serve::params(request.url()).into_iter().collect();
+            if post {
+                let mut body = String::new();
+                let _ = std::io::Read::read_to_string(&mut std::io::Read::take(request.as_reader(), 64 << 10), &mut body);
+                form = parse_form(&body);
+                let get = |k: &str| form.get(k).map(|v| v.trim().to_string()).unwrap_or_default();
+                let (name, title, email, plan) = (get("name").to_lowercase(), get("title"), get("email").to_lowercase(), get("plan"));
+                let chosen = plans.get(&plan);
+                let refused = if chosen.is_none() {
+                    Some("Choose a plan.".to_string())
+                } else if !org_name(&name) {
+                    Some("A name is lower case letters, digits and hyphens: reading-circle.".to_string())
+                } else if let Some(why) = crate::hub::why_not(&name) {
+                    Some(format!("{name}: {why}."))
+                } else if dir.join("orgs").join(&name).is_dir() {
+                    Some(format!("{name} is taken."))
+                } else if !email.contains('@') {
+                    Some("An address to sign in with.".to_string())
+                } else if get("business") != "yes" {
+                    Some("Hosting is for businesses: say that you order as one.".to_string())
+                } else if chosen.is_some_and(|p| p.link.is_empty()) {
+                    Some("This plan cannot be bought here yet. Write to hello@zetlyn.com and it is set up for you.".to_string())
+                } else {
+                    crate::billing::Book::open(&billing).and_then(|b| b.reserve(&name, &email, if title.is_empty() { &name } else { &title }, &plan)).err()
+                };
+                match (refused, chosen) {
+                    (None, Some(p)) => {
+                        let sep = if p.link.contains('?') { '&' } else { '?' };
+                        return redirect(request, &format!("{}{sep}client_reference_id={}&prefilled_email={}", p.link, urlencode(&name), urlencode(&email)));
+                    }
+                    (why, _) => said = why,
+                }
+            }
+            let get = |k: &str| form.get(k).cloned().unwrap_or_default();
+            let picked = if get("plan").is_empty() { plans.keys().next().cloned().unwrap_or_default() } else { get("plan") };
+            respond(request, 200, html_kind, &page("A world of your own", html! {
+                h1 { "A world of your own" }
+                p.about { "Your sources, your trackers and your readers, run for you at " (crate::account::Site::load(dir).url.trim_end_matches('/')) "/<name>, the same program you can run yourself, and yours to take away." }
+                @if let Some(s) = &said { div.note { (s) } }
+                @if plans.is_empty() {
+                    p { "Plans are not open here yet. Write to " a href="mailto:hello@zetlyn.com" { "hello@zetlyn.com" } "." }
+                } @else {
+                    form method="post" action=(serve::at("/new")) {
+                        div.plans {
+                            @for (key, p) in &plans {
+                                label.plan {
+                                    input type="radio" name="plan" value=(key) checked[*key == picked];
+                                    strong { (if p.title.is_empty() { key.clone() } else { p.title.clone() }) }
+                                    " " span { (p.price) " " (currency) " a month, excl. VAT" }
+                                    @if !p.about.is_empty() { div.why { (p.about) } }
+                                    div.why { (p.sources) " sources, read as often as every " (p.every) ", " (p.mails) " mails a month" @if p.domain { ", a domain of your own" } }
+                                    @if p.trial_days > 0 { div.why { (p.trial_days) " days free, then monthly; cancel any time." } }
+                                }
+                            }
+                        }
+                        p { label { "Its name, in its address" br; input type="text" name="name" value=(get("name")) placeholder="reading-circle" pattern="[a-z0-9][a-z0-9-]*" required; } }
+                        p { label { "Its title" br; input.wide type="text" name="title" value=(get("title")) placeholder="Our reading circle"; } }
+                        p { label { "Your address, to sign in with" br; input.wide type="email" name="email" value=(get("email")) placeholder="you@example.org" required; } }
+                        p { label { input type="checkbox" name="business" value="yes" required; " We order as a business, not as a consumer, and accept the " a href="https://zetlyn.com/legal" { "terms" } "." } }
+                        p { button.primary type="submit" { "Continue to payment" } }
+                        p.dim { "Paid at Stripe, which holds the card; here nothing of it is kept. The name is held for half an hour while you pay." }
                     }
                 }
             }));
@@ -3751,6 +3961,47 @@ fn orgs_links(dir: &Path, email: &str) -> Vec<(String, String)> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_world_paid_for_is_made_for_whoever_paid_and_runs_on_its_plan() {
+        let dir = std::env::temp_dir().join(format!("zetlyn-paid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let billing = dir.join(super::BILLING);
+        std::fs::create_dir_all(&billing).unwrap();
+        std::fs::create_dir_all(dir.join("orgs")).unwrap();
+        std::fs::write(billing.join("plans.yaml"), "currency: €\nplans:\n  solo:\n    sources: 10\n    every: 1h\n    mails: 500\n    price: \"19\"\n    link: https://buy.stripe.com/test_solo\n    link_id: plink_solo\n    trial_days: 14\n  team:\n    sources: 50\n    every: 15m\n    mails: 5000\n    price: \"49\"\n    link_id: plink_team\n    domain: true\n").unwrap();
+        let book = crate::billing::Book::open(&billing).unwrap();
+        book.reserve("circle", "ann@example.org", "Our reading circle", "solo").unwrap();
+        // Somebody else may not take the name while it is held.
+        assert!(book.reserve("circle", "eve@example.org", "Mine", "solo").is_err());
+        let checkout = serde_json::json!({ "id": "evt_paid", "type": "checkout.session.completed", "data": { "object": {
+            "client_reference_id": "circle", "customer": "cus_ann", "subscription": "sub_ann", "payment_link": "plink_solo",
+            "customer_details": { "email": "Ann@Example.org" } } } });
+        assert!(crate::billing::apply(&billing, &checkout).unwrap().contains("circle: trialing on solo"));
+        super::provision(&dir, "circle", "ann@example.org").unwrap();
+        assert_eq!(crate::account::Site::load(&dir.join("orgs/circle")).title, "Our reading circle");
+        assert!(super::Membership::load(&dir).orgs["circle"].iter().any(|m| m.email == "ann@example.org" && m.role == "owner"));
+        // Its plan's limits; a world nobody pays for is the operator's, and unlimited.
+        let (go, limits) = super::world_terms(&dir, "circle");
+        assert!(go && limits.sources == Some(10) && limits.every == 3600);
+        assert!(super::world_terms(&dir, "zetlyn").1.sources.is_none());
+        // A domain of its own is the team plan's.
+        assert!(!super::domain_allowed(&dir, "circle"));
+        assert!(super::domain_allowed(&dir, "zetlyn"));
+        let mut c = book.get("circle").unwrap();
+        c.plan = "team".into();
+        book.set(&c, None).unwrap();
+        assert!(super::domain_allowed(&dir, "circle"));
+        // Past what was paid and past the grace, it is read no further.
+        c.state = "past_due".into();
+        c.paid_until = Some(crate::iso_date(crate::now() - 8 * 86_400));
+        book.set(&c, None).unwrap();
+        assert!(!super::world_terms(&dir, "circle").0);
+        c.paid_until = Some(crate::iso_date(crate::now() - 3 * 86_400));
+        book.set(&c, None).unwrap();
+        assert!(super::world_terms(&dir, "circle").0, "within the seven days of grace");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     #[test]
     fn an_organisation_may_not_take_a_path_of_the_site_but_one_already_made_stays() {
         let dir = std::env::temp_dir().join(format!("zetlyn-hosting-names-{}", std::process::id()));

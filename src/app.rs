@@ -2751,6 +2751,21 @@ fn redirect(request: tiny_http::Request, to: &str) {
 }
 
 const APP_STYLE: &str = r#"
+.account-hero { margin: 2.5rem 0 1.5rem; }
+.account-hero h1 { margin: .2rem 0 .4rem; font-size: 1.9rem; word-break: break-all; }
+.account-worlds { display: grid; grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr)); gap: 1rem; margin: 1rem 0 2rem; }
+.card.account-world, a.card.account-new, a.card.account-admin { display: flex; flex-direction: column; gap: .45rem; padding: 1.1rem 1.2rem;
+  background: var(--panel); border: 1px solid var(--line); text-decoration: none; color: var(--fg); }
+.account-world-head { display: flex; justify-content: space-between; align-items: baseline; gap: .6rem; }
+.account-world-head a { color: var(--fg); text-decoration: none; font-size: 1.1rem; }
+.account-world-head a:hover { color: var(--accent); }
+.account-plan { font-size: .92rem; }
+.account-links { display: flex; gap: 1rem; margin-top: auto; padding-top: .5rem; border-top: 1px solid var(--line); font-size: .92rem; }
+a.card.account-new { border-style: dashed; justify-content: center; }
+a.card.account-new strong::before { content: "+ "; color: var(--accent); }
+a.card.account-new:hover, a.card.account-admin:hover { border-color: var(--accent); }
+a.card.account-admin { border-left: 3px solid var(--accent); margin: 0 0 1rem; max-width: 34rem; }
+a.card.account-admin strong { font-size: 1.1rem; }
 h1.big { font-size: 2rem; margin-top: 3rem; }
 input.wide { flex: 1 1 26rem; min-width: 0; width: 100%; padding: .65rem .8rem; font: inherit;
   background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 0; }
@@ -3851,61 +3866,78 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
         // found there, each opening where it runs.
         // Nobody signed in at the account page: signing in is what it is for.
         [] if who.is_none() && !post => redirect(request, &serve::at("/signin")),
+        // Who is signed in here, for the website's and the hub's pages, which are files and know
+        // nobody: their script asks, and shows the address where "Sign in" was.
+        ["me"] => {
+            let site = crate::account::Site::load(dir);
+            let body = match &who {
+                Some(a) => json!({ "email": a.email, "operator": site.all_owners().iter().any(|o| o.eq_ignore_ascii_case(&a.email)) && crate::ops::is_control(dir) }),
+                None => json!({}),
+            };
+            let mut response = tiny_http::Response::from_string(body.to_string());
+            for (k, v) in [("Content-Type", "application/json"), ("Cache-Control", "no-store")] {
+                if let Ok(h) = tiny_http::Header::from_bytes(k.as_bytes(), v.as_bytes()) {
+                    response = response.with_header(h);
+                }
+            }
+            let _ = request.respond(response);
+        }
         [] => {
-            let public = public_trackers(dir);
-            let mine = who.as_ref().map(|a| membership.orgs_of(&a.email)).unwrap_or_default();
-            respond(request, 200, html_kind, &page("Zetlyn", html! {
-                h1 { "Trackers you can read" }
-                p.about { "Every public tracker on this machine, readable without an account. Its organisation keeps it current." }
-                @if public.is_empty() { p.dim { "None yet." } }
-                table { tbody {
-                    @for (org, name, decl) in &public {
-                        tr {
-                            td { a href={"/" (org) "/trackers/" (name) "/"} { strong { (decl.title) } } div.why { (decl.about) } }
-                            td.dim { (org) }
-                        }
+            let Some(a) = who.as_ref() else { return redirect(request, &serve::at("/signin")) };
+            let mine = membership.orgs_of(&a.email);
+            let site = crate::account::Site::load(dir);
+            let operator = site.all_owners().iter().any(|o| o.eq_ignore_ascii_case(&a.email)) && crate::ops::is_control(dir);
+            let register = crate::ops::register(dir).ok();
+            let billing = dir.join(BILLING);
+            let book = crate::billing::Book::read(&billing).ok();
+            let (portal, grace) = crate::billing::terms(&billing);
+            let portal_link = (!portal.is_empty()).then(|| format!("{portal}{}prefilled_email={}", if portal.contains('?') { "&" } else { "?" }, urlencode(&a.email)));
+            let alarms: BTreeMap<String, J> = if operator { std::fs::read(crate::ops::ops_dir(dir).join("alarms.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default() } else { BTreeMap::new() };
+            let state_words = |s: &str| match s { "trialing" => "Free trial", "active" => "Active", "past_due" => "Payment failed, being tried again", "cancelled" => "Cancelled", other => other }.to_string();
+            respond(request, 200, html_kind, &page("Your account", html! {
+                div.account-hero {
+                    p.overline { "Your account" }
+                    h1 { (a.email) }
+                    p.lede { @if mine.is_empty() { "No world of your own yet." } @else { (mine.len()) @if mine.len() == 1 { " world" } @else { " worlds" } " you belong to." } }
+                }
+                @if operator {
+                    a.card.account-admin href=(serve::at("/admin/")) {
+                        span.overline { "Operator" }
+                        strong { "Admin" }
+                        span.dim { @if alarms.is_empty() { "Every server and cell, nothing wrong." } @else { (alarms.len()) " things wrong now." } }
                     }
-                } }
-                @match &who {
-                    Some(a) => {
-                        h2 { "Your organisations" }
-                        @if mine.is_empty() { p.dim { (a.email) " belongs to none yet." } }
-                        table { tbody {
-                            @for (org, role) in &mine { tr { td { a href={"/" (org) "/"} { strong { (org) } } } td.dim { (role) } } }
-                        } }
-                        // What each world they own is on, where somebody pays for it, and where
-                        // the card, the plan and the invoices are: Stripe's portal.
-                        @let billing = dir.join(BILLING);
-                        @let book = crate::billing::Book::read(&billing).ok();
-                        @let (portal, grace) = crate::billing::terms(&billing);
-                        @let paid: Vec<crate::billing::Customer> = mine.iter().filter(|(_, r)| r == "owner").filter_map(|(o, _)| book.as_ref()?.get(o)).collect();
-                        @if !paid.is_empty() {
-                            h2 { "Plans" }
-                            table { tbody {
-                                @for c in &paid {
-                                    tr {
-                                        td { strong { (c.name) } div.why { (c.plan) } }
-                                        td { (match c.state.as_str() { "trialing" => "free trial", "active" => "active", "past_due" => "payment failed, being tried again", "cancelled" => "cancelled", other => other }) }
-                                        td.dim { @if let Some(u) = &c.paid_until { (if c.state == "trialing" { "free until " } else { "paid until " }) (u) } }
-                                        td { @if !c.in_good_standing(grace) { span.chip.on { "not updated" } } }
-                                    }
+                }
+                div.account-worlds {
+                    @for (org, role) in &mine {
+                        @let title = register.as_ref().and_then(|r| r.cells.get(org)).map(|c| c.title.clone()).filter(|t| !t.is_empty()).unwrap_or_else(|| org.clone());
+                        @let customer = book.as_ref().and_then(|b| b.get(org));
+                        div.card.account-world {
+                            div.account-world-head {
+                                a href={"/" (org) "/"} { strong { (title) } }
+                                span.chip { (role) }
+                            }
+                            span.dim.mono { "zetlyn.com/" (org) }
+                            @if let Some(c) = &customer {
+                                div.account-plan {
+                                    span { (if c.plan.is_empty() { "—".to_string() } else { c.plan.clone() }) " · " (state_words(&c.state)) }
+                                    @if let Some(u) = &c.paid_until { span.dim { (if c.state == "trialing" { " · free until " } else { " · paid until " }) (u) } }
+                                    @if !c.in_good_standing(grace) { " " span.chip.on { "not updated" } }
                                 }
-                            } }
-                            @if !portal.is_empty() {
-                                p { a href={(portal) (if portal.contains('?') { "&" } else { "?" }) "prefilled_email=" (urlencode(&a.email))} { "The card, the plan and the invoices, at Stripe" } }
+                            }
+                            div.account-links {
+                                a href={"/" (org) "/"} { "Open" }
+                                @if role == "owner" { a href={"/" (org) "/settings"} { "Settings" } }
+                                @if role == "owner" && customer.is_some() { @if let Some(p) = &portal_link { a href=(p) { "Billing" } } }
                             }
                         }
-                        p { a href=(serve::at("/new")) { "Start a world of your own" } }
-                        form.bar method="post" action=(serve::at("/signout")) { span.dim { "Signed in as " (a.email) } button type="submit" { "Sign out" } }
                     }
-                    None => {
-                        p { a href=(serve::at("/signin")) { "Sign in" } " to run your organisation's trackers." }
+                    a.card.account-new href=(serve::at("/new")) {
+                        strong { "Start a world" }
+                        span.dim { "Your sources, trackers and readers, run for you. 14 days free." }
                     }
                 }
             }));
         }
-        // A world of one's own, paid for at Stripe: a plan, a name and an address here, and the
-        // name held for half an hour while the payment is made.
         // The operator's pages: every cell, every server, what is wrong, and what can be done.
         ["admin", rest @ ..] => {
             let site = crate::account::Site::load(dir);
@@ -3926,6 +3958,8 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                 s => respond(request, s, html_kind, &html),
             }
         }
+        // A world of one's own, paid for at Stripe: a plan, a name and an address here, and the
+        // name held for half an hour while the payment is made.
         ["new"] => {
             let billing = dir.join(BILLING);
             let (currency, plans) = crate::billing::plans(&billing).unwrap_or_default();

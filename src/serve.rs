@@ -562,6 +562,7 @@ pub fn site_header(current: &str, reader: Reader) -> Markup {
                         details.account-menu {
                             summary { (email) }
                             div.account-panel {
+                                a href="https://zetlyn.com/account/" { "Your account" }
                                 @if !orgs.is_empty() {
                                     p.account-label { "Your organisations" }
                                     @for (label, href) in orgs { a href=(href) { (label) } }

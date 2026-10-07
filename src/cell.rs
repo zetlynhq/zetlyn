@@ -387,6 +387,10 @@ pub fn restore(name: &str, from: Option<&str>, port: Option<u16>, version: Optio
         std::fs::create_dir_all(STATE).map_err(|e| e.to_string())?;
         crate::world::import(&plain, &dir_of(name), Some(&node.url), None)?;
         let version = version.map(str::to_string).unwrap_or_else(|| current_version().unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string()));
+        // The snapshot it came from is its latest: it needs no other until a day has passed.
+        let mut env = read_env(name);
+        env.insert("SNAPSHOT".into(), at.clone());
+        write_env(name, &env)?;
         install(name, port, &version)?;
         Ok(at.clone())
     })();

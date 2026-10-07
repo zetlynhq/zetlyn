@@ -306,7 +306,8 @@ pub fn apply(dir: &Path, event: &J) -> Result<String, String> {
                 (_, other) => other,
             }
             .to_string();
-            if let Some(end) = date(&o["current_period_end"]) {
+            // At the subscription where an older API version says it, at its first item where a newer one does.
+            if let Some(end) = date(&o["current_period_end"]).or_else(|| date(&o["items"]["data"][0]["current_period_end"])) {
                 c.paid_until = Some(end);
             }
             book.set(&c, o["id"].as_str())?;
@@ -420,6 +421,11 @@ mod tests {
         let (ok, limits, mails) = limits(&d, "acme");
         assert!(ok && limits.sources == Some(10) && limits.every == 3600 && mails == 500);
 
+        // A newer API version says the period's end at the subscription's first item.
+        let moved = json!({ "id": "evt_1b", "type": "customer.subscription.updated", "data": { "object": {
+            "id": "sub_1", "customer": "cus_1", "status": "active", "items": { "data": [ { "current_period_end": 1_893_456_000 } ] } } } });
+        apply(&d, &moved).unwrap();
+        assert_eq!(Book::open(&d).unwrap().get("acme").unwrap().paid_until.as_deref(), Some("2030-01-01"));
         let gone = json!({ "id": "evt_2", "type": "customer.subscription.deleted", "data": { "object": {
             "id": "sub_1", "customer": "cus_1", "status": "canceled", "current_period_end": crate::now() - 86_400 } } });
         apply(&d, &gone).unwrap();

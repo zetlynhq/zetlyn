@@ -469,6 +469,26 @@ pub fn move_cell(control: &Path, cell: &str, to: &str) -> Result<String, String>
     Ok(format!("{cell} moved from {from_name} to {to} through snapshot {at}"))
 }
 
+/// A cell gone: a last snapshot, kept in the bucket with the others, then off its server, out of
+/// the register and the routes. Its owner is no longer an owner at the machine.
+pub fn remove(control: &Path, cell: &str) -> Result<String, String> {
+    let mut r = register(control)?;
+    let (node, n) = node_of(&r, cell)?;
+    let (node, n) = (node.to_string(), n.clone());
+    if r.cells.get(cell).is_some_and(|c| c.house) {
+        return Err(format!("{cell} is the house's own; remove it from the register by hand if that is meant"));
+    }
+    on(&n, &["remove", cell], None)?;
+    let owner = r.cells.remove(cell).map(|c| c.owner).unwrap_or_default();
+    save_register(control, &r)?;
+    if !owner.is_empty() {
+        let _ = crate::app::set_member(control, cell, &owner, None);
+    }
+    let _ = poll_one(control, &node);
+    routes(control)?;
+    Ok(format!("{cell} removed from {node}; its snapshots stay in the bucket"))
+}
+
 /// A release, from `/srv/zetlyn/releases/<v>/zetlyn` here, onto every server.
 pub fn release(_control: &Path, version: &str, current: bool) -> Result<String, String> {
     let r = register(_control)?;
@@ -515,7 +535,7 @@ pub fn upgrade(control: &Path, cell: &str, version: &str) -> Result<String, Stri
 
 // -- jobs, from the admin pages -----------------------------------------------------------------
 
-pub const ACTIONS: [&str; 10] = ["start", "stop", "restart", "snapshot", "move", "upgrade", "suspend", "resume", "logs", "create"];
+pub const ACTIONS: [&str; 11] = ["start", "stop", "restart", "snapshot", "move", "upgrade", "suspend", "resume", "logs", "create", "remove"];
 
 /// A job for the root side, written by the admin pages. Its id.
 pub fn ask(control: &Path, action: &str, cell: &str, args: &BTreeMap<String, String>, by: &str) -> Result<String, String> {
@@ -576,6 +596,8 @@ pub fn work(control: &Path) {
                     Ok(format!("{cell} made on {node}"))
                 }
                 "move" => move_cell(control, &cell, &arg("to")),
+                "remove" if arg("confirm") == cell => remove(control, &cell),
+                "remove" => Err(format!("{cell}: not removed, its name was not typed to confirm")),
                 "upgrade" => upgrade(control, &cell, &arg("version")),
                 "logs" => {
                     let (_, n) = node_of(&r, &cell)?;
@@ -613,7 +635,7 @@ pub fn work(control: &Path) {
 // -- the command --------------------------------------------------------------------------------
 
 pub const USAGE: &str = "zetlyn ops [--control <dir>] cells | nodes | poll | work | routes | terms \
-| create <cell> --title … --owner … [--node n] [--house] | move <cell> --to <node> | upgrade <cell> --to <v> | upgrade --all --to <v> \
+| create <cell> --title … --owner … [--node n] [--house] | move <cell> --to <node> | remove <cell> | upgrade <cell> --to <v> | upgrade --all --to <v> \
 | release <v> [--current] | start|stop|restart|snapshot|logs <cell> | node-add <name> --host <address> | drain <node> [--off]";
 
 pub fn command(args: &[String]) -> Result<(), String> {
@@ -652,6 +674,10 @@ pub fn command(args: &[String]) -> Result<(), String> {
         }
         Some("move") => {
             println!("{}", move_cell(&control, rest.first().ok_or("which cell?")?, flag("--to").ok_or("--to <node>")?)?);
+            Ok(())
+        }
+        Some("remove") => {
+            println!("{}", remove(&control, rest.first().ok_or("which cell?")?)?);
             Ok(())
         }
         Some("upgrade") => {

@@ -655,12 +655,12 @@ pub fn sync_routes() -> Result<(), String> {
         let domain = crate::account::Site::load(&dir.join("orgs").join(&name)).domain.trim().to_lowercase();
         if !domain.is_empty() && terms(&dir).unwrap_or_default().domain && domain.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-') {
             text.push_str(&format!(
-                "@domain_{n} header X-Forwarded-Host {domain}\nhandle @domain_{n} {{\n\treverse_proxy 127.0.0.1:{port} {{\n\t\tbuffer_requests\n\t\theader_up Host {domain}\n\t}}\n}}\n",
+                "@domain_{n} header X-Forwarded-Host {domain}\nhandle @domain_{n} {{\n\treverse_proxy 127.0.0.1:{port}\n}}\n",
                 n = name.replace('-', "_")
             ));
         }
         text.push_str(&format!(
-            "@cell_{n} path /{name} /{name}/* /worlds/{name} /worlds/{name}/*\nhandle @cell_{n} {{\n\treverse_proxy 127.0.0.1:{port} {{\n\t\tbuffer_requests\n\t}}\n}}\n",
+            "@cell_{n} path /{name} /{name}/* /worlds/{name} /worlds/{name}/*\nhandle @cell_{n} {{\n\treverse_proxy 127.0.0.1:{port}\n}}\n",
             n = name.replace('-', "_")
         ));
     }

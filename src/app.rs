@@ -3176,7 +3176,7 @@ fn admin(dir: &Path, rest: &[&str], post: bool, form: &BTreeMap<String, String>,
     let billing = crate::billing::Book::read(&dir.join(BILLING)).ok();
     match (post, rest) {
         (true, ["cell", cell, action]) => {
-            let args: BTreeMap<String, String> = form.iter().filter(|(k, _)| matches!(k.as_str(), "to" | "version" | "title" | "owner" | "node")).map(|(k, v)| (k.clone(), v.trim().to_string())).collect();
+            let args: BTreeMap<String, String> = form.iter().filter(|(k, _)| matches!(k.as_str(), "to" | "version" | "title" | "owner" | "node" | "confirm")).map(|(k, v)| (k.clone(), v.trim().to_string())).collect();
             match crate::ops::ask(dir, action, cell, &args, by) {
                 Ok(_) => (303, format!("{}?asked={action}", cell_home(cell))),
                 Err(e) => (400, page("Admin", html! { h1 { "Not asked" } div.note { (e) } p { a href=(cell_home(cell)) { "Back" } } })),
@@ -3258,6 +3258,12 @@ fn admin(dir: &Path, rest: &[&str], post: bool, form: &BTreeMap<String, String>,
                 form.bar method="post" action={(cell_home(cell)) "/upgrade"} {
                     input type="text" name="version" placeholder="0.3.62" required;
                     button type="submit" { "Upgrade" }
+                }
+                @if !c.house {
+                    form.bar method="post" action={(cell_home(cell)) "/remove"} {
+                        input type="text" name="confirm" placeholder={"type " (cell) " to remove it"} required;
+                        button type="submit" { "Remove" }
+                    }
                 }
                 h2 { "Jobs" }
                 table { tbody { @for j in &jobs { tr {

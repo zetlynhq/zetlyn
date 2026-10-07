@@ -199,6 +199,10 @@ impl Book {
     pub fn reservation(&self, name: &str) -> Option<(String, String)> {
         self.db.query_row("select email, title from reservation where name = ?1", [name], |r| Ok((r.get(0)?, r.get(1)?))).ok()
     }
+    /// The plan a name was held for, as chosen at /account/new.
+    pub fn reserved_plan(&self, name: &str) -> Option<String> {
+        self.db.query_row("select plan from reservation where name = ?1", [name], |r| r.get(0)).ok()
+    }
     fn by_stripe(&self, customer: &str) -> Option<Customer> {
         let name: String = self.db.query_row("select name from customer where stripe_customer = ?1", [customer], |r| r.get(0)).ok()?;
         self.get(&name)
@@ -274,7 +278,12 @@ pub fn apply(dir: &Path, event: &J) -> Result<String, String> {
             // The plan is the Payment Link it came through; the metadata where a link says it.
             let all = plans(dir).map(|(_, p)| p).unwrap_or_default();
             let by_link = o["payment_link"].as_str().and_then(|l| all.iter().find(|(_, p)| !p.link_id.is_empty() && p.link_id == l)).map(|(n, _)| n.clone());
-            let plan = by_link.or_else(|| o["metadata"]["plan"].as_str().map(str::to_string)).unwrap_or_default();
+            // Or the plan chosen at /account/new, held with the name: a link that is not in plans.yaml
+            // by its id still buys the plan its buyer picked.
+            let plan = by_link
+                .or_else(|| o["metadata"]["plan"].as_str().map(str::to_string))
+                .or_else(|| book.reserved_plan(name))
+                .unwrap_or_default();
             let Some(bought) = all.get(&plan) else {
                 return Err(format!("{plan}: no such plan in plans.yaml, and the checkout's link is none of theirs"));
             };
@@ -418,6 +427,12 @@ mod tests {
         assert!(stripe(&d, checkout.as_bytes(), &signed(&checkout, "whsec", crate::now()), "whsec").unwrap().contains("acme: active on solo"));
         // The same event again is not a second payment.
         assert!(stripe(&d, checkout.as_bytes(), &signed(&checkout, "whsec", crate::now()), "whsec").unwrap().contains("taken already"));
+        // A link that plans.yaml does not name by its id buys the plan reserved with the name.
+        Book::open(&d).unwrap().reserve("beta", "b@beta.test", "Beta", "solo").unwrap();
+        let unnamed = json!({ "id": "evt_9", "type": "checkout.session.completed", "data": { "object": {
+            "client_reference_id": "beta", "customer": "cus_9", "payment_link": "plink_unknown",
+            "customer_details": { "email": "b@beta.test" } } } });
+        assert!(apply(&d, &unnamed).unwrap().contains("beta: active on solo"));
         let (ok, limits, mails) = limits(&d, "acme");
         assert!(ok && limits.sources == Some(10) && limits.every == 3600 && mails == 500);
 

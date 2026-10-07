@@ -2778,11 +2778,12 @@ const APP_STYLE: &str = r#"
 .order-form { display: flex; flex-direction: column; gap: 1.2rem; }
 .order-form label.field { display: flex; flex-direction: column; gap: .35rem; }
 .order-form .field-name { font-weight: 600; }
+.order-form input { flex: none; }
 .order-form input[type=text], .order-form input[type=email] { padding: .7rem .8rem; font: inherit; background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 0; }
 .order-form input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 .order-form .slug { display: flex; align-items: stretch; border: 1px solid var(--line); background: var(--panel); }
 .order-form .slug-base { padding: .7rem 0 .7rem .8rem; color: var(--dim); font-family: var(--mono); }
-.order-form .slug input { border: 0 !important; padding-left: .1rem !important; font-family: var(--mono) !important; flex: 1; min-width: 0; outline: none; }
+.order-form .slug input { border: 0 !important; padding-left: .1rem !important; font-family: var(--mono) !important; flex: 1 1 auto; min-width: 0; outline: none; }
 .order-form .slug:focus-within { outline: 2px solid var(--accent); outline-offset: -1px; }
 .slug-state { font-size: .88rem; min-height: 1.2em; }
 .slug-state.ok { color: #2f7d4a; }
@@ -3478,6 +3479,14 @@ pub(crate) fn take_event(dir: &Path, event: &J) -> Result<String, String> {
             let title = crate::billing::Book::open(&billing).ok().and_then(|b| b.reservation(&name)).map(|(_, t)| t).filter(|t| !t.is_empty()).unwrap_or_else(|| name.clone());
             let args: BTreeMap<String, String> = [("title".to_string(), title), ("owner".to_string(), payer.clone())].into_iter().collect();
             crate::ops::ask(dir, "create", &name, &args, "stripe")?;
+            // Named for it at Stripe, where the key may: one customer per organisation, and the
+            // dashboard and the invoices say which.
+            if let Some(customer) = o["customer"].as_str() {
+                let title = args.get("title").cloned().unwrap_or_else(|| name.clone());
+                if let Err(e) = crate::stripe::name_customer(customer, &title, &name) {
+                    eprintln!("billing: {name}: not named at Stripe: {e}");
+                }
+            }
         } else {
             provision(dir, &name, &payer)?;
         }
@@ -4011,6 +4020,24 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                 }
             }));
         }
+        // One organisation's billing at Stripe, opened straight from the account: its own portal
+        // where the key may open one, the portal's sign-in where it may not.
+        ["billing", org] => {
+            let Some(a) = who.as_ref() else { return redirect(request, &serve::at("/signin")) };
+            let billing = dir.join(BILLING);
+            let owns = membership.orgs_of(&a.email).iter().any(|(o, r)| o == org && r == "owner");
+            let customer = crate::billing::Book::read(&billing).ok().and_then(|b| b.get(org)).and_then(|c| c.stripe_customer);
+            let back = format!("{}/account/", crate::account::Site::load(dir).url.trim_end_matches('/'));
+            let (portal, _) = crate::billing::terms(&billing);
+            let to = match (owns, customer) {
+                (true, Some(c)) => crate::stripe::portal_session(&c, &back).unwrap_or_else(|e| {
+                    eprintln!("billing portal {org}: {e}");
+                    if portal.is_empty() { back.clone() } else { format!("{portal}{}prefilled_email={}", if portal.contains('?') { "&" } else { "?" }, urlencode(&a.email)) }
+                }),
+                _ => back.clone(),
+            };
+            redirect(request, &to);
+        }
         // Where Stripe sends a buyer back: the checkout asked of Stripe itself, the world made
         // from it if the webhook has not made it already, and the buyer told what happens next.
         // No sign-in: the session's id is what it shows, and it shows only that.
@@ -4065,8 +4092,7 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
             let register = crate::ops::register(dir).ok();
             let billing = dir.join(BILLING);
             let book = crate::billing::Book::read(&billing).ok();
-            let (portal, grace) = crate::billing::terms(&billing);
-            let portal_link = (!portal.is_empty()).then(|| format!("{portal}{}prefilled_email={}", if portal.contains('?') { "&" } else { "?" }, urlencode(&a.email)));
+            let (_, grace) = crate::billing::terms(&billing);
             let alarms: BTreeMap<String, J> = if operator { std::fs::read(crate::ops::ops_dir(dir).join("alarms.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default() } else { BTreeMap::new() };
             let state_words = |s: &str| match s { "trialing" => "Free trial", "active" => "Active", "past_due" => "Payment failed, being tried again", "cancelled" => "Cancelled", other => other }.to_string();
             respond(request, 200, html_kind, &page("Your account", html! {
@@ -4114,7 +4140,7 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                             div.account-links {
                                 a href={"/" (org) "/"} { "Open" }
                                 @if role == "owner" { a href={"/" (org) "/settings"} { "Settings" } }
-                                @if role == "owner" && customer.is_some() { @if let Some(p) = &portal_link { a href=(p) { "Billing" } } }
+                                @if role == "owner" && customer.is_some() { a href=(serve::at(&format!("/billing/{org}"))) { "Billing" } }
                                 @if role == "owner" && customer.is_some() { a href=(serve::at("/cancel")) { "Cancel" } }
                             }
                         }
@@ -4237,12 +4263,29 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                     why => said = why,
                 }
             }
+            // Signed in already: the organisations they own, said before they order another, and
+            // the address they sign in with, filled in.
+            if let Some(a) = &who {
+                form.entry("email".to_string()).or_insert_with(|| a.email.clone());
+            }
+            let register = crate::ops::register(dir).ok();
+            let owned: Vec<(String, String)> = who.as_ref().map(|a| membership.orgs_of(&a.email).into_iter().filter(|(_, r)| r == "owner").map(|(o, _)| {
+                let t = register.as_ref().and_then(|r| r.cells.get(&o)).map(|c| c.title.clone()).filter(|t| !t.is_empty()).unwrap_or_else(|| o.clone());
+                (o, t)
+            }).collect()).unwrap_or_default();
             let get = |k: &str| form.get(k).cloned().unwrap_or_default();
             let net: f64 = plan.price.parse().unwrap_or(0.0);
             respond(request, 200, html_kind, &page("Order Zetlyn Managed", html! {
                 div.order {
                     ol.order-steps { li.on { "1 · Details" } li { "2 · Payment" } li { "3 · Your organisation" } }
                     h1 { "Order " (plan.title) }
+                    @if !owned.is_empty() {
+                        div.note.order-owned {
+                            "You already have "
+                            @for (i, (o, t)) in owned.iter().enumerate() { @if i > 0 { ", " } strong { (t) } " (" a href={"/" (o) "/"} { "zetlyn.com/" (o) } ")" }
+                            ". This order adds another organisation, billed on its own at €" (plan.price) " a month plus usage."
+                        }
+                    }
                     @if let Some(s) = &said { div.note { (s) } }
                     div.order-grid {
                         form.order-form method="post" action="/order" {

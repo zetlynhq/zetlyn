@@ -257,3 +257,19 @@ pub fn customer_subscription_event(customer: &str) -> Result<Option<J>, String> 
 pub fn cancel_at_period_end(subscription: &str) -> Result<J, String> {
     post(&format!("subscriptions/{subscription}"), &[p("cancel_at_period_end", "true")], None)
 }
+
+/// Stripe's customer portal for one customer, opened without signing in there: where to send them.
+pub fn portal_session(customer: &str, back: &str) -> Result<String, String> {
+    let s = post("billing_portal/sessions", &[p("customer", customer), p("return_url", back)], None)?;
+    s["url"].as_str().map(str::to_string).ok_or_else(|| "Stripe gave no portal address".to_string())
+}
+
+/// A customer named for the organisation they pay for, so the dashboard and the invoices say which.
+pub fn name_customer(customer: &str, title: &str, organisation: &str) -> Result<(), String> {
+    post(
+        &format!("customers/{customer}"),
+        &[p("name", &format!("{title} (zetlyn.com/{organisation})")), p("metadata[organisation]", organisation)],
+        None,
+    )
+    .map(|_| ())
+}

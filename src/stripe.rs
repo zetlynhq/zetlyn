@@ -21,7 +21,7 @@ pub struct Metered {
 /// Storage in megabyte-days: 2 GB for a 30-day month included, €0.50 a GB-month after.
 /// Source reads: 25,000 included, €1 per 10,000 after. Mails: 1,000 included, €1 per 1,000 after.
 pub const METERED: [Metered; 3] = [
-    Metered { key: "storage", event: "zetlyn_storage_mb_days", product: "Zetlyn storage", included: 2 * 1024 * 30, cents: "0.0016276041667" },
+    Metered { key: "storage", event: "zetlyn_storage_mb_days", product: "Zetlyn storage", included: 2 * 1024 * 30, cents: "0.001627604167" },
     Metered { key: "reads", event: "zetlyn_source_reads", product: "Zetlyn source reads", included: 25_000, cents: "0.01" },
     Metered { key: "mails", event: "zetlyn_mails", product: "Zetlyn mails", included: 1_000, cents: "0.1" },
 ];

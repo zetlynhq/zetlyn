@@ -656,6 +656,11 @@ impl Site {
     /// Hands the mailer the message on its standard input. Where none is named, the link goes to
     /// the operator's own terminal and the page says where to look.
     pub fn send(&self, to: &str, subject: &str, body: &str) -> Result<bool, String> {
+        // A cell counts what it sends, and past what its month allows sends nothing more.
+        if !crate::usage::allowed(crate::usage::MAILS) {
+            return Err("this world has sent every mail its month allows".into());
+        }
+        crate::usage::count(crate::usage::MAILS);
         if let Some(smtp) = &self.mail.smtp {
             crate::mail::send(smtp, to, subject, body)?;
             return Ok(true);

@@ -75,6 +75,9 @@ pub struct Terms {
     pub every: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mails: Option<u64>,
+    /// Source reads this month at most: what the spending limit allows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reads: Option<u64>,
     /// May answer at a domain of its own.
     #[serde(default = "yes")]
     pub domain: bool,
@@ -86,7 +89,7 @@ fn yes() -> bool {
 
 impl Default for Terms {
     fn default() -> Terms {
-        Terms { active: true, sources: None, every: String::new(), mails: None, domain: true }
+        Terms { active: true, sources: None, every: String::new(), mails: None, reads: None, domain: true }
     }
 }
 
@@ -620,6 +623,14 @@ pub fn status() -> J {
             "run_finished": show(&run_unit, "ExecMainExitTimestamp"),
             "answers": if env.get("STATE").map(String::as_str) == Some("running") { probe(&port, &name) } else { 0 },
             "bytes": bytes_under(&dir),
+            "usage": json!({
+                "month": crate::usage::month(),
+                "reads": crate::usage::used(&dir, crate::usage::READS, &crate::usage::month()),
+                "mails": crate::usage::used(&dir, crate::usage::MAILS, &crate::usage::month()),
+                "previous": crate::usage::previous_month(),
+                "previous_reads": crate::usage::used(&dir, crate::usage::READS, &crate::usage::previous_month()),
+                "previous_mails": crate::usage::used(&dir, crate::usage::MAILS, &crate::usage::previous_month()),
+            }),
             "domain": (!domain.is_empty() && t.domain).then_some(domain),
             "terms": t,
         }));
@@ -710,7 +721,7 @@ pub fn sync() -> Result<(), String> {
 
 pub const USAGE: &str = "zetlyn node status [--json] | sync | create <cell> --title … --owner … [--version v] | start|stop|restart <cell> \
 | snapshot <cell> [--why …] | restore <cell> [--from <stamp>|latest] [--port p] [--version v] | remove <cell> [--no-snapshot] \
-| terms <cell> --active yes|no [--sources n] [--every 1h] [--mails n] [--domain yes|no] | limit <cell> --memory 512M --cpu 100% \
+| terms <cell> --active yes|no [--sources n] [--every 1h] [--mails n] [--reads n] [--domain yes|no] | limit <cell> --memory 512M --cpu 100% \
 | version <cell> <v> | install <v> --sha256 <hash> [--current] | logs <cell> [--lines n] | key-check | ca";
 
 pub fn command(args: &[String]) -> Result<(), String> {
@@ -766,6 +777,7 @@ pub fn command(args: &[String]) -> Result<(), String> {
                 sources: flag("--sources").and_then(|v| v.parse().ok()),
                 every: flag("--every").unwrap_or("").to_string(),
                 mails: flag("--mails").and_then(|v| v.parse().ok()),
+                reads: flag("--reads").and_then(|v| v.parse().ok()),
                 domain: yes_no("--domain", true),
             };
             set_terms(&n, &t)?;

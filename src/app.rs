@@ -2766,6 +2766,8 @@ a.card.account-new strong::before { content: "+ "; color: var(--accent); }
 a.card.account-new:hover, a.card.account-admin:hover { border-color: var(--accent); }
 a.card.account-admin { border-left: 3px solid var(--accent); margin: 0 0 1rem; max-width: 34rem; }
 a.card.account-admin strong { font-size: 1.1rem; }
+table.account-usage { width: 100%; margin: .2rem 0 0; font-size: .9rem; }
+table.account-usage td { padding: .15rem .4rem .15rem 0; border: 0; }
 h1.big { font-size: 2rem; margin-top: 3rem; }
 input.wide { flex: 1 1 26rem; min-width: 0; width: 100%; padding: .65rem .8rem; font: inherit;
   background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 0; }
@@ -3923,6 +3925,18 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                                     @if let Some(u) = &c.paid_until { span.dim { (if c.state == "trialing" { " · free until " } else { " · paid until " }) (u) } }
                                     @if !c.in_good_standing(grace) { " " span.chip.on { "not updated" } }
                                 }
+                                @let plan = crate::billing::plans(&billing).ok().and_then(|(_, p)| p.get(&c.plan).cloned()).unwrap_or_default();
+                                @if plan.storage_gb > 0 {
+                                    @let u = crate::ops::usage_of(dir, org);
+                                    @let (so, ro, mo) = crate::ops::overage(&u, &plan);
+                                    @let days = crate::iso_date(crate::now()).get(8..10).and_then(|d| d.parse::<u64>().ok()).unwrap_or(1).max(1);
+                                    table.account-usage { tbody {
+                                        tr { td.dim { "Storage" } td { (format!("{:.2}", u.mb_days as f64 / days as f64 / 1024.0)) " GB" } td.dim { "of " (plan.storage_gb) " GB" } }
+                                        tr { td.dim { "Source reads" } td { (thousands_of(u.reads)) } td.dim { "of " (thousands_of(plan.reads)) } }
+                                        tr { td.dim { "Mails" } td { (thousands_of(u.mails)) } td.dim { "of " (thousands_of(plan.mails)) } }
+                                    } }
+                                    @if so + ro + mo > 0.0 { span.dim { "Beyond the plan this month: €" (format!("{:.2}", so + ro + mo)) " of at most €" (plan.cap) } }
+                                }
                             }
                             div.account-links {
                                 a href={"/" (org) "/"} { "Open" }
@@ -3984,12 +3998,25 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                     Some("An address to sign in with.".to_string())
                 } else if get("business") != "yes" {
                     Some("Hosting is for businesses: say that you order as one.".to_string())
-                } else if chosen.is_some_and(|p| p.link.is_empty()) {
+                } else if chosen.is_some_and(|p| p.link.is_empty()) && crate::stripe::ids(&billing).is_none() {
                     Some("This plan cannot be bought here yet. Write to hello@zetlyn.com and it is set up for you.".to_string())
                 } else {
                     crate::billing::Book::open(&billing).and_then(|b| b.reserve(&name, &email, if title.is_empty() { &name } else { &title }, &plan)).err()
                 };
                 match (refused, chosen) {
+                    // Through Stripe's API where it is set up (the monthly price and the usage prices),
+                    // through the plan's Payment Link where it is not.
+                    (None, Some(p)) if crate::stripe::ids(&billing).is_some() => {
+                        let base = crate::account::Site::load(dir).url.trim_end_matches('/').to_string();
+                        match crate::stripe::checkout(&billing, &name, &email, &base) {
+                            Ok(url) => return redirect(request, &url),
+                            Err(e) => {
+                                eprintln!("checkout: {e}");
+                                said = Some(format!("The payment could not be started: {e}. Try again in a moment, or write to hello@zetlyn.com."));
+                            }
+                        }
+                        let _ = p;
+                    }
                     (None, Some(p)) => {
                         let sep = if p.link.contains('?') { '&' } else { '?' };
                         return redirect(request, &format!("{}{sep}client_reference_id={}&prefilled_email={}", p.link, urlencode(&name), urlencode(&email)));
@@ -4014,7 +4041,12 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                                     strong { (if p.title.is_empty() { key.clone() } else { p.title.clone() }) }
                                     " " span { (p.price) " " (currency) " a month, excl. VAT" }
                                     @if !p.about.is_empty() { div.why { (p.about) } }
-                                    div.why { (p.sources) " sources, read as often as every " (p.every) ", " (p.mails) " mails a month" @if p.domain { ", a domain of your own" } }
+                                    @if p.storage_gb > 0 {
+                                        div.why { (p.storage_gb) " GB storage, " (thousands_of(p.reads)) " source reads and " (thousands_of(p.mails)) " mails a month included; unlimited users, sources and trackers." }
+                                        div.why { "Beyond that: €0.50 per GB a month, €1 per 10,000 reads, €1 per 1,000 mails, at most €" (p.cap) " a month; more if you ask us." }
+                                    } @else {
+                                        div.why { (p.sources) " sources, read as often as every " (p.every) ", " (p.mails) " mails a month" @if p.domain { ", a domain of your own" } }
+                                    }
                                     @if p.trial_days > 0 { div.why { (p.trial_days) " days free, then monthly; cancel any time." } }
                                 }
                             }
@@ -4608,4 +4640,9 @@ fn public_source_page(root: &Path, base: &str, dir_name: &str) -> Option<String>
         }
     };
     Some(page(&title, body))
+}
+
+/// 25000 as 25,000.
+fn thousands_of(n: u64) -> String {
+    crate::web::thousands(n as usize)
 }

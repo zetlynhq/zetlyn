@@ -20,7 +20,8 @@ use serde_json::{json, Value as J};
 pub struct Plan {
     #[serde(default)]
     pub title: String,
-    /// Sources updated. Beyond it, a source is held but not asked again.
+    /// Sources updated. Beyond it, a source is held but not asked again. 0 for no limit.
+    #[serde(default)]
     pub sources: usize,
     /// The shortest cadence, `1h`, `15m`.
     pub every: String,
@@ -45,6 +46,16 @@ pub struct Plan {
     /// What the plan page says it is for, one line.
     #[serde(default)]
     pub about: String,
+    /// Storage included, in GB, as a month's average.
+    #[serde(default)]
+    pub storage_gb: u64,
+    /// Source reads included in a month: one update of one source each.
+    #[serde(default)]
+    pub reads: u64,
+    /// The most a month's usage beyond what is included may cost, in euros, before updates and
+    /// mails pause until the next month.
+    #[serde(default)]
+    pub cap: u64,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -224,7 +235,7 @@ pub fn limits(dir: &Path, name: &str) -> (bool, crate::Limits, u64) {
     let Ok(book) = Book::read(dir) else { return (false, crate::Limits::default(), 0) };
     let Some(c) = book.get(name) else { return (false, crate::Limits::default(), 0) };
     let plan = plans(dir).ok().and_then(|(_, p)| p.get(&c.plan).cloned()).unwrap_or_default();
-    let limits = crate::Limits { sources: Some(plan.sources), every: crate::fetch::duration(&plan.every).unwrap_or(0) };
+    let limits = crate::Limits { sources: (plan.sources > 0).then_some(plan.sources), every: crate::fetch::duration(&plan.every).unwrap_or(0) };
     (c.in_good_standing(terms(dir).1), limits, plan.mails)
 }
 
@@ -361,6 +372,13 @@ pub fn command(args: &[String]) -> Result<(), String> {
             println!("{}: {} until {}", c.name, c.plan, c.paid_until.unwrap_or_default());
             Ok(())
         }
+        // The meters and usage prices the one product is sold with, made in Stripe where they are not.
+        Some("stripe-setup") => {
+            let product = crate::flag(args, "--product").ok_or("--product prod_…, the one sold")?;
+            let ids = crate::stripe::setup(&dir, product)?;
+            println!("{}", serde_json::to_string_pretty(&ids).unwrap_or_default());
+            Ok(())
+        }
         // Stripe's webhook, and nothing else, on its own port behind the web server.
         Some("serve") => {
             let addr = crate::flag(args, "--addr").unwrap_or("127.0.0.1:2195").to_string();
@@ -393,7 +411,7 @@ pub fn command(args: &[String]) -> Result<(), String> {
             }
             Ok(())
         }
-        _ => Err("billing list | grant <dir> <name> --email --plan [--days] | serve <dir> [--addr]".into()),
+        _ => Err("billing list | grant <dir> <name> --email --plan [--days] | stripe-setup <dir> --product prod_… | serve <dir> [--addr]".into()),
     }
 }
 

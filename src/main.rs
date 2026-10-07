@@ -14,6 +14,7 @@ mod console;
 mod directory;
 mod source;
 mod sql;
+mod stripe;
 mod web;
 mod sourcedecl;
 mod expr;
@@ -40,6 +41,7 @@ mod package;
 mod claim;
 mod remote;
 mod tracker;
+mod usage;
 mod trackerdecl;
 mod serve;
 mod servetracker;
@@ -995,6 +997,12 @@ pub fn schedule_pass(root: &Path, deliver: bool, limits: &Limits) -> Option<i64>
                 soonest = Some(soonest.map_or(due, |s: i64| s.min(due)));
                 continue;
             }
+            // A cell counts every source it asks, and past what its month allows asks no more.
+            if !crate::usage::allowed(crate::usage::READS) {
+                eprintln!("{name}: not read, the month's reads are used up");
+                continue;
+            }
+            crate::usage::count(crate::usage::READS);
             match ds.run() {
                 Ok(r) => {
                     println!(
@@ -1035,6 +1043,11 @@ pub fn schedule_pass(root: &Path, deliver: bool, limits: &Limits) -> Option<i64>
                     continue;
                 }
             };
+            if !crate::usage::allowed(crate::usage::READS) {
+                eprintln!("{name}: not read, the month's reads are used up");
+                continue;
+            }
+            crate::usage::count(crate::usage::READS);
             match ds.run() {
                 Ok(r) => println!(
                     "{name} update {} {} after {}: +{} ~{} −{} ={}",

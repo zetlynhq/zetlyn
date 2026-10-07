@@ -337,40 +337,153 @@ pub fn routes(control: &Path) -> Result<(), String> {
 
 // -- terms from the plan ------------------------------------------------------------------------
 
-/// Each billed cell's terms as its plan and its payment say, sent where they differ from what its
-/// server last reported. A cell nobody pays for, the house's or one granted by hand, is left alone.
+/// What a billed cell used this month as the main server counts it, and what it has told Stripe.
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
+pub struct Usage {
+    pub month: String,
+    /// Megabyte-days: each day's storage, counted once that day.
+    pub mb_days: u64,
+    pub day: String,
+    pub hour: String,
+    pub reads: u64,
+    pub mails: u64,
+    #[serde(default)]
+    pub reported: BTreeMap<String, u64>,
+}
+
+fn usage_path(control: &Path, cell: &str) -> PathBuf {
+    ops_dir(control).join("usage").join(format!("{cell}.json"))
+}
+
+pub fn usage_of(control: &Path, cell: &str) -> Usage {
+    std::fs::read(usage_path(control, cell)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+/// What a month's usage beyond the plan costs so far, in euros: storage as megabyte-days past the
+/// month's included ones, reads and mails past theirs.
+pub fn overage(u: &Usage, plan: &crate::billing::Plan) -> (f64, f64, f64) {
+    let gb_month_mb_days = 1024.0 * 30.0;
+    let storage = (u.mb_days as f64 - plan.storage_gb as f64 * gb_month_mb_days).max(0.0) / gb_month_mb_days * 0.5;
+    let reads = (u.reads as f64 - plan.reads as f64).max(0.0) / 10_000.0;
+    let mails = (u.mails as f64 - plan.mails as f64).max(0.0) / 1_000.0;
+    (storage, reads, mails)
+}
+
+/// Each billed cell, once a poll: its usage brought up to date from what its server said, told to
+/// Stripe once an hour as what changed since it was last told, and its terms as its plan, its
+/// payment and its spending limit say, sent where they differ from what its server has. A cell
+/// nobody pays for, the house's or one granted by hand, is left alone.
 pub fn enforce_terms(control: &Path) -> Result<(), String> {
     let r = register(control)?;
     let billing = control.join("billing");
     let Ok(book) = crate::billing::Book::read(&billing) else { return Ok(()) };
     let (_, plans) = crate::billing::plans(&billing).unwrap_or_default();
     let (_, grace) = crate::billing::terms(&billing);
+    let ids = crate::stripe::ids(&billing);
+    let _ = std::fs::create_dir_all(ops_dir(control).join("usage"));
     for (cell, c) in &r.cells {
         if c.house {
             continue;
         }
         let Some(customer) = book.get(cell) else { continue };
         let plan = plans.get(&customer.plan).cloned().unwrap_or_default();
+        let s = cell_status(control, &r, cell);
+        if s.is_null() {
+            continue;
+        }
+        // The month's usage, from the server's counts.
+        let mut u = usage_of(control, cell);
+        let month = s["usage"]["month"].as_str().unwrap_or("").to_string();
+        if month.is_empty() {
+            continue;
+        }
+        if u.month != month {
+            // What the last month used after its last report goes to Stripe before it is forgotten.
+            if !u.month.is_empty() && s["usage"]["previous"].as_str() == Some(u.month.as_str()) {
+                u.reads = s["usage"]["previous_reads"].as_u64().unwrap_or(u.reads);
+                u.mails = s["usage"]["previous_mails"].as_u64().unwrap_or(u.mails);
+                tell_stripe(&mut u, ids.as_ref(), customer.stripe_customer.as_deref(), cell, "final");
+            }
+            u = Usage { month: month.clone(), ..Usage::default() };
+        }
+        u.reads = s["usage"]["reads"].as_u64().unwrap_or(0);
+        u.mails = s["usage"]["mails"].as_u64().unwrap_or(0);
+        let today = crate::iso_date(crate::now());
+        if u.day != today {
+            u.mb_days += s["bytes"].as_u64().unwrap_or(0).div_ceil(1 << 20);
+            u.day = today;
+        }
+        let hour = crate::iso_stamp(crate::now()).get(..13).unwrap_or("").replace([':', '-', 'T'], "");
+        if u.hour != hour {
+            tell_stripe(&mut u, ids.as_ref(), customer.stripe_customer.as_deref(), cell, &hour);
+            u.hour = hour;
+        }
+        let _ = std::fs::write(usage_path(control, cell), serde_json::to_vec_pretty(&u).unwrap_or_default());
+        // What the spending limit leaves for reads and mails, in whole euros, so the terms change
+        // only when a euro has gone.
+        let (storage, reads, mails) = overage(&u, &plan);
+        let (read_cap, mail_cap) = if plan.cap > 0 {
+            let left_for_reads = (plan.cap as f64 - storage.ceil() - mails.ceil()).max(0.0);
+            let left_for_mails = (plan.cap as f64 - storage.ceil() - reads.ceil()).max(0.0);
+            (Some(plan.reads + (left_for_reads * 10_000.0) as u64), Some(plan.mails + (left_for_mails * 1_000.0) as u64))
+        } else {
+            (None, Some(plan.mails))
+        };
         let want = crate::cell::Terms {
             active: customer.in_good_standing(grace),
-            sources: Some(plan.sources),
+            sources: (plan.sources > 0).then_some(plan.sources),
             every: plan.every.clone(),
-            mails: Some(plan.mails),
+            mails: mail_cap,
+            reads: read_cap,
             domain: plan.domain,
         };
-        let have: crate::cell::Terms = serde_json::from_value(cell_status(control, &r, cell)["terms"].clone()).unwrap_or_default();
+        let have: crate::cell::Terms = serde_json::from_value(s["terms"].clone()).unwrap_or_default();
         if serde_json::to_value(&have).ok() != serde_json::to_value(&want).ok() {
             let n = r.nodes.get(&c.node).ok_or("no such node")?;
             let mut words: Vec<String> = vec!["terms".into(), cell.clone(), "--active".into(), if want.active { "yes" } else { "no" }.into(), "--domain".into(), if want.domain { "yes" } else { "no" }.into()];
-            words.extend(["--sources".into(), plan.sources.to_string(), "--mails".into(), plan.mails.to_string()]);
-            if !plan.every.is_empty() {
-                words.extend(["--every".into(), plan.every.clone()]);
+            if let Some(n) = want.sources {
+                words.extend(["--sources".into(), n.to_string()]);
+            }
+            if let Some(n) = want.mails {
+                words.extend(["--mails".into(), n.to_string()]);
+            }
+            if let Some(n) = want.reads {
+                words.extend(["--reads".into(), n.to_string()]);
+            }
+            if !want.every.is_empty() {
+                words.extend(["--every".into(), want.every.clone()]);
             }
             let refs: Vec<&str> = words.iter().map(String::as_str).collect();
             on(n, &refs, None)?;
         }
     }
     Ok(())
+}
+
+/// What changed since Stripe was last told, told: each kind once per stamp, so that a retry of
+/// the same hour is the same event to Stripe and never a second one.
+fn tell_stripe(u: &mut Usage, ids: Option<&crate::stripe::Ids>, customer: Option<&str>, cell: &str, stamp: &str) {
+    let (Some(_), Some(customer)) = (ids, customer) else { return };
+    for m in &crate::stripe::METERED {
+        let now = match m.key {
+            "storage" => u.mb_days,
+            "reads" => u.reads,
+            _ => u.mails,
+        };
+        let told = u.reported.get(m.key).copied().unwrap_or(0);
+        if now <= told {
+            continue;
+        }
+        let id = format!("{cell}-{}-{}-{stamp}", m.key, u.month);
+        // The last month's last hours belong to it: a minute before this month began.
+        let at = if stamp == "final" { crate::thingstore::days(&format!("{}-01", crate::usage::month())).map(|d| d * 86_400 - 60).unwrap_or(crate::now()) } else { crate::now() };
+        match crate::stripe::report(m.event, customer, now - told, &id, at) {
+            Ok(()) => {
+                u.reported.insert(m.key.to_string(), now);
+            }
+            Err(e) => eprintln!("usage {cell} {}: {e}", m.key),
+        }
+    }
 }
 
 // -- moving cells -------------------------------------------------------------------------------
@@ -849,4 +962,30 @@ fn last_backup(control: &Path) -> String {
         .and_then(|b| serde_json::from_slice::<J>(&b).ok())
         .and_then(|j| j["stamp"].as_str().map(str::to_string))
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usage_beyond_the_plan_costs_what_the_page_says() {
+        let plan = crate::billing::Plan { storage_gb: 2, reads: 25_000, mails: 1_000, cap: 50, ..Default::default() };
+        // Within everything: nothing.
+        let u = Usage { mb_days: 2 * 1024 * 30, reads: 25_000, mails: 1_000, ..Default::default() };
+        assert_eq!(overage(&u, &plan), (0.0, 0.0, 0.0));
+        // One GB more for the whole month, 10,000 reads and 1,000 mails more: €0.50, €1, €1.
+        let u = Usage { mb_days: 3 * 1024 * 30, reads: 35_000, mails: 2_000, ..Default::default() };
+        let (s, r, m) = overage(&u, &plan);
+        assert!((s - 0.5).abs() < 1e-9 && (r - 1.0).abs() < 1e-9 && (m - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_megabyte_day_is_priced_as_half_a_euro_a_gigabyte_month() {
+        let storage = &crate::stripe::METERED[0];
+        let cents: f64 = storage.cents.parse().unwrap();
+        // 1 GB for 30 days at that price is 50 cents.
+        assert!((cents * 1024.0 * 30.0 - 50.0).abs() < 1e-6);
+        assert_eq!(storage.included, 2 * 1024 * 30);
+    }
 }

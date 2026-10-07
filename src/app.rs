@@ -3463,6 +3463,10 @@ pub(crate) fn set_member(dir: &Path, org: &str, email: &str, role: Option<&str>)
     if let Some(role) = role {
         list.push(Member { email: email.to_lowercase(), role: role.to_string() });
     }
+    // An organisation nobody is in any more is not listed as one.
+    if m.orgs.get(org).is_some_and(|l| l.is_empty()) {
+        m.orgs.remove(org);
+    }
     m.save(dir)
 }
 

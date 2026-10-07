@@ -3933,7 +3933,7 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                     }
                     a.card.account-new href=(serve::at("/new")) {
                         strong { "Start a world" }
-                        span.dim { "Your sources, trackers and readers, run for you. 14 days free." }
+                        span.dim { "Managed Zetlyn: your sources, trackers and readers, run for you at zetlyn.com." }
                     }
                 }
             }));

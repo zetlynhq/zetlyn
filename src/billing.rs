@@ -210,6 +210,11 @@ impl Book {
     pub fn reservation(&self, name: &str) -> Option<(String, String)> {
         self.db.query_row("select email, title from reservation where name = ?1", [name], |r| Ok((r.get(0)?, r.get(1)?))).ok()
     }
+    /// The Stripe subscription a world is paid by.
+    pub fn subscription_of(&self, name: &str) -> Option<String> {
+        self.db.query_row("select stripe_subscription from customer where name = ?1", [name], |r| r.get::<_, Option<String>>(0)).ok().flatten()
+    }
+
     /// The plan a name was held for, as chosen at /account/new.
     pub fn reserved_plan(&self, name: &str) -> Option<String> {
         self.db.query_row("select plan from reservation where name = ?1", [name], |r| r.get(0)).ok()

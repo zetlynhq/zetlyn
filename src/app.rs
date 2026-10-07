@@ -636,7 +636,7 @@ impl App {
                 let sent = crate::account::Accounts::open(&self.root).and_then(|readers| {
                     let raw = readers.ensure(&email).and_then(|a| readers.new_link(a.id))?;
                     let link = site.link(&serve::at(&format!("/signin/{raw}{next}")));
-                    site.send(&email, "Your Zetlyn sign-in link", &format!("{link}\n\nGood for a quarter of an hour, and once."))
+                    { let (subject, text) = crate::mail::signin_letter(&link); site.send(&email, &subject, &text) }
                 });
                 if let Err(e) = sent {
                     eprintln!("sign-in mail: {e}");
@@ -3448,11 +3448,8 @@ fn provision(dir: &Path, name: &str, email: &str) -> Result<(), String> {
     if fresh {
         let site = crate::account::Site::load(dir);
         let home = format!("{}/{name}/", site.url.trim_end_matches('/'));
-        let text = format!(
-            "{title} is ready at {home}\n\nSign in at {home}signin with this address: a link comes by mail, no password.\n\nThe plan, the card and the invoices are at {}/account/.\n",
-            site.url.trim_end_matches('/')
-        );
-        site.send(email, &format!("{title} is ready"), &text)?;
+        let (subject, text) = crate::mail::welcome_letter(&title, &home, &format!("{}/account/", site.url.trim_end_matches('/')), email);
+        site.send(email, &subject, &text)?;
     }
     Ok(())
 }
@@ -3885,6 +3882,76 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
         // found there, each opening where it runs.
         // Nobody signed in at the account page: signing in is what it is for.
         [] if who.is_none() && !post => redirect(request, &serve::at("/signin")),
+        // Ending a contract, as § 312k BGB asks: reachable without signing in, from every page's
+        // footer; what is needed to find the contract, a button that ends it, a page and a mail
+        // that say so with the moment it was asked. Where the world and the address it was bought
+        // with go together, Stripe ends the subscription at the end of the month; every
+        // cancellation is kept and told to the operator either way.
+        ["cancel"] => {
+            let billing = dir.join(BILLING);
+            let base = crate::account::Site::load(dir).url.trim_end_matches('/').to_string();
+            if !post {
+                return respond(request, 200, html_kind, &page("Cancel a contract", html! {
+                    div.account-hero { p.overline { "Cancel a contract" } h1 { "End your Zetlyn Managed plan" } }
+                    form method="post" action=(serve::at("/cancel")) {
+                        p { label { "The world's name, as in its address zetlyn.com/<name>" br; input type="text" name="world" required pattern="[a-z0-9-]+"; } }
+                        p { label { "The address it was ordered with" br; input.wide type="email" name="email" required; } }
+                        p { "Kind of cancellation" br
+                            label { input type="radio" name="kind" value="ordinary" checked; " Ordinary, at the end of the current month" } br
+                            label { input type="radio" name="kind" value="extraordinary"; " Extraordinary, for a reason" } }
+                        p { label { "The reason, for an extraordinary cancellation" br; textarea.wide name="reason" rows="3" {} } }
+                        p { button.primary type="submit" { "Cancel now" } }
+                        p.dim { "You get a confirmation by mail, with the date and time it was received." }
+                    }
+                }));
+            }
+            let mut body = String::new();
+            let _ = std::io::Read::read_to_string(&mut std::io::Read::take(request.as_reader(), 32 << 10), &mut body);
+            let form = parse_form(&body);
+            let get = |k: &str| form.get(k).map(|v| v.trim().to_string()).unwrap_or_default();
+            let (world, email, kind, reason) = (get("world").to_lowercase(), get("email").to_lowercase(), get("kind"), get("reason"));
+            let at = crate::iso_stamp(crate::now());
+            let book = crate::billing::Book::read(&billing).ok();
+            let customer = book.as_ref().and_then(|b| b.get(&world)).filter(|c| c.email.eq_ignore_ascii_case(&email));
+            // Ended at Stripe where the contract was found, at the end of the month either way.
+            let done = match (&customer, book.as_ref().and_then(|b| b.subscription_of(&world))) {
+                (Some(_), Some(sub)) => crate::stripe::cancel_at_period_end(&sub).map(|_| ()),
+                (Some(_), None) => Err("no subscription on record".into()),
+                (None, _) => Err("no contract for that world and address".into()),
+            };
+            let until = customer.as_ref().and_then(|c| c.paid_until.clone()).unwrap_or_default();
+            let line = json!({ "at": at, "world": world, "email": email, "kind": kind, "reason": reason, "found": customer.is_some(), "ended_at_stripe": done.is_ok(), "error": done.as_ref().err() });
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(billing.join("cancellations.jsonl")) {
+                let _ = std::io::Write::write_all(&mut f, format!("{line}\n").as_bytes());
+            }
+            let site = crate::account::Site::load(dir);
+            // The confirmation goes to the address on the contract where there is one, else to the
+            // one typed, so nobody learns of a contract by typing another's name.
+            let to = customer.as_ref().map(|c| c.email.clone()).unwrap_or(email.clone());
+            let text = format!(
+                "Hello,\n\nwe received your cancellation on {at} (UTC).\n\n  World: {world}\n  Kind: {kind}\n{}\n{}\n\nIf you did not send it, write to hello@zetlyn.com straight away.\n\nBest regards,\nThe Zetlyn team\n\n--\nZetlyn · https://zetlyn.com · hello@zetlyn.com\n",
+                if reason.is_empty() { String::new() } else { format!("  Reason: {reason}\n") },
+                if customer.is_some() { format!("Your plan ends at the end of the current month{}. Until then your world runs as before, and you can take it away with you from its settings.", if until.is_empty() { String::new() } else { format!(", on {until}") }) } else { "We look up the contract it belongs to and confirm it to the address it was ordered with.".to_string() }
+            );
+            if !to.is_empty() {
+                let _ = site.send(&to, "Your Zetlyn cancellation was received", &text);
+            }
+            if let Ok(r) = crate::ops::register(dir) {
+                if !r.alarm.is_empty() {
+                    let _ = site.send(&r.alarm, &format!("Zetlyn: cancellation of {world}"), &format!("{line}\n\n{base}/account/admin/cell/{world}\n"));
+                }
+            }
+            respond(request, 200, html_kind, &page("Cancellation received", html! {
+                div.account-hero {
+                    p.overline { "Cancel a contract" }
+                    h1 { "Your cancellation was received" }
+                    p.lede { "On " (at) " (UTC), for " code { (world) } "." }
+                    p { "A confirmation is on its way by mail. "
+                        @if customer.is_some() { "Your plan ends at the end of the current month; until then your world runs as before." }
+                        @else { "We look up the contract it belongs to and confirm it to the address it was ordered with." } }
+                }
+            }));
+        }
         // Where Stripe sends a buyer back: the checkout asked of Stripe itself, the world made
         // from it if the webhook has not made it already, and the buyer told what happens next.
         // No sign-in: the session's id is what it shows, and it shows only that.
@@ -3989,6 +4056,7 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                                 a href={"/" (org) "/"} { "Open" }
                                 @if role == "owner" { a href={"/" (org) "/settings"} { "Settings" } }
                                 @if role == "owner" && customer.is_some() { @if let Some(p) = &portal_link { a href=(p) { "Billing" } } }
+                                @if role == "owner" && customer.is_some() { a href=(serve::at("/cancel")) { "Cancel" } }
                             }
                         }
                     }
@@ -4023,7 +4091,7 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
         // name held for half an hour while the payment is made.
         ["new"] => {
             let billing = dir.join(BILLING);
-            let (currency, plans) = crate::billing::plans(&billing).unwrap_or_default();
+            let (_, plans) = crate::billing::plans(&billing).unwrap_or_default();
             let mut said: Option<String> = None;
             let mut form: BTreeMap<String, String> = serve::params(request.url()).into_iter().collect();
             if post {
@@ -4043,13 +4111,24 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                     Some(format!("{name} is taken."))
                 } else if !email.contains('@') {
                     Some("An address to sign in with.".to_string())
-                } else if get("business") != "yes" {
-                    Some("Hosting is for businesses: say that you order as one.".to_string())
+                } else if get("terms") != "yes" {
+                    Some("Please accept the terms and confirm you have read the privacy notice and the cancellation policy.".to_string())
+                } else if get("start") != "yes" {
+                    Some("Please confirm that your world may start right away.".to_string())
                 } else if chosen.is_some_and(|p| p.link.is_empty()) && crate::stripe::ids(&billing).is_none() {
                     Some("This plan cannot be bought here yet. Write to hello@zetlyn.com and it is set up for you.".to_string())
                 } else {
                     crate::billing::Book::open(&billing).and_then(|b| b.reserve(&name, &email, if title.is_empty() { &name } else { &title }, &plan)).err()
                 };
+                // What the buyer agreed to, and when: the terms, and that the world starts before the
+                // withdrawal period ends. Kept as long as the customer is, as the record of it.
+                if refused.is_none() {
+                    let line = json!({ "at": crate::iso_stamp(crate::now()), "world": name, "email": email, "plan": plan, "terms": true, "start_before_withdrawal_ends": true,
+                        "said": "I accept the terms and have read the privacy notice and the cancellation policy. I ask that my world starts right away, before the 14-day withdrawal period ends. If I withdraw as a consumer, I pay for the time it ran until then." });
+                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(billing.join("consents.jsonl")) {
+                        let _ = std::io::Write::write_all(&mut f, format!("{line}\n").as_bytes());
+                    }
+                }
                 match (refused, chosen) {
                     // Through Stripe's API where it is set up (the monthly price and the usage prices),
                     // through the plan's Payment Link where it is not.
@@ -4086,7 +4165,8 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                                 label.plan {
                                     input type="radio" name="plan" value=(key) checked[*key == picked];
                                     strong { (if p.title.is_empty() { key.clone() } else { p.title.clone() }) }
-                                    " " span { (p.price) " " (currency) " a month, excl. VAT" }
+                                    " " span { "€" (p.price) " a month plus VAT" }
+                                    @if let Ok(net) = p.price.parse::<f64>() { div.why { "€" (format!("{:.2}", net * 1.19)) " a month with 19 % German VAT; tax in other EU countries as it applies there." } }
                                     @if !p.about.is_empty() { div.why { (p.about) } }
                                     @if p.storage_gb > 0 {
                                         div.why { (p.storage_gb) " GB storage, " (thousands_of(p.reads)) " source reads and " (thousands_of(p.mails)) " mails a month included; unlimited users, sources and trackers." }
@@ -4101,8 +4181,9 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                         p { label { "Its name, in its address" br; input type="text" name="name" value=(get("name")) placeholder="reading-circle" pattern="[a-z0-9][a-z0-9-]*" required; } }
                         p { label { "Its title" br; input.wide type="text" name="title" value=(get("title")) placeholder="Our reading circle"; } }
                         p { label { "Your address, to sign in with" br; input.wide type="email" name="email" value=(get("email")) placeholder="you@example.org" required; } }
-                        p { label { input type="checkbox" name="business" value="yes" required; " We order as a business, not as a consumer, and accept the " a href="https://zetlyn.com/legal" { "terms" } "." } }
-                        p { button.primary type="submit" { "Continue to payment" } }
+                        p { label { input type="checkbox" name="terms" value="yes" required; " I accept the " a href="https://zetlyn.com/legal" { "terms" } " and have read the " a href="https://zetlyn.com/privacy" { "privacy notice" } " and the " a href="https://zetlyn.com/legal" { "cancellation policy" } "." } }
+                        p { label { input type="checkbox" name="start" value="yes" required; " I ask that my world starts right away, before the 14-day withdrawal period ends. If I withdraw as a consumer, I pay for the time it ran until then." } }
+                        p { button.primary type="submit" { "Order and pay" } }
                         p.dim { "Paid at Stripe, which holds the card; here nothing of it is kept. The name is held for half an hour while you pay." }
                     }
                 }
@@ -4120,7 +4201,7 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                         site.url = site_url.to_string();
                     }
                     let link = site.link(&serve::at(&format!("/signin/{raw}")));
-                    site.send(&email, "Your Zetlyn sign-in link", &format!("{link}\n\nGood for a quarter of an hour, and once."))
+                    { let (subject, text) = crate::mail::signin_letter(&link); site.send(&email, &subject, &text) }
                 });
                 if let Err(e) = sent {
                     eprintln!("sign-in mail: {e}");

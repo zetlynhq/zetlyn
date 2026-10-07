@@ -214,3 +214,33 @@ mod tests {
         assert!(send(&s, "x@y.z\r\nRCPT TO:<evil@e.e>", "s", "b").unwrap_err().contains("not an address"));
     }
 }
+
+/// The words of the mail a sign-in link goes out in: subject and body.
+pub fn signin_letter(link: &str) -> (String, String) {
+    (
+        "Your Zetlyn sign-in link".to_string(),
+        format!(
+            "Hello,\n\n\
+             here is your link to sign in to Zetlyn:\n\n  {link}\n\n\
+             It works once, for the next 15 minutes. If you did not ask for it, you can ignore this mail; nothing happens without the link.\n\n\
+             Best regards,\nThe Zetlyn team\n\n--\nZetlyn · https://zetlyn.com · hello@zetlyn.com\n"
+        ),
+    )
+}
+
+/// The words of the mail a new world's owner gets once it runs: subject and body.
+pub fn welcome_letter(title: &str, home: &str, account: &str, email: &str) -> (String, String) {
+    (
+        format!("Your Zetlyn world \u{201c}{title}\u{201d} is ready"),
+        format!(
+            "Hello,\n\n\
+             thank you for choosing Zetlyn Managed. Your world \u{201c}{title}\u{201d} is set up and running:\n\n  {home}\n\n\
+             To sign in, open {home}signin and enter {email}. We send you a link by mail; there is no password.\n\n\
+             Your plan, this month's usage and your invoices are in your account:\n\n  {account}\n\n\
+             Your plan includes 2 GB of storage, 25,000 source reads and 1,000 mails a month, with as many users, sources and trackers as you like. \
+             To get started, see https://zetlyn.com/docs/getting_started.\n\n\
+             If you have any questions, write to hello@zetlyn.com; we are glad to help.\n\n\
+             Best regards,\nThe Zetlyn team\n\n--\nZetlyn · https://zetlyn.com · hello@zetlyn.com\n"
+        ),
+    )
+}

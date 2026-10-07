@@ -513,7 +513,7 @@ fn signin_mail(here: &Here, accounts: &Accounts, request: tiny_http::Request, as
         Ok((a, raw)) => {
             let site = Site::for_workspace(&here.root);
             let link = format!("{}/oauth/signin/{raw}?next={}", here.endpoints, crate::serve::urlencode(&next));
-            if let Err(e) = site.send(&a.email, "Your Zetlyn sign-in link", &format!("{link}\n\nGood for a quarter of an hour, and once.")) {
+            if let Err(e) = { let (subject, text) = crate::mail::signin_letter(&link); site.send(&a.email, &subject, &text) } {
                 eprintln!("sign-in mail: {e}");
             }
             page(request, 200, "Check your mail", html! { h1 { "Check your mail" } p { "A link is on its way. It is good for a quarter of an hour, and once." } });

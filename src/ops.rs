@@ -890,10 +890,8 @@ pub fn welcome(control: &Path, cell: &str, title: &str, owner: &str) -> Result<(
     let site = crate::account::Site::load(control);
     let base = site.url.trim_end_matches('/').to_string();
     let title = if title.is_empty() { cell } else { title };
-    let text = format!(
-        "{title} is ready at {base}/{cell}/\n\nSign in at {base}/{cell}/signin with this address: a link comes by mail, no password.\n\nThe plan, the card and the invoices are at {base}/account/.\n"
-    );
-    site.send(owner, &format!("{title} is ready"), &text).map(|_| ())
+    let (subject, text) = crate::mail::welcome_letter(title, &format!("{base}/{cell}/"), &format!("{base}/account/"), owner);
+    site.send(owner, &subject, &text).map(|_| ())
 }
 
 // -- the main server's own --------------------------------------------------------------------

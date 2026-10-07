@@ -252,3 +252,8 @@ pub fn customer_subscription_event(customer: &str) -> Result<Option<J>, String> 
     let hour = crate::iso_stamp(crate::now()).get(..13).unwrap_or("").to_string();
     Ok(Some(serde_json::json!({ "id": format!("pull-{}-{hour}", s["id"].as_str().unwrap_or("")), "type": kind, "data": { "object": s } })))
 }
+
+/// A subscription ended at the end of the month it is in: what a cancellation asks.
+pub fn cancel_at_period_end(subscription: &str) -> Result<J, String> {
+    post(&format!("subscriptions/{subscription}"), &[p("cancel_at_period_end", "true")], None)
+}

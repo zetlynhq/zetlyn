@@ -603,6 +603,7 @@ pub fn site_footer(extra: &[(String, String)]) -> Markup {
                 a href="mailto:hello@zetlyn.com" { "Contact" }
                 a href="https://zetlyn.com/privacy" { "Privacy" }
                 a href="https://zetlyn.com/legal" { "Legal" }
+                a href="https://zetlyn.com/account/cancel" { "Cancel a contract" }
                 button.theme-toggle type="button" id="theme-toggle" { "Theme" }
             }
         }

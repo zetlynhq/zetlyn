@@ -1709,8 +1709,8 @@ impl TrackerSite {
                         let sent = site
                             .send(
                                 &a.email,
-                                "Your Zetlyn sign-in link",
-                                &format!("{link}\n\nGood for a quarter of an hour, and once."),
+                                &crate::mail::signin_letter(&link).0,
+                                &crate::mail::signin_letter(&link).1,
                             )
                             .unwrap_or(false);
                         let said = if sent {

@@ -572,8 +572,8 @@ impl App {
             .split(';')
             .filter_map(|p| p.trim().split_once('='))
             .filter(|(k, _)| *k == "zs")
-            .filter_map(|(_, v)| h.accounts.by_session(v, crate::account::Kind::Member))
-            .any(|a| h.is_member(&a.email))
+            .filter_map(|(_, v)| h.accounts.by_session(v, crate::account::Kind::Member).map(|a| a.email).or_else(|| crate::account::remote_member(v)))
+            .any(|e| h.is_member(&e))
     }
 
     /// What anybody may reach on a hosted workspace, and whether this request is its owner's. The
@@ -583,7 +583,7 @@ impl App {
         let header = |name: &'static str| request.headers().iter().find(|x| x.field.equiv(name)).map(|x| x.value.as_str().to_string());
         let (cookie, signature) = (header("Cookie"), header("X-Hub-Signature-256").or_else(|| header("X-Zetlyn-Signature")));
         let session = cookie.and_then(|c| c.split(';').filter_map(|p| p.trim().split_once('=')).find(|(k, _)| *k == "zs").map(|(_, v)| v.to_string()));
-        let signed_in = session.and_then(|s| h.accounts.by_session(&s, crate::account::Kind::Member)).map(|a| a.email);
+        let signed_in = session.and_then(|s| h.accounts.by_session(&s, crate::account::Kind::Member).map(|a| a.email).or_else(|| crate::account::remote_member(&s)));
         let owner = signed_in.as_deref().is_some_and(|e| h.is_member(e));
         self.who = signed_in;
         let post = request.method() == &tiny_http::Method::Post;
@@ -622,6 +622,22 @@ impl App {
                 let _ = std::io::Read::read_to_end(&mut std::io::Read::take(request.as_reader(), crate::propose::MAX_BODY as u64 + 1), &mut body);
                 let (status, answer) = self.take_proposal(source, &body, key.as_deref(), signature.as_deref());
                 respond(request, status, "application/json", &answer);
+                None
+            }
+            // In a cell, signing in and out is the main server's, for everything on zetlyn.com at once:
+            // the organisation sends people there and is sent back to.
+            ["signin", ..] | ["signout"] if crate::account::remote_identity() => {
+                let origin = crate::account::identity_origin().unwrap_or_default();
+                let next = serve::params(url).get("next").and_then(|n| crate::servetracker::next_of(n)).unwrap_or_else(|| "/".to_string());
+                let back = format!("{}{next}", self.base);
+                let to = if parts.first().map(String::as_str) == Some("signout") { "signout" } else { "signin" };
+                let mut response = tiny_http::Response::from_string("").with_status_code(303);
+                for (k, v) in [("Location".to_string(), format!("{origin}/account/{to}?next={}", urlencode(&back))), ("Set-Cookie".to_string(), crate::servetracker::reader_cookie(&crate::account::Site::for_workspace(&self.root), "", 0))] {
+                    if let Ok(hd) = tiny_http::Header::from_bytes(k.as_bytes(), v.as_bytes()) {
+                        response = response.with_header(hd);
+                    }
+                }
+                let _ = request.respond(response);
                 None
             }
             // One sign-in for everybody in this world, at its own address: a reader, and whoever
@@ -2315,7 +2331,9 @@ impl App {
                 } }
             }
             (self.unfinished())
-            p.dim { "The workspace is " code { (self.root.display()) } ". Everything here is a file in it. " a href=(serve::at("/assist")) { @if crate::assist::Assist::configured(&self.root).available() { "The assist asks " (crate::assist::Assist::configured(&self.root).who()) } @else { "No model is set up, and none is needed to begin" } } "." }
+            // Run for somebody, where its files are is ours; on their own machine, it is theirs to know.
+            @if self.hosted.is_some() { p.dim { "Your organisation runs for you on Zetlyn's servers. You can download all of it from " a href=(serve::at("/settings")) { "Settings" } "." } } @else {
+            p.dim { "The workspace is " code { (self.root.display()) } ". Everything here is a file in it. " a href=(serve::at("/assist")) { @if crate::assist::Assist::configured(&self.root).available() { "The assist asks " (crate::assist::Assist::configured(&self.root).who()) } @else { "No model is set up, and none is needed to begin" } } "." } }
         };
         page("Zetlyn", body)
     }
@@ -2751,6 +2769,36 @@ fn redirect(request: tiny_http::Request, to: &str) {
 }
 
 const APP_STYLE: &str = r#"
+.order { max-width: 64rem; margin: 2rem 0 3rem; }
+.order h1 { margin: .6rem 0 1.4rem; font-size: 2rem; }
+.order-steps { display: flex; gap: 1.6rem; list-style: none; padding: 0; margin: 0; font-family: var(--mono); font-size: .78rem; letter-spacing: .06em; text-transform: uppercase; color: var(--dim); }
+.order-steps li.on { color: var(--accent); font-weight: 600; }
+.order-grid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(16rem, 1fr); gap: 2rem; align-items: start; }
+@media (max-width: 52rem) { .order-grid { grid-template-columns: 1fr; } .order-summary { order: -1; } }
+.order-form { display: flex; flex-direction: column; gap: 1.2rem; }
+.order-form label.field { display: flex; flex-direction: column; gap: .35rem; }
+.order-form .field-name { font-weight: 600; }
+.order-form input[type=text], .order-form input[type=email] { padding: .7rem .8rem; font: inherit; background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 0; }
+.order-form input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.order-form .slug { display: flex; align-items: stretch; border: 1px solid var(--line); background: var(--panel); }
+.order-form .slug-base { padding: .7rem 0 .7rem .8rem; color: var(--dim); font-family: var(--mono); }
+.order-form .slug input { border: 0 !important; padding-left: .1rem !important; font-family: var(--mono) !important; flex: 1; min-width: 0; outline: none; }
+.order-form .slug:focus-within { outline: 2px solid var(--accent); outline-offset: -1px; }
+.slug-state { font-size: .88rem; min-height: 1.2em; }
+.slug-state.ok { color: #2f7d4a; }
+.slug-state.no { color: var(--accent); }
+.order-form label.check { display: flex; gap: .6rem; align-items: flex-start; font-size: .94rem; }
+.order-form label.check input { margin-top: .25rem; }
+.order-button { align-self: flex-start; padding: .8rem 1.6rem; font-size: 1rem; }
+.order-summary { background: var(--panel); border: 1px solid var(--line); padding: 1.3rem 1.4rem; display: flex; flex-direction: column; gap: .5rem; }
+.order-price { margin: 0; font-size: 1.05rem; }
+.order-price strong { font-size: 2rem; letter-spacing: -.02em; }
+.order-included { list-style: none; padding: .6rem 0; margin: 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: .3rem; }
+.order-included li::before { content: "\2713\00a0\00a0"; color: var(--accent); }
+.order-beyond-title { margin: .4rem 0 0; font-weight: 600; font-size: .92rem; }
+table.order-beyond { width: 100%; font-size: .9rem; margin: 0; }
+table.order-beyond td { padding: .2rem 0; border: 0; }
+table.order-beyond td + td { text-align: right; }
 .account-hero { margin: 2.5rem 0 1.5rem; }
 .account-hero h1 { margin: .2rem 0 .4rem; font-size: 1.9rem; word-break: break-all; }
 .account-worlds { display: grid; grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr)); gap: 1rem; margin: 1rem 0 2rem; }
@@ -3554,6 +3602,9 @@ fn hosting_serve(args: &[String]) -> Result<(), String> {
     // A cell is not the machine: "Sign in with zetlyn.com" is the main server's, asked over HTTP.
     if crate::cell::terms(&dir).is_none() {
         crate::oidc::serving_machine(&dir);
+    } else {
+        // And signing in is the main server's: a cell asks it who a session is.
+        crate::account::ask_identity_at(&format!("{}/account/me", crate::account::Site::load(&dir).url.trim_end_matches('/')));
     }
     let server = tiny_http::Server::http(&addr).map_err(|e| e.to_string())?;
     println!("{} organisations from {} on http://{addr}/", orgs_in(&dir).len(), dir.display());
@@ -3715,6 +3766,13 @@ fn hosting_worker(server: &tiny_http::Server, dir: &Path, addr: &str, jobs: &Sha
             }
             continue;
         }
+        // Ordering an organisation, at a name that says so: the account's order page.
+        if first == "order" && crate::ops::is_control(dir) {
+            serve::mount(&format!("/{ACCOUNT}"));
+            let rest: Vec<String> = std::iter::once("new".to_string()).chain(parts[1..].iter().cloned()).collect();
+            hosting_root(request, dir, &accounts, &rest, "");
+            continue;
+        }
         // The machine's own pages: whoever is signed in, and the worlds they belong to.
         if first == ACCOUNT {
             serve::mount(&format!("/{ACCOUNT}"));
@@ -3873,7 +3931,8 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
     serve::frame_current(None);
     serve::frame_hosted(None, Some(who.as_ref().map(|a| a.email.clone())));
     serve::frame_area("app", None, who.as_ref().map(|a| orgs_links(dir, &a.email)).unwrap_or_default());
-    serve::frame_side("Public trackers");
+    // The main server holds no organisation of its own any more: no heading over an empty list.
+    serve::frame_side(if public_links(dir).is_empty() { "" } else { "Public trackers" });
     serve::frame_section(None, Vec::new());
     serve::frame_app(None, None);
     match parts.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
@@ -3894,7 +3953,7 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                 return respond(request, 200, html_kind, &page("Cancel a contract", html! {
                     div.account-hero { p.overline { "Cancel a contract" } h1 { "End your Zetlyn Managed plan" } }
                     form method="post" action=(serve::at("/cancel")) {
-                        p { label { "The world's name, as in its address zetlyn.com/<name>" br; input type="text" name="world" required pattern="[a-z0-9-]+"; } }
+                        p { label { "Your organisation's address on Zetlyn, zetlyn.com/<address>" br; input type="text" name="world" required pattern="[a-z0-9-]+" placeholder="acme-research"; } }
                         p { label { "The address it was ordered with" br; input.wide type="email" name="email" required; } }
                         p { "Kind of cancellation" br
                             label { input type="radio" name="kind" value="ordinary" checked; " Ordinary, at the end of the current month" } br
@@ -3917,7 +3976,7 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
             let done = match (&customer, book.as_ref().and_then(|b| b.subscription_of(&world))) {
                 (Some(_), Some(sub)) => crate::stripe::cancel_at_period_end(&sub).map(|_| ()),
                 (Some(_), None) => Err("no subscription on record".into()),
-                (None, _) => Err("no contract for that world and address".into()),
+                (None, _) => Err("no contract for that organisation and address".into()),
             };
             let until = customer.as_ref().and_then(|c| c.paid_until.clone()).unwrap_or_default();
             let line = json!({ "at": at, "world": world, "email": email, "kind": kind, "reason": reason, "found": customer.is_some(), "ended_at_stripe": done.is_ok(), "error": done.as_ref().err() });
@@ -3929,9 +3988,9 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
             // one typed, so nobody learns of a contract by typing another's name.
             let to = customer.as_ref().map(|c| c.email.clone()).unwrap_or(email.clone());
             let text = format!(
-                "Hello,\n\nwe received your cancellation on {at} (UTC).\n\n  World: {world}\n  Kind: {kind}\n{}\n{}\n\nIf you did not send it, write to hello@zetlyn.com straight away.\n\nBest regards,\nThe Zetlyn team\n\n--\nZetlyn · https://zetlyn.com · hello@zetlyn.com\n",
+                "Hello,\n\nwe received your cancellation on {at} (UTC).\n\n  Organisation: zetlyn.com/{world}\n  Kind: {kind}\n{}\n{}\n\nIf you did not send it, write to hello@zetlyn.com straight away.\n\nBest regards,\nThe Zetlyn team\n\n--\nZetlyn · https://zetlyn.com · hello@zetlyn.com\n",
                 if reason.is_empty() { String::new() } else { format!("  Reason: {reason}\n") },
-                if customer.is_some() { format!("Your plan ends at the end of the current month{}. Until then your world runs as before, and you can take it away with you from its settings.", if until.is_empty() { String::new() } else { format!(", on {until}") }) } else { "We look up the contract it belongs to and confirm it to the address it was ordered with.".to_string() }
+                if customer.is_some() { format!("Your plan ends at the end of the current month{}. Until then your organisation runs as before, and you can take all of it with you from its settings.", if until.is_empty() { String::new() } else { format!(", on {until}") }) } else { "We look up the contract it belongs to and confirm it to the address it was ordered with.".to_string() }
             );
             if !to.is_empty() {
                 let _ = site.send(&to, "Your Zetlyn cancellation was received", &text);
@@ -3947,7 +4006,7 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                     h1 { "Your cancellation was received" }
                     p.lede { "On " (at) " (UTC), for " code { (world) } "." }
                     p { "A confirmation is on its way by mail. "
-                        @if customer.is_some() { "Your plan ends at the end of the current month; until then your world runs as before." }
+                        @if customer.is_some() { "Your plan ends at the end of the current month; until then your organisation runs as before." }
                         @else { "We look up the contract it belongs to and confirm it to the address it was ordered with." } }
                 }
             }));
@@ -3968,14 +4027,14 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                             @let name = o["client_reference_id"].as_str().unwrap_or("");
                             @let email = o["customer_details"]["email"].as_str().unwrap_or("");
                             p.overline { "Thank you" }
-                            h1 { "Your world is on its way" }
+                            h1 { "Your organisation is on its way" }
                             p.lede { "It is being set up now, at " a href={(base) "/" (name) "/"} { (base) "/" (name) "/" } ", and a mail to " (email) " says when it is ready, usually within a minute." }
                             p { "Sign in there with " (email) ": a link comes by mail, no password. Your plan, your usage and your invoices are at " a href=(serve::at("/")) { "your account" } "." }
                         }
                         Err(e) => {
                             p.overline { "Thank you" }
                             h1 { "We could not look at your order just now" }
-                            p.lede { "Your payment is safe with Stripe, and your world is set up as soon as we hear of it. If no mail has come within a few minutes, write to " a href="mailto:hello@zetlyn.com" { "hello@zetlyn.com" } "." }
+                            p.lede { "Your payment is safe with Stripe, and your organisation is set up as soon as we hear of it. If no mail has come within a few minutes, write to " a href="mailto:hello@zetlyn.com" { "hello@zetlyn.com" } "." }
                             p.dim { (e) }
                         }
                     }
@@ -4014,7 +4073,7 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                 div.account-hero {
                     p.overline { "Your account" }
                     h1 { (a.email) }
-                    p.lede { @if mine.is_empty() { "No world of your own yet." } @else { (mine.len()) @if mine.len() == 1 { " world" } @else { " worlds" } " you belong to." } }
+                    p.lede { @if mine.is_empty() { "No organisation yet." } @else { (mine.len()) @if mine.len() == 1 { " organisation" } @else { " organisations" } " you belong to." } }
                 }
                 @if operator {
                     a.card.account-admin href=(serve::at("/admin/")) {
@@ -4060,8 +4119,8 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                             }
                         }
                     }
-                    a.card.account-new href=(serve::at("/new")) {
-                        strong { "Start a world" }
+                    a.card.account-new href="/order" {
+                        strong { "Order an organisation" }
                         span.dim { "Managed Zetlyn: your sources, trackers and readers, run for you at zetlyn.com." }
                     }
                 }
@@ -4087,11 +4146,41 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                 s => respond(request, s, html_kind, &html),
             }
         }
-        // A world of one's own, paid for at Stripe: a plan, a name and an address here, and the
-        // name held for half an hour while the payment is made.
+        // Whether a name can be ordered, asked by the order page as it is typed.
+        ["new", "check"] => {
+            let name = serve::params(request.url()).get("name").cloned().unwrap_or_default().trim().to_lowercase();
+            let (ok, said) = if name.is_empty() {
+                (false, "")
+            } else if !org_name(&name) || !crate::cell::name_ok(&name) {
+                (false, "lower case letters, digits and hyphens, at most 28")
+            } else if crate::hub::why_not(&name).is_some() {
+                (false, "reserved")
+            } else if world_taken(dir, &name).is_some() {
+                (false, "taken")
+            } else {
+                (true, "available")
+            };
+            let mut response = tiny_http::Response::from_string(json!({ "ok": ok, "said": said }).to_string());
+            for (k, v) in [("Content-Type", "application/json"), ("Cache-Control", "no-store")] {
+                if let Ok(h) = tiny_http::Header::from_bytes(k.as_bytes(), v.as_bytes()) {
+                    response = response.with_header(h);
+                }
+            }
+            let _ = request.respond(response);
+        }
+        // Its old address, where the order page was until 2026-10-07.
+        ["new"] if !post && request.url().starts_with(&format!("/{ACCOUNT}/new")) => {
+            let query = request.url().split_once('?').map(|(_, q)| format!("?{q}")).unwrap_or_default();
+            redirect_permanently(request, &format!("/order{query}"));
+        }
+        // Ordering an organisation, at zetlyn.com/order: its name and its address on Zetlyn, the
+        // buyer's address, the terms; the name held for half an hour while it is paid at Stripe.
         ["new"] => {
             let billing = dir.join(BILLING);
             let (_, plans) = crate::billing::plans(&billing).unwrap_or_default();
+            let Some((plan_key, plan)) = plans.iter().next().map(|(k, p)| (k.clone(), p.clone())) else {
+                return respond(request, 200, html_kind, &page("Order", html! { div.account-hero { h1 { "Ordering is not open yet" } p.lede { "Write to " a href="mailto:hello@zetlyn.com" { "hello@zetlyn.com" } " and we set it up for you." } } }));
+            };
             let mut said: Option<String> = None;
             let mut form: BTreeMap<String, String> = serve::params(request.url()).into_iter().collect();
             if post {
@@ -4099,130 +4188,166 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                 let _ = std::io::Read::read_to_string(&mut std::io::Read::take(request.as_reader(), 64 << 10), &mut body);
                 form = parse_form(&body);
                 let get = |k: &str| form.get(k).map(|v| v.trim().to_string()).unwrap_or_default();
-                let (name, title, email, plan) = (get("name").to_lowercase(), get("title"), get("email").to_lowercase(), get("plan"));
-                let chosen = plans.get(&plan);
-                let refused = if chosen.is_none() {
-                    Some("Choose a plan.".to_string())
-                } else if !org_name(&name) {
-                    Some("A name is lower case letters, digits and hyphens: reading-circle.".to_string())
-                } else if let Some(why) = crate::hub::why_not(&name) {
-                    Some(format!("{name}: {why}."))
+                let (name, title, email) = (get("name").to_lowercase(), get("title"), get("email").to_lowercase());
+                let refused = if title.is_empty() {
+                    Some("Please give your organisation's name.".to_string())
+                } else if !org_name(&name) || !crate::cell::name_ok(&name) {
+                    Some("Your address on Zetlyn is lower case letters, digits and hyphens, at most 28: acme-research.".to_string())
+                } else if crate::hub::why_not(&name).is_some() {
+                    Some(format!("zetlyn.com/{name} is reserved; please choose another address."))
                 } else if world_taken(dir, &name).is_some() {
-                    Some(format!("{name} is taken."))
+                    Some(format!("zetlyn.com/{name} is taken; please choose another address."))
                 } else if !email.contains('@') {
-                    Some("An address to sign in with.".to_string())
+                    Some("Please give the email address you will sign in with.".to_string())
                 } else if get("terms") != "yes" {
                     Some("Please accept the terms and confirm you have read the privacy notice and the cancellation policy.".to_string())
                 } else if get("start") != "yes" {
-                    Some("Please confirm that your world may start right away.".to_string())
-                } else if chosen.is_some_and(|p| p.link.is_empty()) && crate::stripe::ids(&billing).is_none() {
-                    Some("This plan cannot be bought here yet. Write to hello@zetlyn.com and it is set up for you.".to_string())
+                    Some("Please confirm that your organisation may start right away.".to_string())
+                } else if plan.link.is_empty() && crate::stripe::ids(&billing).is_none() {
+                    Some("Ordering is not open yet. Write to hello@zetlyn.com and we set it up for you.".to_string())
                 } else {
-                    crate::billing::Book::open(&billing).and_then(|b| b.reserve(&name, &email, if title.is_empty() { &name } else { &title }, &plan)).err()
+                    crate::billing::Book::open(&billing).and_then(|b| b.reserve(&name, &email, &title, &plan_key)).err()
                 };
-                // What the buyer agreed to, and when: the terms, and that the world starts before the
-                // withdrawal period ends. Kept as long as the customer is, as the record of it.
+                // What the buyer agreed to, and when: the terms, and that the organisation starts
+                // before the withdrawal period ends. Kept as long as the customer is, as the record of it.
                 if refused.is_none() {
-                    let line = json!({ "at": crate::iso_stamp(crate::now()), "world": name, "email": email, "plan": plan, "terms": true, "start_before_withdrawal_ends": true,
-                        "said": "I accept the terms and have read the privacy notice and the cancellation policy. I ask that my world starts right away, before the 14-day withdrawal period ends. If I withdraw as a consumer, I pay for the time it ran until then." });
+                    let line = json!({ "at": crate::iso_stamp(crate::now()), "organisation": name, "title": title, "email": email, "plan": plan_key, "terms": true, "start_before_withdrawal_ends": true,
+                        "said": "I accept the terms and have read the privacy notice and the cancellation policy. I ask that my organisation starts right away, before the 14-day withdrawal period ends. If I withdraw as a consumer, I pay for the time it ran until then." });
                     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(billing.join("consents.jsonl")) {
                         let _ = std::io::Write::write_all(&mut f, format!("{line}\n").as_bytes());
                     }
                 }
-                match (refused, chosen) {
+                match refused {
                     // Through Stripe's API where it is set up (the monthly price and the usage prices),
                     // through the plan's Payment Link where it is not.
-                    (None, Some(p)) if crate::stripe::ids(&billing).is_some() => {
+                    None if crate::stripe::ids(&billing).is_some() => {
                         let base = crate::account::Site::load(dir).url.trim_end_matches('/').to_string();
                         match crate::stripe::checkout(&billing, &name, &email, &base) {
                             Ok(url) => return redirect(request, &url),
                             Err(e) => {
                                 eprintln!("checkout: {e}");
-                                said = Some(format!("The payment could not be started: {e}. Try again in a moment, or write to hello@zetlyn.com."));
+                                said = Some("The payment could not be started just now. Please try again in a moment, or write to hello@zetlyn.com.".to_string());
                             }
                         }
-                        let _ = p;
                     }
-                    (None, Some(p)) => {
-                        let sep = if p.link.contains('?') { '&' } else { '?' };
-                        return redirect(request, &format!("{}{sep}client_reference_id={}&prefilled_email={}", p.link, urlencode(&name), urlencode(&email)));
+                    None => {
+                        let sep = if plan.link.contains('?') { '&' } else { '?' };
+                        return redirect(request, &format!("{}{sep}client_reference_id={}&prefilled_email={}", plan.link, urlencode(&name), urlencode(&email)));
                     }
-                    (why, _) => said = why,
+                    why => said = why,
                 }
             }
             let get = |k: &str| form.get(k).cloned().unwrap_or_default();
-            let picked = if get("plan").is_empty() { plans.keys().next().cloned().unwrap_or_default() } else { get("plan") };
-            respond(request, 200, html_kind, &page("A world of your own", html! {
-                h1 { "A world of your own" }
-                p.about { "Your sources, your trackers and your readers, run for you at " (crate::account::Site::load(dir).url.trim_end_matches('/')) "/<name>, the same program you can run yourself, and yours to take away." }
-                @if let Some(s) = &said { div.note { (s) } }
-                @if plans.is_empty() {
-                    p { "Plans are not open here yet. Write to " a href="mailto:hello@zetlyn.com" { "hello@zetlyn.com" } "." }
-                } @else {
-                    form method="post" action=(serve::at("/new")) {
-                        div.plans {
-                            @for (key, p) in &plans {
-                                label.plan {
-                                    input type="radio" name="plan" value=(key) checked[*key == picked];
-                                    strong { (if p.title.is_empty() { key.clone() } else { p.title.clone() }) }
-                                    " " span { "€" (p.price) " a month plus VAT" }
-                                    @if let Ok(net) = p.price.parse::<f64>() { div.why { "€" (format!("{:.2}", net * 1.19)) " a month with 19 % German VAT; tax in other EU countries as it applies there." } }
-                                    @if !p.about.is_empty() { div.why { (p.about) } }
-                                    @if p.storage_gb > 0 {
-                                        div.why { (p.storage_gb) " GB storage, " (thousands_of(p.reads)) " source reads and " (thousands_of(p.mails)) " mails a month included; unlimited users, sources and trackers." }
-                                        div.why { "Beyond that: €0.50 per GB a month, €1 per 10,000 reads, €1 per 1,000 mails, at most €" (p.cap) " a month; more if you ask us." }
-                                    } @else {
-                                        div.why { (p.sources) " sources, read as often as every " (p.every) ", " (p.mails) " mails a month" @if p.domain { ", a domain of your own" } }
-                                    }
-                                    @if p.trial_days > 0 { div.why { (p.trial_days) " days free, then monthly; cancel any time." } }
-                                }
+            let net: f64 = plan.price.parse().unwrap_or(0.0);
+            respond(request, 200, html_kind, &page("Order Zetlyn Managed", html! {
+                div.order {
+                    ol.order-steps { li.on { "1 · Details" } li { "2 · Payment" } li { "3 · Your organisation" } }
+                    h1 { "Order " (plan.title) }
+                    @if let Some(s) = &said { div.note { (s) } }
+                    div.order-grid {
+                        form.order-form method="post" action="/order" {
+                            label.field {
+                                span.field-name { "Organisation name" }
+                                input #org type="text" name="title" value=(get("title")) placeholder="Acme Research" required maxlength="80" autocomplete="organization";
                             }
+                            label.field {
+                                span.field-name { "Your address on Zetlyn" }
+                                span.slug { span.slug-base { "zetlyn.com/" } input #slug type="text" name="name" value=(get("name")) placeholder="acme-research" required maxlength="28" pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?" autocapitalize="none" spellcheck="false"; }
+                                span #slug-state .slug-state {}
+                                small.dim { "Lower case letters, digits and hyphens. This is your organisation's address on Zetlyn and cannot be changed later." }
+                            }
+                            label.field {
+                                span.field-name { "Your email" }
+                                input type="email" name="email" value=(get("email")) placeholder="you@example.org" required autocomplete="email";
+                                small.dim { "You sign in with it: a link comes by mail, there is no password." }
+                            }
+                            label.check { input type="checkbox" name="terms" value="yes" required; span { "I accept the " a href="https://zetlyn.com/terms" { "terms" } " and have read the " a href="https://zetlyn.com/privacy" { "privacy notice" } " and the " a href="https://zetlyn.com/withdrawal" { "cancellation policy" } "." } }
+                            label.check { input type="checkbox" name="start" value="yes" required; span { "I ask that my organisation starts right away, before the 14-day withdrawal period ends. If I withdraw as a consumer, I pay for the time it ran until then." } }
+                            button.primary.order-button type="submit" { "Order and pay" }
+                            p.dim { "Next you pay securely at Stripe, which holds your card; we never see it. Your organisation is set up the moment the payment is through." }
                         }
-                        p { label { "Its name, in its address" br; input type="text" name="name" value=(get("name")) placeholder="reading-circle" pattern="[a-z0-9][a-z0-9-]*" required; } }
-                        p { label { "Its title" br; input.wide type="text" name="title" value=(get("title")) placeholder="Our reading circle"; } }
-                        p { label { "Your address, to sign in with" br; input.wide type="email" name="email" value=(get("email")) placeholder="you@example.org" required; } }
-                        p { label { input type="checkbox" name="terms" value="yes" required; " I accept the " a href="https://zetlyn.com/legal" { "terms" } " and have read the " a href="https://zetlyn.com/privacy" { "privacy notice" } " and the " a href="https://zetlyn.com/legal" { "cancellation policy" } "." } }
-                        p { label { input type="checkbox" name="start" value="yes" required; " I ask that my world starts right away, before the 14-day withdrawal period ends. If I withdraw as a consumer, I pay for the time it ran until then." } }
-                        p { button.primary type="submit" { "Order and pay" } }
-                        p.dim { "Paid at Stripe, which holds the card; here nothing of it is kept. The name is held for half an hour while you pay." }
+                        aside.order-summary {
+                            p.overline { (plan.title) }
+                            p.order-price { strong { "€" (plan.price) } " a month plus VAT" }
+                            p.dim { "€" (format!("{:.2}", net * 1.19)) " with 19 % German VAT; in other EU countries their VAT applies." }
+                            ul.order-included {
+                                li { (plan.storage_gb) " GB storage" }
+                                li { (thousands_of(plan.reads)) " source reads a month" }
+                                li { (thousands_of(plan.mails)) " mails a month" }
+                                li { "Unlimited users, sources and trackers" }
+                            }
+                            p.order-beyond-title { "Beyond that" }
+                            table.order-beyond { tbody {
+                                tr { td { "Storage" } td { "€0.50 per GB a month" } }
+                                tr { td { "Source reads" } td { "€1 per 10,000" } }
+                                tr { td { "Mails" } td { "€1 per 1,000" } }
+                            } }
+                            p.dim { "At most €" (plan.cap) " a month beyond the plan; more if you ask us. Billed monthly from the first of the month; cancel any time, to the end of the month." }
+                        }
                     }
                 }
+                script { (PreEscaped(ORDER_SCRIPT)) }
             }));
         }
+        // Signing in to everything on zetlyn.com: on the main server for any address, a reader of
+        // an organisation as much as its owner; on a machine of its own for its members. Back to
+        // where it was asked from, a page of an organisation included.
         ["signin"] if post => {
             let mut body = String::new();
-            let _ = std::io::Read::read_to_string(request.as_reader(), &mut body);
-            let email = parse_form(&body).get("email").cloned().unwrap_or_default().trim().to_lowercase();
-            // The same words whoever asks, so the page does not say who belongs anywhere.
-            if !membership.orgs_of(&email).is_empty() {
+            let _ = std::io::Read::read_to_string(&mut std::io::Read::take(request.as_reader(), 16 << 10), &mut body);
+            let form = parse_form(&body);
+            let email = form.get("email").cloned().unwrap_or_default().trim().to_lowercase();
+            let next = form.get("next").and_then(|n| crate::servetracker::next_of(n)).map(|n| format!("?next={}", urlencode(&n))).unwrap_or_default();
+            let anybody = crate::ops::is_control(dir);
+            if email.contains('@') && (anybody || !membership.orgs_of(&email).is_empty()) {
                 let sent = accounts.ensure(&email).and_then(|a| accounts.new_link(a.id)).and_then(|raw| {
                     let mut site = crate::account::Site::load(dir);
                     if !site_url.is_empty() {
                         site.url = site_url.to_string();
                     }
-                    let link = site.link(&serve::at(&format!("/signin/{raw}")));
+                    let link = site.link(&serve::at(&format!("/signin/{raw}{next}")));
                     { let (subject, text) = crate::mail::signin_letter(&link); site.send(&email, &subject, &text) }
                 });
                 if let Err(e) = sent {
                     eprintln!("sign-in mail: {e}");
                 }
             }
-            respond(request, 200, html_kind, &page("Sign in", html! { h1 { "Check your mail" } p { "If that address belongs to an organisation here, a link to sign in is on its way. It is good for a quarter of an hour, and once." } }));
+            respond(request, 200, html_kind, &page("Sign in", html! {
+                div.account-hero {
+                    p.overline { "Sign in" }
+                    h1 { "Check your mail" }
+                    p.lede { @if anybody { "A link to sign in is on its way to " (email) "." } @else { "If that address belongs to an organisation here, a link to sign in is on its way." } }
+                    p.dim { "It works once, for the next 15 minutes." }
+                }
+            }));
         }
-        ["signin"] => respond(request, 200, html_kind, &page("Sign in", html! {
-            h1 { "Sign in" }
-            p.about { "With a link sent to your address. No password." }
-            form.bar method="post" action=(serve::at("/signin")) {
-                input.wide type="email" name="email" placeholder="you@example.org" required;
-                button.primary type="submit" { "Send me a link" }
-            }
-        })),
+        ["signin"] => {
+            let next = serve::params(request.url()).get("next").and_then(|n| crate::servetracker::next_of(n)).unwrap_or_default();
+            respond(request, 200, html_kind, &page("Sign in", html! {
+                div.account-hero {
+                    p.overline { "Zetlyn" }
+                    h1 { "Sign in" }
+                    p.lede { "With a link sent to your address, no password. One sign-in for zetlyn.com and every organisation on it." }
+                }
+                form.bar method="post" action=(serve::at("/signin")) {
+                    input type="hidden" name="next" value=(next);
+                    input.wide type="email" name="email" placeholder="you@example.org" required;
+                    button.primary type="submit" { "Send me a link" }
+                }
+            }))
+        }
         ["signin", raw] => match accounts.spend_link(raw, crate::account::Kind::Member) {
             Some(session) => {
                 let cookie = format!("zs={session}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000");
                 let mut response = tiny_http::Response::from_string("").with_status_code(303);
-                // At a world's own name, back to the world; at the machine's, to the machine's page.
-                let home = if site_url.is_empty() { serve::at("/") } else { "/".to_string() };
+                // Back to where signing in was asked from; at a world's own name, back to the
+                // world; else to the account.
+                let next = serve::params(request.url()).get("next").and_then(|n| crate::servetracker::next_of(n));
+                let home = match next {
+                    Some(n) => n,
+                    None if site_url.is_empty() => serve::at("/"),
+                    None => "/".to_string(),
+                };
                 for (k, v) in [("Location", home), ("Set-Cookie", cookie)] {
                     if let Ok(h) = tiny_http::Header::from_bytes(k.as_bytes(), v.as_bytes()) {
                         response = response.with_header(h);
@@ -4232,12 +4357,15 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
             }
             None => respond(request, 410, html_kind, &page("Sign in", html! { h1 { "That link is spent" } p { a href=(serve::at("/signin")) { "Ask for another" } } })),
         },
-        ["signout"] if post => {
+        // Signing out of everything on zetlyn.com, from the account's menu or from an
+        // organisation's page, which sends people here and is sent back to.
+        ["signout"] => {
             if let Some(s) = &session {
                 accounts.end_session(s);
             }
+            let next = serve::params(request.url()).get("next").and_then(|n| crate::servetracker::next_of(n)).unwrap_or_else(|| serve::at("/signin"));
             let mut response = tiny_http::Response::from_string("").with_status_code(303);
-            for (k, v) in [("Location", serve::at("/")), ("Set-Cookie", "zs=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0".to_string())] {
+            for (k, v) in [("Location", next), ("Set-Cookie", "zs=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0".to_string())] {
                 if let Ok(h) = tiny_http::Header::from_bytes(k.as_bytes(), v.as_bytes()) {
                     response = response.with_header(h);
                 }
@@ -4355,7 +4483,7 @@ pub(crate) fn publish_root(root: &Path, org: &str, answers: impl FnOnce(&str) ->
 fn signed_in(request: &tiny_http::Request, accounts: &crate::account::Accounts) -> Option<String> {
     let cookie = request.headers().iter().find(|h| h.field.equiv("Cookie"))?.value.as_str().to_string();
     let session = cookie.split(';').filter_map(|p| p.trim().split_once('=')).find(|(k, _)| *k == "zs").map(|(_, v)| v.to_string())?;
-    accounts.by_session(&session, crate::account::Kind::Member).map(|a| a.email)
+    accounts.by_session(&session, crate::account::Kind::Member).map(|a| a.email).or_else(|| crate::account::remote_member(&session))
 }
 
 /// Every public tracker on the machine as a link: its title, and where it answers.
@@ -4774,3 +4902,34 @@ fn public_source_page(root: &Path, base: &str, dir_name: &str) -> Option<String>
 fn thousands_of(n: u64) -> String {
     crate::web::thousands(n as usize)
 }
+
+/// The order page's address field: suggested from the organisation's name until it is typed in
+/// itself, kept to what an address may hold, and checked as it changes.
+const ORDER_SCRIPT: &str = r#"(function () {
+  var org = document.getElementById("org"), slug = document.getElementById("slug"), state = document.getElementById("slug-state");
+  if (!org || !slug || !window.fetch) return;
+  var typed = slug.value !== "", timer;
+  function address(s) {
+    return s.toLowerCase().replace(/ä/g, "ae").replace(/ö/g, "oe").replace(/ü/g, "ue").replace(/ß/g, "ss")
+      .normalize("NFKD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 28).replace(/-+$/, "");
+  }
+  function check() {
+    clearTimeout(timer);
+    var v = slug.value;
+    if (!v) { state.textContent = ""; state.className = "slug-state"; return; }
+    timer = setTimeout(function () {
+      fetch("/order/check?name=" + encodeURIComponent(v), { cache: "no-store" })
+        .then(function (r) { return r.json(); })
+        .then(function (j) { if (slug.value !== v) return; state.textContent = (j.ok ? "✓ " : "✗ ") + "zetlyn.com/" + v + " is " + j.said; state.className = "slug-state " + (j.ok ? "ok" : "no"); })
+        .catch(function () {});
+    }, 250);
+  }
+  org.addEventListener("input", function () { if (!typed) { slug.value = address(org.value); check(); } });
+  slug.addEventListener("input", function () {
+    typed = slug.value !== "";
+    var kept = slug.value.toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 28);
+    if (kept !== slug.value) slug.value = kept;
+    check();
+  });
+  if (slug.value) check();
+})();"#;

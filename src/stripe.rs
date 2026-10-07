@@ -194,7 +194,7 @@ pub fn checkout(billing: &Path, world: &str, email: &str, base: &str) -> Result<
         p("subscription_data[billing_cycle_anchor]", &next_month_start().to_string()),
         p("subscription_data[proration_behavior]", "create_prorations"),
         p("success_url", &format!("{base}/account/welcome?session={{CHECKOUT_SESSION_ID}}")),
-        p("cancel_url", &format!("{base}/account/new")),
+        p("cancel_url", &format!("{base}/order")),
     ];
     for (i, m) in METERED.iter().enumerate() {
         let price = ids.prices.get(m.key).ok_or_else(|| format!("no price for {}", m.key))?;

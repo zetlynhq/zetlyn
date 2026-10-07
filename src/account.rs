@@ -744,6 +744,12 @@ pub fn viewer_of(accounts: &Accounts, cookie: Option<&str>, authorization: Optio
             };
         }
     }
+    // In a cell, the main server's sign-in is the one: whoever it says the session is, is the
+    // reader here, and nobody else, so signing out there is signing out here.
+    if remote_identity() {
+        let account = cookie.and_then(session_cookie).and_then(|s| remote_member(&s)).and_then(|email| accounts.ensure(&email).ok());
+        return Viewer { account, by_key: false, free: false };
+    }
     let session = cookie.and_then(|c| {
         c.split(';')
             .filter_map(|p| p.trim().split_once('='))
@@ -1199,4 +1205,60 @@ mod access_tests {
         assert!(admits(&site.all_owners(), "ann@example.org", &[]));
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+// -- one sign-in for every cell ----------------------------------------------------------------
+
+/// Where a cell asks who a session is: the main server's `/account/me`. Set where a hosting
+/// directory is a cell; nowhere else is anybody asked.
+static IDENTITY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+pub fn ask_identity_at(url: &str) {
+    let _ = IDENTITY.set(url.to_string());
+}
+
+pub fn remote_identity() -> bool {
+    IDENTITY.get().is_some()
+}
+
+/// The address the main server says a session cookie is signed in as, asked at most once a minute
+/// for the same session.
+pub fn remote_member(session: &str) -> Option<String> {
+    let url = IDENTITY.get()?;
+    if session.is_empty() || session.len() > 200 || !session.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    type Kept = std::collections::BTreeMap<String, (i64, Option<String>)>;
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Kept>> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(Kept::new()));
+    let now = crate::now();
+    if let Some((at, email)) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(session).cloned() {
+        if now - at < 60 {
+            return email;
+        }
+    }
+    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(5))).build().into();
+    let email = agent
+        .get(url)
+        .header("Cookie", &format!("zs={session}"))
+        .call()
+        .ok()
+        .and_then(|mut r| r.body_mut().read_json::<serde_json::Value>().ok())
+        .and_then(|j| j["email"].as_str().map(str::to_lowercase));
+    let mut kept = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if kept.len() > 10_000 {
+        kept.clear();
+    }
+    kept.insert(session.to_string(), (now, email.clone()));
+    email
+}
+
+/// The `zs` session in a Cookie header.
+pub fn session_cookie(cookie: &str) -> Option<String> {
+    cookie.split(';').filter_map(|p| p.trim().split_once('=')).find(|(k, _)| *k == "zs").map(|(_, v)| v.to_string())
+}
+
+/// The main server's address a cell sends people to for signing in and out: `https://zetlyn.com`.
+pub fn identity_origin() -> Option<String> {
+    IDENTITY.get().map(|u| u.trim_end_matches("/account/me").to_string())
 }

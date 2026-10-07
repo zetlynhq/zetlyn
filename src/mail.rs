@@ -231,10 +231,10 @@ pub fn signin_letter(link: &str) -> (String, String) {
 /// The words of the mail a new world's owner gets once it runs: subject and body.
 pub fn welcome_letter(title: &str, home: &str, account: &str, email: &str) -> (String, String) {
     (
-        format!("Your Zetlyn world \u{201c}{title}\u{201d} is ready"),
+        format!("Your Zetlyn organisation \u{201c}{title}\u{201d} is ready"),
         format!(
             "Hello,\n\n\
-             thank you for choosing Zetlyn Managed. Your world \u{201c}{title}\u{201d} is set up and running:\n\n  {home}\n\n\
+             thank you for choosing Zetlyn Managed. Your organisation \u{201c}{title}\u{201d} is set up and running:\n\n  {home}\n\n\
              To sign in, open {home}signin and enter {email}. We send you a link by mail; there is no password.\n\n\
              Your plan, this month's usage and your invoices are in your account:\n\n  {account}\n\n\
              Your plan includes 2 GB of storage, 25,000 source reads and 1,000 mails a month, with as many users, sources and trackers as you like. \

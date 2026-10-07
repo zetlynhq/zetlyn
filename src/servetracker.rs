@@ -3575,7 +3575,8 @@ fn signin_elsewhere(id: &str, next: Option<&str>) -> String {
 /// Where a signed-in reader comes back to: a path on this site, never another site.
 pub(crate) fn next_of(raw: &str) -> Option<String> {
     let raw = raw.trim();
-    (raw.starts_with('/') && !raw.starts_with("//") && !raw.contains("://")).then(|| raw.to_string())
+    // `/\evil.example` is read by browsers as `//evil.example`: no backslash, no control character.
+    (raw.starts_with('/') && !raw.starts_with("//") && !raw.contains("://") && !raw.contains('\\') && !raw.chars().any(char::is_control)).then(|| raw.to_string())
 }
 
 /// The form for one row: a field per field of the source, filled from a claim when it corrects

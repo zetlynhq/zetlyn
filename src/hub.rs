@@ -61,6 +61,10 @@ const REFUSED: &[&str] = &[
     "oauth",
     // Stripe's webhook for the hosted worlds, since 2026-10-06.
     "billing",
+    // Ordering an organisation, and the terms it is ordered on, since 2026-10-07.
+    "order",
+    "terms",
+    "withdrawal",
     "docs",
     "legal",
     "privacy",

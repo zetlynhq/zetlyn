@@ -292,17 +292,31 @@ impl S3 {
         body: &[u8],
         now: (String, String),
     ) -> BTreeMap<String, String> {
+        // What a file written here may be read by, where the operator says: `public-read` puts a
+        // hub's files out for anybody, file by file, which holds where a bucket's policy is slow
+        // to reach every node.
+        let acl = (method == "PUT" && !self.acl.is_empty()).then_some(self.acl.as_str());
+        self.signed_with(method, canonical_uri, query, body, now, acl)
+    }
+
+    /// The signature, with the canned ACL said where one is given.
+    fn signed_with(
+        &self,
+        method: &str,
+        canonical_uri: &str,
+        query: &str,
+        body: &[u8],
+        now: (String, String),
+        acl: Option<&str>,
+    ) -> BTreeMap<String, String> {
         let (date, stamp) = now;
         let payload = sha256(body);
         let mut headers = BTreeMap::new();
         headers.insert("host".to_string(), self.host());
         headers.insert("x-amz-content-sha256".to_string(), payload.clone());
         headers.insert("x-amz-date".to_string(), stamp.clone());
-        // What a file written here may be read by, where the operator says: `public-read` puts a
-        // hub's files out for anybody, file by file, which holds where a bucket's policy is slow
-        // to reach every node.
-        if method == "PUT" && !self.acl.is_empty() {
-            headers.insert("x-amz-acl".to_string(), self.acl.clone());
+        if let Some(acl) = acl {
+            headers.insert("x-amz-acl".to_string(), acl.to_string());
         }
         if self.key.is_empty() || self.secret.is_empty() {
             return headers;
@@ -336,6 +350,116 @@ impl S3 {
     }
 }
 
+
+/// Files larger than memory, written and read where nobody else may: a cell's snapshot. Every
+/// object written through these is private whatever `ZETLYN_S3_ACL` says, because that is the
+/// hub's setting and a snapshot is not the hub's.
+impl S3 {
+    const PART: usize = 64 << 20;
+
+    fn call(&self, method: &str, path: &str, query: &str, body: &[u8], acl: Option<&str>) -> Result<(String, String), String> {
+        let uri = format!("/{}/{}", self.bucket, self.key_for(path));
+        let url = if query.is_empty() { self.url(path) } else { format!("{}?{query}", self.url(path)) };
+        let headers = self.signed_with(method, &uri, query, body, amz_now(), acl);
+        let mut response = match method {
+            "GET" | "DELETE" => {
+                let mut r = if method == "GET" { self.agent.get(&url) } else { self.agent.delete(&url) };
+                for (k, v) in &headers {
+                    r = r.header(k.as_str(), v.as_str());
+                }
+                r.call()
+            }
+            _ => {
+                let mut r = if method == "POST" { self.agent.post(&url) } else { self.agent.put(&url) };
+                for (k, v) in &headers {
+                    r = r.header(k.as_str(), v.as_str());
+                }
+                r.send(body)
+            }
+        }
+        .map_err(|e| format!("{method} {url}: {e}"))?;
+        let etag = response.headers().get("etag").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+        let text = response.body_mut().read_to_string().unwrap_or_default();
+        Ok((etag, text))
+    }
+
+    /// A file, private: whole where it is small, in parts of 64 MB where it is not, so no more
+    /// than one part is ever held in memory. A multipart upload that fails is aborted.
+    pub fn upload_private(&self, path: &str, file: &std::path::Path) -> Result<u64, String> {
+        if self.key.is_empty() || self.secret.is_empty() {
+            return Err("ZETLYN_S3_KEY and ZETLYN_S3_SECRET are not set".into());
+        }
+        let size = std::fs::metadata(file).map_err(|e| format!("{}: {e}", file.display()))?.len();
+        let mut f = std::fs::File::open(file).map_err(|e| format!("{}: {e}", file.display()))?;
+        if size as usize <= Self::PART {
+            let mut bytes = Vec::new();
+            f.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+            self.call("PUT", path, "", &bytes, Some("private"))?;
+            return Ok(size);
+        }
+        let (_, started) = self.call("POST", path, "uploads=", b"", Some("private"))?;
+        let id = between(&started, "<UploadId>", "</UploadId>").into_iter().next().ok_or("the storage gave no upload id")?;
+        let id = unescape(&id);
+        let result = (|| {
+            let mut parts: Vec<(usize, String)> = Vec::new();
+            let mut buf = vec![0u8; Self::PART];
+            loop {
+                let mut filled = 0;
+                while filled < buf.len() {
+                    let n = f.read(&mut buf[filled..]).map_err(|e| e.to_string())?;
+                    if n == 0 {
+                        break;
+                    }
+                    filled += n;
+                }
+                if filled == 0 {
+                    break;
+                }
+                let number = parts.len() + 1;
+                let query = format!("partNumber={number}&uploadId={}", uri_encode(&id));
+                let (etag, _) = self.call("PUT", path, &query, &buf[..filled], None)?;
+                parts.push((number, etag));
+                if filled < buf.len() {
+                    break;
+                }
+            }
+            let body: String = std::iter::once("<CompleteMultipartUpload>".to_string())
+                .chain(parts.iter().map(|(n, e)| format!("<Part><PartNumber>{n}</PartNumber><ETag>{e}</ETag></Part>")))
+                .chain(std::iter::once("</CompleteMultipartUpload>".to_string()))
+                .collect();
+            let (_, done) = self.call("POST", path, &format!("uploadId={}", uri_encode(&id)), body.as_bytes(), None)?;
+            if done.contains("<Error>") {
+                return Err(format!("the storage refused to finish the upload: {done}"));
+            }
+            Ok(size)
+        })();
+        if result.is_err() {
+            let _ = self.call("DELETE", path, &format!("uploadId={}", uri_encode(&id)), b"", None);
+        }
+        result
+    }
+
+    /// An object into a file, as it arrives, never whole in memory.
+    pub fn download(&self, path: &str, to: &std::path::Path) -> Result<u64, String> {
+        let url = self.url(path);
+        let mut request = self.agent.get(&url);
+        for (k, v) in self.signed("GET", path, b"", amz_now()) {
+            request = request.header(k.as_str(), v.as_str());
+        }
+        let mut response = request.call().map_err(|e| format!("{url}: {e}"))?;
+        let mut out = std::fs::File::create(to).map_err(|e| format!("{}: {e}", to.display()))?;
+        std::io::copy(&mut response.body_mut().as_reader(), &mut out).map_err(|e| format!("{url}: {e}"))
+    }
+
+    pub fn delete(&self, path: &str) -> Result<(), String> {
+        self.call("DELETE", path, "", b"", None).map(|_| ())
+    }
+
+    /// A small object, private.
+    pub fn put_private(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
+        self.call("PUT", path, "", bytes, Some("private")).map(|_| ())
+    }
+}
 /// HMAC-SHA256, written out because the one hash this program already depends on is enough.
 fn hmac(key: &[u8], message: &[u8]) -> Vec<u8> {
     const BLOCK: usize = 64;

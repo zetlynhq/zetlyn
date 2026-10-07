@@ -1,0 +1,737 @@
+//! The main server's hold on every cell: `zetlyn ops`, run as root there (CELLS.md in zetlyn-ops).
+//!
+//! It keeps the register, `/srv/zetlyn/control/ops/register.yaml`: which servers there are and
+//! which cell is on which. It reaches a server only through `zetlyn node` over SSH, with a key that
+//! may run that and nothing else. Once a minute it asks every server how its cells are, writes what
+//! it heard where the admin pages read it, says what is wrong to the alarm address, and keeps the
+//! main server's routes in step. What the admin pages ask for (start, move, upgrade…) they write as
+//! a job, and this runs it: the pages are served without root, and only this holds the key.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value as J};
+
+/// The machine's own hosting directory on the main server: its accounts, its billing, its pages.
+pub const CONTROL: &str = "/srv/zetlyn/control";
+
+pub fn ops_dir(control: &Path) -> PathBuf {
+    control.join("ops")
+}
+
+/// Whether this hosting directory is the main server's, holding a register of cells.
+pub fn is_control(dir: &Path) -> bool {
+    ops_dir(dir).join("register.yaml").exists()
+}
+
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeEntry {
+    /// Its address, by which SSH and the main server's Caddy reach it.
+    pub host: String,
+    /// Its Caddy's own root certificate, which the main server trusts for that hop alone.
+    #[serde(default)]
+    pub ca: String,
+    /// No new cell is placed on it while it is draining.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub draining: bool,
+}
+
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CellEntry {
+    pub node: String,
+    #[serde(default)]
+    pub owner: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub created: String,
+    /// The operator's own, unlimited and never billed: `zetlyn`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub house: bool,
+    /// Memory and processor for it, where its plan's default is not enough.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub memory: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cpu: String,
+}
+
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Register {
+    /// Where alarms go.
+    #[serde(default)]
+    pub alarm: String,
+    /// A URL asked once a minute while the watching works, so that something outside notices
+    /// when it does not (healthchecks.io and the like). Empty for none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub heartbeat: String,
+    #[serde(default)]
+    pub nodes: BTreeMap<String, NodeEntry>,
+    #[serde(default)]
+    pub cells: BTreeMap<String, CellEntry>,
+}
+
+pub fn register(control: &Path) -> Result<Register, String> {
+    crate::yaml::read(&ops_dir(control).join("register.yaml"))
+}
+
+pub fn save_register(control: &Path, r: &Register) -> Result<(), String> {
+    let path = ops_dir(control).join("register.yaml");
+    let partial = path.with_extension("partial");
+    std::fs::write(&partial, crate::yaml::to_string(r)?).map_err(|e| e.to_string())?;
+    std::fs::rename(&partial, &path).map_err(|e| e.to_string())?;
+    // The register is the one file the cells cannot be rebuilt without: it goes to the bucket as
+    // it changes, beside the snapshots.
+    let _ = keep_in_bucket(control, "control/register.yaml", &path);
+    Ok(())
+}
+
+fn keep_in_bucket(_control: &Path, key: &str, file: &Path) -> Result<(), String> {
+    load_env(crate::cell::S3_ENV)?;
+    let bucket = std::env::var("ZETLYN_CELLS_BUCKET").unwrap_or_else(|_| "zetlyn".into());
+    crate::place::S3::new(&bucket)?.upload_private(key, file).map(|_| ())
+}
+
+fn load_env(path: &str) -> Result<(), String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    for (k, v) in text.lines().filter_map(|l| l.trim().strip_prefix("export ").unwrap_or(l.trim()).split_once('=')) {
+        std::env::set_var(k.trim(), v.trim().trim_matches('"'));
+    }
+    Ok(())
+}
+
+// -- reaching a server --------------------------------------------------------------------------
+
+const SSH_KEY: &str = "/root/.ssh/zetlyn-ops";
+
+/// `zetlyn node <words>` on a server, its output, or what it said went wrong.
+pub fn on(node: &NodeEntry, words: &[&str], input: Option<&Path>) -> Result<String, String> {
+    let mut cmd = Command::new("ssh");
+    cmd.args(["-i", SSH_KEY, "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-o", "StrictHostKeyChecking=accept-new", "-o", "ServerAliveInterval=30"])
+        .arg(format!("root@{}", node.host))
+        .arg("node")
+        .args(words);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    if input.is_some() {
+        cmd.stdin(Stdio::piped());
+    }
+    let mut child = cmd.spawn().map_err(|e| format!("ssh: {e}"))?;
+    if let Some(path) = input {
+        let mut stdin = child.stdin.take().ok_or("no stdin")?;
+        let mut f = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        std::io::copy(&mut f, &mut stdin).map_err(|e| e.to_string())?;
+        drop(stdin);
+    }
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    } else {
+        let err = String::from_utf8_lossy(&out.stderr);
+        Err(format!("{}: {}", node.host, err.trim().lines().last().unwrap_or("failed")))
+    }
+}
+
+fn node_of<'a>(r: &'a Register, cell: &str) -> Result<(&'a str, &'a NodeEntry), String> {
+    let c = r.cells.get(cell).ok_or_else(|| format!("{cell}: no such cell in the register"))?;
+    let n = r.nodes.get(&c.node).ok_or_else(|| format!("{cell} is on {}, which the register does not hold", c.node))?;
+    Ok((c.node.as_str(), n))
+}
+
+// -- what the servers say -----------------------------------------------------------------------
+
+fn status_path(control: &Path, node: &str) -> PathBuf {
+    ops_dir(control).join("status").join(format!("{node}.json"))
+}
+
+/// What a server said last, and when; Null where it has not answered.
+pub fn last_status(control: &Path, node: &str) -> J {
+    std::fs::read(status_path(control, node)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(J::Null)
+}
+
+/// A cell as its server last described it.
+pub fn cell_status(control: &Path, r: &Register, cell: &str) -> J {
+    let Some(c) = r.cells.get(cell) else { return J::Null };
+    last_status(control, &c.node)["cells"].as_array().and_then(|a| a.iter().find(|x| x["name"] == cell).cloned()).unwrap_or(J::Null)
+}
+
+/// Once a minute: every server asked, what it said written down, alarms raised and cleared, the
+/// main server's routes kept in step, waiting jobs run, and the heartbeat said.
+pub fn poll(control: &Path) -> Result<(), String> {
+    let r = register(control)?;
+    std::fs::create_dir_all(ops_dir(control).join("status")).map_err(|e| e.to_string())?;
+    let mut problems: BTreeMap<String, String> = BTreeMap::new();
+    for (name, node) in &r.nodes {
+        match on(node, &["status", "--json"], None).and_then(|s| serde_json::from_str::<J>(&s).map_err(|e| e.to_string())) {
+            Ok(mut s) => {
+                s["heard"] = json!(crate::now());
+                let _ = std::fs::write(status_path(control, name), s.to_string());
+                problems.extend(judge(name, &s, &r));
+            }
+            Err(e) => {
+                let mut s = last_status(control, name);
+                if s.is_null() {
+                    s = json!({ "node": name });
+                }
+                s["error"] = json!(e);
+                s["failed_at"] = json!(crate::now());
+                let _ = std::fs::write(status_path(control, name), s.to_string());
+                problems.insert(format!("node:{name}"), format!("{name} ({}) does not answer: {e}", node.host));
+            }
+        }
+    }
+    // A cell in the register that no server holds is a cell that is nowhere.
+    for (cell, c) in &r.cells {
+        let s = last_status(control, &c.node);
+        if s.get("cells").is_some() && cell_status(control, &r, cell).is_null() {
+            problems.insert(format!("cell:{cell}:missing"), format!("{cell} is registered on {}, which does not hold it", c.node));
+        }
+    }
+    alarms(control, &r, problems);
+    if let Err(e) = routes(control) {
+        eprintln!("routes: {e}");
+    }
+    if let Err(e) = enforce_terms(control) {
+        eprintln!("terms: {e}");
+    }
+    work(control);
+    if !r.heartbeat.is_empty() {
+        let _ = ureq::get(&r.heartbeat).call();
+    }
+    Ok(())
+}
+
+/// What is wrong on one server, by a key that stays the same while it stays wrong.
+fn judge(node: &str, s: &J, r: &Register) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let (free, size) = (s["disk_free"].as_f64().unwrap_or(0.0), s["disk_size"].as_f64().unwrap_or(1.0));
+    if size > 0.0 && free / size < 0.15 {
+        out.insert(format!("node:{node}:disk"), format!("{node} has {:.0} % of its disk left", 100.0 * free / size));
+    }
+    let (avail, total) = (s["memory_available"].as_f64().unwrap_or(0.0), s["memory_total"].as_f64().unwrap_or(1.0));
+    if total > 0.0 && avail / total < 0.10 {
+        out.insert(format!("node:{node}:memory"), format!("{node} has {:.0} % of its memory left", 100.0 * avail / total));
+    }
+    let day_ago = crate::iso_stamp(crate::now() - 26 * 3600).replace([':', '-'], "");
+    for c in s["cells"].as_array().into_iter().flatten() {
+        let name = c["name"].as_str().unwrap_or("");
+        if !r.cells.contains_key(name) {
+            out.insert(format!("cell:{name}:stray"), format!("{node} holds {name}, which the register does not"));
+            continue;
+        }
+        if c["state"] != "running" {
+            continue;
+        }
+        if c["active"] != "active" {
+            out.insert(format!("cell:{name}:down"), format!("{name} on {node} is {}", c["active"].as_str().unwrap_or("?")));
+        } else if !matches!(c["answers"].as_u64(), Some(200..=399)) {
+            out.insert(format!("cell:{name}:answers"), format!("{name} on {node} answers {}", c["answers"]));
+        }
+        if matches!(c["run_result"].as_str(), Some(r) if !r.is_empty() && r != "success") {
+            out.insert(format!("cell:{name}:run"), format!("{name}: its last reading ended {}", c["run_result"].as_str().unwrap_or("")));
+        }
+        if c["snapshot"].as_str().unwrap_or("") < day_ago.as_str() {
+            out.insert(format!("cell:{name}:snapshot"), format!("{name}: no snapshot since {}", c["snapshot"].as_str().unwrap_or("ever")));
+        }
+        if let (Some(m), Some(max)) = (c["memory"].as_f64(), c["memory_max"].as_f64()) {
+            if max > 0.0 && m / max > 0.9 {
+                out.insert(format!("cell:{name}:memory"), format!("{name} uses {:.0} % of its memory", 100.0 * m / max));
+            }
+        }
+    }
+    out
+}
+
+/// Mail the alarm address once when something goes wrong and once when it is right again. A
+/// problem has to be seen on two polls in a row before it is said, so one slow answer is not news.
+fn alarms(control: &Path, r: &Register, now: BTreeMap<String, String>) {
+    let path = ops_dir(control).join("alarms.json");
+    let mut held: BTreeMap<String, J> = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let mut said: Vec<String> = Vec::new();
+    for (key, text) in &now {
+        let entry = held.entry(key.clone()).or_insert_with(|| json!({ "text": text, "since": crate::iso_stamp(crate::now()), "seen": 0, "mailed": false }));
+        entry["text"] = json!(text);
+        entry["seen"] = json!(entry["seen"].as_u64().unwrap_or(0) + 1);
+        if entry["seen"].as_u64().unwrap_or(0) >= 2 && entry["mailed"] != true {
+            entry["mailed"] = json!(true);
+            said.push(format!("WRONG  {text}"));
+        }
+    }
+    let gone: Vec<String> = held.keys().filter(|k| !now.contains_key(*k)).cloned().collect();
+    for key in gone {
+        if let Some(e) = held.remove(&key) {
+            if e["mailed"] == true {
+                said.push(format!("RIGHT  {}", e["text"].as_str().unwrap_or(&key)));
+            }
+        }
+    }
+    let _ = std::fs::write(&path, serde_json::to_vec_pretty(&held).unwrap_or_default());
+    if !said.is_empty() && !r.alarm.is_empty() {
+        let site = crate::account::Site::load(control);
+        let subject = if said.iter().any(|s| s.starts_with("WRONG")) { "Zetlyn: something is wrong" } else { "Zetlyn: it is right again" };
+        let text = format!("{}\n\nhttps://zetlyn.com/account/admin/\n", said.join("\n"));
+        if let Err(e) = site.send(&r.alarm, subject, &text) {
+            eprintln!("alarm mail: {e}");
+        }
+    }
+}
+
+// -- the main server's routes -------------------------------------------------------------------
+
+pub const MAIN_ROUTES: &str = "/etc/caddy/cells.caddy";
+pub const MAIN_DOMAINS: &str = "/etc/caddy/domains.caddy";
+
+/// Which path and which domain goes to which server, as the main server's Caddy reads it, written
+/// and reloaded only when it changed.
+pub fn routes(control: &Path) -> Result<(), String> {
+    let r = register(control)?;
+    let mut paths = String::from("# Written by `zetlyn ops`: which server holds which cell. Not edited by hand.\n");
+    let mut domains = String::from("# Written by `zetlyn ops`: the domains cells answer at, each with its certificate. Not edited by hand.\n");
+    let mut seen = BTreeSet::new();
+    for (cell, c) in &r.cells {
+        let Some(n) = r.nodes.get(&c.node) else { continue };
+        let id = cell.replace('-', "_");
+        paths.push_str(&format!(
+            "@cell_{id} path /{cell} /{cell}/* /worlds/{cell} /worlds/{cell}/*\nhandle @cell_{id} {{\n\timport cellproxy {} {}\n}}\n",
+            n.host, n.ca
+        ));
+        let s = cell_status(control, &r, cell);
+        if let Some(d) = s["domain"].as_str().filter(|d| d.contains('.') && d.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '.' || ch == '-')) {
+            if seen.insert(d.to_string()) {
+                domains.push_str(&format!("{d} {{\n\timport domainproxy {} {}\n}}\n", n.host, n.ca));
+            }
+        }
+    }
+    let mut changed = false;
+    for (path, text) in [(MAIN_ROUTES, &paths), (MAIN_DOMAINS, &domains)] {
+        if std::fs::read_to_string(path).ok().as_deref() != Some(text.as_str()) {
+            let partial = format!("{path}.partial");
+            std::fs::write(&partial, text).map_err(|e| e.to_string())?;
+            std::fs::rename(&partial, path).map_err(|e| e.to_string())?;
+            changed = true;
+        }
+    }
+    if changed {
+        let out = Command::new("systemctl").args(["reload", "caddy"]).output().map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(format!("caddy did not take the routes: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        }
+    }
+    Ok(())
+}
+
+// -- terms from the plan ------------------------------------------------------------------------
+
+/// Each billed cell's terms as its plan and its payment say, sent where they differ from what its
+/// server last reported. A cell nobody pays for, the house's or one granted by hand, is left alone.
+pub fn enforce_terms(control: &Path) -> Result<(), String> {
+    let r = register(control)?;
+    let billing = control.join("billing");
+    let Ok(book) = crate::billing::Book::read(&billing) else { return Ok(()) };
+    let (_, plans) = crate::billing::plans(&billing).unwrap_or_default();
+    let (_, grace) = crate::billing::terms(&billing);
+    for (cell, c) in &r.cells {
+        if c.house {
+            continue;
+        }
+        let Some(customer) = book.get(cell) else { continue };
+        let plan = plans.get(&customer.plan).cloned().unwrap_or_default();
+        let want = crate::cell::Terms {
+            active: customer.in_good_standing(grace),
+            sources: Some(plan.sources),
+            every: plan.every.clone(),
+            mails: Some(plan.mails),
+            domain: plan.domain,
+        };
+        let have: crate::cell::Terms = serde_json::from_value(cell_status(control, &r, cell)["terms"].clone()).unwrap_or_default();
+        if serde_json::to_value(&have).ok() != serde_json::to_value(&want).ok() {
+            let n = r.nodes.get(&c.node).ok_or("no such node")?;
+            let mut words: Vec<String> = vec!["terms".into(), cell.clone(), "--active".into(), if want.active { "yes" } else { "no" }.into(), "--domain".into(), if want.domain { "yes" } else { "no" }.into()];
+            words.extend(["--sources".into(), plan.sources.to_string(), "--mails".into(), plan.mails.to_string()]);
+            if !plan.every.is_empty() {
+                words.extend(["--every".into(), plan.every.clone()]);
+            }
+            let refs: Vec<&str> = words.iter().map(String::as_str).collect();
+            on(n, &refs, None)?;
+        }
+    }
+    Ok(())
+}
+
+// -- moving cells -------------------------------------------------------------------------------
+
+/// The server with the most room that is not draining: where a new cell goes.
+pub fn place(control: &Path, r: &Register) -> Result<String, String> {
+    r.nodes
+        .iter()
+        .filter(|(_, n)| !n.draining)
+        .map(|(name, _)| {
+            let s = last_status(control, name);
+            let room = s["memory_available"].as_f64().unwrap_or(0.0) / s["memory_total"].as_f64().unwrap_or(1.0).max(1.0)
+                + s["disk_free"].as_f64().unwrap_or(0.0) / s["disk_size"].as_f64().unwrap_or(1.0).max(1.0);
+            (name.clone(), if s.get("error").is_some() { -1.0 } else { room })
+        })
+        .filter(|(_, room)| *room > 0.0)
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(n, _)| n)
+        .ok_or_else(|| "no server answering with room for a cell".to_string())
+}
+
+/// A new cell for a world somebody paid for or the operator asked for: placed, made, given its
+/// limits, registered and routed.
+pub fn create(control: &Path, cell: &str, title: &str, owner: &str, on_node: Option<&str>, house: bool) -> Result<String, String> {
+    let mut r = register(control)?;
+    if r.cells.contains_key(cell) {
+        return Err(format!("{cell}: already registered on {}", r.cells[cell].node));
+    }
+    let node = match on_node {
+        Some(n) => n.to_string(),
+        None => place(control, &r)?,
+    };
+    let n = r.nodes.get(&node).ok_or_else(|| format!("{node}: no such server"))?.clone();
+    on(&n, &["create", cell, "--title", &title.replace(char::is_whitespace, "\u{a0}"), "--owner", owner], None)?;
+    on(&n, &["limit", cell, "--memory", if house { "2G" } else { "512M" }, "--cpu", if house { "150%" } else { "50%" }], None)?;
+    r.cells.insert(cell.to_string(), CellEntry { node: node.clone(), owner: owner.to_string(), title: title.to_string(), created: crate::iso_stamp(crate::now()), house, ..Default::default() });
+    save_register(control, &r)?;
+    // Its owner signs in at the machine as the owner of it.
+    if !owner.is_empty() {
+        crate::app::set_member(control, cell, owner, Some("owner"))?;
+    }
+    let _ = poll_one(control, &node);
+    routes(control)?;
+    Ok(node)
+}
+
+fn poll_one(control: &Path, node: &str) -> Result<(), String> {
+    let r = register(control)?;
+    let n = r.nodes.get(node).ok_or("no such node")?;
+    let mut s: J = serde_json::from_str(&on(n, &["status", "--json"], None)?).map_err(|e| e.to_string())?;
+    s["heard"] = json!(crate::now());
+    std::fs::write(status_path(control, node), s.to_string()).map_err(|e| e.to_string())
+}
+
+/// A cell from its server to another, through the bucket: stopped, snapshotted, restored there,
+/// answering there, routed there, and only then gone from where it was. Should anything before the
+/// route fail, it is started again where it was and nothing else changes.
+pub fn move_cell(control: &Path, cell: &str, to: &str) -> Result<String, String> {
+    let mut r = register(control)?;
+    let (from_name, from) = node_of(&r, cell)?;
+    let (from_name, from) = (from_name.to_string(), from.clone());
+    if from_name == to {
+        return Err(format!("{cell} is on {to} already"));
+    }
+    let target = r.nodes.get(to).ok_or_else(|| format!("{to}: no such server"))?.clone();
+    let version = cell_status(control, &r, cell)["version"].as_str().unwrap_or("").to_string();
+    on(&target, &["status", "--json"], None).map_err(|e| format!("{to} does not answer: {e}"))?;
+    on(&from, &["stop", cell], None)?;
+    let undo = |why: String| -> String {
+        let _ = on(&from, &["start", cell], None);
+        format!("{why}; {cell} is running on {from_name} again")
+    };
+    let at = on(&from, &["snapshot", cell, "--why", "move"], None).map_err(|e| undo(e))?.trim().to_string();
+    let mut words = vec!["restore", cell, "--from", at.as_str()];
+    if !version.is_empty() {
+        words.extend(["--version", version.as_str()]);
+    }
+    on(&target, &words, None).map_err(|e| undo(e))?;
+    let c = r.cells.get(cell).cloned().unwrap_or_default();
+    let memory = if c.memory.is_empty() { if c.house { "2G".to_string() } else { "512M".to_string() } } else { c.memory.clone() };
+    let cpu = if c.cpu.is_empty() { if c.house { "150%".to_string() } else { "50%".to_string() } } else { c.cpu.clone() };
+    let _ = on(&target, &["limit", cell, "--memory", &memory, "--cpu", &cpu], None);
+    // It answers there before anybody is sent there.
+    let mut answering = false;
+    for _ in 0..30 {
+        if let Ok(s) = on(&target, &["status", "--json"], None) {
+            let s: J = serde_json::from_str(&s).unwrap_or(J::Null);
+            if s["cells"].as_array().into_iter().flatten().any(|x| x["name"] == cell && matches!(x["answers"].as_u64(), Some(200..=399))) {
+                answering = true;
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(4));
+    }
+    if !answering {
+        let _ = on(&target, &["remove", cell, "--no-snapshot"], None);
+        return Err(undo(format!("{cell} did not answer on {to}")));
+    }
+    if let Some(e) = r.cells.get_mut(cell) {
+        e.node = to.to_string();
+    }
+    save_register(control, &r)?;
+    let _ = poll_one(control, to);
+    routes(control)?;
+    on(&from, &["remove", cell, "--no-snapshot"], None)?;
+    let _ = poll_one(control, &from_name);
+    Ok(format!("{cell} moved from {from_name} to {to} through snapshot {at}"))
+}
+
+/// A release, from `/srv/zetlyn/releases/<v>/zetlyn` here, onto every server.
+pub fn release(_control: &Path, version: &str, current: bool) -> Result<String, String> {
+    let r = register(_control)?;
+    let file = Path::new(crate::cell::RELEASES).join(version).join("zetlyn");
+    let bytes = std::fs::read(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let sha = crate::place::sha256(&bytes);
+    let mut said = Vec::new();
+    for (name, n) in &r.nodes {
+        let mut words = vec!["install", version, "--sha256", sha.as_str()];
+        if current {
+            words.push("--current");
+        }
+        match on(n, &words, Some(&file)) {
+            Ok(_) => said.push(format!("{name}: {version}")),
+            Err(e) => said.push(format!("{name}: {e}")),
+        }
+    }
+    Ok(said.join("\n"))
+}
+
+/// A cell onto another release: a snapshot first, then the release, and back to the one before if
+/// it does not answer within a minute.
+pub fn upgrade(control: &Path, cell: &str, version: &str) -> Result<String, String> {
+    let r = register(control)?;
+    let (node, n) = node_of(&r, cell)?;
+    let before = cell_status(control, &r, cell)["version"].as_str().unwrap_or("").to_string();
+    on(n, &["snapshot", cell, "--why", "upgrade"], None)?;
+    on(n, &["version", cell, version], None)?;
+    for _ in 0..15 {
+        std::thread::sleep(std::time::Duration::from_secs(4));
+        if let Ok(s) = on(n, &["status", "--json"], None) {
+            let s: J = serde_json::from_str(&s).unwrap_or(J::Null);
+            if s["cells"].as_array().into_iter().flatten().any(|x| x["name"] == cell && matches!(x["answers"].as_u64(), Some(200..=399))) {
+                let _ = poll_one(control, node);
+                return Ok(format!("{cell}: {before} → {version}"));
+            }
+        }
+    }
+    if !before.is_empty() {
+        on(n, &["version", cell, &before], None)?;
+    }
+    Err(format!("{cell} did not answer on {version}; back on {before}"))
+}
+
+// -- jobs, from the admin pages -----------------------------------------------------------------
+
+pub const ACTIONS: [&str; 10] = ["start", "stop", "restart", "snapshot", "move", "upgrade", "suspend", "resume", "logs", "create"];
+
+/// A job for the root side, written by the admin pages. Its id.
+pub fn ask(control: &Path, action: &str, cell: &str, args: &BTreeMap<String, String>, by: &str) -> Result<String, String> {
+    if !ACTIONS.contains(&action) {
+        return Err(format!("{action}: not an action"));
+    }
+    let id = format!("{}-{}", crate::iso_stamp(crate::now()).replace([':', '-'], ""), crate::jwt::random().get(..8).unwrap_or(""));
+    let job = json!({ "id": id, "action": action, "cell": cell, "args": args, "by": by, "at": crate::iso_stamp(crate::now()) });
+    let dir = ops_dir(control).join("jobs");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let partial = dir.join(format!("{id}.partial"));
+    std::fs::write(&partial, job.to_string()).map_err(|e| e.to_string())?;
+    std::fs::rename(&partial, dir.join(format!("{id}.json"))).map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
+/// The jobs done, newest first, and those waiting.
+pub fn jobs(control: &Path, limit: usize) -> Vec<J> {
+    let mut out: Vec<J> = Vec::new();
+    for sub in ["jobs", "jobs/done"] {
+        for e in std::fs::read_dir(ops_dir(control).join(sub)).into_iter().flatten().flatten() {
+            if e.path().extension().is_some_and(|x| x == "json") {
+                if let Some(j) = std::fs::read(e.path()).ok().and_then(|b| serde_json::from_slice::<J>(&b).ok()) {
+                    out.push(j);
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| b["id"].as_str().cmp(&a["id"].as_str()));
+    out.truncate(limit);
+    out
+}
+
+/// Every waiting job, one after another, each answered in jobs/done/.
+pub fn work(control: &Path) {
+    let dir = ops_dir(control).join("jobs");
+    let mut waiting: Vec<PathBuf> = std::fs::read_dir(&dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
+    waiting.sort();
+    let _ = std::fs::create_dir_all(dir.join("done"));
+    for path in waiting {
+        let Some(mut job) = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<J>(&b).ok()) else {
+            let _ = std::fs::remove_file(&path);
+            continue;
+        };
+        let cell = job["cell"].as_str().unwrap_or("").to_string();
+        let arg = |k: &str| job["args"][k].as_str().unwrap_or("").to_string();
+        let result = (|| -> Result<String, String> {
+            if !crate::cell::name_ok(&cell) {
+                return Err(format!("{cell}: not a cell's name"));
+            }
+            let r = register(control)?;
+            match job["action"].as_str().unwrap_or("") {
+                "create" => {
+                    let node = create(control, &cell, &arg("title"), &arg("owner"), Some(arg("node")).filter(|n| !n.is_empty()).as_deref(), false)?;
+                    if !arg("owner").is_empty() {
+                        welcome(control, &cell, &arg("title"), &arg("owner"))?;
+                    }
+                    Ok(format!("{cell} made on {node}"))
+                }
+                "move" => move_cell(control, &cell, &arg("to")),
+                "upgrade" => upgrade(control, &cell, &arg("version")),
+                "logs" => {
+                    let (_, n) = node_of(&r, &cell)?;
+                    on(n, &["logs", &cell, "--lines", "300"], None)
+                }
+                "suspend" | "resume" => {
+                    let (_, n) = node_of(&r, &cell)?;
+                    let active = if job["action"] == "resume" { "yes" } else { "no" };
+                    on(n, &["terms", &cell, "--active", active], None).map(|_| format!("{cell}: updates {}", if active == "yes" { "resumed" } else { "suspended" }))
+                }
+                a @ ("start" | "stop" | "restart" | "snapshot") => {
+                    let (_, n) = node_of(&r, &cell)?;
+                    let mut words = vec![a, cell.as_str()];
+                    if a == "snapshot" {
+                        words.extend(["--why", "asked"]);
+                    }
+                    on(n, &words, None).map(|o| format!("{cell}: {a} {}", o.trim()))
+                }
+                other => Err(format!("{other}: not an action")),
+            }
+        })();
+        job["done"] = json!(crate::iso_stamp(crate::now()));
+        match result {
+            Ok(said) => job["said"] = json!(said),
+            Err(e) => job["error"] = json!(e),
+        }
+        let id = job["id"].as_str().unwrap_or("job").to_string();
+        let _ = std::fs::write(dir.join("done").join(format!("{id}.json")), job.to_string());
+        let _ = std::fs::remove_file(&path);
+        // Who can read the admin pages reads the answer.
+        let _ = Command::new("chown").args(["-R", "zetlyn:zetlyn", &dir.to_string_lossy()]).status();
+    }
+}
+
+// -- the command --------------------------------------------------------------------------------
+
+pub const USAGE: &str = "zetlyn ops [--control <dir>] cells | nodes | poll | work | routes | terms \
+| create <cell> --title … --owner … [--node n] [--house] | move <cell> --to <node> | upgrade <cell> --to <v> | upgrade --all --to <v> \
+| release <v> [--current] | start|stop|restart|snapshot|logs <cell> | node-add <name> --host <address> | drain <node> [--off]";
+
+pub fn command(args: &[String]) -> Result<(), String> {
+    let control = PathBuf::from(crate::flag(args, "--control").unwrap_or(CONTROL));
+    let rest = crate::positional(args, 2);
+    let flag = |f: &str| crate::flag(args, f);
+    match args.get(1).map(String::as_str) {
+        Some("cells") => {
+            let r = register(&control)?;
+            for (cell, c) in &r.cells {
+                let s = cell_status(&control, &r, cell);
+                println!("{:<24} {:<6} {:<8} {:<8} answers {:<4} snapshot {:<16} {}", cell, c.node, s["active"].as_str().unwrap_or("?"), s["version"].as_str().unwrap_or(""), s["answers"], s["snapshot"].as_str().unwrap_or("—"), c.owner);
+            }
+            Ok(())
+        }
+        Some("nodes") => {
+            let r = register(&control)?;
+            for (name, n) in &r.nodes {
+                let s = last_status(&control, name);
+                println!("{:<6} {:<16} {} cells, load {}, {}{}", name, n.host, s["cells"].as_array().map_or(0, Vec::len), s["load"].as_str().unwrap_or("?"), s["error"].as_str().unwrap_or("answering"), if n.draining { ", draining" } else { "" });
+            }
+            Ok(())
+        }
+        Some("poll") => poll(&control),
+        Some("work") => {
+            work(&control);
+            Ok(())
+        }
+        Some("routes") => routes(&control),
+        Some("terms") => enforce_terms(&control),
+        Some("create") => {
+            let cell = rest.first().ok_or("which cell?")?;
+            let node = create(&control, cell, flag("--title").unwrap_or(cell), flag("--owner").unwrap_or(""), flag("--node"), args.iter().any(|a| a == "--house"))?;
+            println!("{cell} on {node}");
+            Ok(())
+        }
+        Some("move") => {
+            println!("{}", move_cell(&control, rest.first().ok_or("which cell?")?, flag("--to").ok_or("--to <node>")?)?);
+            Ok(())
+        }
+        Some("upgrade") => {
+            let to = flag("--to").ok_or("--to <version>")?;
+            let cells: Vec<String> = if args.iter().any(|a| a == "--all") { register(&control)?.cells.keys().cloned().collect() } else { vec![rest.first().ok_or("which cell, or --all?")?.to_string()] };
+            for c in cells {
+                match upgrade(&control, &c, to) {
+                    Ok(s) => println!("{s}"),
+                    Err(e) => println!("{c}: {e}"),
+                }
+            }
+            Ok(())
+        }
+        Some("release") => {
+            println!("{}", release(&control, rest.first().ok_or("which version?")?, args.iter().any(|a| a == "--current"))?);
+            Ok(())
+        }
+        Some(a @ ("start" | "stop" | "restart" | "snapshot" | "logs")) => {
+            let cell = rest.first().ok_or("which cell?")?;
+            let r = register(&control)?;
+            let (_, n) = node_of(&r, cell)?;
+            let mut words = vec![a, cell.as_str()];
+            if a == "snapshot" {
+                words.extend(["--why", "asked"]);
+            }
+            print!("{}", on(n, &words, None)?);
+            Ok(())
+        }
+        // A server joins: registered, and its Caddy's root kept here for the hop to it.
+        Some("node-add") => {
+            let name = rest.first().ok_or("which name, n3?")?.to_string();
+            let host = flag("--host").ok_or("--host <address>")?.to_string();
+            let mut r = register(&control)?;
+            let entry = NodeEntry { host: host.clone(), ca: format!("/etc/caddy/nodes/{name}.crt"), draining: false };
+            let ca = on(&entry, &["ca"], None)?;
+            std::fs::create_dir_all("/etc/caddy/nodes").map_err(|e| e.to_string())?;
+            std::fs::write(&entry.ca, ca).map_err(|e| e.to_string())?;
+            r.nodes.insert(name.clone(), entry);
+            save_register(&control, &r)?;
+            poll_one(&control, &name)?;
+            println!("{name} at {host} joined");
+            Ok(())
+        }
+        Some("drain") => {
+            let name = rest.first().ok_or("which node?")?;
+            let mut r = register(&control)?;
+            let n = r.nodes.get_mut(*name).ok_or("no such node")?;
+            n.draining = !args.iter().any(|a| a == "--off");
+            save_register(&control, &r)?;
+            Ok(())
+        }
+        _ => Err(USAGE.into()),
+    }
+}
+
+/// The admin pages' mail to one owner or to every one, with what was sent written down.
+pub fn mail(control: &Path, to: &[String], subject: &str, text: &str, by: &str) -> Result<usize, String> {
+    let site = crate::account::Site::load(control);
+    let mut sent = 0;
+    let log = ops_dir(control).join("mail.jsonl");
+    for address in to {
+        let result = site.send(address, subject, text);
+        let line = json!({ "at": crate::iso_stamp(crate::now()), "to": address, "subject": subject, "by": by, "ok": result.is_ok(), "error": result.as_ref().err() });
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log) {
+            let _ = writeln!(f, "{line}");
+        }
+        if result.is_ok() {
+            sent += 1;
+        }
+    }
+    Ok(sent)
+}
+
+/// The mail a new world's owner gets once it answers: where it is and how to sign in.
+pub fn welcome(control: &Path, cell: &str, title: &str, owner: &str) -> Result<(), String> {
+    let site = crate::account::Site::load(control);
+    let base = site.url.trim_end_matches('/').to_string();
+    let title = if title.is_empty() { cell } else { title };
+    let text = format!(
+        "{title} is ready at {base}/{cell}/\n\nSign in at {base}/{cell}/signin with this address: a link comes by mail, no password.\n\nThe plan, the card and the invoices are at {base}/account/.\n"
+    );
+    site.send(owner, &format!("{title} is ready"), &text).map(|_| ())
+}

@@ -9,6 +9,7 @@ mod examples;
 mod artifact;
 mod billing;
 mod build;
+mod cell;
 mod console;
 mod directory;
 mod source;
@@ -33,6 +34,7 @@ mod mail;
 mod matches;
 mod migrate;
 mod oidc;
+mod ops;
 mod outbound;
 mod package;
 mod claim;
@@ -587,6 +589,8 @@ fn run(args: &[String]) -> Result<(), String> {
         Some("hub") => hub_command(args),
         Some("assist") => assist_command(args),
         Some("billing") => billing::command(args),
+        Some("node") => cell::command(args),
+        Some("ops") => ops::command(args),
         Some("host") => app::host(args),
         Some("hosting") => app::hosting(args),
         Some("world") => world::command(args),

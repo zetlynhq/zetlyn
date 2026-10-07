@@ -2817,6 +2817,10 @@ a.card.account-admin { border-left: 3px solid var(--accent); margin: 0 0 1rem; m
 a.card.account-admin strong { font-size: 1.1rem; }
 table.account-usage { width: 100%; margin: .2rem 0 0; font-size: .9rem; }
 table.account-usage td { padding: .15rem .4rem .15rem 0; border: 0; }
+.billing-failed { margin: .3rem 0 0; padding: .55rem .7rem; font-size: .9rem; border-left: 3px solid var(--accent); background: var(--bg); }
+form.billing-open { margin: 0; }
+form.billing-open button { font-size: .88rem; padding: .3rem .7rem; }
+.account-links { align-items: center; }
 h1.big { font-size: 2rem; margin-top: 3rem; }
 input.wide { flex: 1 1 26rem; min-width: 0; width: 100%; padding: .65rem .8rem; font: inherit;
   background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 0; }
@@ -4020,24 +4024,77 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                 }
             }));
         }
-        // One organisation's billing at Stripe, opened straight from the account: its own portal
-        // where the key may open one, the portal's sign-in where it may not.
-        ["billing", org] => {
+        // Billing, at /account/billing: every organisation the signed-in owner pays for, its plan
+        // and this month's usage, and a button into its own portal at Stripe for the payment
+        // method and the invoices. The portal opens on a POST, so nothing prefetches a session;
+        // where Stripe cannot open it, the page says so instead of going anywhere.
+        ["billing"] => {
             let Some(a) = who.as_ref() else { return redirect(request, &serve::at("/signin")) };
             let billing = dir.join(BILLING);
-            let owns = membership.orgs_of(&a.email).iter().any(|(o, r)| o == org && r == "owner");
-            let customer = crate::billing::Book::read(&billing).ok().and_then(|b| b.get(org)).and_then(|c| c.stripe_customer);
-            let back = format!("{}/account/", crate::account::Site::load(dir).url.trim_end_matches('/'));
-            let (portal, _) = crate::billing::terms(&billing);
-            let to = match (owns, customer) {
-                (true, Some(c)) => crate::stripe::portal_session(&c, &back).unwrap_or_else(|e| {
-                    eprintln!("billing portal {org}: {e}");
-                    if portal.is_empty() { back.clone() } else { format!("{portal}{}prefilled_email={}", if portal.contains('?') { "&" } else { "?" }, urlencode(&a.email)) }
-                }),
-                _ => back.clone(),
-            };
-            redirect(request, &to);
+            let book = crate::billing::Book::read(&billing).ok();
+            let (portal, grace) = crate::billing::terms(&billing);
+            let register = crate::ops::register(dir).ok();
+            let paid: Vec<(String, crate::billing::Customer)> = membership
+                .orgs_of(&a.email)
+                .into_iter()
+                .filter(|(_, r)| r == "owner")
+                .filter_map(|(o, _)| book.as_ref().and_then(|b| b.get(&o)).map(|c| (o, c)))
+                .collect();
+            let mut failed: Option<String> = None;
+            if post {
+                let mut body = String::new();
+                let _ = std::io::Read::read_to_string(&mut std::io::Read::take(request.as_reader(), 4 << 10), &mut body);
+                let org = parse_form(&body).get("org").cloned().unwrap_or_default();
+                let back = format!("{}/account/billing", crate::account::Site::load(dir).url.trim_end_matches('/'));
+                let opened = match paid.iter().find(|(o, _)| *o == org).and_then(|(_, c)| c.stripe_customer.clone()) {
+                    Some(c) => crate::stripe::portal_session(&c, &back),
+                    None => Err("no Stripe customer on record".into()),
+                };
+                match opened {
+                    Ok(to) => return redirect(request, &to),
+                    Err(e) => {
+                        eprintln!("billing portal {org}: {e}");
+                        failed = Some(org);
+                    }
+                }
+            }
+            respond(request, 200, html_kind, &page("Billing", html! {
+                div.account-hero {
+                    p.overline { "Your account" }
+                    h1 { "Billing" }
+                    p.lede { @if paid.is_empty() { "No plan in your name yet." } @else { "Your plan, this month's usage, and your payment method and invoices at Stripe." } }
+                }
+                div.account-worlds {
+                    @for (org, c) in &paid {
+                        @let title = register.as_ref().and_then(|r| r.cells.get(org)).map(|c| c.title.clone()).filter(|t| !t.is_empty()).unwrap_or_else(|| org.clone());
+                        div.card.account-world {
+                            div.account-world-head { a href={"/" (org) "/"} { strong { (title) } } }
+                            span.dim.mono { "zetlyn.com/" (org) }
+                            (plan_summary(dir, &billing, org, c, grace))
+                            @if failed.as_deref() == Some(org.as_str()) {
+                                p.billing-failed {
+                                    "Stripe could not open your billing page just now. Please try again in a minute"
+                                    @if !portal.is_empty() { ", or " a href={(portal) (if portal.contains('?') { "&" } else { "?" }) "prefilled_email=" (urlencode(&a.email))} { "sign in to it at Stripe" } " with the address you ordered with" }
+                                    ". If it keeps failing, write to " a href="mailto:hello@zetlyn.com" { "hello@zetlyn.com" } "."
+                                }
+                            }
+                            div.account-links {
+                                @if c.stripe_customer.is_some() {
+                                    form.billing-open method="post" action=(serve::at("/billing")) {
+                                        input type="hidden" name="org" value=(org);
+                                        button.primary type="submit" { "Payment method and invoices" }
+                                    }
+                                }
+                                a href=(serve::at("/cancel")) { "Cancel" }
+                            }
+                        }
+                    }
+                }
+                p.dim { a href=(serve::at("/")) { "Back to your account" } }
+            }));
         }
+        // Where the Billing link pointed until 0.3.75.
+        ["billing", _] => redirect(request, &serve::at("/billing")),
         // Where Stripe sends a buyer back: the checkout asked of Stripe itself, the world made
         // from it if the webhook has not made it already, and the buyer told what happens next.
         // No sign-in: the session's id is what it shows, and it shows only that.
@@ -4094,7 +4151,6 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
             let book = crate::billing::Book::read(&billing).ok();
             let (_, grace) = crate::billing::terms(&billing);
             let alarms: BTreeMap<String, J> = if operator { std::fs::read(crate::ops::ops_dir(dir).join("alarms.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default() } else { BTreeMap::new() };
-            let state_words = |s: &str| match s { "trialing" => "Free trial", "active" => "Active", "past_due" => "Payment failed, being tried again", "cancelled" => "Cancelled", other => other }.to_string();
             respond(request, 200, html_kind, &page("Your account", html! {
                 div.account-hero {
                     p.overline { "Your account" }
@@ -4118,29 +4174,11 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                                 span.chip { (role) }
                             }
                             span.dim.mono { "zetlyn.com/" (org) }
-                            @if let Some(c) = &customer {
-                                div.account-plan {
-                                    span { (if c.plan.is_empty() { "—".to_string() } else { c.plan.clone() }) " · " (state_words(&c.state)) }
-                                    @if let Some(u) = &c.paid_until { span.dim { (if c.state == "trialing" { " · free until " } else { " · paid until " }) (u) } }
-                                    @if !c.in_good_standing(grace) { " " span.chip.on { "not updated" } }
-                                }
-                                @let plan = crate::billing::plans(&billing).ok().and_then(|(_, p)| p.get(&c.plan).cloned()).unwrap_or_default();
-                                @if plan.storage_gb > 0 {
-                                    @let u = crate::ops::usage_of(dir, org);
-                                    @let (so, ro, mo) = crate::ops::overage(&u, &plan);
-                                    @let days = crate::iso_date(crate::now()).get(8..10).and_then(|d| d.parse::<u64>().ok()).unwrap_or(1).max(1);
-                                    table.account-usage { tbody {
-                                        tr { td.dim { "Storage" } td { (format!("{:.2}", u.mb_days as f64 / days as f64 / 1024.0)) " GB" } td.dim { "of " (plan.storage_gb) " GB" } }
-                                        tr { td.dim { "Source reads" } td { (thousands_of(u.reads)) } td.dim { "of " (thousands_of(plan.reads)) } }
-                                        tr { td.dim { "Mails" } td { (thousands_of(u.mails)) } td.dim { "of " (thousands_of(plan.mails)) } }
-                                    } }
-                                    @if so + ro + mo > 0.0 { span.dim { "Beyond the plan this month: €" (format!("{:.2}", so + ro + mo)) " of at most €" (plan.cap) } }
-                                }
-                            }
+                            @if let Some(c) = &customer { (plan_summary(dir, &billing, org, c, grace)) }
                             div.account-links {
                                 a href={"/" (org) "/"} { "Open" }
                                 @if role == "owner" { a href={"/" (org) "/settings"} { "Settings" } }
-                                @if role == "owner" && customer.is_some() { a href=(serve::at(&format!("/billing/{org}"))) { "Billing" } }
+                                @if role == "owner" && customer.is_some() { a href=(serve::at("/billing")) { "Billing" } }
                                 @if role == "owner" && customer.is_some() { a href=(serve::at("/cancel")) { "Cancel" } }
                             }
                         }
@@ -4976,3 +5014,29 @@ const ORDER_SCRIPT: &str = r#"(function () {
   });
   if (slug.value) check();
 })();"#;
+
+/// One organisation's plan as its owner sees it: which, in what state, paid until when, and this
+/// month's usage against what the plan includes.
+fn plan_summary(dir: &Path, billing: &Path, org: &str, c: &crate::billing::Customer, grace: i64) -> Markup {
+    let state = match c.state.as_str() { "trialing" => "Free trial", "active" => "Active", "past_due" => "Payment failed, being tried again", "cancelled" => "Cancelled", other => other }.to_string();
+    let plan = crate::billing::plans(billing).ok().and_then(|(_, p)| p.get(&c.plan).cloned()).unwrap_or_default();
+    let name = if !plan.title.is_empty() { plan.title.clone() } else if c.plan.is_empty() { "—".to_string() } else { c.plan.clone() };
+    html! {
+        div.account-plan {
+            span { (name) " · " (state) }
+            @if let Some(u) = &c.paid_until { span.dim { (if c.state == "trialing" { " · free until " } else { " · paid until " }) (u) } }
+            @if !c.in_good_standing(grace) { " " span.chip.on { "not updated" } }
+        }
+        @if plan.storage_gb > 0 {
+            @let u = crate::ops::usage_of(dir, org);
+            @let (so, ro, mo) = crate::ops::overage(&u, &plan);
+            @let days = crate::iso_date(crate::now()).get(8..10).and_then(|d| d.parse::<u64>().ok()).unwrap_or(1).max(1);
+            table.account-usage { tbody {
+                tr { td.dim { "Storage" } td { (format!("{:.2}", u.mb_days as f64 / days as f64 / 1024.0)) " GB" } td.dim { "of " (plan.storage_gb) " GB" } }
+                tr { td.dim { "Source reads" } td { (thousands_of(u.reads)) } td.dim { "of " (thousands_of(plan.reads)) } }
+                tr { td.dim { "Mails" } td { (thousands_of(u.mails)) } td.dim { "of " (thousands_of(plan.mails)) } }
+            } }
+            @if so + ro + mo > 0.0 { span.dim { "Beyond the plan this month: €" (format!("{:.2}", so + ro + mo)) " of at most €" (plan.cap) } }
+        }
+    }
+}

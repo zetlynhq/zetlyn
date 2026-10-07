@@ -193,7 +193,7 @@ pub fn checkout(billing: &Path, world: &str, email: &str, base: &str) -> Result<
         p("subscription_data[metadata][world]", world),
         p("subscription_data[billing_cycle_anchor]", &next_month_start().to_string()),
         p("subscription_data[proration_behavior]", "create_prorations"),
-        p("success_url", &format!("{base}/account/?ordered={world}")),
+        p("success_url", &format!("{base}/account/welcome?session={{CHECKOUT_SESSION_ID}}")),
         p("cancel_url", &format!("{base}/account/new")),
     ];
     for (i, m) in METERED.iter().enumerate() {
@@ -222,4 +222,33 @@ pub fn report(event: &str, customer: &str, value: u64, identifier: &str, at: i64
         Some(identifier),
     )
     .map(|_| ())
+}
+
+/// A checkout session as Stripe has it now, made into the event a webhook would have carried, so
+/// that a world is made whether or not the webhook arrived.
+pub fn session_event(id: &str) -> Result<J, String> {
+    let s = get(&format!("checkout/sessions/{id}"), &[])?;
+    Ok(serde_json::json!({ "id": format!("pull-{id}"), "type": "checkout.session.completed", "data": { "object": s } }))
+}
+
+/// Every checkout completed in the last two days, as such events.
+pub fn recent_sessions() -> Result<Vec<J>, String> {
+    let since = (crate::now() - 2 * 86_400).to_string();
+    let list = get("checkout/sessions", &[p("status", "complete"), p("limit", "100"), p("created[gte]", &since)])?;
+    Ok(list["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|s| serde_json::json!({ "id": format!("pull-{}", s["id"].as_str().unwrap_or("")), "type": "checkout.session.completed", "data": { "object": s } }))
+        .collect())
+}
+
+
+/// A customer's newest subscription, as the event its state would have been.
+pub fn customer_subscription_event(customer: &str) -> Result<Option<J>, String> {
+    let list = get("subscriptions", &[p("customer", customer), p("status", "all"), p("limit", "1")])?;
+    let Some(s) = list["data"].as_array().and_then(|a| a.first()).cloned() else { return Ok(None) };
+    let kind = if s["status"] == "canceled" { "customer.subscription.deleted" } else { "customer.subscription.updated" };
+    let hour = crate::iso_stamp(crate::now()).get(..13).unwrap_or("").to_string();
+    Ok(Some(serde_json::json!({ "id": format!("pull-{}-{hour}", s["id"].as_str().unwrap_or("")), "type": kind, "data": { "object": s } })))
 }

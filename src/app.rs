@@ -3380,44 +3380,61 @@ fn stripe_webhook(mut request: tiny_http::Request, dir: &Path) {
     let event = match crate::billing::verified(&body, &signature, &secret) {
         Ok(e) => e,
         // Refused, and Stripe gives up: it is not Stripe's, or not now.
-        Err(e) => return respond(request, 400, json_kind, &json!({ "error": e }).to_string()),
+        Err(e) => {
+            eprintln!("billing: an event refused: {e}");
+            return respond(request, 400, json_kind, &json!({ "error": e }).to_string());
+        }
     };
+    match take_event(dir, &event) {
+        Ok(said) => {
+            eprintln!("billing: {said}");
+            respond(request, 200, json_kind, &json!({ "ok": said }).to_string());
+        }
+        // A moment's failure is 500, and Stripe sends it again.
+        Err(e) => {
+            eprintln!("billing: {e}");
+            respond(request, 500, json_kind, &json!({ "error": e }).to_string());
+        }
+    }
+}
+
+/// A Stripe event, however it came (the webhook, the page a buyer returns to, the hourly look at
+/// Stripe): applied to the book, and a checkout that was paid is a world, made once. What it did.
+pub(crate) fn take_event(dir: &Path, event: &J) -> Result<String, String> {
     let billing = dir.join(BILLING);
     let checkout = event["type"] == "checkout.session.completed";
     let o = &event["data"]["object"];
     let name = o["client_reference_id"].as_str().unwrap_or("").to_string();
     let payer = o["customer_details"]["email"].as_str().or(o["customer_email"].as_str()).unwrap_or("").to_lowercase();
-    // A world already here that is not the payer's is not handed over: the payment is kept, and
-    // the operator is the one to sort it out.
-    if checkout && world_taken(dir, &name).is_some_and(|owner| !owner.eq_ignore_ascii_case(&payer)) {
-        eprintln!("billing: {payer} paid for {name}, which is somebody else's; nothing was made");
-        return respond(request, 200, json_kind, &json!({ "ok": "needs attention: the world is somebody else's" }).to_string());
-    }
-    let said = match crate::billing::apply(&billing, &event) {
-        Ok(s) => s,
-        // Anything else is 500, and Stripe sends it again, which a moment's failure wants.
-        Err(e) => {
-            eprintln!("billing: {e}");
-            return respond(request, 500, json_kind, &json!({ "error": e }).to_string());
+    if checkout {
+        if !matches!(o["payment_status"].as_str(), Some("paid" | "no_payment_required")) || o["status"].as_str().is_some_and(|s| s != "complete") {
+            return Ok(format!("{name}: not paid yet"));
         }
-    };
+        // Taken already, by the same customer: the webhook and the page and the look at Stripe all
+        // bring the same checkout, and it is one world.
+        let book = crate::billing::Book::open(&billing)?;
+        if book.get(&name).is_some_and(|c| c.stripe_customer.is_some() && c.stripe_customer.as_deref() == o["customer"].as_str()) {
+            return Ok(format!("{name}: taken already"));
+        }
+        // A world already here that is not the payer's is not handed over: the payment is kept,
+        // and the operator is the one to sort it out.
+        if world_taken(dir, &name).is_some_and(|owner| !owner.eq_ignore_ascii_case(&payer)) {
+            return Ok(format!("needs attention: {payer} paid for {name}, which is somebody else's"));
+        }
+    }
+    let said = crate::billing::apply(&billing, event)?;
     if checkout {
         // On the main server a world is a cell, made on whichever server has room by the root
         // side; on a machine of its own it is made here.
-        let made = if crate::ops::is_control(dir) {
-            let title = crate::billing::Book::open(&dir.join(BILLING)).ok().and_then(|b| b.reservation(&name)).map(|(_, t)| t).filter(|t| !t.is_empty()).unwrap_or_else(|| name.clone());
+        if crate::ops::is_control(dir) {
+            let title = crate::billing::Book::open(&billing).ok().and_then(|b| b.reservation(&name)).map(|(_, t)| t).filter(|t| !t.is_empty()).unwrap_or_else(|| name.clone());
             let args: BTreeMap<String, String> = [("title".to_string(), title), ("owner".to_string(), payer.clone())].into_iter().collect();
-            crate::ops::ask(dir, "create", &name, &args, "stripe").map(|_| ())
+            crate::ops::ask(dir, "create", &name, &args, "stripe")?;
         } else {
-            provision(dir, &name, &payer)
-        };
-        if let Err(e) = made {
-            eprintln!("billing: {name}: {e}");
-            return respond(request, 500, json_kind, &json!({ "error": e }).to_string());
+            provision(dir, &name, &payer)?;
         }
     }
-    eprintln!("billing: {said}");
-    respond(request, 200, json_kind, &json!({ "ok": said }).to_string());
+    Ok(said)
 }
 
 /// The world somebody paid for: made under the name they chose, with the title they gave it, them
@@ -3868,6 +3885,36 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
         // found there, each opening where it runs.
         // Nobody signed in at the account page: signing in is what it is for.
         [] if who.is_none() && !post => redirect(request, &serve::at("/signin")),
+        // Where Stripe sends a buyer back: the checkout asked of Stripe itself, the world made
+        // from it if the webhook has not made it already, and the buyer told what happens next.
+        // No sign-in: the session's id is what it shows, and it shows only that.
+        ["welcome"] => {
+            let id = serve::params(request.url()).get("session").cloned().unwrap_or_default();
+            let ok = id.starts_with("cs_") && id.len() < 200 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            let taken = if ok { crate::stripe::session_event(&id).and_then(|e| take_event(dir, &e).map(|s| (s, e))) } else { Err("not a checkout".into()) };
+            let base = crate::account::Site::load(dir).url.trim_end_matches('/').to_string();
+            respond(request, 200, html_kind, &page("Thank you", html! {
+                div.account-hero {
+                    @match &taken {
+                        Ok((_, e)) => {
+                            @let o = &e["data"]["object"];
+                            @let name = o["client_reference_id"].as_str().unwrap_or("");
+                            @let email = o["customer_details"]["email"].as_str().unwrap_or("");
+                            p.overline { "Thank you" }
+                            h1 { "Your world is on its way" }
+                            p.lede { "It is being set up now, at " a href={(base) "/" (name) "/"} { (base) "/" (name) "/" } ", and a mail to " (email) " says when it is ready, usually within a minute." }
+                            p { "Sign in there with " (email) ": a link comes by mail, no password. Your plan, your usage and your invoices are at " a href=(serve::at("/")) { "your account" } "." }
+                        }
+                        Err(e) => {
+                            p.overline { "Thank you" }
+                            h1 { "We could not look at your order just now" }
+                            p.lede { "Your payment is safe with Stripe, and your world is set up as soon as we hear of it. If no mail has come within a few minutes, write to " a href="mailto:hello@zetlyn.com" { "hello@zetlyn.com" } "." }
+                            p.dim { (e) }
+                        }
+                    }
+                }
+            }));
+        }
         // Who is signed in here, for the website's and the hub's pages, which are files and know
         // nobody: their script asks, and shows the address where "Sign in" was.
         ["me"] => {

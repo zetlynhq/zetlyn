@@ -206,6 +206,7 @@ pub fn poll(control: &Path) -> Result<(), String> {
     if let Err(e) = routes(control) {
         eprintln!("routes: {e}");
     }
+    reconcile(control);
     if let Err(e) = enforce_terms(control) {
         eprintln!("terms: {e}");
     }
@@ -988,4 +989,48 @@ mod tests {
         assert!((cents * 1024.0 * 30.0 - 50.0).abs() < 1e-6);
         assert_eq!(storage.included, 2 * 1024 * 30);
     }
+}
+
+/// Once an hour, what Stripe has, taken as if its webhooks had all arrived: every checkout paid in
+/// the last two days that made no world yet, and every customer's subscription as it stands now.
+/// A webhook lost, refused or never set up costs an hour, not a customer.
+pub fn reconcile(control: &Path) {
+    let billing = control.join("billing");
+    if crate::stripe::ids(&billing).is_none() {
+        return;
+    }
+    let path = ops_dir(control).join("reconciled");
+    let hour = crate::iso_stamp(crate::now()).get(..13).unwrap_or("").to_string();
+    if std::fs::read_to_string(&path).ok().as_deref() == Some(hour.as_str()) {
+        return;
+    }
+    match crate::stripe::recent_sessions() {
+        Ok(events) => {
+            for e in events {
+                match crate::app::take_event(control, &e) {
+                    Ok(s) if !s.ends_with("taken already") => eprintln!("reconcile: {s}"),
+                    Ok(_) => {}
+                    Err(err) => eprintln!("reconcile: {err}"),
+                }
+            }
+        }
+        Err(e) => eprintln!("reconcile: {e}"),
+    }
+    if let Ok(book) = crate::billing::Book::read(&billing) {
+        for c in book.all() {
+            let Some(customer) = c.stripe_customer.as_deref() else { continue };
+            match crate::stripe::customer_subscription_event(customer) {
+                Ok(Some(e)) => {
+                    if let Err(err) = crate::billing::apply(&billing, &e) {
+                        eprintln!("reconcile {}: {err}", c.name);
+                    }
+                }
+                Ok(None) => {}
+                Err(err) => eprintln!("reconcile {}: {err}", c.name),
+            }
+        }
+    }
+    // Root wrote the book; the pages that read and write it are zetlyn's.
+    let _ = Command::new("chown").args(["-R", "--reference", &control.to_string_lossy(), &billing.to_string_lossy()]).status();
+    let _ = std::fs::write(&path, hour);
 }

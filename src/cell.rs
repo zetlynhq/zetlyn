@@ -181,7 +181,7 @@ const MAGIC: &[u8] = b"ZCELL1\n";
 const CHUNK: usize = 1 << 20;
 
 /// The cells' key, 32 bytes, as 64 hex characters in its file.
-fn key() -> Result<ring::aead::LessSafeKey, String> {
+pub(crate) fn key() -> Result<ring::aead::LessSafeKey, String> {
     let text = std::fs::read_to_string(KEY).map_err(|e| format!("{KEY}: {e}"))?;
     key_from_hex(text.trim())
 }
@@ -207,7 +207,7 @@ fn nonce(prefix: &[u8; 8], counter: u32) -> ring::aead::Nonce {
 /// A file sealed in chunks of a megabyte: the magic, a random prefix for the nonces, then each
 /// chunk's length and its ciphertext. Each chunk is bound to its place and to whether it is the
 /// last, so chunks cannot be reordered, dropped or the file cut short without the open failing.
-fn seal(key: &ring::aead::LessSafeKey, from: &Path, to: &Path) -> Result<(), String> {
+pub(crate) fn seal(key: &ring::aead::LessSafeKey, from: &Path, to: &Path) -> Result<(), String> {
     let mut prefix = [0u8; 8];
     ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut prefix).map_err(|_| "no randomness")?;
     let mut input = std::fs::File::open(from).map_err(|e| format!("{}: {e}", from.display()))?;
@@ -246,7 +246,7 @@ fn fill(input: &mut impl Read, buf: &mut [u8]) -> Result<usize, String> {
     Ok(filled)
 }
 
-fn open(key: &ring::aead::LessSafeKey, from: &Path, to: &Path) -> Result<(), String> {
+pub(crate) fn open(key: &ring::aead::LessSafeKey, from: &Path, to: &Path) -> Result<(), String> {
     let mut input = std::io::BufReader::new(std::fs::File::open(from).map_err(|e| format!("{}: {e}", from.display()))?);
     let mut head = vec![0u8; MAGIC.len() + 8];
     input.read_exact(&mut head).map_err(|_| "not a cell's snapshot")?;
@@ -292,7 +292,7 @@ fn open(key: &ring::aead::LessSafeKey, from: &Path, to: &Path) -> Result<(), Str
 
 // -- snapshots ----------------------------------------------------------------------------------
 
-fn stamp() -> String {
+pub(crate) fn stamp() -> String {
     crate::iso_stamp(crate::now()).replace([':', '-'], "")
 }
 
@@ -338,9 +338,14 @@ pub fn snapshot(name: &str, why: &str) -> Result<String, String> {
 }
 
 /// The fourteen newest snapshots, and the newest of each of the last twelve months; the rest go.
-fn prune(s3: &crate::place::S3, name: &str) {
+pub(crate) fn prune(s3: &crate::place::S3, name: &str) {
+    prune_under(s3, &format!("cells/{name}/snapshots"));
+}
+
+/// The same keeping, for any folder of snapshots: the cells' and the main server's own.
+pub(crate) fn prune_under(s3: &crate::place::S3, folder: &str) {
     use crate::place::Place;
-    let Ok(all) = s3.list(&format!("cells/{name}/snapshots/")) else { return };
+    let Ok(all) = s3.list(&format!("{folder}/")) else { return };
     let mut stamps: Vec<String> = all.iter().filter_map(|k| k.rsplit('/').next()?.strip_suffix(".zcell").map(str::to_string)).collect();
     stamps.sort();
     stamps.reverse();
@@ -355,8 +360,8 @@ fn prune(s3: &crate::place::S3, name: &str) {
         }
     }
     for s in stamps.iter().filter(|s| !keep.contains(*s)) {
-        let _ = s3.delete(&format!("cells/{name}/snapshots/{s}.zcell"));
-        let _ = s3.delete(&format!("cells/{name}/snapshots/{s}.json"));
+        let _ = s3.delete(&format!("{folder}/{s}.zcell"));
+        let _ = s3.delete(&format!("{folder}/{s}.json"));
     }
 }
 

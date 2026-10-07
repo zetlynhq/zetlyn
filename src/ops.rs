@@ -191,6 +191,17 @@ pub fn poll(control: &Path) -> Result<(), String> {
             problems.insert(format!("cell:{cell}:missing"), format!("{cell} is registered on {}, which does not hold it", c.node));
         }
     }
+    // The main server's own, kept once a day, and said when it is not.
+    let day_ago = crate::iso_stamp(crate::now() - 86_400).replace([':', '-'], "");
+    if last_backup(control) < day_ago {
+        if let Err(e) = backup(control) {
+            eprintln!("backup: {e}");
+        }
+    }
+    let late = crate::iso_stamp(crate::now() - 26 * 3600).replace([':', '-'], "");
+    if last_backup(control) < late {
+        problems.insert("control:backup".into(), format!("the main server's own has no backup since {}", if last_backup(control).is_empty() { "ever".to_string() } else { last_backup(control) }));
+    }
     alarms(control, &r, problems);
     if let Err(e) = routes(control) {
         eprintln!("routes: {e}");
@@ -634,7 +645,7 @@ pub fn work(control: &Path) {
 
 // -- the command --------------------------------------------------------------------------------
 
-pub const USAGE: &str = "zetlyn ops [--control <dir>] cells | nodes | poll | work | routes | terms \
+pub const USAGE: &str = "zetlyn ops [--control <dir>] cells | nodes | poll | work | routes | terms | backup | restore-control [<stamp>|latest] --to <dir> \
 | create <cell> --title … --owner … [--node n] [--house] | move <cell> --to <node> | remove <cell> | upgrade <cell> --to <v> | upgrade --all --to <v> \
 | release <v> [--current] | start|stop|restart|snapshot|logs <cell> | node-add <name> --host <address> | drain <node> [--off]";
 
@@ -665,6 +676,15 @@ pub fn command(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         Some("routes") => routes(&control),
+        Some("backup") => {
+            println!("{}", backup(&control)?);
+            Ok(())
+        }
+        Some("restore-control") => {
+            let to = PathBuf::from(flag("--to").ok_or("--to <an empty directory>")?);
+            println!("{}", restore_control(rest.first().map(|s| s.as_str()).unwrap_or("latest"), &to)?);
+            Ok(())
+        }
         Some("terms") => enforce_terms(&control),
         Some("create") => {
             let cell = rest.first().ok_or("which cell?")?;
@@ -760,4 +780,73 @@ pub fn welcome(control: &Path, cell: &str, title: &str, owner: &str) -> Result<(
         "{title} is ready at {base}/{cell}/\n\nSign in at {base}/{cell}/signin with this address: a link comes by mail, no password.\n\nThe plan, the card and the invoices are at {base}/account/.\n"
     );
     site.send(owner, &format!("{title} is ready"), &text).map(|_| ())
+}
+
+// -- the main server's own --------------------------------------------------------------------
+
+fn control_bucket() -> Result<crate::place::S3, String> {
+    load_env(crate::cell::S3_ENV)?;
+    let bucket = std::env::var("ZETLYN_CELLS_BUCKET").unwrap_or_else(|_| "zetlyn".into());
+    crate::place::S3::new(&bucket)
+}
+
+/// The main server's own directory, as a cell's is kept: one moment of it, sealed with the cells'
+/// key, in `s3://zetlyn/control/snapshots/`. Its accounts, its sign-in key, its customers, its
+/// members, its register: what no cell holds and nothing else would bring back.
+pub fn backup(control: &Path) -> Result<String, String> {
+    let key = crate::cell::key()?;
+    let s3 = control_bucket()?;
+    let at = crate::cell::stamp();
+    let work = Path::new("/var/tmp").join(format!("zetlyn-control-{at}"));
+    std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
+    let result = (|| {
+        let plain = work.join("control.tar.gz");
+        let files = crate::world::export(control, &plain)?;
+        let _ = Command::new("chown").args(["-R", "--reference", &control.to_string_lossy(), &control.to_string_lossy()]).status();
+        let sealed = work.join("control.zcell");
+        crate::cell::seal(&key, &plain, &sealed)?;
+        let bytes = s3.upload_private(&format!("control/snapshots/{at}.zcell"), &sealed)?;
+        let about = json!({ "stamp": at, "files": files, "bytes": bytes, "zetlyn": env!("CARGO_PKG_VERSION") });
+        s3.put_private(&format!("control/snapshots/{at}.json"), about.to_string().as_bytes())?;
+        s3.put_private("control/latest.json", about.to_string().as_bytes())?;
+        std::fs::write(ops_dir(control).join("backup.json"), about.to_string()).map_err(|e| e.to_string())?;
+        crate::cell::prune_under(&s3, "control/snapshots");
+        Ok(at.clone())
+    })();
+    let _ = std::fs::remove_dir_all(&work);
+    result
+}
+
+/// The main server's directory from the bucket into an empty one: what a new main server starts from.
+pub fn restore_control(from: &str, to: &Path) -> Result<String, String> {
+    let key = crate::cell::key()?;
+    let s3 = control_bucket()?;
+    let at = if from == "latest" {
+        use crate::place::Place;
+        let latest: J = serde_json::from_slice(&s3.get("control/latest.json")?).map_err(|e| e.to_string())?;
+        latest["stamp"].as_str().ok_or("no backup named as the latest")?.to_string()
+    } else {
+        from.to_string()
+    };
+    let work = Path::new("/var/tmp").join(format!("zetlyn-control-restore-{}", crate::cell::stamp()));
+    std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
+    let result = (|| {
+        let sealed = work.join("control.zcell");
+        s3.download(&format!("control/snapshots/{at}.zcell"), &sealed)?;
+        let plain = work.join("control.tar.gz");
+        crate::cell::open(&key, &sealed, &plain)?;
+        crate::world::import(&plain, to, None, None)?;
+        Ok(at.clone())
+    })();
+    let _ = std::fs::remove_dir_all(&work);
+    result
+}
+
+/// When the main server's own was last kept, as its stamp; empty for never.
+fn last_backup(control: &Path) -> String {
+    std::fs::read(ops_dir(control).join("backup.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<J>(&b).ok())
+        .and_then(|j| j["stamp"].as_str().map(str::to_string))
+        .unwrap_or_default()
 }

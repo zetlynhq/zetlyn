@@ -4553,7 +4553,7 @@ limitations under the License.
 ================================================================================
 Apache License 2.0 (Apache-2.0)
 Used by:
-  zetlyn 0.3.70
+  zetlyn 0.3.71
   arraydeque 0.5.1
   async-trait 0.1.92
   dtoa 1.0.11

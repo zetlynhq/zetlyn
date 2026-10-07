@@ -21,9 +21,9 @@ pub struct Metered {
 /// Storage in megabyte-days: 2 GB for a 30-day month included, €0.50 a GB-month after.
 /// Source reads: 25,000 included, €1 per 10,000 after. Mails: 1,000 included, €1 per 1,000 after.
 pub const METERED: [Metered; 3] = [
-    Metered { key: "storage", event: "zetlyn_storage_mb_days", product: "Zetlyn storage", included: 2 * 1024 * 30, cents: "0.001627604167" },
-    Metered { key: "reads", event: "zetlyn_source_reads", product: "Zetlyn source reads", included: 25_000, cents: "0.01" },
-    Metered { key: "mails", event: "zetlyn_mails", product: "Zetlyn mails", included: 1_000, cents: "0.1" },
+    Metered { key: "storage", event: "zetlyn_storage_mb_days", product: "Zetlyn Storage", included: 2 * 1024 * 30, cents: "0.001627604167" },
+    Metered { key: "reads", event: "zetlyn_source_reads", product: "Zetlyn Source Reads", included: 25_000, cents: "0.01" },
+    Metered { key: "mails", event: "zetlyn_mails", product: "Zetlyn Mails", included: 1_000, cents: "0.1" },
 ];
 
 /// What the setup made, kept beside plans.yaml: the base price and, per metered kind, its meter
@@ -104,6 +104,7 @@ pub fn setup(billing: &Path, product: &str) -> Result<Ids, String> {
     let base = prices["data"].as_array().into_iter().flatten().find(|x| x["recurring"]["usage_type"] == "licensed" && x["recurring"]["interval"] == "month");
     ids.base_price = base.and_then(|b| b["id"].as_str()).ok_or("the product has no monthly price")?.to_string();
     let meters = get("billing/meters", &[p("status", "active"), p("limit", "100")])?;
+    let products = get("products", &[p("active", "true"), p("limit", "100")])?;
     for m in &METERED {
         let meter = match meters["data"].as_array().into_iter().flatten().find(|x| x["event_name"] == m.event).and_then(|x| x["id"].as_str()) {
             Some(id) => id.to_string(),
@@ -127,8 +128,18 @@ pub fn setup(billing: &Path, product: &str) -> Result<Ids, String> {
         if ids.prices.get(m.key).is_some_and(|x| !x.is_empty()) {
             continue;
         }
-        let made = post("products", &[p("name", m.product), p("tax_code", "txcd_10103001")], Some(&format!("zetlyn-product-{}", m.event)))?;
-        let pid = made["id"].as_str().ok_or("no product id")?.to_string();
+        // The product it is shown as: found by the mark it was made with, or by its name in any
+        // case, and given the name it is meant to have; made where there is none.
+        let pid = match products["data"].as_array().into_iter().flatten().find(|x| x["metadata"]["zetlyn"] == m.event || x["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(m.product))).and_then(|x| x["id"].as_str()) {
+            Some(id) => {
+                post(&format!("products/{id}"), &[p("name", m.product), p("metadata[zetlyn]", m.event)], None)?;
+                id.to_string()
+            }
+            None => post("products", &[p("name", m.product), p("tax_code", "txcd_10103001"), p("metadata[zetlyn]", m.event)], Some(&format!("zetlyn-product-v2-{}", m.event)))?["id"]
+                .as_str()
+                .ok_or("no product id")?
+                .to_string(),
+        };
         let included = m.included.to_string();
         let price = post(
             "prices",

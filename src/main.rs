@@ -32,6 +32,7 @@ mod place;
 mod propose;
 mod platform;
 mod mail;
+mod maintenance;
 mod matches;
 mod migrate;
 mod oidc;
@@ -953,6 +954,10 @@ pub struct Limits {
 /// One pass: every source that is due runs, the trackers whose sources moved look again, and every
 /// watch is asked. When the next source is due, if any is.
 pub fn schedule_pass(root: &Path, deliver: bool, limits: &Limits) -> Option<i64> {
+    // Maintenance that holds everything still: nothing is read until it is over.
+    if matches!(crate::maintenance::mode().as_deref(), Some("readonly" | "closed")) {
+        return Some(now() + 60);
+    }
     let root = root.to_path_buf();
     {
         let tick = now();

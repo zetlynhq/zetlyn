@@ -968,7 +968,7 @@ pub fn follow(dir: &Path) -> Result<Option<String>, String> {
 
 /// A top-level `key: value` in a workspace.yaml, set where it is said and added where it is not,
 /// everything else in the file as it was. `None` takes it out.
-fn set_top(file: &Path, key: &str, value: Option<&str>) -> Result<(), String> {
+pub(crate) fn set_top(file: &Path, key: &str, value: Option<&str>) -> Result<(), String> {
     let text = std::fs::read_to_string(file).unwrap_or_default();
     let line = value.map(|v| format!("{key}: {}", serde_json::to_string(v).unwrap_or_default()));
     let mut out: Vec<String> = Vec::new();

@@ -207,6 +207,12 @@ impl Book {
     }
 
     /// Who a name was held for, and the title they gave it.
+    /// Every name held for a checkout: name, address, title, plan, when (unix seconds).
+    pub fn reservations(&self) -> Vec<(String, String, String, String, i64)> {
+        let Ok(mut stmt) = self.db.prepare("select name, email, title, plan, at from reservation order by at desc") else { return Vec::new() };
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).map(|rows| rows.flatten().collect()).unwrap_or_default()
+    }
+
     pub fn reservation(&self, name: &str) -> Option<(String, String)> {
         self.db.query_row("select email, title from reservation where name = ?1", [name], |r| Ok((r.get(0)?, r.get(1)?))).ok()
     }

@@ -849,6 +849,70 @@ fn import_into(name: &str) -> Result<usize, String> {
     result
 }
 
+/// An export the main server sends on standard input, brought in as an owner's upload would be.
+fn import_from_stdin(name: &str, by: &str) -> Result<usize, String> {
+    let dir = dir_of(name);
+    if !dir.is_dir() {
+        return Err(format!("{name}: no such cell on this server"));
+    }
+    let incoming = dir.join(INCOMING);
+    std::fs::create_dir_all(&incoming).map_err(|e| e.to_string())?;
+    let file = incoming.join(ARCHIVE);
+    let mut out = std::fs::File::create(&file).map_err(|e| e.to_string())?;
+    std::io::copy(&mut std::io::stdin(), &mut out).map_err(|e| e.to_string())?;
+    if let Err(e) = crate::world::check_export(&file) {
+        let _ = std::fs::remove_file(&file);
+        return Err(e);
+    }
+    std::fs::write(incoming.join(ASKED), json!({ "by": by, "at": crate::iso_stamp(crate::now()) }).to_string()).map_err(|e| e.to_string())?;
+    import_into(name)
+}
+
+/// A cell's title, domain and owners, changed in its world, and the cell started again to see it.
+fn set_world(name: &str, title: Option<&str>, domain: Option<&str>, add: &[String], remove: &[String]) -> Result<(), String> {
+    let dir = dir_of(name);
+    let ws = dir.join("orgs").join(name).join(crate::account::WORKSPACE);
+    if !ws.exists() {
+        return Err(format!("{name}: no world in this cell"));
+    }
+    if let Some(t) = title {
+        crate::world::set_top(&ws, "title", Some(t))?;
+    }
+    if let Some(d) = domain {
+        crate::world::set_top(&ws, "domain", if d == "-" { None } else { Some(d) })?;
+    }
+    for o in add {
+        crate::app::set_member(&dir, name, o, Some("owner"))?;
+    }
+    for o in remove {
+        crate::app::set_member(&dir, name, o, None)?;
+    }
+    give_back(&dir);
+    if read_env(name).get("STATE").map(String::as_str) == Some("running") {
+        systemctl(&["restart", &format!("zetlyn-cell@{name}")])?;
+    }
+    sync_routes()
+}
+
+/// The maintenance notice the main server gives a cell, or none.
+fn set_maintenance(name: &str, hex: Option<&str>) -> Result<(), String> {
+    let dir = dir_of(name);
+    let path = dir.join(crate::maintenance::FILE);
+    match hex {
+        None => {
+            let _ = std::fs::remove_file(&path);
+            Ok(())
+        }
+        Some(h) => {
+            let bytes: Vec<u8> = (0..h.len()).step_by(2).filter_map(|i| u8::from_str_radix(h.get(i..i + 2)?, 16).ok()).collect();
+            let n: crate::maintenance::Notice = serde_json::from_slice(&bytes).map_err(|e| format!("not a notice: {e}"))?;
+            std::fs::write(&path, serde_json::to_vec(&n).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+            give_back(&dir);
+            Ok(())
+        }
+    }
+}
+
 /// A mail from the server itself, through its mailer.
 fn server_mail(to: &str, subject: &str, body: &str) -> Result<(), String> {
     let central = std::env::var("ZETLYN_MAIL").unwrap_or_else(|_| "/etc/zetlyn/mail.yaml".into());
@@ -985,7 +1049,8 @@ pub fn relay_mail(to: &str, subject: &str, body: &str) -> Result<(), String> {
 pub const USAGE: &str = "zetlyn node status [--json] | sync | create <cell> --title … --owner … [--version v] | start|stop|restart <cell> \
 | snapshot <cell> [--why …] | restore <cell> [--from <stamp>|latest] [--port p] [--version v] | remove <cell> [--no-snapshot] \
 | terms <cell> --active yes|no [--sources n] [--every 1h] [--mails n] [--reads n] [--domain yes|no] \
-[--plan <title> --plan-storage-gb n --plan-reads n --plan-mails n --plan-cap n --mb-days n] | mail | limit <cell> --memory 512M --cpu 100% \
+[--plan <title> --plan-storage-gb n --plan-reads n --plan-mails n --plan-cap n --mb-days n] | mail | import <cell> [--by e] \
+| set <cell> [--title t] [--domain d|-] [--owner e]… [--not-owner e]… | maintenance <cell> --set <hex>|--clear | limit <cell> --memory 512M --cpu 100% \
 | version <cell> <v> | install <v> --sha256 <hash> [--current] | logs <cell> [--lines n] | key-check | ca";
 
 pub fn command(args: &[String]) -> Result<(), String> {
@@ -1010,6 +1075,19 @@ pub fn command(args: &[String]) -> Result<(), String> {
         }
         Some("sync") => sync(),
         Some("mail") => serve_mail(),
+        Some("import") => {
+            let n = cell()?;
+            let files = import_from_stdin(&n, flag("--by").unwrap_or(""))?;
+            println!("imported, {files} files");
+            Ok(())
+        }
+        Some("set") => {
+            let n = cell()?;
+            let many = |f: &str| -> Vec<String> { args.windows(2).filter(|w| w[0] == f).map(|w| w[1].to_lowercase()).collect() };
+            let title = flag("--title").map(|t| t.replace('\u{a0}', " "));
+            set_world(&n, title.as_deref(), flag("--domain"), &many("--owner"), &many("--not-owner"))
+        }
+        Some("maintenance") => set_maintenance(&cell()?, if args.iter().any(|a| a == "--clear") { None } else { Some(flag("--set").ok_or("--set <hex> or --clear")?) }),
         Some("create") => {
             let n = cell()?;
             // A title crosses SSH as one word, its spaces as no-break spaces.
@@ -1089,7 +1167,7 @@ pub fn command(args: &[String]) -> Result<(), String> {
         Some("ssh") => {
             let asked = std::env::var("SSH_ORIGINAL_COMMAND").unwrap_or_default();
             let words: Vec<String> = asked.split_whitespace().map(str::to_string).collect();
-            let allowed = ["status", "ca", "sync", "create", "start", "stop", "restart", "snapshot", "restore", "remove", "terms", "limit", "version", "install", "logs", "key-check"];
+            let allowed = ["status", "ca", "sync", "create", "start", "stop", "restart", "snapshot", "restore", "remove", "terms", "limit", "version", "install", "logs", "key-check", "set", "import", "maintenance"];
             if words.first().map(String::as_str) != Some("node") || !words.get(1).is_some_and(|w| allowed.contains(&w.as_str())) {
                 return Err(format!("only `node <{}>` is taken here", allowed.join("|")));
             }

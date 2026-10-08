@@ -11,7 +11,9 @@ use crate::expr::{self, Lit, Op, Pred};
 use crate::claim::{Claim, Value};
 use crate::store::Hit;
 
-pub const STYLE: &str = r#"
+pub const STYLE: &str = r#".maintenance-banner { padding: .55rem 1rem; text-align: center; font-size: .92rem; border-bottom: 1px solid var(--line); background: var(--panel); }
+.maintenance-banner.warning { border-bottom-color: var(--accent); box-shadow: inset 0 -2px 0 var(--accent); }
+
 /* Square, as the website is: no rounded corner anywhere, so a field, a button or a card looks
    the same here as on zetlyn.com. */
 /* The palette is the website's, to the value. A reader who arrives from zetlyn.com or from a hub
@@ -580,6 +582,8 @@ pub fn site_header(current: &str, reader: Reader) -> Markup {
                 }
             }
         }
+        // Maintenance, announced or in force, on every page.
+        (crate::maintenance::banner())
     }
 }
 

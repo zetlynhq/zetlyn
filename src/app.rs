@@ -2962,6 +2962,12 @@ table.account-usage { width: 100%; margin: .2rem 0 0; font-size: .9rem; }
 table.account-usage td { padding: .15rem .4rem .15rem 0; border: 0; }
 .billing-failed { margin: .3rem 0 0; padding: .55rem .7rem; font-size: .9rem; border-left: 3px solid var(--accent); background: var(--bg); }
 form.billing-open { margin: 0; }
+nav.admin-nav { display: flex; flex-wrap: wrap; gap: .4rem 1.2rem; margin: 1.5rem 0 .5rem; font-size: .92rem; }
+form.admin-form { max-width: 52rem; }
+form.admin-form label { display: flex; flex-direction: column; gap: .25rem; font-size: .9rem; margin: .4rem 0; }
+form.admin-form label.check { flex-direction: row; align-items: center; }
+.admin-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr)); gap: .2rem 1rem; }
+.admin-grid input, .admin-grid select { padding: .45rem .6rem; font: inherit; background: var(--panel); color: var(--fg); border: 1px solid var(--line); }
 table.usage-meter { width: 100%; max-width: 44rem; margin: .4rem 0 .6rem; }
 table.usage-meter td { padding: .35rem .6rem .35rem 0; vertical-align: middle; }
 table.usage-meter td.num, td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
@@ -3390,22 +3396,126 @@ fn admin(dir: &Path, rest: &[&str], post: bool, form: &BTreeMap<String, String>,
     let cell_home = |c: &str| serve::at(&format!("/admin/cell/{c}"));
     let mb = |b: &J| b.as_f64().map(|x| format!("{:.0} MB", x / 1_048_576.0)).unwrap_or_else(|| "—".into());
     let alarms: BTreeMap<String, J> = std::fs::read(crate::ops::ops_dir(dir).join("alarms.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-    let billing = crate::billing::Book::read(&dir.join(BILLING)).ok();
+    let billing_dir = dir.join(BILLING);
+    let billing = crate::billing::Book::read(&billing_dir).ok();
+    let nav = html! {
+        nav.admin-nav {
+            a href=(home) { "Overview" } a href={(home) "new"} { "New cell" } a href={(home) "customers"} { "Customers" }
+            a href={(home) "activity"} { "Activity" } a href={(home) "maintenance"} { "Maintenance" } a href={(home) "mail"} { "Mail" }
+        }
+    };
+    // Stripe's dashboard, in test mode while the key is a test key.
+    let stripe = if std::env::var("STRIPE_API_KEY").unwrap_or_default().contains("_test_") { "https://dashboard.stripe.com/test" } else { "https://dashboard.stripe.com" };
+    let ask = |action: &str, target: &str, keys: &[&str], to: String| -> (u16, String) {
+        let args: BTreeMap<String, String> = form.iter().filter(|(k, _)| keys.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.trim().to_string())).collect();
+        match crate::ops::ask(dir, action, target, &args, by) {
+            Ok(_) => (303, format!("{to}?asked={action}")),
+            Err(e) => (400, page("Admin", html! { h1 { "Not asked" } div.note { (e) } p { a href=(to) { "Back" } } })),
+        }
+    };
     match (post, rest) {
         (true, ["cell", cell, action]) => {
-            let args: BTreeMap<String, String> = form.iter().filter(|(k, _)| matches!(k.as_str(), "to" | "version" | "title" | "owner" | "node" | "confirm")).map(|(k, v)| (k.clone(), v.trim().to_string())).collect();
-            match crate::ops::ask(dir, action, cell, &args, by) {
-                Ok(_) => (303, format!("{}?asked={action}", cell_home(cell))),
-                Err(e) => (400, page("Admin", html! { h1 { "Not asked" } div.note { (e) } p { a href=(cell_home(cell)) { "Back" } } })),
-            }
+            let keys: &[&str] = match *action {
+                "set" => &["title", "owners", "domain", "note"],
+                "limits" => &["memory", "cpu", "billing", "free_until", "storage_gb", "reads", "mails", "cap", "sources", "every"],
+                "restore" => &["stamp", "confirm"],
+                "download" => &["stamp"],
+                _ => &["to", "version", "confirm"],
+            };
+            ask(action, cell, keys, cell_home(cell))
         }
         (true, ["new"]) => {
             let cell = form.get("cell").cloned().unwrap_or_default().trim().to_lowercase();
-            let args: BTreeMap<String, String> = form.iter().filter(|(k, _)| matches!(k.as_str(), "title" | "owner" | "node")).map(|(k, v)| (k.clone(), v.trim().to_string())).collect();
-            match crate::ops::ask(dir, "create", &cell, &args, by) {
-                Ok(_) => (303, format!("{home}?asked=create")),
-                Err(e) => (400, page("Admin", html! { h1 { "Not asked" } div.note { (e) } })),
+            ask("create", &cell, &["title", "owners", "node", "memory", "cpu", "billing", "free_until", "storage_gb", "reads", "mails", "cap", "sources", "every", "note", "welcome", "archive"], home.clone())
+        }
+        (true, ["node", node, action @ ("drain" | "undrain")]) => ask(action, node, &[], home.clone()),
+        (true, ["nodes"]) => {
+            let name = form.get("name").cloned().unwrap_or_default().trim().to_lowercase();
+            ask("node-add", &name, &["host"], home.clone())
+        }
+        (true, ["upgrade-all"]) => ask("upgrade-all", "all", &["version"], home.clone()),
+        (true, ["maintenance"]) => {
+            let path = crate::ops::maintenance_path(dir);
+            if form.get("clear").is_some() {
+                let _ = std::fs::remove_file(&path);
+                crate::ops::audit(dir, by, "maintenance cleared", "", "");
+                return (303, format!("{home}maintenance"));
             }
+            let get = |k: &str| form.get(k).map(|v| v.trim().to_string()).unwrap_or_default();
+            // `2026-10-08T22:00` from the form, in UTC as the form says.
+            let stamp = |k: &str| { let v = get(k); if v.len() == 16 { format!("{v}:00Z") } else { v } };
+            let n = crate::maintenance::Notice {
+                text: get("text"),
+                level: if get("level") == "warning" { "warning".into() } else { "info".into() },
+                mode: match get("mode").as_str() { m @ ("nologin" | "readonly" | "closed") => m.into(), _ => "notice".into() },
+                target: { let t = get("target"); if t.is_empty() { "all".into() } else { t } },
+                announce_from: { let a = stamp("announce_from"); if a.is_empty() { crate::iso_stamp(crate::now()) } else { a } },
+                from: stamp("from"),
+                until: stamp("until"),
+                by: by.to_string(),
+            };
+            if n.from.len() != 20 || n.until.len() != 20 || n.until <= n.from || n.announce_from > n.from {
+                return (400, page("Admin", html! { h1 { "Not saved" } div.note { "From before until, both as dates and times; the announcement no later than the start." } p { a href={(home) "maintenance"} { "Back" } } }));
+            }
+            if let Err(e) = std::fs::write(&path, serde_json::to_vec_pretty(&n).unwrap_or_default()) {
+                return (500, page("Admin", html! { h1 { "Not saved" } div.note { (e) } }));
+            }
+            crate::ops::audit(dir, by, "maintenance set", &n.target, &format!("{} {} to {}", n.mode, n.from, n.until));
+            if get("mail") == "yes" {
+                let owners: BTreeSet<String> = r.cells.iter().filter(|(c, e)| !e.house && n.applies(&e.node, c)).flat_map(|(c, e)| { let mut o = crate::app::owners_of(dir, c); o.push(e.owner.clone()); o }).filter(|o| o.contains('@')).collect();
+                let what = match n.mode.as_str() {
+                    "closed" => "Your organisation cannot be reached during that time.",
+                    "readonly" => "Your organisation can be read during that time, but not changed, and its sources are not read.",
+                    "nologin" => "Nobody can sign in or order during that time; whoever is signed in stays signed in.",
+                    _ => "Your organisation stays available; there may be short interruptions.",
+                };
+                let text = format!(
+                    "Hello,\n\nwe are carrying out maintenance from {} to {}.\n\n{what}{}\n\nBest regards,\nThe Zetlyn team\n\n--\nZetlyn · https://zetlyn.com · hello@zetlyn.com\n",
+                    crate::maintenance::when(&n.from), crate::maintenance::when(&n.until), if n.text.is_empty() { String::new() } else { format!("\n\n{}", n.text) }
+                );
+                let list: Vec<String> = owners.into_iter().collect();
+                let _ = crate::ops::mail(dir, &list, "Planned maintenance at Zetlyn", &text, by);
+            }
+            (303, format!("{home}maintenance?saved=1"))
+        }
+        (false, ["maintenance"]) => {
+            let n = crate::maintenance::read(&crate::ops::maintenance_path(dir));
+            let now = crate::iso_stamp(crate::now());
+            let field = |s: &str| s.get(..16).unwrap_or("").to_string();
+            (200, page("Admin · Maintenance", html! {
+                (nav)
+                h1 { "Maintenance" }
+                @if let Some(n) = &n {
+                    div.note {
+                        strong { (n.state(&now).map(|s| if s == "active" { "In force" } else { "Announced" }).unwrap_or(if now >= n.until { "Over" } else { "Not yet announced" })) }
+                        " · " (n.mode) " · " (n.target) " · " (crate::maintenance::when(&n.from)) " to " (crate::maintenance::when(&n.until))
+                        @if !n.text.is_empty() { br; (n.text) }
+                    }
+                    form method="post" action={(home) "maintenance"} { input type="hidden" name="clear" value="1"; button type="submit" { "End it now" } }
+                }
+                form.admin-form method="post" action={(home) "maintenance"} {
+                    p { label { "What it is, for everybody to read" br; input.wide type="text" name="text" value=(n.as_ref().map(|n| n.text.clone()).unwrap_or_default()) placeholder="Moving to a faster server."; } }
+                    div.admin-grid {
+                        label { "Announced from (UTC)" input type="datetime-local" name="announce_from" value=(n.as_ref().map(|n| field(&n.announce_from)).unwrap_or_default()); }
+                        label { "From (UTC)" input type="datetime-local" name="from" required value=(n.as_ref().map(|n| field(&n.from)).unwrap_or_default()); }
+                        label { "Until (UTC)" input type="datetime-local" name="until" required value=(n.as_ref().map(|n| field(&n.until)).unwrap_or_default()); }
+                        label { "While it is in force" select name="mode" {
+                            @for (v, l) in [("notice", "Only the banner"), ("nologin", "No new sign-ins, no orders"), ("readonly", "Read only, no source read"), ("closed", "Closed, operator only")] {
+                                option value=(v) selected[n.as_ref().is_some_and(|n| n.mode == v)] { (l) }
+                            }
+                        } }
+                        label { "For" select name="target" {
+                            option value="all" { "Everything" }
+                            @for name in r.nodes.keys() { option value={"node:" (name)} selected[n.as_ref().is_some_and(|n| n.target == format!("node:{name}"))] { "Server " (name) } }
+                            @for name in r.cells.keys() { option value={"cell:" (name)} selected[n.as_ref().is_some_and(|n| n.target == format!("cell:{name}"))] { "Cell " (name) } }
+                        } }
+                        label { "Banner" select name="level" { option value="info" { "Info" } option value="warning" { "Warning" } } }
+                    }
+                    p { label.check { input type="checkbox" name="mail" value="yes"; " Mail the owners it concerns now" } }
+                    p { button.primary type="submit" { "Save" } }
+                    p.dim { "Empty “announced from” is now. Alarms for what it covers are silent while it is in force." }
+                }
+            }))
         }
         (true, ["mail"]) => {
             let to: Vec<String> = match form.get("to").map(String::as_str) {
@@ -3419,12 +3529,13 @@ fn admin(dir: &Path, rest: &[&str], post: bool, form: &BTreeMap<String, String>,
                 return (400, page("Admin", html! { h1 { "Not sent" } div.note { "A recipient, a subject and a text." } p { a href={(home) "mail"} { "Back" } } }));
             }
             let sent = crate::ops::mail(dir, &to, &subject, &text, by).unwrap_or(0);
+            crate::ops::audit(dir, by, "mail", form.get("to").map(String::as_str).unwrap_or(""), &subject);
             (303, format!("{home}mail?sent={sent}"))
         }
         (false, ["mail"]) => {
-            let log: Vec<J> = std::fs::read_to_string(crate::ops::ops_dir(dir).join("mail.jsonl")).unwrap_or_default().lines().rev().take(50).filter_map(|l| serde_json::from_str(l).ok()).collect();
+            let log = crate::ops::log_lines(dir, "mail.jsonl", 50);
             (200, page("Admin · Mail", html! {
-                p { a href=(home) { "← Admin" } }
+                (nav)
                 h1 { "Write to customers" }
                 form method="post" action={(home) "mail"} {
                     p { label { "To" br; select name="to" {
@@ -3442,29 +3553,134 @@ fn admin(dir: &Path, rest: &[&str], post: bool, form: &BTreeMap<String, String>,
                 } } } }
             }))
         }
+        (false, ["new"]) => {
+            let (_, plans) = crate::billing::plans(&billing_dir).unwrap_or_default();
+            let plan = plans.values().next().cloned().unwrap_or_default();
+            (200, page("Admin · New cell", html! {
+                (nav)
+                h1 { "A new cell" }
+                p.dim { "For somebody who does not order at /order: a pilot, a partner, a gift. Billed cells come from orders." }
+                form.admin-form #new-cell method="post" action={(home) "new"} {
+                    h2 { "What it is" }
+                    div.admin-grid {
+                        label { "Address, zetlyn.com/…" input #slug type="text" name="cell" required pattern="[a-z0-9-]+" maxlength="28" placeholder="acme-research"; small #slug-state .dim {} }
+                        label { "Title" input type="text" name="title" placeholder="Acme Research"; }
+                        label { "Server" select name="node" { option value="" { "where there is room" } @for (n, e) in &r.nodes { option value=(n) disabled[e.draining] { (n) @if e.draining { " (draining)" } } } } }
+                    }
+                    label { "Owners, one to a line; the first gets the mails" textarea.wide name="owners" rows="3" required placeholder="owner@example.org" {} }
+                    h2 { "What it may use" }
+                    div.admin-grid {
+                        label { "Billing" select name="billing" { option value="free" { "Free, without Stripe" } } }
+                        label { "Free until (empty: no end)" input type="date" name="free_until"; }
+                        label { "Memory" input type="text" name="memory" placeholder="512M"; }
+                        label { "Processor" input type="text" name="cpu" placeholder="50%"; }
+                        label { "Storage, GB" input type="number" name="storage_gb" min="0" placeholder=(plan.storage_gb); }
+                        label { "Source reads a month" input type="number" name="reads" min="0" placeholder=(plan.reads); }
+                        label { "Mails a month" input type="number" name="mails" min="0" placeholder=(plan.mails); }
+                        label { "Sources (0 no limit)" input type="number" name="sources" min="0" placeholder=(plan.sources); }
+                        label { "Shortest interval" input type="text" name="every" placeholder=(plan.every); }
+                    }
+                    h2 { "Its start" }
+                    label { "A world to start from (optional), an export .tar.gz" input #archive type="file" accept=".gz,.tgz,application/gzip"; }
+                    input #archive-flag type="hidden" name="archive" value="";
+                    label { "Note, for the admin pages only" textarea.wide name="note" rows="2" {} }
+                    input type="hidden" name="welcome" value="no";
+                    p { label.check { input type="checkbox" name="welcome" value="yes" checked; " Send the owner the welcome mail" } }
+                    p { button.primary type="submit" { "Make it" } }
+                    p #new-said .dim {}
+                }
+                script { (PreEscaped(ADMIN_NEW_SCRIPT)) }
+            }))
+        }
+        (false, ["customers"]) => {
+            let all = billing.as_ref().map(|b| b.all()).unwrap_or_default();
+            let held = billing.as_ref().map(|b| b.reservations()).unwrap_or_default();
+            let consents: Vec<J> = std::fs::read_to_string(billing_dir.join("consents.jsonl")).unwrap_or_default().lines().rev().take(100).filter_map(|l| serde_json::from_str(l).ok()).collect();
+            let cancelled: Vec<J> = std::fs::read_to_string(billing_dir.join("cancellations.jsonl")).unwrap_or_default().lines().rev().take(100).filter_map(|l| serde_json::from_str(l).ok()).collect();
+            let now = crate::now();
+            (200, page("Admin · Customers", html! {
+                (nav)
+                h1 { "Customers" }
+                table { thead { tr { th { "Organisation" } th { "Address" } th { "Plan" } th { "State" } th { "Paid until" } th { "Stripe" } } }
+                    tbody { @for c in &all { tr {
+                        td { @if r.cells.contains_key(&c.name) { a href=(cell_home(&c.name)) { strong { (c.name) } } } @else { strong { (c.name) } " " span.chip { "no cell" } } }
+                        td.dim { (c.email) } td { (c.plan) }
+                        td { @if c.state == "past_due" { span.chip.on { "payment failed" } } @else if c.state == "cancelled" { span.chip { "cancelled" } } @else { (c.state) } }
+                        td { (c.paid_until.clone().unwrap_or_default()) }
+                        td { @if let Some(id) = &c.stripe_customer { a href={(stripe) "/customers/" (id)} rel="noopener" { "customer" } } }
+                    } } }
+                }
+                h2 { "Held for a checkout" }
+                @if held.is_empty() { p.dim { "None." } }
+                table { tbody { @for (name, email, title, plan, at) in &held { tr {
+                    td { strong { (name) } div.why { (title) } } td.dim { (email) } td { (plan) } td.dim { (crate::iso_stamp(*at)) @if now - at > 1800 { " · expired" } }
+                } } } }
+                h2 { "Cancellations" }
+                @if cancelled.is_empty() { p.dim { "None." } }
+                table { tbody { @for l in &cancelled { tr {
+                    td.dim { (l["at"].as_str().unwrap_or("")) } td { (l["world"].as_str().unwrap_or("")) } td.dim { (l["email"].as_str().unwrap_or("")) } td { (l["kind"].as_str().unwrap_or("")) }
+                    td { @if l["ended_at_stripe"] == true { "ended at Stripe" } @else { span.chip.on { "by hand: " (l["error"].as_str().unwrap_or("")) } } }
+                } } } }
+                h2 { "Agreed when ordering" }
+                table { tbody { @for l in &consents { tr {
+                    td.dim { (l["at"].as_str().unwrap_or("")) } td { (l["organisation"].as_str().unwrap_or("")) } td.dim { (l["email"].as_str().unwrap_or("")) } td { (l["plan"].as_str().unwrap_or("")) }
+                } } } }
+            }))
+        }
+        (false, ["activity"]) => {
+            let done = crate::ops::log_lines(dir, "audit.jsonl", 200);
+            let alarmed = crate::ops::log_lines(dir, "alarms.jsonl", 100);
+            (200, page("Admin · Activity", html! {
+                (nav)
+                h1 { "Activity" }
+                table { thead { tr { th { "When" } th { "Who" } th { "What" } th { "Cell" } th { "" } } } tbody { @for l in &done { tr {
+                    td.dim { (l["at"].as_str().unwrap_or("")) } td.dim { (l["by"].as_str().unwrap_or("")) } td { (l["what"].as_str().unwrap_or("")) }
+                    td { (l["cell"].as_str().unwrap_or("")) } td.dim { (l["said"].as_str().unwrap_or("").chars().take(160).collect::<String>()) }
+                } } } }
+                h2 { "Alarms" }
+                @if alarmed.is_empty() { p.dim { "None mailed yet." } }
+                table { tbody { @for l in &alarmed { tr {
+                    td.dim { (l["at"].as_str().unwrap_or("")) } td { @if l["what"] == "wrong" { span.chip.on { "wrong" } } @else { span.chip { "right" } } } td { (l["text"].as_str().unwrap_or("")) }
+                } } } }
+            }))
+        }
         (false, ["cell", cell]) => {
             let Some(c) = r.cells.get(*cell) else { return (404, page("Admin", html! { h1 { "No such cell" } })) };
             let s = crate::ops::cell_status(dir, &r, cell);
-            let jobs: Vec<J> = crate::ops::jobs(dir, 200).into_iter().filter(|j| j["cell"] == *cell).take(20).collect();
-            let logs = jobs.iter().find(|j| j["action"] == "logs" && j.get("said").is_some()).and_then(|j| j["said"].as_str().map(str::to_string));
+            let jobs: Vec<J> = crate::ops::jobs(dir, 300).into_iter().filter(|j| j["cell"] == *cell).take(25).collect();
+            let latest = |a: &str| jobs.iter().find(|j| j["action"] == a && j.get("said").is_some()).and_then(|j| j["said"].as_str().map(str::to_string));
+            let logs = latest("logs");
+            let snaps: Vec<J> = latest("snapshots").and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+            let downloads: Vec<String> = std::fs::read_dir(crate::ops::downloads_dir(dir)).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with(&format!("{cell}-"))).collect();
             let customer = billing.as_ref().and_then(|b| b.get(cell));
+            let subscription = billing.as_ref().and_then(|b| b.subscription_of(cell));
+            let owners = crate::app::owners_of(dir, cell);
+            let u = crate::ops::usage_of(dir, cell);
+            let consents: Vec<J> = std::fs::read_to_string(billing_dir.join("consents.jsonl")).unwrap_or_default().lines().filter_map(|l| serde_json::from_str::<J>(l).ok()).filter(|l| l["organisation"] == *cell).collect();
+            let cancelled: Vec<J> = std::fs::read_to_string(billing_dir.join("cancellations.jsonl")).unwrap_or_default().lines().filter_map(|l| serde_json::from_str::<J>(l).ok()).filter(|l| l["world"] == *cell).collect();
             let act = |a: &str, label: &str| html! { form.bar method="post" action={(cell_home(cell)) "/" (a)} { button type="submit" { (label) } } };
+            let q = &c.quota;
+            let opt = |v: Option<u64>| v.map(|v| v.to_string()).unwrap_or_default();
             (200, page(&format!("Admin · {cell}"), html! {
-                p { a href=(home) { "← Admin" } }
-                h1 { (cell) }
-                p.about { (c.title) " · " (c.owner) " · on " (c.node) @if c.house { " · the house's" } }
+                (nav)
+                h1 { (cell) " " span.dim { (c.title) } }
+                p.about { "on " (c.node) @if c.house { " · the house's" } @if c.free { " · free" @if !c.free_until.is_empty() { " until " (c.free_until) } } }
+                @if !c.delete_on.is_empty() {
+                    div.note {
+                        @if c.keep { "Its contract ended; it would be deleted on " (c.delete_on) ", but is kept. " (act("unkeep", "Delete it on its day after all")) }
+                        @else { strong { "Deleted on " (c.delete_on) } ", 30 days after its contract ended. " (act("keep", "Keep it")) }
+                    }
+                }
+                @if !c.note.is_empty() { div.note { (c.note) } }
                 table { tbody {
                     tr { th { "Running" } td { (s["active"].as_str().unwrap_or("?")) " (" (s["state"].as_str().unwrap_or("")) "), since " (s["since"].as_str().unwrap_or("")) ", restarts " (s["restarts"].as_str().unwrap_or("0")) } }
                     tr { th { "Answers" } td { (s["answers"]) } }
                     tr { th { "Version" } td { (s["version"].as_str().unwrap_or("")) } }
-                    tr { th { "Port" } td { (s["port"].as_str().unwrap_or("")) } }
                     tr { th { "Memory" } td { (mb(&s["memory"])) " of " (mb(&s["memory_max"])) } }
                     tr { th { "On disk" } td { (mb(&s["bytes"])) } }
                     tr { th { "Last reading" } td { (s["run_result"].as_str().unwrap_or("")) " · " (s["run_finished"].as_str().unwrap_or("")) } }
                     tr { th { "Last snapshot" } td { (s["snapshot"].as_str().unwrap_or("none")) } }
-                    tr { th { "Domain" } td { (s["domain"].as_str().unwrap_or("—")) } }
                     tr { th { "Terms" } td { code { (s["terms"].to_string()) } } }
-                    @if let Some(cu) = customer { tr { th { "Customer" } td { (cu.plan) " · " (cu.state) " · paid until " (cu.paid_until.clone().unwrap_or_default()) } } }
                 } }
                 h2 { "Do" }
                 div.bar { (act("restart", "Restart")) (act("stop", "Stop")) (act("start", "Start")) (act("snapshot", "Snapshot now")) (act("suspend", "Suspend updates")) (act("resume", "Resume updates")) (act("logs", "Fetch logs")) }
@@ -3473,10 +3689,75 @@ fn admin(dir: &Path, rest: &[&str], post: bool, form: &BTreeMap<String, String>,
                     button type="submit" { "Move there" }
                 }
                 form.bar method="post" action={(cell_home(cell)) "/upgrade"} {
-                    input type="text" name="version" placeholder="0.3.62" required;
+                    input type="text" name="version" placeholder=(env!("CARGO_PKG_VERSION")) required;
                     button type="submit" { "Upgrade" }
                 }
+                h2 { "What it is" }
+                form.admin-form method="post" action={(cell_home(cell)) "/set"} {
+                    div.admin-grid {
+                        label { "Title" input type="text" name="title" value=(c.title); }
+                        label { "Domain of its own (empty: none)" input type="text" name="domain" value=(s["domain"].as_str().unwrap_or("")) placeholder="tracker.example.org"; }
+                    }
+                    label { "Owners, one to a line; the first gets the mails" textarea.wide name="owners" rows="3" { (if owners.is_empty() { c.owner.clone() } else { owners.join("\n") }) } }
+                    label { "Note" textarea.wide name="note" rows="2" { (c.note) } }
+                    p { button type="submit" { "Save" } }
+                }
+                h2 { "What it may use" }
+                form.admin-form method="post" action={(cell_home(cell)) "/limits"} {
+                    div.admin-grid {
+                        label { "Billing" select name="billing" {
+                            option value="plan" selected[!c.free] { "By its plan at Stripe" }
+                            option value="free" selected[c.free] { "Free, without Stripe" }
+                        } }
+                        label { "Free until" input type="date" name="free_until" value=(c.free_until); }
+                        label { "Memory" input type="text" name="memory" value=(c.memory) placeholder="512M"; }
+                        label { "Processor" input type="text" name="cpu" value=(c.cpu) placeholder="50%"; }
+                        label { "Storage, GB" input type="number" min="0" name="storage_gb" value=(opt(q.storage_gb)) placeholder="plan"; }
+                        label { "Source reads a month" input type="number" min="0" name="reads" value=(opt(q.reads)) placeholder="plan"; }
+                        label { "Mails a month" input type="number" min="0" name="mails" value=(opt(q.mails)) placeholder="plan"; }
+                        label { "Spending limit, €" input type="number" min="0" name="cap" value=(opt(q.cap)) placeholder="plan"; }
+                        label { "Sources (0 no limit)" input type="number" min="0" name="sources" value=(q.sources.map(|v| v.to_string()).unwrap_or_default()) placeholder="plan"; }
+                        label { "Shortest interval" input type="text" name="every" value=(q.every) placeholder="plan"; }
+                    }
+                    p { button type="submit" { "Save" } span.dim { " Empty is the plan's." } }
+                }
+                h2 { "Billing" }
+                @if c.house { p.dim { "The house's own, never billed." } }
+                @else if let Some(cu) = &customer {
+                    table { tbody {
+                        tr { th { "Plan" } td { (cu.plan) " · " (cu.state) " · paid until " (cu.paid_until.clone().unwrap_or_default()) } }
+                        tr { th { "Paid by" } td { (cu.email) } }
+                        tr { th { "Stripe" } td {
+                            @if let Some(id) = &cu.stripe_customer { a href={(stripe) "/customers/" (id)} rel="noopener" { "Customer" } }
+                            @if let Some(id) = &subscription { " · " a href={(stripe) "/subscriptions/" (id)} rel="noopener" { "Subscription" } }
+                        } }
+                        tr { th { "This month" } td { (thousands_of(u.reads)) " reads · " (thousands_of(u.mails)) " mails · " (u.mb_days) " MB-days" } }
+                        tr { th { "Last month" } td { (thousands_of(s["usage"]["previous_reads"].as_u64().unwrap_or(0))) " reads · " (thousands_of(s["usage"]["previous_mails"].as_u64().unwrap_or(0))) " mails" } }
+                    } }
+                    @for l in &consents { p.dim { "Agreed " (l["at"].as_str().unwrap_or("")) " by " (l["email"].as_str().unwrap_or("")) ": terms, start before the withdrawal period ends." } }
+                    @for l in &cancelled { p.dim { "Cancelled " (l["at"].as_str().unwrap_or("")) " by " (l["email"].as_str().unwrap_or("")) " (" (l["kind"].as_str().unwrap_or("")) ")" @if let Some(w) = l["reason"].as_str().filter(|w| !w.is_empty()) { ": " (w) } } }
+                } @else if c.free { p.dim { "Run free: this month " (thousands_of(u.reads)) " reads, " (thousands_of(u.mails)) " mails." } }
+                @else { p.dim { "No customer: neither billed nor run free; its terms are as they were set." } }
+                h2 { "Snapshots" }
+                (act("snapshots", "List them"))
+                @if !downloads.is_empty() { p { "Ready to download: " @for d in &downloads { a href={(home) "download/" (d)} { (d) } " " } } }
+                @if !snaps.is_empty() {
+                    table { thead { tr { th { "Stamp" } th { "Why" } th { "Size" } th {} th {} } } tbody { @for sn in &snaps {
+                        @let stamp = sn["stamp"].as_str().unwrap_or("");
+                        tr {
+                            td { (stamp) } td.dim { (sn["why"].as_str().unwrap_or("")) } td { (mb(&sn["bytes"])) }
+                            td { form.bar method="post" action={(cell_home(cell)) "/download"} { input type="hidden" name="stamp" value=(stamp); button type="submit" { "Open for download" } } }
+                            td { form.bar method="post" action={(cell_home(cell)) "/restore"} {
+                                input type="hidden" name="stamp" value=(stamp);
+                                input type="text" name="confirm" placeholder={"type " (cell)} required size="10";
+                                button type="submit" { "Restore" }
+                            } }
+                        }
+                    } } }
+                    p.dim { "A restore takes a snapshot of it as it is first. A download is the whole cell; the organisation is world/orgs/" (cell) "/ in it." }
+                }
                 @if !c.house {
+                    h2 { "Remove" }
                     form.bar method="post" action={(cell_home(cell)) "/remove"} {
                         input type="text" name="confirm" placeholder={"type " (cell) " to remove it"} required;
                         button type="submit" { "Remove" }
@@ -3485,33 +3766,62 @@ fn admin(dir: &Path, rest: &[&str], post: bool, form: &BTreeMap<String, String>,
                 h2 { "Jobs" }
                 table { tbody { @for j in &jobs { tr {
                     td.dim { (j["at"].as_str().unwrap_or("")) } td { (j["action"].as_str().unwrap_or("")) } td.dim { (j["by"].as_str().unwrap_or("")) }
-                    td { @if let Some(e) = j["error"].as_str() { span.chip.on { (e) } } @else if let Some(sd) = j["said"].as_str() { (sd.lines().next().unwrap_or("")) } @else { "waiting" } }
+                    td { @if let Some(e) = j["error"].as_str() { span.chip.on { (e) } } @else if j["action"] == "snapshots" && j.get("said").is_some() { "listed" } @else if let Some(sd) = j["said"].as_str() { (sd.lines().next().unwrap_or("")) } @else { "waiting" } }
                 } } } }
                 @if let Some(l) = logs { h2 { "Logs" } pre { (l) } }
             }))
         }
         (false, []) => {
             let rows: Vec<(String, crate::ops::CellEntry, J)> = r.cells.iter().map(|(n, c)| (n.clone(), c.clone(), crate::ops::cell_status(dir, &r, n))).collect();
+            let notice = crate::maintenance::read(&crate::ops::maintenance_path(dir)).filter(|n| crate::iso_stamp(crate::now()) < n.until);
+            let mut releases: Vec<String> = std::fs::read_dir(crate::cell::RELEASES).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|v| crate::world::version(v).is_some()).collect();
+            releases.sort_by_key(|v| crate::world::version(v));
+            releases.reverse();
+            let pending = crate::ops::jobs(dir, 50).into_iter().filter(|j| j.get("done").is_none()).count();
             (200, page("Admin", html! {
+                (nav)
                 h1 { "Admin" }
                 @if alarms.is_empty() { p.dim { "Nothing is wrong." } } @else {
                     h2 { "Wrong" }
                     ul { @for (_, a) in &alarms { li { (a["text"].as_str().unwrap_or("")) span.dim { " · since " (a["since"].as_str().unwrap_or("")) } } } }
                 }
+                @if let Some(n) = &notice { div.note { a href={(home) "maintenance"} { "Maintenance" } ": " (n.mode) ", " (crate::maintenance::when(&n.from)) " to " (crate::maintenance::when(&n.until)) } }
+                @if pending > 0 { p.dim { (pending) " jobs waiting." } }
                 h2 { "Servers" }
-                table { thead { tr { th { "Server" } th { "Address" } th { "Cells" } th { "Memory free" } th { "Disk free" } th { "Load" } th { "Heard" } } }
+                table { thead { tr { th { "Server" } th { "Address" } th { "Release" } th { "Cells" } th { "Memory free" } th { "Disk free" } th { "Load" } th { "Heard" } th {} } }
                     tbody { @for (name, n) in &r.nodes {
                         @let s = crate::ops::last_status(dir, name);
                         tr {
-                            td { strong { (name) } @if n.draining { " " span.chip { "draining" } } }
+                            td { strong { (name) } @if n.draining { " " span.chip { "no new cells" } } }
                             td.dim { (n.host) }
+                            td { (s["current"].as_str().or(s["zetlyn"].as_str()).unwrap_or("")) }
                             td { (s["cells"].as_array().map_or(0, Vec::len)) }
                             td { (mb(&s["memory_available"])) " of " (mb(&s["memory_total"])) }
                             td { (mb(&s["disk_free"])) }
                             td { (s["load"].as_str().unwrap_or("")) }
                             td { @if let Some(e) = s["error"].as_str() { span.chip.on { (e) } } @else { (s["at"].as_str().unwrap_or("never")) } }
+                            td { form.bar method="post" action={(home) "node/" (name) "/" (if n.draining { "undrain" } else { "drain" })} {
+                                button type="submit" { (if n.draining { "Take new cells" } else { "No new cells" }) }
+                            } }
                         }
                     } }
+                }
+                details {
+                    summary { "A new server" }
+                    p.dim { "First, from the laptop: " code { "DRY=0 NODE=root@<address> NAME=n3 sh deploy/node-setup.sh" } " in zetlyn-ops. Then here:" }
+                    form.bar method="post" action={(home) "nodes"} {
+                        input type="text" name="name" placeholder="n3" pattern="[a-z0-9-]+" required size="6";
+                        input type="text" name="host" placeholder="address" required;
+                        button type="submit" { "Add it" }
+                    }
+                }
+                details {
+                    summary { "Releases" }
+                    p.dim { "On the main server: " (releases.join(", ")) ". A new one comes with " code { "deploy/release.sh" } "." }
+                    form.bar method="post" action={(home) "upgrade-all"} {
+                        select name="version" { @for v in &releases { option value=(v) { (v) } } }
+                        button type="submit" { "Every cell onto it" }
+                    }
                 }
                 h2 { "Cells" }
                 table { thead { tr { th { "Cell" } th { "Owner" } th { "Server" } th { "Running" } th { "Answers" } th { "Version" } th { "Memory" } th { "Snapshot" } th { "Paid" } } }
@@ -3525,24 +3835,48 @@ fn admin(dir: &Path, rest: &[&str], post: bool, form: &BTreeMap<String, String>,
                             td { (s["version"].as_str().unwrap_or("")) }
                             td { (mb(&s["memory"])) }
                             td.dim { (s["snapshot"].as_str().unwrap_or("none")) }
-                            td { @if c.house { "house" } @else if let Some(cu) = billing.as_ref().and_then(|b| b.get(name)) { (cu.state) " · " (cu.paid_until.clone().unwrap_or_default()) } @else { "—" } }
+                            td {
+                                @if c.house { "house" }
+                                @else if c.free { "free" @if !c.free_until.is_empty() { " until " (c.free_until) } }
+                                @else if let Some(cu) = billing.as_ref().and_then(|b| b.get(name)) { (cu.state) " · " (cu.paid_until.clone().unwrap_or_default()) }
+                                @else { "—" }
+                                @if !c.delete_on.is_empty() && !c.keep { " " span.chip.on { "deleted " (c.delete_on) } }
+                            }
                         }
                     } }
                 }
-                h2 { "A new cell" }
-                form.bar method="post" action={(home) "new"} {
-                    input type="text" name="cell" placeholder="name" pattern="[a-z0-9-]+" required;
-                    input type="text" name="title" placeholder="Title";
-                    input type="email" name="owner" placeholder="owner@example.org" required;
-                    select name="node" { option value="" { "where there is room" } @for n in r.nodes.keys() { option value=(n) { (n) } } }
-                    button type="submit" { "Make it" }
-                }
-                p { a href={(home) "mail"} { "Write to customers" } }
+                p { a.chip href={(home) "new"} { "A new cell" } }
             }))
         }
         _ => (404, page("Admin", html! { h1 { "Not here" } })),
     }
 }
+
+/// The new-cell form: the address checked as it is typed, and a chosen archive uploaded before
+/// the form is sent.
+const ADMIN_NEW_SCRIPT: &str = r#"(function () {
+  var form = document.getElementById("new-cell"), slug = document.getElementById("slug"), state = document.getElementById("slug-state");
+  var file = document.getElementById("archive"), flag = document.getElementById("archive-flag"), said = document.getElementById("new-said");
+  if (!form || !window.fetch) return;
+  var timer;
+  slug.addEventListener("input", function () {
+    clearTimeout(timer);
+    timer = setTimeout(function () {
+      if (!slug.value) { state.textContent = ""; return; }
+      fetch("/account/new/check?name=" + encodeURIComponent(slug.value)).then(function (r) { return r.json(); }).then(function (j) { state.textContent = j.said; });
+    }, 250);
+  });
+  form.addEventListener("submit", function (e) {
+    var f = file.files && file.files[0];
+    if (!f || flag.value === "yes") return;
+    e.preventDefault();
+    said.textContent = "Uploading the archive…";
+    fetch("/account/admin/upload/" + encodeURIComponent(slug.value), { method: "PUT", body: f, credentials: "same-origin" })
+      .then(function (r) { return r.text().then(function (t) { return { ok: r.ok, t: t }; }); })
+      .then(function (x) { if (!x.ok) { said.textContent = x.t; return; } flag.value = "yes"; said.textContent = "Uploaded, " + x.t + "."; form.submit(); })
+      .catch(function () { said.textContent = "The upload broke off."; });
+  });
+})();"#;
 
 /// Where the machine keeps its plans and its customers: `plans.yaml`, written by the operator, and
 /// `customers.db`, moved by Stripe's events.
@@ -3695,6 +4029,11 @@ pub(crate) fn make_org(dir: &Path, name: &str, title: &str) -> Result<PathBuf, S
 }
 
 /// Somebody in an organisation on the machine as owner, editor or reader; with no role, out of it.
+/// The owners a hosting directory's members name for an organisation, lower case.
+pub(crate) fn owners_of(dir: &Path, org: &str) -> Vec<String> {
+    Membership::load(dir).of(org, &["owner"])
+}
+
 pub(crate) fn set_member(dir: &Path, org: &str, email: &str, role: Option<&str>) -> Result<(), String> {
     let mut m = Membership::load(dir);
     let list = m.orgs.entry(org.to_string()).or_default();
@@ -3826,6 +4165,31 @@ fn hosting_worker(server: &tiny_http::Server, dir: &Path, addr: &str, jobs: &Sha
         // On the main server its owners run zetlyn.com: their account menu leads to the admin pages.
         if crate::ops::is_control(dir) {
             crate::account::note_operators(&crate::account::Site::load(dir).all_owners());
+            crate::maintenance::watch(crate::ops::maintenance_path(dir));
+        }
+        // Maintenance in force: closed for everybody but the operator, or nothing changed, or no
+        // order; what signing in, Stripe and the admin pages need stays open.
+        if let Some(mode) = crate::maintenance::mode().filter(|m| m != "notice") {
+            let open = ["/billing/stripe", "/account/signin", "/account/signout", "/account/me", "/account/maintenance", "/account/style.css", "/oauth/"].iter().any(|p| path.starts_with(p)) || path.starts_with("/account/admin");
+            let changing = request.method() != &tiny_http::Method::Get && request.method() != &tiny_http::Method::Head;
+            let ordering = path == "/order" || path.starts_with("/account/new");
+            let blocked = match mode.as_str() {
+                "closed" => !open,
+                "readonly" => (changing && !open) || ordering,
+                "nologin" => ordering,
+                _ => false,
+            };
+            if blocked {
+                let cookie = request.headers().iter().find(|h| h.field.equiv("Cookie")).map(|h| h.value.as_str().to_string()).unwrap_or_default();
+                let email = crate::account::session_cookie(&cookie).and_then(|s| {
+                    if crate::account::remote_identity() { crate::account::remote_member(&s) } else { accounts.by_session(&s, crate::account::Kind::Member).map(|a| a.email) }
+                });
+                if !email.is_some_and(|e| crate::account::is_operator(&e)) {
+                    let n = crate::maintenance::now().map(|(n, _)| n).unwrap_or_default();
+                    respond(request, 503, "text/html; charset=utf-8", &crate::maintenance::closed_page(&n));
+                    continue;
+                }
+            }
         }
         let parts: Vec<String> = path.split('/').filter(|s| !s.is_empty()).map(serve::urldecode).collect();
         let first = parts.first().cloned().unwrap_or_default();
@@ -4276,6 +4640,21 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                 }
             }));
         }
+        // The maintenance announced or in force, for the website's pages, which are files: their
+        // script shows the same banner the app's pages do.
+        ["maintenance"] => {
+            let body = match crate::maintenance::now() {
+                Some((n, state)) => json!({ "state": state, "level": n.level, "mode": n.mode, "text": crate::maintenance::words(&n, state) }),
+                None => json!({}),
+            };
+            let mut response = tiny_http::Response::from_string(body.to_string());
+            for (k, v) in [("Content-Type", "application/json"), ("Cache-Control", "no-store")] {
+                if let Ok(h) = tiny_http::Header::from_bytes(k.as_bytes(), v.as_bytes()) {
+                    response = response.with_header(h);
+                }
+            }
+            let _ = request.respond(response);
+        }
         // Who is signed in here, for the website's and the hub's pages, which are files and know
         // nobody: their script asks, and shows the address where "Sign in" was.
         ["me"] => {
@@ -4349,6 +4728,44 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                 return respond(request, 404, html_kind, &page("Not here", html! { h1 { "Not here" } }));
             }
             let by = who.as_ref().map(|a| a.email.clone()).unwrap_or_default();
+            // A new cell's first world, uploaded before the form is sent: streamed to a file the
+            // job takes it from.
+            if let ["upload", cell] = rest {
+                if request.method() != &tiny_http::Method::Put || !crate::cell::name_ok(cell) {
+                    return respond(request, 400, "text/plain; charset=utf-8", "PUT an archive for a cell's name");
+                }
+                let d = crate::ops::ops_dir(dir).join("uploads");
+                let _ = std::fs::create_dir_all(&d);
+                let file = d.join(format!("{cell}.tar.gz"));
+                let said = std::fs::File::create(&file)
+                    .map_err(|e| e.to_string())
+                    .and_then(|mut f| std::io::copy(&mut std::io::Read::take(request.as_reader(), 8 << 30), &mut f).map_err(|e| e.to_string()))
+                    .and_then(|_| crate::world::check_export(&file));
+                return match said {
+                    Ok(n) => respond(request, 200, "text/plain; charset=utf-8", &format!("{n} files")),
+                    Err(e) => {
+                        let _ = std::fs::remove_file(&file);
+                        respond(request, 400, "text/plain; charset=utf-8", &e)
+                    }
+                };
+            }
+            // A snapshot opened for download, for a day.
+            if let ["download", name] = rest {
+                let file = crate::ops::downloads_dir(dir).join(name);
+                let ok = name.ends_with(".tar.gz") && !name.contains(['/', '\\']) && !name.starts_with('.');
+                return match std::fs::File::open(&file).ok().filter(|_| ok) {
+                    Some(f) => {
+                        let mut response = tiny_http::Response::from_file(f);
+                        for (k, v) in [("Content-Type", "application/gzip".to_string()), ("Content-Disposition", format!("attachment; filename=\"{name}\""))] {
+                            if let Ok(h) = tiny_http::Header::from_bytes(k.as_bytes(), v.as_bytes()) {
+                                response = response.with_header(h);
+                            }
+                        }
+                        let _ = request.respond(response);
+                    }
+                    None => respond(request, 404, html_kind, &page("Not here", html! { h1 { "No such download" } })),
+                };
+            }
             let mut form = BTreeMap::new();
             if post {
                 let mut body = String::new();
@@ -4531,6 +4948,11 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
             let email = form.get("email").cloned().unwrap_or_default().trim().to_lowercase();
             let next = form.get("next").and_then(|n| crate::servetracker::next_of(n)).map(|n| format!("?next={}", urlencode(&n))).unwrap_or_default();
             let anybody = crate::ops::is_control(dir);
+            // During maintenance that stops new sign-ins, only the operator signs in.
+            if matches!(crate::maintenance::mode().as_deref(), Some("nologin" | "closed")) && !crate::account::is_operator(&email) {
+                let n = crate::maintenance::now().map(|(n, s)| crate::maintenance::words(&n, s)).unwrap_or_default();
+                return respond(request, 503, html_kind, &page("Maintenance", html! { div.account-hero { h1 { "Signing in is paused" } p.lede { (n) } } }));
+            }
             if email.contains('@') && (anybody || !membership.orgs_of(&email).is_empty()) {
                 let sent = accounts.ensure(&email).and_then(|a| accounts.new_link(a.id)).and_then(|raw| {
                     let mut site = crate::account::Site::load(dir);

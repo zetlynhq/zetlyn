@@ -58,6 +58,91 @@ pub struct CellEntry {
     pub memory: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub cpu: String,
+    /// The operator's own words about it, on the admin pages only.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+    /// Run without Stripe: a pilot, a friend, a gift. Its terms come from the plan and `quota`;
+    /// past `free_until`, where set, its updates stop.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub free: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub free_until: String,
+    /// What it may use where its plan's numbers are not the right ones.
+    #[serde(default, skip_serializing_if = "Quota::is_empty")]
+    pub quota: Quota,
+    /// A contract ended: the day it is deleted, unless `keep` holds that off.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub delete_on: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep: bool,
+}
+
+/// A cell's own numbers over its plan's; each unset is the plan's.
+#[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Quota {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_gb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reads: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mails: Option<u64>,
+    /// The month's spending limit beyond the plan, in euros.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cap: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sources: Option<usize>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub every: String,
+}
+
+impl Quota {
+    pub fn is_empty(&self) -> bool {
+        *self == Quota::default()
+    }
+    /// A plan with these numbers over its own.
+    pub fn over(&self, plan: &crate::billing::Plan) -> crate::billing::Plan {
+        let mut p = plan.clone();
+        if let Some(v) = self.storage_gb {
+            p.storage_gb = v;
+        }
+        if let Some(v) = self.reads {
+            p.reads = v;
+        }
+        if let Some(v) = self.mails {
+            p.mails = v;
+        }
+        if let Some(v) = self.cap {
+            p.cap = v;
+        }
+        if let Some(v) = self.sources {
+            p.sources = v;
+        }
+        if !self.every.is_empty() {
+            p.every = self.every.clone();
+        }
+        p
+    }
+}
+
+/// What was done, by whom, when: every job asked and answered, every mail, every deletion.
+pub fn audit(control: &Path, by: &str, what: &str, cell: &str, said: &str) {
+    let line = json!({ "at": crate::iso_stamp(crate::now()), "by": by, "what": what, "cell": cell, "said": said });
+    let path = ops_dir(control).join("audit.jsonl");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{line}");
+    }
+    // Written by root (the jobs) and by the pages (mail): it stays the directory's owner's.
+    use std::os::unix::fs::MetadataExt;
+    if let Ok(m) = std::fs::metadata(ops_dir(control)) {
+        let _ = std::os::unix::fs::chown(&path, Some(m.uid()), Some(m.gid()));
+    }
+}
+
+/// The newest lines of one of the ops logs, newest first.
+pub fn log_lines(control: &Path, file: &str, n: usize) -> Vec<J> {
+    let text = std::fs::read_to_string(ops_dir(control).join(file)).unwrap_or_default();
+    text.lines().rev().take(n).filter_map(|l| serde_json::from_str(l).ok()).collect()
 }
 
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
@@ -202,7 +287,8 @@ pub fn poll(control: &Path) -> Result<(), String> {
     if last_backup(control) < late {
         problems.insert("control:backup".into(), format!("the main server's own has no backup since {}", if last_backup(control).is_empty() { "ever".to_string() } else { last_backup(control) }));
     }
-    alarms(control, &r, problems);
+    alarms(control, &r, mute(control, &r, problems));
+    push_maintenance(control, &r);
     if let Err(e) = routes(control) {
         eprintln!("routes: {e}");
     }
@@ -210,6 +296,10 @@ pub fn poll(control: &Path) -> Result<(), String> {
     if let Err(e) = enforce_terms(control) {
         eprintln!("terms: {e}");
     }
+    if let Err(e) = expire(control) {
+        eprintln!("expire: {e}");
+    }
+    clean_downloads(control);
     work(control);
     if !r.heartbeat.is_empty() {
         let _ = ureq::get(&r.heartbeat).call();
@@ -271,6 +361,7 @@ fn alarms(control: &Path, r: &Register, now: BTreeMap<String, String>) {
         if entry["seen"].as_u64().unwrap_or(0) >= 2 && entry["mailed"] != true {
             entry["mailed"] = json!(true);
             said.push(format!("WRONG  {text}"));
+            history(control, "wrong", key, text);
         }
     }
     let gone: Vec<String> = held.keys().filter(|k| !now.contains_key(*k)).cloned().collect();
@@ -278,6 +369,7 @@ fn alarms(control: &Path, r: &Register, now: BTreeMap<String, String>) {
         if let Some(e) = held.remove(&key) {
             if e["mailed"] == true {
                 said.push(format!("RIGHT  {}", e["text"].as_str().unwrap_or(&key)));
+                history(control, "right", &key, e["text"].as_str().unwrap_or(""));
             }
         }
     }
@@ -386,8 +478,16 @@ pub fn enforce_terms(control: &Path) -> Result<(), String> {
         if c.house {
             continue;
         }
-        let Some(customer) = book.get(cell) else { continue };
-        let plan = plans.get(&customer.plan).cloned().unwrap_or_default();
+        // Billed by Stripe, or run free by the operator's word; anything else is left alone.
+        let customer = book.get(cell).filter(|_| !c.free);
+        if customer.is_none() && !c.free {
+            continue;
+        }
+        let base = customer.as_ref().and_then(|cu| plans.get(&cu.plan)).or_else(|| plans.values().next()).cloned().unwrap_or_default();
+        let plan = c.quota.over(&base);
+        let plan_name = customer.as_ref().map(|cu| cu.plan.clone()).unwrap_or_else(|| "free".into());
+        let stripe_customer = customer.as_ref().and_then(|cu| cu.stripe_customer.clone());
+        let today = crate::iso_date(crate::now());
         let s = cell_status(control, &r, cell);
         if s.is_null() {
             continue;
@@ -403,27 +503,29 @@ pub fn enforce_terms(control: &Path) -> Result<(), String> {
             if !u.month.is_empty() && s["usage"]["previous"].as_str() == Some(u.month.as_str()) {
                 u.reads = s["usage"]["previous_reads"].as_u64().unwrap_or(u.reads);
                 u.mails = s["usage"]["previous_mails"].as_u64().unwrap_or(u.mails);
-                tell_stripe(&mut u, ids.as_ref(), customer.stripe_customer.as_deref(), cell, "final");
+                tell_stripe(&mut u, ids.as_ref(), stripe_customer.as_deref(), cell, "final");
             }
             u = Usage { month: month.clone(), ..Usage::default() };
         }
         u.reads = s["usage"]["reads"].as_u64().unwrap_or(0);
         u.mails = s["usage"]["mails"].as_u64().unwrap_or(0);
-        let today = crate::iso_date(crate::now());
         if u.day != today {
             u.mb_days += s["bytes"].as_u64().unwrap_or(0).div_ceil(1 << 20);
-            u.day = today;
+            u.day = today.clone();
         }
         let hour = crate::iso_stamp(crate::now()).get(..13).unwrap_or("").replace([':', '-', 'T'], "");
         if u.hour != hour {
-            tell_stripe(&mut u, ids.as_ref(), customer.stripe_customer.as_deref(), cell, &hour);
+            tell_stripe(&mut u, ids.as_ref(), stripe_customer.as_deref(), cell, &hour);
             u.hour = hour;
         }
         let _ = std::fs::write(usage_path(control, cell), serde_json::to_vec_pretty(&u).unwrap_or_default());
         // What the spending limit leaves for reads and mails, in whole euros, so the terms change
         // only when a euro has gone.
         let (storage, reads, mails) = overage(&u, &plan);
-        let (read_cap, mail_cap) = if plan.cap > 0 {
+        // Run free, nothing beyond the plan is billed, so nothing beyond it is used.
+        let (read_cap, mail_cap) = if customer.is_none() {
+            (Some(plan.reads), Some(plan.mails))
+        } else if plan.cap > 0 {
             let left_for_reads = (plan.cap as f64 - storage.ceil() - mails.ceil()).max(0.0);
             let left_for_mails = (plan.cap as f64 - storage.ceil() - reads.ceil()).max(0.0);
             (Some(plan.reads + (left_for_reads * 10_000.0) as u64), Some(plan.mails + (left_for_mails * 1_000.0) as u64))
@@ -431,14 +533,17 @@ pub fn enforce_terms(control: &Path) -> Result<(), String> {
             (None, Some(plan.mails))
         };
         let want = crate::cell::Terms {
-            active: customer.in_good_standing(grace),
+            active: match &customer {
+                Some(cu) => cu.in_good_standing(grace),
+                None => c.free_until.is_empty() || today <= c.free_until,
+            },
             sources: (plan.sources > 0).then_some(plan.sources),
             every: plan.every.clone(),
             mails: mail_cap,
             reads: read_cap,
             domain: plan.domain,
             plan: (plan.storage_gb > 0).then(|| crate::cell::PlanShown {
-                title: if plan.title.is_empty() { customer.plan.clone() } else { plan.title.clone() },
+                title: if plan.title.is_empty() { plan_name.clone() } else { plan.title.clone() },
                 storage_gb: plan.storage_gb,
                 reads: plan.reads,
                 mails: plan.mails,
@@ -470,6 +575,65 @@ pub fn enforce_terms(control: &Path) -> Result<(), String> {
             }
             let refs: Vec<&str> = words.iter().map(String::as_str).collect();
             on(n, &refs, None)?;
+        }
+    }
+    Ok(())
+}
+
+/// A contract ended: its cell stays 30 days past what was paid for its owner to take it away, as
+/// the terms say, and is then deleted, unless the operator keeps it. The owner is told the day once.
+pub fn expire(control: &Path) -> Result<(), String> {
+    let mut r = register(control)?;
+    let Ok(book) = crate::billing::Book::read(&control.join("billing")) else { return Ok(()) };
+    let today = crate::iso_date(crate::now());
+    let (mut changed, mut due, mut tell) = (false, Vec::new(), Vec::new());
+    for (cell, c) in r.cells.iter_mut() {
+        if c.house || c.free {
+            continue;
+        }
+        let Some(cu) = book.get(cell) else { continue };
+        let until = cu.paid_until.clone().unwrap_or_default();
+        let ended = cu.state == "cancelled" && !until.is_empty() && until < today;
+        if !ended {
+            if !c.delete_on.is_empty() {
+                c.delete_on.clear();
+                changed = true;
+            }
+            continue;
+        }
+        if c.delete_on.is_empty() {
+            let Some(d) = crate::thingstore::days(&until) else { continue };
+            c.delete_on = crate::iso_date((d + 30) * 86_400);
+            changed = true;
+            audit(control, "ops", "deletion planned", cell, &c.delete_on);
+            tell.push((cell.clone(), c.owner.clone(), c.delete_on.clone()));
+        }
+        if !c.keep && today >= c.delete_on {
+            due.push(cell.clone());
+        }
+    }
+    if changed {
+        save_register(control, &r)?;
+    }
+    let base = crate::account::Site::load(control).url.trim_end_matches('/').to_string();
+    for (cell, owner, on) in tell {
+        if owner.is_empty() {
+            continue;
+        }
+        let text = format!(
+            "Hello,\n\nyour plan for {base}/{cell}/ has ended. Until {on} you can still download all of it from its settings (Download all of it); on {on} it is deleted.\n\nIf that is a mistake, write to hello@zetlyn.com before then.\n\nBest regards,\nThe Zetlyn team\n\n--\nZetlyn · https://zetlyn.com · hello@zetlyn.com\n"
+        );
+        let _ = mail(control, &[owner], "Your Zetlyn organisation is deleted soon", &text, "ops");
+    }
+    for cell in due {
+        match remove(control, &cell) {
+            Ok(said) => {
+                audit(control, "ops", "deleted", &cell, &said);
+                if !r.alarm.is_empty() {
+                    let _ = crate::account::Site::load(control).send(&r.alarm, &format!("Zetlyn: {cell} deleted"), &format!("{said}\n\nIts contract ended; 30 days passed.\n"));
+                }
+            }
+            Err(e) => eprintln!("expire {cell}: {e}"),
         }
     }
     Ok(())
@@ -672,9 +836,288 @@ pub fn upgrade(control: &Path, cell: &str, version: &str) -> Result<String, Stri
     Err(format!("{cell} did not answer on {version}; back on {before}"))
 }
 
+// -- snapshots, from the admin pages ------------------------------------------------------------
+
+/// A cell's snapshots in the bucket, newest first, as their `.json` beside each says.
+pub fn snapshots(cell: &str) -> Result<Vec<J>, String> {
+    use crate::place::Place;
+    let s3 = control_bucket()?;
+    let mut keys: Vec<String> = s3.list(&format!("cells/{cell}/snapshots/"))?.into_iter().filter(|k| k.ends_with(".json")).collect();
+    keys.sort();
+    keys.reverse();
+    Ok(keys.iter().filter_map(|k| s3.get(k).ok().and_then(|b| serde_json::from_slice(&b).ok())).collect())
+}
+
+/// Where the admin pages offer what was asked for download, for a day.
+pub fn downloads_dir(control: &Path) -> PathBuf {
+    ops_dir(control).join("downloads")
+}
+
+/// One snapshot opened, as the archive it was made from, for the operator to download: the whole
+/// cell (its hosting directory, `world/orgs/<cell>/` the organisation).
+pub fn download(control: &Path, cell: &str, stamp: &str) -> Result<String, String> {
+    if !stamp.chars().all(|c| c.is_ascii_alphanumeric()) || stamp.is_empty() {
+        return Err("which snapshot?".into());
+    }
+    let s3 = control_bucket()?;
+    let key = crate::cell::key()?;
+    let dir = downloads_dir(control);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let sealed = Path::new("/var/tmp").join(format!("zetlyn-download-{cell}-{stamp}.zcell"));
+    let name = format!("{cell}-{stamp}.tar.gz");
+    let result = (|| {
+        s3.download(&format!("cells/{cell}/snapshots/{stamp}.zcell"), &sealed)?;
+        crate::cell::open(&key, &sealed, &dir.join(&name))?;
+        let _ = Command::new("chown").args(["-R", "zetlyn:zetlyn", &dir.to_string_lossy()]).status();
+        Ok(format!("{name} ready for a day"))
+    })();
+    let _ = std::fs::remove_file(&sealed);
+    result
+}
+
+/// Downloads older than a day, gone.
+fn clean_downloads(control: &Path) {
+    for e in std::fs::read_dir(downloads_dir(control)).into_iter().flatten().flatten() {
+        let old = e.metadata().ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).is_some_and(|d| d.as_secs() > 86_400);
+        if old {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+/// A cell back to one of its snapshots, in place: a snapshot of it as it is first, then the one
+/// asked for restored on the same server; where that does not answer, the one just taken.
+pub fn restore_to(control: &Path, cell: &str, stamp: &str) -> Result<String, String> {
+    let r = register(control)?;
+    let (node, n) = node_of(&r, cell)?;
+    let (node, n) = (node.to_string(), n.clone());
+    let version = cell_status(control, &r, cell)["version"].as_str().unwrap_or("").to_string();
+    let before = on(&n, &["snapshot", cell, "--why", "before-restore"], None)?.trim().to_string();
+    let c = r.cells.get(cell).cloned().unwrap_or_default();
+    let put = |from: &str| -> Result<(), String> {
+        on(&n, &["remove", cell, "--no-snapshot"], None)?;
+        let mut words = vec!["restore", cell, "--from", from];
+        if !version.is_empty() {
+            words.extend(["--version", version.as_str()]);
+        }
+        on(&n, &words, None)?;
+        let memory = if c.memory.is_empty() { "512M" } else { c.memory.as_str() };
+        let cpu = if c.cpu.is_empty() { "50%" } else { c.cpu.as_str() };
+        let _ = on(&n, &["limit", cell, "--memory", memory, "--cpu", cpu], None);
+        Ok(())
+    };
+    let answers = || {
+        (0..30).any(|_| {
+            std::thread::sleep(std::time::Duration::from_secs(4));
+            on(&n, &["status", "--json"], None).ok().and_then(|s| serde_json::from_str::<J>(&s).ok()).is_some_and(|s| {
+                s["cells"].as_array().into_iter().flatten().any(|x| x["name"] == cell && matches!(x["answers"].as_u64(), Some(200..=399)))
+            })
+        })
+    };
+    if put(stamp).is_ok() && answers() {
+        let _ = poll_one(control, &node);
+        routes(control)?;
+        return Ok(format!("{cell} is back at {stamp}; as it was is in {before}"));
+    }
+    put(&before)?;
+    let _ = poll_one(control, &node);
+    routes(control)?;
+    Err(format!("{cell} did not answer at {stamp}; it is as it was again ({before})"))
+}
+
+// -- changes, from the admin pages --------------------------------------------------------------
+
+/// A cell's title, owners or domain, here and in the cell: `owners` the whole list, the first the
+/// one the register names; a domain empty for none.
+pub fn set(control: &Path, cell: &str, title: Option<&str>, owners: Option<&[String]>, domain: Option<&str>, note: Option<&str>) -> Result<String, String> {
+    let mut r = register(control)?;
+    let (_, n) = node_of(&r, cell)?;
+    let n = n.clone();
+    let mut words: Vec<String> = vec!["set".into(), cell.into()];
+    let mut said = Vec::new();
+    if let Some(t) = title.filter(|t| !t.trim().is_empty()) {
+        words.extend(["--title".into(), t.trim().replace(char::is_whitespace, "\u{a0}")]);
+        said.push(format!("title {t}"));
+    }
+    if let Some(d) = domain {
+        let d = d.trim().to_lowercase();
+        if !d.is_empty() && !d.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-') {
+            return Err(format!("{d}: not a domain"));
+        }
+        words.extend(["--domain".into(), if d.is_empty() { "-".into() } else { d.clone() }]);
+        said.push(format!("domain {}", if d.is_empty() { "none" } else { &d }));
+    }
+    let members = crate::app::owners_of(control, cell);
+    if let Some(list) = owners {
+        let want: Vec<String> = list.iter().map(|o| o.trim().to_lowercase()).filter(|o| o.contains('@')).collect();
+        if want.is_empty() {
+            return Err("at least one owner".into());
+        }
+        for o in want.iter().filter(|o| !members.contains(o)) {
+            words.extend(["--owner".into(), o.clone()]);
+            crate::app::set_member(control, cell, o, Some("owner"))?;
+        }
+        for o in members.iter().filter(|o| !want.contains(o)) {
+            words.extend(["--not-owner".into(), o.clone()]);
+            crate::app::set_member(control, cell, o, None)?;
+        }
+        said.push(format!("owners {}", want.join(", ")));
+        if let Some(e) = r.cells.get_mut(cell) {
+            e.owner = want[0].clone();
+        }
+    }
+    if words.len() > 2 {
+        let refs: Vec<&str> = words.iter().map(String::as_str).collect();
+        on(&n, &refs, None)?;
+    }
+    if let Some(e) = r.cells.get_mut(cell) {
+        if let Some(t) = title.filter(|t| !t.trim().is_empty()) {
+            e.title = t.trim().to_string();
+        }
+        if let Some(nt) = note {
+            e.note = nt.trim().to_string();
+            said.push("note".into());
+        }
+    }
+    save_register(control, &r)?;
+    let _ = poll_one(control, &r.cells.get(cell).map(|c| c.node.clone()).unwrap_or_default());
+    routes(control)?;
+    Ok(format!("{cell}: {}", if said.is_empty() { "nothing changed".to_string() } else { said.join("; ") }))
+}
+
+/// A cell's limits: memory and processor at its server, its numbers over its plan's, and whether
+/// it runs free and until when; its terms sent at once.
+pub fn limits(control: &Path, cell: &str, args: &BTreeMap<String, String>) -> Result<String, String> {
+    let mut r = register(control)?;
+    let n = node_of(&r, cell)?.1.clone();
+    let get = |k: &str| args.get(k).map(|v| v.trim().to_string()).unwrap_or_default();
+    let num = |k: &str| -> Result<Option<u64>, String> {
+        let v = get(k);
+        if v.is_empty() { Ok(None) } else { v.parse().map(Some).map_err(|_| format!("{k}: a number")) }
+    };
+    let quota = Quota {
+        storage_gb: num("storage_gb")?,
+        reads: num("reads")?,
+        mails: num("mails")?,
+        cap: num("cap")?,
+        sources: num("sources")?.map(|v| v as usize),
+        every: get("every"),
+    };
+    let e = r.cells.get_mut(cell).ok_or("no such cell")?;
+    let (memory, cpu) = (get("memory"), get("cpu"));
+    if !memory.is_empty() || !cpu.is_empty() {
+        let m = if memory.is_empty() { if e.memory.is_empty() { "512M".to_string() } else { e.memory.clone() } } else { memory.clone() };
+        let c = if cpu.is_empty() { if e.cpu.is_empty() { "50%".to_string() } else { e.cpu.clone() } } else { cpu.clone() };
+        on(&n, &["limit", cell, "--memory", &m, "--cpu", &c], None)?;
+        e.memory = m;
+        e.cpu = c;
+    }
+    e.quota = quota;
+    if args.contains_key("billing") {
+        e.free = get("billing") == "free";
+        e.free_until = get("free_until");
+        if !e.free_until.is_empty() && crate::thingstore::days(&e.free_until).is_none() {
+            return Err("free until: a date, 2026-12-31".into());
+        }
+    }
+    let said = format!("{cell}: memory {}, cpu {}, {}{}", e.memory, e.cpu, if e.free { "free" } else { "billed" }, if e.free_until.is_empty() { String::new() } else { format!(" until {}", e.free_until) });
+    save_register(control, &r)?;
+    enforce_terms(control)?;
+    Ok(said)
+}
+
+/// A server joins: registered, and its Caddy's root kept here for the hop to it.
+pub fn node_add(control: &Path, name: &str, host: &str) -> Result<String, String> {
+    if !crate::cell::name_ok(name) || host.is_empty() || !host.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == ':' || c == '-') {
+        return Err("a name like n3 and an address".into());
+    }
+    let mut r = register(control)?;
+    let entry = NodeEntry { host: host.to_string(), ca: format!("/etc/caddy/nodes/{name}.crt"), draining: false };
+    let ca = on(&entry, &["ca"], None)?;
+    std::fs::create_dir_all("/etc/caddy/nodes").map_err(|e| e.to_string())?;
+    std::fs::write(&entry.ca, ca).map_err(|e| e.to_string())?;
+    r.nodes.insert(name.to_string(), entry);
+    save_register(control, &r)?;
+    poll_one(control, name)?;
+    Ok(format!("{name} at {host} joined"))
+}
+
+pub fn drain(control: &Path, name: &str, on_: bool) -> Result<String, String> {
+    let mut r = register(control)?;
+    r.nodes.get_mut(name).ok_or("no such node")?.draining = on_;
+    save_register(control, &r)?;
+    Ok(format!("{name}: {}", if on_ { "takes no new cells" } else { "takes new cells again" }))
+}
+
+// -- maintenance --------------------------------------------------------------------------------
+
+/// The notice of the admin pages, where it is.
+pub fn maintenance_path(control: &Path) -> PathBuf {
+    ops_dir(control).join(crate::maintenance::FILE)
+}
+
+/// Each cell given the notice that applies to it while it stands, and none after: sent to its
+/// server only when that changed.
+fn push_maintenance(control: &Path, r: &Register) {
+    let notice = crate::maintenance::read(&maintenance_path(control));
+    let now = crate::iso_stamp(crate::now());
+    let pushed_path = ops_dir(control).join("maintenance-pushed.json");
+    let mut pushed: BTreeMap<String, String> = std::fs::read(&pushed_path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    for (cell, c) in &r.cells {
+        let want = notice.as_ref().filter(|n| n.applies(&c.node, cell) && n.state(&now).is_some()).map(|n| {
+            let mut n = n.clone();
+            n.target.clear();
+            n
+        });
+        let text = want.as_ref().map(|n| serde_json::to_string(n).unwrap_or_default()).unwrap_or_default();
+        if pushed.get(cell).map(String::as_str).unwrap_or("") == text {
+            continue;
+        }
+        let Some(node) = r.nodes.get(&c.node) else { continue };
+        let hex = crate::key::hex(text.as_bytes());
+        let words: Vec<&str> = if text.is_empty() { vec!["maintenance", cell, "--clear"] } else { vec!["maintenance", cell, "--set", hex.as_str()] };
+        match on(node, &words, None) {
+            Ok(_) => {
+                pushed.insert(cell.clone(), text);
+            }
+            Err(e) => eprintln!("maintenance {cell}: {e}"),
+        }
+    }
+    let _ = std::fs::write(&pushed_path, serde_json::to_vec(&pushed).unwrap_or_default());
+}
+
+/// What would be an alarm, without what the maintenance in force covers: nothing is said of a
+/// server or cell while it is being worked on, and it starts counting again after.
+fn mute(control: &Path, r: &Register, problems: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let Some(n) = crate::maintenance::read(&maintenance_path(control)) else { return problems };
+    if n.state(&crate::iso_stamp(crate::now())) != Some("active") {
+        return problems;
+    }
+    problems
+        .into_iter()
+        .filter(|(key, _)| {
+            if n.target.is_empty() || n.target == "all" {
+                return false;
+            }
+            if let Some(rest) = key.strip_prefix("node:") {
+                return !n.applies(rest.split(':').next().unwrap_or(""), "");
+            }
+            if let Some(rest) = key.strip_prefix("cell:") {
+                let cell = rest.split(':').next().unwrap_or("");
+                let node = r.cells.get(cell).map(|c| c.node.as_str()).unwrap_or("");
+                return !n.applies(node, cell);
+            }
+            true
+        })
+        .collect()
+}
+
 // -- jobs, from the admin pages -----------------------------------------------------------------
 
-pub const ACTIONS: [&str; 11] = ["start", "stop", "restart", "snapshot", "move", "upgrade", "suspend", "resume", "logs", "create", "remove"];
+pub const ACTIONS: [&str; 22] = [
+    "start", "stop", "restart", "snapshot", "move", "upgrade", "suspend", "resume", "logs", "create", "remove", "set", "limits", "snapshots", "restore", "download",
+    "keep", "unkeep", "node-add", "drain", "undrain", "upgrade-all",
+];
 
 /// A job for the root side, written by the admin pages. Its id.
 pub fn ask(control: &Path, action: &str, cell: &str, args: &BTreeMap<String, String>, by: &str) -> Result<String, String> {
@@ -688,6 +1131,7 @@ pub fn ask(control: &Path, action: &str, cell: &str, args: &BTreeMap<String, Str
     let partial = dir.join(format!("{id}.partial"));
     std::fs::write(&partial, job.to_string()).map_err(|e| e.to_string())?;
     std::fs::rename(&partial, dir.join(format!("{id}.json"))).map_err(|e| e.to_string())?;
+    audit(control, by, &format!("asked {action}"), cell, &serde_json::to_string(args).unwrap_or_default());
     Ok(id)
 }
 
@@ -728,11 +1172,69 @@ pub fn work(control: &Path) {
             let r = register(control)?;
             match job["action"].as_str().unwrap_or("") {
                 "create" => {
-                    let node = create(control, &cell, &arg("title"), &arg("owner"), Some(arg("node")).filter(|n| !n.is_empty()).as_deref(), false)?;
-                    if !arg("owner").is_empty() {
-                        welcome(control, &cell, &arg("title"), &arg("owner"))?;
+                    let owners: Vec<String> = arg("owners").split([',', '\n', ' ']).map(|o| o.trim().to_lowercase()).filter(|o| o.contains('@')).collect();
+                    let owner = owners.first().cloned().unwrap_or_else(|| arg("owner"));
+                    let node = create(control, &cell, &arg("title"), &owner, Some(arg("node")).filter(|n| !n.is_empty()).as_deref(), false)?;
+                    let mut said = vec![format!("{cell} made on {node}")];
+                    if owners.len() > 1 {
+                        set(control, &cell, None, Some(&owners), None, None)?;
+                        said.push(format!("owners {}", owners.join(", ")));
                     }
-                    Ok(format!("{cell} made on {node}"))
+                    let mut la: BTreeMap<String, String> = BTreeMap::new();
+                    for k in ["memory", "cpu", "storage_gb", "reads", "mails", "cap", "sources", "every", "billing", "free_until"] {
+                        la.insert(k.to_string(), arg(k));
+                    }
+                    if !arg("billing").is_empty() || la.values().any(|v| !v.is_empty()) {
+                        if arg("billing").is_empty() {
+                            la.remove("billing");
+                        }
+                        said.push(limits(control, &cell, &la)?);
+                    }
+                    if !arg("note").is_empty() {
+                        set(control, &cell, None, None, None, Some(&arg("note")))?;
+                    }
+                    // A first world, uploaded with the order: the server brings it in as an
+                    // owner's import would be, a snapshot first.
+                    let upload = ops_dir(control).join("uploads").join(format!("{cell}.tar.gz"));
+                    if arg("archive") == "yes" && upload.exists() {
+                        let n = register(control)?.nodes.get(&node).cloned().ok_or("no such node")?;
+                        let r = on(&n, &["import", &cell, "--by", &owner], Some(&upload));
+                        let _ = std::fs::remove_file(&upload);
+                        said.push(r.map(|o| o.trim().to_string()).unwrap_or_else(|e| format!("not imported: {e}")));
+                    }
+                    if !owner.is_empty() && arg("welcome") != "no" {
+                        welcome(control, &cell, &arg("title"), &owner)?;
+                        said.push(format!("welcome mail to {owner}"));
+                    }
+                    Ok(said.join("; "))
+                }
+                "set" => {
+                    let owners: Option<Vec<String>> = job["args"].get("owners").and_then(|v| v.as_str()).map(|s| s.split([',', '\n', ' ']).map(str::to_string).filter(|o| !o.trim().is_empty()).collect());
+                    let opt = |k: &str| job["args"].get(k).and_then(|v| v.as_str()).map(str::to_string);
+                    set(control, &cell, opt("title").as_deref(), owners.as_deref(), opt("domain").as_deref(), opt("note").as_deref())
+                }
+                "limits" => {
+                    let la: BTreeMap<String, String> = job["args"].as_object().into_iter().flatten().map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string())).collect();
+                    limits(control, &cell, &la)
+                }
+                "snapshots" => snapshots(&cell).map(|l| J::Array(l).to_string()),
+                "restore" if arg("confirm") == cell => restore_to(control, &cell, &arg("stamp")),
+                "restore" => Err(format!("{cell}: not restored, its name was not typed to confirm")),
+                "download" => download(control, &cell, &arg("stamp")),
+                a @ ("keep" | "unkeep") => {
+                    let mut r = register(control)?;
+                    let e = r.cells.get_mut(&cell).ok_or("no such cell")?;
+                    e.keep = a == "keep";
+                    save_register(control, &r)?;
+                    Ok(format!("{cell}: {}", if a == "keep" { "kept, not deleted" } else { "deleted on its day again" }))
+                }
+                "node-add" => node_add(control, &cell, &arg("host")),
+                "drain" => drain(control, &cell, true),
+                "undrain" => drain(control, &cell, false),
+                "upgrade-all" => {
+                    let v = arg("version");
+                    let cells: Vec<String> = r.cells.keys().cloned().collect();
+                    Ok(cells.iter().map(|c| upgrade(control, c, &v).unwrap_or_else(|e| e)).collect::<Vec<_>>().join("\n"))
                 }
                 "move" => move_cell(control, &cell, &arg("to")),
                 "remove" if arg("confirm") == cell => remove(control, &cell),
@@ -762,6 +1264,12 @@ pub fn work(control: &Path) {
         match result {
             Ok(said) => job["said"] = json!(said),
             Err(e) => job["error"] = json!(e),
+        }
+        let by = job["by"].as_str().unwrap_or("").to_string();
+        let what = format!("done {}", job["action"].as_str().unwrap_or(""));
+        let outcome = job["said"].as_str().map(|s| s.lines().next().unwrap_or("").to_string()).or_else(|| job["error"].as_str().map(|e| format!("failed: {e}"))).unwrap_or_default();
+        if job["action"] != "snapshots" && job["action"] != "logs" {
+            audit(control, &by, &what, &cell, &outcome);
         }
         let id = job["id"].as_str().unwrap_or("job").to_string();
         let _ = std::fs::write(dir.join("done").join(format!("{id}.json")), job.to_string());
@@ -1045,4 +1553,12 @@ pub fn reconcile(control: &Path) {
     // Root wrote the book; the pages that read and write it are zetlyn's.
     let _ = Command::new("chown").args(["-R", "--reference", &control.to_string_lossy(), &billing.to_string_lossy()]).status();
     let _ = std::fs::write(&path, hour);
+}
+
+/// Every alarm raised and cleared, for the admin pages' history.
+fn history(control: &Path, what: &str, key: &str, text: &str) {
+    let line = json!({ "at": crate::iso_stamp(crate::now()), "what": what, "key": key, "text": text });
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(ops_dir(control).join("alarms.jsonl")) {
+        let _ = writeln!(f, "{line}");
+    }
 }

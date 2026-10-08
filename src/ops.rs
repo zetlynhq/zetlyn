@@ -1140,7 +1140,7 @@ pub fn jobs(control: &Path, limit: usize) -> Vec<J> {
     let mut out: Vec<J> = Vec::new();
     for sub in ["jobs", "jobs/done"] {
         for e in std::fs::read_dir(ops_dir(control).join(sub)).into_iter().flatten().flatten() {
-            if e.path().extension().is_some_and(|x| x == "json") {
+            if e.path().extension().is_some_and(|x| x == "json" || x == "running") {
                 if let Some(j) = std::fs::read(e.path()).ok().and_then(|b| serde_json::from_slice::<J>(&b).ok()) {
                     out.push(j);
                 }
@@ -1158,7 +1158,13 @@ pub fn work(control: &Path) {
     let mut waiting: Vec<PathBuf> = std::fs::read_dir(&dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
     waiting.sort();
     let _ = std::fs::create_dir_all(dir.join("done"));
-    for path in waiting {
+    for waiting_path in waiting {
+        // Taken by renaming it: the minute's poll and the watcher both run this, and only the one
+        // whose rename succeeds runs the job.
+        let path = waiting_path.with_extension("running");
+        if std::fs::rename(&waiting_path, &path).is_err() {
+            continue;
+        }
         let Some(mut job) = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<J>(&b).ok()) else {
             let _ = std::fs::remove_file(&path);
             continue;

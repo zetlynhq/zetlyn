@@ -3726,6 +3726,11 @@ fn admin(dir: &Path, rest: &[&str], post: bool, form: &BTreeMap<String, String>,
             let act = |a: &str, label: &str| html! { form method="post" action={(cell_home(cell)) "/" (a)} { button type="submit" { (label) } } };
             let q = &c.quota;
             let opt = |v: Option<u64>| v.map(|v| v.to_string()).unwrap_or_default();
+            // What its plan includes, and what it may use with its own numbers over those.
+            let (_, plans) = crate::billing::plans(&billing_dir).unwrap_or_default();
+            let base = customer.as_ref().and_then(|cu| plans.get(&cu.plan)).or_else(|| plans.values().next()).cloned().unwrap_or_default();
+            let eff = q.over(&base);
+            let hint = |v: String| format!("{v} (plan)");
             let (dot, state) = cell_health(&s);
             let billed = if c.house { "House".to_string() } else if c.free { if c.free_until.is_empty() { "Free".to_string() } else { format!("Free until {}", c.free_until) } } else if let Some(cu) = &customer { format!("{} · {}", cu.plan, cu.state) } else { "Not billed".to_string() };
             let field = |k: &str| s[k].as_str().unwrap_or("").to_string();
@@ -3753,8 +3758,8 @@ fn admin(dir: &Path, rest: &[&str], post: bool, form: &BTreeMap<String, String>,
                         dl.admin-kv {
                             dt { "Running" } dd { (field("active")) @if !field("since").is_empty() { span.dim { " since " (field("since")) } } }
                             dt { "Restarts" } dd { (s["restarts"].as_str().unwrap_or("0")) }
-                            dt { "Memory" } dd { (mb(&s["memory"])) " of " (mb(&s["memory_max"])) (meter_of(s["memory"].as_f64(), s["memory_max"].as_f64())) }
-                            dt { "On disk" } dd { (mb(&s["bytes"])) }
+                            dt { "RAM" } dd { (mb(&s["memory"])) " of " (mb(&s["memory_max"])) (meter_of(s["memory"].as_f64(), s["memory_max"].as_f64())) }
+                            dt { "Storage used" } dd { (mb(&s["bytes"])) }
                             dt { "Last reading" } dd { (if field("run_result").is_empty() { "—".to_string() } else { field("run_result") }) span.dim { " " (field("run_finished")) } }
                             dt { "Last snapshot" } dd { (stamp_words(&field("snapshot"))) }
                             dt { "Domain" } dd { (if field("domain").is_empty() { "—".to_string() } else { field("domain") }) }
@@ -3799,17 +3804,46 @@ fn admin(dir: &Path, rest: &[&str], post: bool, form: &BTreeMap<String, String>,
                                     option value="free" selected[c.free] { "Free, without Stripe" }
                                 } }
                                 label { "Free until" input type="date" name="free_until" value=(c.free_until); }
-                                label { "Memory" input type="text" name="memory" value=(c.memory) placeholder="512M"; }
+                                label { "RAM" input type="text" name="memory" value=(c.memory) placeholder="512M"; }
                                 label { "Processor" input type="text" name="cpu" value=(c.cpu) placeholder="50%"; }
-                                label { "Storage, GB" input type="number" min="0" name="storage_gb" value=(opt(q.storage_gb)) placeholder="plan"; }
-                                label { "Reads a month" input type="number" min="0" name="reads" value=(opt(q.reads)) placeholder="plan"; }
-                                label { "Mails a month" input type="number" min="0" name="mails" value=(opt(q.mails)) placeholder="plan"; }
-                                label { "Spending limit, €" input type="number" min="0" name="cap" value=(opt(q.cap)) placeholder="plan"; }
-                                label { "Sources" input type="number" min="0" name="sources" value=(q.sources.map(|v| v.to_string()).unwrap_or_default()) placeholder="plan"; }
-                                label { "Shortest interval" input type="text" name="every" value=(q.every) placeholder="plan"; }
+                                label { "Storage, GB" input type="number" min="0" name="storage_gb" value=(opt(q.storage_gb)) placeholder=(hint(base.storage_gb.to_string())); }
+                                label { "Reads a month" input type="number" min="0" name="reads" value=(opt(q.reads)) placeholder=(hint(base.reads.to_string())); }
+                                label { "Mails a month" input type="number" min="0" name="mails" value=(opt(q.mails)) placeholder=(hint(base.mails.to_string())); }
+                                label { "Spending limit, €" input type="number" min="0" name="cap" value=(opt(q.cap)) placeholder=(hint(base.cap.to_string())); }
+                                label { "Sources" input type="number" min="0" name="sources" value=(q.sources.map(|v| v.to_string()).unwrap_or_default()) placeholder=(hint(if base.sources == 0 { "0 = no limit".to_string() } else { base.sources.to_string() })); }
+                                label { "Shortest interval" input type="text" name="every" value=(q.every) placeholder=(hint(base.every.clone())); }
                             }
                             div.admin-submit { button.primary type="submit" { "Save" } span.dim { "Empty is the plan's." } }
                         }
+                    }
+                }
+                section.admin-card {
+                    div.admin-card-head {
+                        h2 { "Plan and usage" }
+                        span.dim { @if c.house { "the house's own, not limited by a plan" } @else { (if base.title.is_empty() { "Plan".to_string() } else { base.title.clone() }) " · " (billed) } }
+                    }
+                    @if c.house { p.dim { "Its terms are what was set by hand; it is never billed." } }
+                    @else {
+                        @let reads = s["usage"]["reads"].as_u64().unwrap_or(u.reads);
+                        @let mails = s["usage"]["mails"].as_u64().unwrap_or(u.mails);
+                        @let days = crate::iso_date(crate::now()).get(8..10).and_then(|d| d.parse::<f64>().ok()).unwrap_or(1.0).max(1.0);
+                        @let avg_gb = u.mb_days as f64 / days / 1024.0;
+                        @let now_gb = s["bytes"].as_f64().unwrap_or(0.0) / 1_073_741_824.0;
+                        @let used = crate::ops::Usage { mb_days: u.mb_days, reads, mails, ..crate::ops::Usage::default() };
+                        @let (so, ro, mo) = crate::ops::overage(&used, &eff);
+                        @let own = |set: bool| if set { html! { " " span.chip { "own" } } } else { html! {} };
+                        table.admin-table {
+                            thead { tr { th { "" } th.num { "Included" } th.num { "Used this month" } th { "" } } }
+                            tbody {
+                                tr { td { "Storage" (own(q.storage_gb.is_some())) } td.num { (eff.storage_gb) " GB" } td.num { (format!("{now_gb:.2}")) " GB now" br; span.dim { (format!("{avg_gb:.2}")) " GB average" } } td { (meter_of(Some(avg_gb), Some(eff.storage_gb as f64))) } }
+                                tr { td { "Source reads" (own(q.reads.is_some())) } td.num { (thousands_of(eff.reads)) } td.num { (thousands_of(reads)) } td { (meter_of(Some(reads as f64), Some(eff.reads as f64))) } }
+                                tr { td { "Mails" (own(q.mails.is_some())) } td.num { (thousands_of(eff.mails)) } td.num { (thousands_of(mails)) } td { (meter_of(Some(mails as f64), Some(eff.mails as f64))) } }
+                                tr { td { "Sources" (own(q.sources.is_some())) } td.num { (if eff.sources == 0 { "no limit".to_string() } else { eff.sources.to_string() }) } td.num { span.dim { "—" } } td {} }
+                                tr { td { "Shortest interval" (own(!q.every.is_empty())) } td.num { (if eff.every.is_empty() { "—".to_string() } else { eff.every.clone() }) } td.num { span.dim { "—" } } td {} }
+                                tr { td { "Spending limit beyond it" (own(q.cap.is_some())) } td.num { "€" (eff.cap) } td.num { @if c.free { span.dim { "not billed" } } @else { "€" (format!("{:.2}", so + ro + mo)) } } td { @if !c.free { (meter_of(Some(so + ro + mo), Some(eff.cap as f64))) } } }
+                            }
+                        }
+                        p.dim { "RAM and processor are the cell's process: " (if c.memory.is_empty() { "512M".to_string() } else { c.memory.clone() }) ", " (if c.cpu.is_empty() { "50%".to_string() } else { c.cpu.clone() }) ". Storage is the organisation on disk, counted once a day." }
                     }
                 }
                 section.admin-card {

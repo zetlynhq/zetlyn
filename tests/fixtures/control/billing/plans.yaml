@@ -1,0 +1,10 @@
+plans:
+  managed:
+    title: Zetlyn Managed
+    price: "19"
+    sources: 0
+    every: 5m
+    storage_gb: 2
+    reads: 25000
+    mails: 1000
+    cap: 50

@@ -137,7 +137,7 @@ fn every_admin_page_shows_what_it_is_for() {
     let pages: [(&str, &[&str]); 7] = [
         ("/account/admin/", &["Servers", "Bucket", "Cells", "acme", "pilot", "pilot on n1 is failed", "no new cells", "Left by removed cells", "gone"]),
         ("/account/admin/cell/acme", &["Acme Research", "Status", "Actions", "What it is", "What it may use", "Billing", "Snapshots", "Remove"]),
-        ("/account/admin/cell/pilot", &["Free until 2099-12-31", "value=\"5000\""]),
+        ("/account/admin/cell/pilot", &["Free until 2099-12-31", "value=\"5000\"", "Plan and usage", "Zetlyn Managed", "5,000", "25000 (plan)", "RAM", "Storage used"]),
         ("/account/admin/new", &["New cell", "name=\"owners\"", "name=\"billing\"", "type=\"file\""]),
         ("/account/admin/customers", &["Customers", "Held for a checkout", "Cancellations"]),
         ("/account/admin/activity", &["Activity", "Alarms"]),

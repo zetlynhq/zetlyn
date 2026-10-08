@@ -1166,7 +1166,7 @@ pub fn command(args: &[String]) -> Result<(), String> {
         // words it asked for, checked against what `node` takes, never a shell.
         Some("ssh") => {
             let asked = std::env::var("SSH_ORIGINAL_COMMAND").unwrap_or_default();
-            let words: Vec<String> = asked.split_whitespace().map(str::to_string).collect();
+            let words = ssh_words(&asked);
             let allowed = ["status", "ca", "sync", "create", "start", "stop", "restart", "snapshot", "restore", "remove", "terms", "limit", "version", "install", "logs", "key-check", "set", "import", "maintenance"];
             if words.first().map(String::as_str) != Some("node") || !words.get(1).is_some_and(|w| allowed.contains(&w.as_str())) {
                 return Err(format!("only `node <{}>` is taken here", allowed.join("|")));
@@ -1180,9 +1180,20 @@ pub fn command(args: &[String]) -> Result<(), String> {
     }
 }
 
+/// The words of a command that came over SSH, split at ASCII blanks only: a title crosses as one
+/// word, its spaces as no-break spaces, which Rust counts as whitespace too.
+fn ssh_words(asked: &str) -> Vec<String> {
+    asked.split(|c: char| c.is_ascii_whitespace()).filter(|w| !w.is_empty()).map(str::to_string).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_title_crosses_ssh_as_one_word() {
+        assert_eq!(ssh_words("node set acme --title Acme\u{a0}Research  --owner a@b.c"), vec!["node", "set", "acme", "--title", "Acme\u{a0}Research", "--owner", "a@b.c"]);
+    }
 
     #[test]
     fn a_snapshot_opens_with_its_key_and_not_when_cut_or_changed() {

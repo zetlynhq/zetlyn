@@ -2962,12 +2962,81 @@ table.account-usage { width: 100%; margin: .2rem 0 0; font-size: .9rem; }
 table.account-usage td { padding: .15rem .4rem .15rem 0; border: 0; }
 .billing-failed { margin: .3rem 0 0; padding: .55rem .7rem; font-size: .9rem; border-left: 3px solid var(--accent); background: var(--bg); }
 form.billing-open { margin: 0; }
-nav.admin-nav { display: flex; flex-wrap: wrap; gap: .4rem 1.2rem; margin: 1.5rem 0 .5rem; font-size: .92rem; }
-form.admin-form { max-width: 52rem; }
-form.admin-form label { display: flex; flex-direction: column; gap: .25rem; font-size: .9rem; margin: .4rem 0; }
-form.admin-form label.check { flex-direction: row; align-items: center; }
-.admin-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr)); gap: .2rem 1rem; }
-.admin-grid input, .admin-grid select { padding: .45rem .6rem; font: inherit; background: var(--panel); color: var(--fg); border: 1px solid var(--line); }
+/* The admin pages: cards, figures, quiet tables. */
+.admin-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 1rem; flex-wrap: wrap; margin: .4rem 0 1.4rem; }
+.admin-head h1 { margin: 0; font-size: 1.8rem; letter-spacing: -.02em; }
+.admin-sub { margin: .25rem 0 0; color: var(--dim); font-size: .92rem; }
+.admin-chips { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; }
+a.button { display: inline-flex; align-items: center; padding: .5rem .9rem; border: 1px solid var(--fg); color: var(--fg); text-decoration: none; font-size: .92rem; }
+a.button.primary { background: var(--fg); color: var(--bg); }
+a.button.primary:hover { background: var(--accent); border-color: var(--accent); }
+.admin-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: .75rem; margin: 0 0 1.5rem; }
+.admin-kpi { display: flex; flex-direction: column; gap: .15rem; padding: .85rem 1rem; background: var(--panel); border: 1px solid var(--line); border-top: 3px solid var(--line-strong); }
+.admin-kpi span { font-size: .78rem; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); }
+.admin-kpi strong { font-size: 1.6rem; font-weight: 600; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.admin-kpi small { color: var(--dim); font-size: .82rem; }
+.admin-kpi.ok { border-top-color: #2f9e5b; } .admin-kpi.bad { border-top-color: #d23c2a; } .admin-kpi.warn { border-top-color: #d4a017; }
+h2.admin-section { margin: 1.8rem 0 .7rem; font-size: .8rem; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); font-weight: 600; }
+.admin-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(19rem, 1fr)); gap: .9rem; margin: 0 0 .9rem; }
+.admin-cards.two { grid-template-columns: repeat(auto-fit, minmax(22rem, 1fr)); }
+.admin-card { background: var(--panel); border: 1px solid var(--line); padding: 1.05rem 1.2rem; margin: 0 0 .9rem; min-width: 0; }
+.admin-cards > .admin-card { margin: 0; }
+.admin-card h2, .admin-card h3, .admin-head h1, h2.admin-section { font-family: inherit; }
+.admin > h2, .admin form > h2 { margin: 1.6rem 0 .6rem; font-family: inherit; font-size: .8rem; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); font-weight: 600; }
+.admin > table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line); font-size: .9rem; margin: 0 0 1rem; }
+.admin > table th { text-align: left; font-size: .75rem; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); font-weight: 600; padding: .65rem .9rem; border-bottom: 1px solid var(--line); }
+.admin > table td { padding: .6rem .9rem; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.admin > table tr:last-child td { border-bottom: 0; }
+.admin > form:not(.admin-form) { background: var(--panel); border: 1px solid var(--line); padding: 1.05rem 1.2rem; margin: 0 0 1rem; max-width: 56rem; }
+.admin > form:not(.admin-form) input.wide, .admin > form:not(.admin-form) textarea.wide, .admin > form:not(.admin-form) select { flex: none; width: 100%; box-sizing: border-box; padding: .5rem .65rem; font: inherit; background: var(--bg); color: var(--fg); border: 1px solid var(--line); }
+.admin > form.admin-form { background: var(--panel); border: 1px solid var(--line); padding: 1.05rem 1.2rem; margin: 0 0 1rem; }
+.admin > .note { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--accent); padding: .7rem 1rem; }
+.admin-card h2 { margin: 0 0 .8rem; font-size: 1rem; font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--fg); }
+.admin-card h3 { margin: 0; font-size: 1.05rem; display: flex; align-items: center; gap: .5rem; }
+.admin-card.quiet { background: transparent; border-style: dashed; }
+.admin-card.flush { padding: 0; overflow-x: auto; }
+.admin-card.danger { border-color: #d23c2a; border-left-width: 3px; }
+.admin-card-head { display: flex; justify-content: space-between; align-items: center; gap: .8rem; margin: 0 0 .7rem; }
+.admin-card-head h2 { margin: 0; }
+.admin-card form { margin: 0; }
+dl.admin-kv { display: grid; grid-template-columns: 8.5rem minmax(0, 1fr); gap: .45rem .8rem; margin: 0 0 .9rem; font-size: .9rem; }
+dl.admin-kv dt { color: var(--dim); }
+dl.admin-kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+table.admin-table { width: 100%; border-collapse: collapse; font-size: .9rem; margin: 0; }
+table.admin-table th { text-align: left; font-size: .75rem; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); font-weight: 600; padding: .65rem .9rem; border-bottom: 1px solid var(--line); }
+table.admin-table td { padding: .6rem .9rem; border-bottom: 1px solid var(--line); vertical-align: middle; }
+table.admin-table tbody tr:last-child td { border-bottom: 0; }
+table.admin-table tbody tr:hover td { background: var(--wash); }
+.admin-card:not(.flush) table.admin-table th:first-child, .admin-card:not(.flush) table.admin-table td:first-child { padding-left: 0; }
+td.nowrap { white-space: nowrap; }
+.dot { display: inline-block; width: .55rem; height: .55rem; border-radius: 50%; background: var(--line-strong); margin-right: .45rem; vertical-align: .05em; flex: none; }
+.dot.ok { background: #2f9e5b; } .dot.warn { background: #d4a017; } .dot.bad { background: #d23c2a; }
+.status { display: inline-flex; align-items: center; font-size: .88rem; }
+.admin-meter { display: block; height: 4px; background: var(--chip); margin-top: .3rem; max-width: 14rem; }
+.admin-meter > span { display: block; height: 100%; background: #2f9e5b; }
+.admin-meter.warn > span { background: #d4a017; } .admin-meter.bad > span { background: #d23c2a; }
+.admin-alert { padding: .7rem 1rem; margin: 0 0 1rem; border: 1px solid var(--line); border-left: 3px solid var(--line-strong); background: var(--panel); display: flex; align-items: center; gap: .8rem; flex-wrap: wrap; font-size: .92rem; }
+.admin-alert.bad { border-left-color: #d23c2a; } .admin-alert.info { border-left-color: var(--accent); }
+.admin-alert form { margin: 0; }
+.admin-error { color: #d23c2a; font-size: .88rem; margin: 0 0 .6rem; }
+.admin-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: .4rem; font-size: .92rem; }
+.admin-actions { display: grid; grid-template-columns: 5rem minmax(0, 1fr); gap: .55rem .8rem; align-items: center; }
+.admin-label { font-size: .78rem; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); }
+.admin-actions .bar, .admin-card .bar { display: flex; flex-wrap: wrap; gap: .4rem; margin: 0; }
+.admin-card button, .admin-alert button { padding: .38rem .75rem; font-size: .88rem; }
+button.danger { border-color: #d23c2a; color: #d23c2a; background: transparent; }
+button.danger:hover { background: #d23c2a; color: #fff; }
+form.admin-form { display: flex; flex-direction: column; gap: .65rem; max-width: 56rem; }
+form.admin-form label { display: flex; flex-direction: column; gap: .3rem; font-size: .85rem; color: var(--dim); margin: 0; }
+form.admin-form label.check { flex-direction: row; align-items: center; gap: .45rem; color: var(--fg); }
+.admin-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr)); gap: .65rem .9rem; }
+form.admin-form input:not([type=checkbox]):not([type=hidden]), form.admin-form select, form.admin-form textarea, .admin-card input.short, .admin-card select { flex: none; width: 100%; box-sizing: border-box; padding: .5rem .65rem; font: inherit; font-size: .92rem; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 0; min-height: 0; height: auto; }
+.admin-card input.short { width: 9rem; } .admin-card .bar select { width: auto; }
+form.admin-form textarea { resize: vertical; }
+form.admin-form input:focus, form.admin-form select:focus, form.admin-form textarea:focus, .admin-card input.short:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.admin-submit { display: flex; align-items: center; gap: .8rem; }
+.admin-submit .dim { font-size: .85rem; }
+ (max-width: 720px) { .admin-actions { grid-template-columns: 1fr; } dl.admin-kv { grid-template-columns: 1fr; gap: .1rem; } dl.admin-kv dd { margin-bottom: .45rem; } }
 table.usage-meter { width: 100%; max-width: 44rem; margin: .4rem 0 .6rem; }
 table.usage-meter td { padding: .35rem .6rem .35rem 0; vertical-align: middle; }
 table.usage-meter td.num, td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
@@ -3388,6 +3457,8 @@ fn world_taken(dir: &Path, name: &str) -> Option<String> {
 /// The operator's pages on the main server, `/account/admin/…`: a status, a page, or (303) where to
 /// go after an action was asked for.
 fn admin(dir: &Path, rest: &[&str], post: bool, form: &BTreeMap<String, String>, by: &str) -> (u16, String) {
+    // Every admin page in one frame of its own, for its look.
+    let page = |t: &str, b: Markup| crate::app::page(t, html! { div.admin { (b) } });
     let r = match crate::ops::register(dir) {
         Ok(r) => r,
         Err(e) => return (500, page("Admin", html! { h1 { "Admin" } div.note { (e) } })),
@@ -3398,12 +3469,6 @@ fn admin(dir: &Path, rest: &[&str], post: bool, form: &BTreeMap<String, String>,
     let alarms: BTreeMap<String, J> = std::fs::read(crate::ops::ops_dir(dir).join("alarms.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
     let billing_dir = dir.join(BILLING);
     let billing = crate::billing::Book::read(&billing_dir).ok();
-    let nav = html! {
-        nav.admin-nav {
-            a href=(home) { "Overview" } a href={(home) "new"} { "New cell" } a href={(home) "customers"} { "Customers" }
-            a href={(home) "activity"} { "Activity" } a href={(home) "maintenance"} { "Maintenance" } a href={(home) "mail"} { "Mail" }
-        }
-    };
     // Stripe's dashboard, in test mode while the key is a test key.
     let stripe = if std::env::var("STRIPE_API_KEY").unwrap_or_default().contains("_test_") { "https://dashboard.stripe.com/test" } else { "https://dashboard.stripe.com" };
     let ask = |action: &str, target: &str, keys: &[&str], to: String| -> (u16, String) {
@@ -3483,8 +3548,8 @@ fn admin(dir: &Path, rest: &[&str], post: bool, form: &BTreeMap<String, String>,
             let now = crate::iso_stamp(crate::now());
             let field = |s: &str| s.get(..16).unwrap_or("").to_string();
             (200, page("Admin · Maintenance", html! {
-                (nav)
-                h1 { "Maintenance" }
+
+                header.admin-head { div { h1 { "Maintenance" } p.admin-sub { "A banner for everybody, and what stops while it is in force." } } }
                 @if let Some(n) = &n {
                     div.note {
                         strong { (n.state(&now).map(|s| if s == "active" { "In force" } else { "Announced" }).unwrap_or(if now >= n.until { "Over" } else { "Not yet announced" })) }
@@ -3535,8 +3600,8 @@ fn admin(dir: &Path, rest: &[&str], post: bool, form: &BTreeMap<String, String>,
         (false, ["mail"]) => {
             let log = crate::ops::log_lines(dir, "mail.jsonl", 50);
             (200, page("Admin · Mail", html! {
-                (nav)
-                h1 { "Write to customers" }
+
+                header.admin-head { div { h1 { "Mail" } p.admin-sub { "To one organisation's owner, or to every customer's." } } }
                 form method="post" action={(home) "mail"} {
                     p { label { "To" br; select name="to" {
                         option value="all" { "Every customer's owner" }
@@ -3557,9 +3622,8 @@ fn admin(dir: &Path, rest: &[&str], post: bool, form: &BTreeMap<String, String>,
             let (_, plans) = crate::billing::plans(&billing_dir).unwrap_or_default();
             let plan = plans.values().next().cloned().unwrap_or_default();
             (200, page("Admin · New cell", html! {
-                (nav)
-                h1 { "A new cell" }
-                p.dim { "For somebody who does not order at /order: a pilot, a partner, a gift. Billed cells come from orders." }
+
+                header.admin-head { div { h1 { "New cell" } p.admin-sub { "For somebody who does not order at /order: a pilot, a partner, a gift. Billed cells come from orders." } } }
                 form.admin-form #new-cell method="post" action={(home) "new"} {
                     h2 { "What it is" }
                     div.admin-grid {
@@ -3599,8 +3663,8 @@ fn admin(dir: &Path, rest: &[&str], post: bool, form: &BTreeMap<String, String>,
             let cancelled: Vec<J> = std::fs::read_to_string(billing_dir.join("cancellations.jsonl")).unwrap_or_default().lines().rev().take(100).filter_map(|l| serde_json::from_str(l).ok()).collect();
             let now = crate::now();
             (200, page("Admin · Customers", html! {
-                (nav)
-                h1 { "Customers" }
+
+                header.admin-head { div { h1 { "Customers" } p.admin-sub { "Everybody who ordered, what is held for a checkout, what was cancelled and agreed." } } }
                 table { thead { tr { th { "Organisation" } th { "Address" } th { "Plan" } th { "State" } th { "Paid until" } th { "Stripe" } } }
                     tbody { @for c in &all { tr {
                         td { @if r.cells.contains_key(&c.name) { a href=(cell_home(&c.name)) { strong { (c.name) } } } @else { strong { (c.name) } " " span.chip { "no cell" } } }
@@ -3631,8 +3695,8 @@ fn admin(dir: &Path, rest: &[&str], post: bool, form: &BTreeMap<String, String>,
             let done = crate::ops::log_lines(dir, "audit.jsonl", 200);
             let alarmed = crate::ops::log_lines(dir, "alarms.jsonl", 100);
             (200, page("Admin · Activity", html! {
-                (nav)
-                h1 { "Activity" }
+
+                header.admin-head { div { h1 { "Activity" } p.admin-sub { "What was done, by whom, and every alarm." } } }
                 table { thead { tr { th { "When" } th { "Who" } th { "What" } th { "Cell" } th { "" } } } tbody { @for l in &done { tr {
                     td.dim { (l["at"].as_str().unwrap_or("")) } td.dim { (l["by"].as_str().unwrap_or("")) } td { (l["what"].as_str().unwrap_or("")) }
                     td { (l["cell"].as_str().unwrap_or("")) } td.dim { (l["said"].as_str().unwrap_or("").chars().take(160).collect::<String>()) }
@@ -3658,117 +3722,153 @@ fn admin(dir: &Path, rest: &[&str], post: bool, form: &BTreeMap<String, String>,
             let u = crate::ops::usage_of(dir, cell);
             let consents: Vec<J> = std::fs::read_to_string(billing_dir.join("consents.jsonl")).unwrap_or_default().lines().filter_map(|l| serde_json::from_str::<J>(l).ok()).filter(|l| l["organisation"] == *cell).collect();
             let cancelled: Vec<J> = std::fs::read_to_string(billing_dir.join("cancellations.jsonl")).unwrap_or_default().lines().filter_map(|l| serde_json::from_str::<J>(l).ok()).filter(|l| l["world"] == *cell).collect();
-            let act = |a: &str, label: &str| html! { form.bar method="post" action={(cell_home(cell)) "/" (a)} { button type="submit" { (label) } } };
+            let act = |a: &str, label: &str| html! { form method="post" action={(cell_home(cell)) "/" (a)} { button type="submit" { (label) } } };
             let q = &c.quota;
             let opt = |v: Option<u64>| v.map(|v| v.to_string()).unwrap_or_default();
+            let (dot, state) = cell_health(&s);
+            let billed = if c.house { "House".to_string() } else if c.free { if c.free_until.is_empty() { "Free".to_string() } else { format!("Free until {}", c.free_until) } } else if let Some(cu) = &customer { format!("{} · {}", cu.plan, cu.state) } else { "Not billed".to_string() };
+            let field = |k: &str| s[k].as_str().unwrap_or("").to_string();
             (200, page(&format!("Admin · {cell}"), html! {
-                (nav)
-                h1 { (cell) " " span.dim { (c.title) } }
-                p.about { "on " (c.node) @if c.house { " · the house's" } @if c.free { " · free" @if !c.free_until.is_empty() { " until " (c.free_until) } } }
+                header.admin-head {
+                    div {
+                        h1 { (if c.title.is_empty() { cell.to_string() } else { c.title.clone() }) }
+                        p.admin-sub { span.mono { "zetlyn.com/" (cell) } " · " (c.owner) }
+                    }
+                    div.admin-chips {
+                        span.status { span.(format!("dot {dot}")) {} (state) }
+                        span.chip { (c.node) } span.chip { (field("version")) } span.chip { (billed) }
+                    }
+                }
                 @if !c.delete_on.is_empty() {
-                    div.note {
-                        @if c.keep { "Its contract ended; it would be deleted on " (c.delete_on) ", but is kept. " (act("unkeep", "Delete it on its day after all")) }
-                        @else { strong { "Deleted on " (c.delete_on) } ", 30 days after its contract ended. " (act("keep", "Keep it")) }
+                    div.admin-alert.(if c.keep { "info" } else { "bad" }) {
+                        @if c.keep { "Its contract ended; it is kept rather than deleted on " (c.delete_on) "." (act("unkeep", "Delete it on its day")) }
+                        @else { strong { "Deleted on " (c.delete_on) } ", 30 days after its contract ended." (act("keep", "Keep it")) }
                     }
                 }
-                @if !c.note.is_empty() { div.note { (c.note) } }
-                table { tbody {
-                    tr { th { "Running" } td { (s["active"].as_str().unwrap_or("?")) " (" (s["state"].as_str().unwrap_or("")) "), since " (s["since"].as_str().unwrap_or("")) ", restarts " (s["restarts"].as_str().unwrap_or("0")) } }
-                    tr { th { "Answers" } td { (s["answers"]) } }
-                    tr { th { "Version" } td { (s["version"].as_str().unwrap_or("")) } }
-                    tr { th { "Memory" } td { (mb(&s["memory"])) " of " (mb(&s["memory_max"])) } }
-                    tr { th { "On disk" } td { (mb(&s["bytes"])) } }
-                    tr { th { "Last reading" } td { (s["run_result"].as_str().unwrap_or("")) " · " (s["run_finished"].as_str().unwrap_or("")) } }
-                    tr { th { "Last snapshot" } td { (s["snapshot"].as_str().unwrap_or("none")) } }
-                    tr { th { "Terms" } td { code { (s["terms"].to_string()) } } }
-                } }
-                h2 { "Do" }
-                div.bar { (act("restart", "Restart")) (act("stop", "Stop")) (act("start", "Start")) (act("snapshot", "Snapshot now")) (act("suspend", "Suspend updates")) (act("resume", "Resume updates")) (act("logs", "Fetch logs")) }
-                form.bar method="post" action={(cell_home(cell)) "/move"} {
-                    select name="to" { @for n in r.nodes.keys().filter(|n| **n != c.node) { option value=(n) { (n) } } }
-                    button type="submit" { "Move there" }
-                }
-                form.bar method="post" action={(cell_home(cell)) "/upgrade"} {
-                    input type="text" name="version" placeholder=(env!("CARGO_PKG_VERSION")) required;
-                    button type="submit" { "Upgrade" }
-                }
-                h2 { "What it is" }
-                form.admin-form method="post" action={(cell_home(cell)) "/set"} {
-                    div.admin-grid {
-                        label { "Title" input type="text" name="title" value=(c.title); }
-                        label { "Domain of its own (empty: none)" input type="text" name="domain" value=(s["domain"].as_str().unwrap_or("")) placeholder="tracker.example.org"; }
-                    }
-                    label { "Owners, one to a line; the first gets the mails" textarea.wide name="owners" rows="3" { (if owners.is_empty() { c.owner.clone() } else { owners.join("\n") }) } }
-                    label { "Note" textarea.wide name="note" rows="2" { (c.note) } }
-                    p { button type="submit" { "Save" } }
-                }
-                h2 { "What it may use" }
-                form.admin-form method="post" action={(cell_home(cell)) "/limits"} {
-                    div.admin-grid {
-                        label { "Billing" select name="billing" {
-                            option value="plan" selected[!c.free] { "By its plan at Stripe" }
-                            option value="free" selected[c.free] { "Free, without Stripe" }
-                        } }
-                        label { "Free until" input type="date" name="free_until" value=(c.free_until); }
-                        label { "Memory" input type="text" name="memory" value=(c.memory) placeholder="512M"; }
-                        label { "Processor" input type="text" name="cpu" value=(c.cpu) placeholder="50%"; }
-                        label { "Storage, GB" input type="number" min="0" name="storage_gb" value=(opt(q.storage_gb)) placeholder="plan"; }
-                        label { "Source reads a month" input type="number" min="0" name="reads" value=(opt(q.reads)) placeholder="plan"; }
-                        label { "Mails a month" input type="number" min="0" name="mails" value=(opt(q.mails)) placeholder="plan"; }
-                        label { "Spending limit, €" input type="number" min="0" name="cap" value=(opt(q.cap)) placeholder="plan"; }
-                        label { "Sources (0 no limit)" input type="number" min="0" name="sources" value=(q.sources.map(|v| v.to_string()).unwrap_or_default()) placeholder="plan"; }
-                        label { "Shortest interval" input type="text" name="every" value=(q.every) placeholder="plan"; }
-                    }
-                    p { button type="submit" { "Save" } span.dim { " Empty is the plan's." } }
-                }
-                h2 { "Billing" }
-                @if c.house { p.dim { "The house's own, never billed." } }
-                @else if let Some(cu) = &customer {
-                    table { tbody {
-                        tr { th { "Plan" } td { (cu.plan) " · " (cu.state) " · paid until " (cu.paid_until.clone().unwrap_or_default()) } }
-                        tr { th { "Paid by" } td { (cu.email) } }
-                        tr { th { "Stripe" } td {
-                            @if let Some(id) = &cu.stripe_customer { a href={(stripe) "/customers/" (id)} rel="noopener" { "Customer" } }
-                            @if let Some(id) = &subscription { " · " a href={(stripe) "/subscriptions/" (id)} rel="noopener" { "Subscription" } }
-                        } }
-                        tr { th { "This month" } td { (thousands_of(u.reads)) " reads · " (thousands_of(u.mails)) " mails · " (u.mb_days) " MB-days" } }
-                        tr { th { "Last month" } td { (thousands_of(s["usage"]["previous_reads"].as_u64().unwrap_or(0))) " reads · " (thousands_of(s["usage"]["previous_mails"].as_u64().unwrap_or(0))) " mails" } }
-                    } }
-                    @for l in &consents { p.dim { "Agreed " (l["at"].as_str().unwrap_or("")) " by " (l["email"].as_str().unwrap_or("")) ": terms, start before the withdrawal period ends." } }
-                    @for l in &cancelled { p.dim { "Cancelled " (l["at"].as_str().unwrap_or("")) " by " (l["email"].as_str().unwrap_or("")) " (" (l["kind"].as_str().unwrap_or("")) ")" @if let Some(w) = l["reason"].as_str().filter(|w| !w.is_empty()) { ": " (w) } } }
-                } @else if c.free { p.dim { "Run free: this month " (thousands_of(u.reads)) " reads, " (thousands_of(u.mails)) " mails." } }
-                @else { p.dim { "No customer: neither billed nor run free; its terms are as they were set." } }
-                h2 { "Snapshots" }
-                (act("snapshots", "List them"))
-                @if !downloads.is_empty() { p { "Ready to download: " @for d in &downloads { a href={(home) "download/" (d)} { (d) } " " } } }
-                @if !snaps.is_empty() {
-                    table { thead { tr { th { "Stamp" } th { "Why" } th { "Size" } th {} th {} } } tbody { @for sn in &snaps {
-                        @let stamp = sn["stamp"].as_str().unwrap_or("");
-                        tr {
-                            td { (stamp) } td.dim { (sn["why"].as_str().unwrap_or("")) } td { (mb(&sn["bytes"])) }
-                            td { form.bar method="post" action={(cell_home(cell)) "/download"} { input type="hidden" name="stamp" value=(stamp); button type="submit" { "Open for download" } } }
-                            td { form.bar method="post" action={(cell_home(cell)) "/restore"} {
-                                input type="hidden" name="stamp" value=(stamp);
-                                input type="text" name="confirm" placeholder={"type " (cell)} required size="10";
-                                button type="submit" { "Restore" }
-                            } }
+                @if !c.note.is_empty() { div.admin-alert.info { (c.note) } }
+                div.admin-cards.two {
+                    section.admin-card {
+                        h2 { "Status" }
+                        dl.admin-kv {
+                            dt { "Running" } dd { (field("active")) @if !field("since").is_empty() { span.dim { " since " (field("since")) } } }
+                            dt { "Restarts" } dd { (s["restarts"].as_str().unwrap_or("0")) }
+                            dt { "Memory" } dd { (mb(&s["memory"])) " of " (mb(&s["memory_max"])) (meter_of(s["memory"].as_f64(), s["memory_max"].as_f64())) }
+                            dt { "On disk" } dd { (mb(&s["bytes"])) }
+                            dt { "Last reading" } dd { (if field("run_result").is_empty() { "—".to_string() } else { field("run_result") }) span.dim { " " (field("run_finished")) } }
+                            dt { "Last snapshot" } dd { (stamp_words(&field("snapshot"))) }
+                            dt { "Domain" } dd { (if field("domain").is_empty() { "—".to_string() } else { field("domain") }) }
                         }
-                    } } }
-                    p.dim { "A restore takes a snapshot of it as it is first. A download is the whole cell; the organisation is world/orgs/" (cell) "/ in it." }
+                    }
+                    section.admin-card {
+                        h2 { "Actions" }
+                        div.admin-actions {
+                            span.admin-label { "Process" } div.bar { (act("restart", "Restart")) (act("stop", "Stop")) (act("start", "Start")) }
+                            span.admin-label { "Updates" } div.bar { (act("suspend", "Suspend")) (act("resume", "Resume")) }
+                            span.admin-label { "Keep" } div.bar { (act("snapshot", "Snapshot now")) (act("logs", "Fetch logs")) }
+                            span.admin-label { "Move" }
+                            form.bar method="post" action={(cell_home(cell)) "/move"} {
+                                select name="to" { @for n in r.nodes.keys().filter(|n| **n != c.node) { option value=(n) { (n) } } }
+                                button type="submit" { "Move" }
+                            }
+                            span.admin-label { "Release" }
+                            form.bar method="post" action={(cell_home(cell)) "/upgrade"} {
+                                input.short type="text" name="version" placeholder=(env!("CARGO_PKG_VERSION")) required;
+                                button type="submit" { "Upgrade" }
+                            }
+                        }
+                    }
+                }
+                div.admin-cards.two {
+                    section.admin-card {
+                        h2 { "What it is" }
+                        form.admin-form method="post" action={(cell_home(cell)) "/set"} {
+                            label { "Title" input type="text" name="title" value=(c.title); }
+                            label { "Domain of its own" input type="text" name="domain" value=(field("domain")) placeholder="none"; }
+                            label { "Owners, one to a line; the first gets the mails" textarea name="owners" rows="3" { (if owners.is_empty() { c.owner.clone() } else { owners.join("\n") }) } }
+                            label { "Note, for these pages only" textarea name="note" rows="2" { (c.note) } }
+                            div.admin-submit { button.primary type="submit" { "Save" } }
+                        }
+                    }
+                    section.admin-card {
+                        h2 { "What it may use" }
+                        form.admin-form method="post" action={(cell_home(cell)) "/limits"} {
+                            div.admin-grid {
+                                label { "Billing" select name="billing" {
+                                    option value="plan" selected[!c.free] { "By its plan at Stripe" }
+                                    option value="free" selected[c.free] { "Free, without Stripe" }
+                                } }
+                                label { "Free until" input type="date" name="free_until" value=(c.free_until); }
+                                label { "Memory" input type="text" name="memory" value=(c.memory) placeholder="512M"; }
+                                label { "Processor" input type="text" name="cpu" value=(c.cpu) placeholder="50%"; }
+                                label { "Storage, GB" input type="number" min="0" name="storage_gb" value=(opt(q.storage_gb)) placeholder="plan"; }
+                                label { "Reads a month" input type="number" min="0" name="reads" value=(opt(q.reads)) placeholder="plan"; }
+                                label { "Mails a month" input type="number" min="0" name="mails" value=(opt(q.mails)) placeholder="plan"; }
+                                label { "Spending limit, €" input type="number" min="0" name="cap" value=(opt(q.cap)) placeholder="plan"; }
+                                label { "Sources" input type="number" min="0" name="sources" value=(q.sources.map(|v| v.to_string()).unwrap_or_default()) placeholder="plan"; }
+                                label { "Shortest interval" input type="text" name="every" value=(q.every) placeholder="plan"; }
+                            }
+                            div.admin-submit { button.primary type="submit" { "Save" } span.dim { "Empty is the plan's." } }
+                        }
+                    }
+                }
+                section.admin-card {
+                    h2 { "Billing" }
+                    @if c.house { p.dim { "The house's own, never billed." } }
+                    @else if let Some(cu) = &customer {
+                        dl.admin-kv {
+                            dt { "Plan" } dd { (cu.plan) " · " (cu.state) " · paid until " (cu.paid_until.clone().unwrap_or_default()) }
+                            dt { "Paid by" } dd { (cu.email) }
+                            dt { "Stripe" } dd {
+                                @if let Some(id) = &cu.stripe_customer { a href={(stripe) "/customers/" (id)} rel="noopener" { "Customer" } }
+                                @if let Some(id) = &subscription { " · " a href={(stripe) "/subscriptions/" (id)} rel="noopener" { "Subscription" } }
+                            }
+                            dt { "This month" } dd { (thousands_of(u.reads)) " reads · " (thousands_of(u.mails)) " mails · " (u.mb_days) " MB-days" }
+                            dt { "Last month" } dd { (thousands_of(s["usage"]["previous_reads"].as_u64().unwrap_or(0))) " reads · " (thousands_of(s["usage"]["previous_mails"].as_u64().unwrap_or(0))) " mails" }
+                            @for l in &consents { dt { "Agreed" } dd { (stamp_words(l["at"].as_str().unwrap_or(""))) " by " (l["email"].as_str().unwrap_or("")) } }
+                            @for l in &cancelled { dt { "Cancelled" } dd { (stamp_words(l["at"].as_str().unwrap_or(""))) " · " (l["kind"].as_str().unwrap_or("")) @if let Some(w) = l["reason"].as_str().filter(|w| !w.is_empty()) { ": " (w) } } }
+                        }
+                    } @else if c.free { p.dim { "Run free. This month " (thousands_of(u.reads)) " reads, " (thousands_of(u.mails)) " mails." } }
+                    @else { p.dim { "Neither billed nor run free: its terms stay as they were set." } }
+                }
+                section.admin-card {
+                    div.admin-card-head { h2 { "Snapshots" } (act("snapshots", "List them")) }
+                    @if !downloads.is_empty() { p { "Ready to download: " @for d in &downloads { a href={(home) "download/" (d)} { (d) } " " } } }
+                    @if snaps.is_empty() { p.dim { "Listed on request, from the bucket." } }
+                    @else {
+                        table.admin-table { thead { tr { th { "Taken" } th { "Why" } th.num { "Size" } th {} th {} } } tbody { @for sn in &snaps {
+                            @let stamp = sn["stamp"].as_str().unwrap_or("");
+                            tr {
+                                td { (stamp_words(stamp)) } td.dim { (sn["why"].as_str().unwrap_or("")) } td.num { (mb(&sn["bytes"])) }
+                                td { form method="post" action={(cell_home(cell)) "/download"} { input type="hidden" name="stamp" value=(stamp); button type="submit" { "Download" } } }
+                                td { form.bar method="post" action={(cell_home(cell)) "/restore"} {
+                                    input type="hidden" name="stamp" value=(stamp);
+                                    input.short type="text" name="confirm" placeholder={"type " (cell)} required;
+                                    button type="submit" { "Restore" }
+                                } }
+                            }
+                        } } }
+                        p.dim { "A restore takes a snapshot of it as it is first. A download is the whole cell; the organisation is world/orgs/" (cell) "/ in it." }
+                    }
+                }
+                section.admin-card {
+                    h2 { "Jobs" }
+                    @if jobs.is_empty() { p.dim { "None yet." } }
+                    table.admin-table { tbody { @for j in &jobs { tr {
+                        td.dim.nowrap { (stamp_words(j["at"].as_str().unwrap_or(""))) } td { (j["action"].as_str().unwrap_or("")) } td.dim { (j["by"].as_str().unwrap_or("")) }
+                        td { @if let Some(e) = j["error"].as_str() { span.status { span.dot.bad {} (e) } } @else if j["action"] == "snapshots" && j.get("said").is_some() { "listed" } @else if let Some(sd) = j["said"].as_str() { (sd.lines().next().unwrap_or("")) } @else { span.dim { "waiting" } } }
+                    } } } }
+                    @if let Some(l) = logs { details { summary { "Logs" } pre { (l) } } }
                 }
                 @if !c.house {
-                    h2 { "Remove" }
-                    form.bar method="post" action={(cell_home(cell)) "/remove"} {
-                        input type="text" name="confirm" placeholder={"type " (cell) " to remove it"} required;
-                        button type="submit" { "Remove" }
+                    section.admin-card.danger {
+                        h2 { "Remove" }
+                        p.dim { "A last snapshot stays in the bucket; the cell is gone from its server, the register and the routes." }
+                        form.bar method="post" action={(cell_home(cell)) "/remove"} {
+                            input.short type="text" name="confirm" placeholder={"type " (cell)} required;
+                            button.danger type="submit" { "Remove " (cell) }
+                        }
                     }
                 }
-                h2 { "Jobs" }
-                table { tbody { @for j in &jobs { tr {
-                    td.dim { (j["at"].as_str().unwrap_or("")) } td { (j["action"].as_str().unwrap_or("")) } td.dim { (j["by"].as_str().unwrap_or("")) }
-                    td { @if let Some(e) = j["error"].as_str() { span.chip.on { (e) } } @else if j["action"] == "snapshots" && j.get("said").is_some() { "listed" } @else if let Some(sd) = j["said"].as_str() { (sd.lines().next().unwrap_or("")) } @else { "waiting" } }
-                } } } }
-                @if let Some(l) = logs { h2 { "Logs" } pre { (l) } }
             }))
         }
         (false, []) => {
@@ -3778,74 +3878,95 @@ fn admin(dir: &Path, rest: &[&str], post: bool, form: &BTreeMap<String, String>,
             releases.sort_by_key(|v| crate::world::version(v));
             releases.reverse();
             let pending = crate::ops::jobs(dir, 50).into_iter().filter(|j| j.get("done").is_none()).count();
+            let statuses: Vec<(String, J)> = r.nodes.keys().map(|n| (n.clone(), crate::ops::last_status(dir, n))).collect();
+            let nodes_up = statuses.iter().filter(|(_, s)| s["error"].is_null() && !s.is_null()).count();
+            let cells_up = rows.iter().filter(|(_, _, s)| cell_health(s).0 == "ok").count();
             (200, page("Admin", html! {
-                (nav)
-                h1 { "Admin" }
-                @if alarms.is_empty() { p.dim { "Nothing is wrong." } } @else {
-                    h2 { "Wrong" }
-                    ul { @for (_, a) in &alarms { li { (a["text"].as_str().unwrap_or("")) span.dim { " · since " (a["since"].as_str().unwrap_or("")) } } } }
+                header.admin-head { div { h1 { "Admin" } p.admin-sub { "zetlyn.com, every server and cell" } } a.button.primary href={(home) "new"} { "New cell" } }
+                div.admin-kpis {
+                    div.admin-kpi.(if nodes_up == r.nodes.len() { "ok" } else { "bad" }) { span { "Servers" } strong { (nodes_up) " / " (r.nodes.len()) } small { "answering" } }
+                    div.admin-kpi.(if cells_up == rows.len() { "ok" } else { "bad" }) { span { "Cells" } strong { (cells_up) " / " (rows.len()) } small { "answering" } }
+                    div.admin-kpi.(if alarms.is_empty() { "ok" } else { "bad" }) { span { "Wrong now" } strong { (alarms.len()) } small { @if alarms.is_empty() { "all well" } @else { "mailed to the alarm address" } } }
+                    div.admin-kpi.(if notice.is_some() { "warn" } else { "ok" }) { span { "Maintenance" } strong { @if notice.is_some() { "planned" } @else { "none" } }
+                        small { @if let Some(n) = &notice { (crate::maintenance::when(&n.from)) } @else { a href={(home) "maintenance"} { "announce one" } } } }
+                    div.admin-kpi { span { "Jobs" } strong { (pending) } small { "waiting" } }
                 }
-                @if let Some(n) = &notice { div.note { a href={(home) "maintenance"} { "Maintenance" } ": " (n.mode) ", " (crate::maintenance::when(&n.from)) " to " (crate::maintenance::when(&n.until)) } }
-                @if pending > 0 { p.dim { (pending) " jobs waiting." } }
-                h2 { "Servers" }
-                table { thead { tr { th { "Server" } th { "Address" } th { "Release" } th { "Cells" } th { "Memory free" } th { "Disk free" } th { "Load" } th { "Heard" } th {} } }
-                    tbody { @for (name, n) in &r.nodes {
-                        @let s = crate::ops::last_status(dir, name);
-                        tr {
-                            td { strong { (name) } @if n.draining { " " span.chip { "no new cells" } } }
-                            td.dim { (n.host) }
-                            td { (s["current"].as_str().or(s["zetlyn"].as_str()).unwrap_or("")) }
-                            td { (s["cells"].as_array().map_or(0, Vec::len)) }
-                            td { (mb(&s["memory_available"])) " of " (mb(&s["memory_total"])) }
-                            td { (mb(&s["disk_free"])) }
-                            td { (s["load"].as_str().unwrap_or("")) }
-                            td { @if let Some(e) = s["error"].as_str() { span.chip.on { (e) } } @else { (s["at"].as_str().unwrap_or("never")) } }
-                            td { form.bar method="post" action={(home) "node/" (name) "/" (if n.draining { "undrain" } else { "drain" })} {
-                                button type="submit" { (if n.draining { "Take new cells" } else { "No new cells" }) }
-                            } }
-                        }
-                    } }
-                }
-                details {
-                    summary { "A new server" }
-                    p.dim { "First, from the laptop: " code { "DRY=0 NODE=root@<address> NAME=n3 sh deploy/node-setup.sh" } " in zetlyn-ops. Then here:" }
-                    form.bar method="post" action={(home) "nodes"} {
-                        input type="text" name="name" placeholder="n3" pattern="[a-z0-9-]+" required size="6";
-                        input type="text" name="host" placeholder="address" required;
-                        button type="submit" { "Add it" }
+                @if !alarms.is_empty() {
+                    section.admin-card.danger {
+                        h2 { "Wrong now" }
+                        ul.admin-list { @for (_, a) in &alarms { li { span.dot.bad {} (a["text"].as_str().unwrap_or("")) span.dim { " · since " (stamp_words(a["since"].as_str().unwrap_or(""))) } } } }
                     }
                 }
-                details {
-                    summary { "Releases" }
+                h2.admin-section { "Servers" }
+                div.admin-cards {
+                    @for (name, s) in &statuses {
+                        @let n = &r.nodes[name];
+                        @let down = s["error"].as_str();
+                        @let mem_used = s["memory_total"].as_f64().zip(s["memory_available"].as_f64()).map(|(t, a)| t - a);
+                        @let disk_used = s["disk_size"].as_f64().zip(s["disk_free"].as_f64()).map(|(t, f)| t - f);
+                        section.admin-card {
+                            div.admin-card-head {
+                                h3 { span.(if down.is_some() { "dot bad" } else { "dot ok" }) {} (name) }
+                                span.dim.mono { (n.host) }
+                            }
+                            @if let Some(e) = down { p.admin-error { (e) } }
+                            dl.admin-kv {
+                                dt { "Release" } dd { (s["current"].as_str().or(s["zetlyn"].as_str()).unwrap_or("—")) }
+                                dt { "Cells" } dd { (s["cells"].as_array().map_or(0, Vec::len)) @if n.draining { " " span.chip { "no new cells" } } }
+                                dt { "Memory" } dd { (mb(&json!(mem_used))) " of " (mb(&s["memory_total"])) (meter_of(mem_used, s["memory_total"].as_f64())) }
+                                dt { "Disk" } dd { (gb(disk_used)) " of " (gb(s["disk_size"].as_f64())) (meter_of(disk_used, s["disk_size"].as_f64())) }
+                                dt { "Load" } dd { (s["load"].as_str().unwrap_or("—")) }
+                                dt { "Heard" } dd { (stamp_words(s["at"].as_str().unwrap_or(""))) }
+                            }
+                            form method="post" action={(home) "node/" (name) "/" (if n.draining { "undrain" } else { "drain" })} {
+                                button type="submit" { (if n.draining { "Take new cells again" } else { "Take no new cells" }) }
+                            }
+                        }
+                    }
+                    section.admin-card.quiet {
+                        h3 { "A new server" }
+                        p.dim { "First, from the laptop in zetlyn-ops: " code { "DRY=0 NODE=root@<address> NAME=n3 sh deploy/node-setup.sh" } }
+                        form.admin-form method="post" action={(home) "nodes"} {
+                            div.admin-grid {
+                                label { "Name" input type="text" name="name" placeholder="n3" pattern="[a-z0-9-]+" required; }
+                                label { "Address" input type="text" name="host" placeholder="203.0.113.7" required; }
+                            }
+                            div.admin-submit { button type="submit" { "Add it" } }
+                        }
+                    }
+                }
+                h2.admin-section { "Cells" }
+                section.admin-card.flush {
+                    table.admin-table {
+                        thead { tr { th { "Cell" } th { "Owner" } th { "Server" } th { "Release" } th.num { "Memory" } th { "Snapshot" } th { "Billing" } } }
+                        tbody { @for (name, c, s) in &rows {
+                            @let (dot, state) = cell_health(s);
+                            tr {
+                                td { span.(format!("dot {dot}")) title=(state) {} a href=(cell_home(name)) { strong { (name) } } div.why { (c.title) } }
+                                td.dim { (c.owner) }
+                                td { (c.node) }
+                                td { (s["version"].as_str().unwrap_or("—")) }
+                                td.num { (mb(&s["memory"])) }
+                                td.dim.nowrap { (stamp_words(s["snapshot"].as_str().unwrap_or(""))) }
+                                td {
+                                    @if c.house { span.chip { "house" } }
+                                    @else if c.free { span.chip { "free" @if !c.free_until.is_empty() { " until " (c.free_until) } } }
+                                    @else if let Some(cu) = billing.as_ref().and_then(|b| b.get(name)) { span.chip.(if cu.state == "active" { "" } else { "on" }) { (cu.state) } " " span.dim { (cu.paid_until.clone().unwrap_or_default()) } }
+                                    @else { span.dim { "—" } }
+                                    @if !c.delete_on.is_empty() && !c.keep { " " span.chip.on { "deleted " (c.delete_on) } }
+                                }
+                            }
+                        } }
+                    }
+                }
+                section.admin-card.quiet {
+                    h3 { "Releases" }
                     p.dim { "On the main server: " (releases.join(", ")) ". A new one comes with " code { "deploy/release.sh" } "." }
                     form.bar method="post" action={(home) "upgrade-all"} {
                         select name="version" { @for v in &releases { option value=(v) { (v) } } }
                         button type="submit" { "Every cell onto it" }
                     }
                 }
-                h2 { "Cells" }
-                table { thead { tr { th { "Cell" } th { "Owner" } th { "Server" } th { "Running" } th { "Answers" } th { "Version" } th { "Memory" } th { "Snapshot" } th { "Paid" } } }
-                    tbody { @for (name, c, s) in &rows {
-                        tr {
-                            td { a href=(cell_home(name)) { strong { (name) } } div.why { (c.title) } }
-                            td.dim { (c.owner) }
-                            td { (c.node) }
-                            td { (s["active"].as_str().unwrap_or("?")) }
-                            td { (s["answers"]) }
-                            td { (s["version"].as_str().unwrap_or("")) }
-                            td { (mb(&s["memory"])) }
-                            td.dim { (s["snapshot"].as_str().unwrap_or("none")) }
-                            td {
-                                @if c.house { "house" }
-                                @else if c.free { "free" @if !c.free_until.is_empty() { " until " (c.free_until) } }
-                                @else if let Some(cu) = billing.as_ref().and_then(|b| b.get(name)) { (cu.state) " · " (cu.paid_until.clone().unwrap_or_default()) }
-                                @else { "—" }
-                                @if !c.delete_on.is_empty() && !c.keep { " " span.chip.on { "deleted " (c.delete_on) } }
-                            }
-                        }
-                    } }
-                }
-                p { a.chip href={(home) "new"} { "A new cell" } }
             }))
         }
         _ => (404, page("Admin", html! { h1 { "Not here" } })),
@@ -4772,6 +4893,12 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                 let _ = std::io::Read::read_to_string(&mut std::io::Read::take(request.as_reader(), 256 << 10), &mut body);
                 form = parse_form(&body);
             }
+            // The admin's parts in the sidebar, the one asked for marked.
+            let sections = [("Overview", ""), ("New cell", "new"), ("Customers", "customers"), ("Activity", "activity"), ("Maintenance", "maintenance"), ("Mail", "mail")];
+            let here = sections.iter().find(|(_, p)| rest.first().copied().unwrap_or("") == *p || (*p == "" && rest.first() == Some(&"cell"))).map(|(l, _)| l.to_string());
+            serve::frame_home("Account", &serve::at("/"), sections.iter().map(|(l, p)| (l.to_string(), serve::at(&format!("/admin/{p}")))).collect());
+            serve::frame_side("Admin");
+            serve::frame_current(here);
             let (status, html) = admin(dir, rest, post, &form, &by);
             match status {
                 303 => redirect(request, &html),
@@ -5703,5 +5830,46 @@ fn republish_words(r: &str) -> &'static str {
         "yes" => "shown in full on public pages",
         "summary" => "titles, values and a link on public pages",
         _ => "not shown on public pages",
+    }
+}
+
+/// A cell's health from its server's word: `ok`, `warn` or `bad`, and why.
+fn cell_health(s: &J) -> (&'static str, String) {
+    if s.is_null() {
+        return ("bad", "no word from its server".into());
+    }
+    let answers = s["answers"].as_u64().unwrap_or(0);
+    match (s["active"].as_str().unwrap_or(""), answers) {
+        ("active", 200..=399) if s["run_result"].as_str().is_some_and(|r| !r.is_empty() && r != "success") => ("warn", format!("answers {answers}, last reading {}", s["run_result"].as_str().unwrap_or(""))),
+        ("active", 200..=399) => ("ok", format!("answers {answers}")),
+        (a, n) => ("bad", format!("{a}, answers {n}")),
+    }
+}
+
+/// `20261008T080917Z` or `2026-10-08T08:09:17Z` as `8 Oct 08:09`.
+fn stamp_words(s: &str) -> String {
+    let d: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
+    if d.len() < 12 {
+        return if s.is_empty() { "—".into() } else { s.to_string() };
+    }
+    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let m: usize = d[4..6].parse().unwrap_or(1);
+    let day: u32 = d[6..8].parse().unwrap_or(1);
+    format!("{day} {} {}:{}", MONTHS.get(m.wrapping_sub(1)).unwrap_or(&""), &d[8..10], &d[10..12])
+}
+
+/// Bytes as gigabytes, one decimal.
+fn gb(b: Option<f64>) -> String {
+    b.map(|x| format!("{:.1} GB", x / 1_073_741_824.0)).unwrap_or_else(|| "—".into())
+}
+
+/// A thin bar of how much of something is used, red past 90 %.
+fn meter_of(used: Option<f64>, of: Option<f64>) -> Markup {
+    match used.zip(of).filter(|(_, o)| *o > 0.0) {
+        Some((u, o)) => {
+            let p = (u / o * 100.0).clamp(0.0, 100.0);
+            html! { span.admin-meter.(if p > 90.0 { "bad" } else if p > 75.0 { "warn" } else { "ok" }) { span style={"width:" (format!("{p:.0}")) "%"} {} } }
+        }
+        None => html! {},
     }
 }

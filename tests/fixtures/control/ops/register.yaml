@@ -1,0 +1,25 @@
+alarm: ""
+nodes:
+  n1:
+    host: "203.0.113.1"
+  n2:
+    host: "203.0.113.2"
+    draining: true
+cells:
+  acme:
+    node: n1
+    owner: anna@acme.example
+    title: Acme Research
+  pilot:
+    node: n1
+    owner: piet@pilot.example
+    title: Pilot
+    free: true
+    free_until: "2099-12-31"
+    quota:
+      reads: 5000
+  house:
+    node: n2
+    owner: op@example.org
+    title: House
+    house: true

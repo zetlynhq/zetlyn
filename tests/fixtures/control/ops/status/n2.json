@@ -1,0 +1,1 @@
+{"node":"n2","at":"2026-10-08T08:20:02Z","current":"0.3.80","disk_free":30000000000,"disk_size":80000000000,"memory_total":8000000000,"memory_available":5100000000,"load":"0.21","cells":[{"name":"house","state":"running","active":"active","version":"0.3.80","answers":200,"memory":740000000,"memory_max":2147483648,"bytes":2400000000,"snapshot":"20261008T080923Z","usage":{}}]}

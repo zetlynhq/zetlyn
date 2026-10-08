@@ -526,6 +526,13 @@ impl Place for S3 {
     }
     /// ListObjectsV2, a thousand keys a page, following the continuation until there is none.
     fn list(&self, prefix: &str) -> Result<Vec<String>, String> {
+        Ok(self.list_sized(prefix)?.into_iter().map(|(k, _, _)| k).collect())
+    }
+}
+
+impl S3 {
+    /// Every key under a prefix with its size and when it was last written.
+    pub fn list_sized(&self, prefix: &str) -> Result<Vec<(String, u64, String)>, String> {
         let full = self.key_for(prefix);
         let strip = if self.prefix.is_empty() { String::new() } else { format!("{}/", self.prefix) };
         let mut out = Vec::new();
@@ -544,9 +551,11 @@ impl Place for S3 {
             }
             let mut response = request.call().map_err(|e| format!("{url}: {e}"))?;
             let body = response.body_mut().read_to_string().map_err(|e| format!("{url}: {e}"))?;
-            for key in between(&body, "<Key>", "</Key>") {
-                let key = unescape(&key);
-                out.push(key.strip_prefix(&strip).unwrap_or(&key).to_string());
+            for item in between(&body, "<Contents>", "</Contents>") {
+                let Some(key) = between(&item, "<Key>", "</Key>").into_iter().next().map(|k| unescape(&k)) else { continue };
+                let size = between(&item, "<Size>", "</Size>").into_iter().next().and_then(|s| s.parse().ok()).unwrap_or(0);
+                let at = between(&item, "<LastModified>", "</LastModified>").into_iter().next().unwrap_or_default();
+                out.push((key.strip_prefix(&strip).unwrap_or(&key).to_string(), size, at));
             }
             token = between(&body, "<NextContinuationToken>", "</NextContinuationToken>").into_iter().next().map(|t| unescape(&t));
             if !body.contains("<IsTruncated>true</IsTruncated>") || token.is_none() {

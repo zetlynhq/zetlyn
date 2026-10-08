@@ -1165,6 +1165,28 @@ pub fn hub_file(root: &Path, rest: &[String], prefix: &str) -> Option<(Vec<u8>, 
 mod tests {
     use super::*;
 
+    #[test]
+    fn an_export_is_checked_before_it_replaces_a_hosted_world() {
+        let base = std::env::temp_dir().join(format!("zetlyn-hostedimport-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let ws = base.join("ws");
+        std::fs::create_dir_all(ws.join("sources")).unwrap();
+        std::fs::write(ws.join(crate::account::WORKSPACE), "title: Mine\nurl: http://localhost:2500\n").unwrap();
+        std::fs::write(ws.join("sources").join("note.txt"), "kept").unwrap();
+        let file = base.join("w.tar.gz");
+        export(&ws, &file).unwrap();
+        assert!(check_export(&file).unwrap() >= 2);
+        let to = base.join("orgs").join("mine");
+        import_hosted(&file, &to).unwrap();
+        let text = std::fs::read_to_string(to.join(crate::account::WORKSPACE)).unwrap();
+        assert!(text.contains("Mine") && !text.contains("url:"), "{text}");
+        assert_eq!(std::fs::read_to_string(to.join("sources").join("note.txt")).unwrap(), "kept");
+        // Anything else is refused before anything is touched.
+        std::fs::write(base.join("not.tar.gz"), b"not an archive").unwrap();
+        assert!(check_export(&base.join("not.tar.gz")).is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     fn wanted() -> Wanted {
         let args: Vec<String> = ["world", "up", "prices.example", "--owner", "Ann@Example.org", "--smtp", "smtp.example:465", "--smtp-user", "ann", "--title", "Car prices"].iter().map(|s| s.to_string()).collect();
         Wanted::from_args(&args, "prices.example").unwrap()

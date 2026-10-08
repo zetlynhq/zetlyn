@@ -287,6 +287,9 @@ pub fn poll(control: &Path) -> Result<(), String> {
     if last_backup(control) < late {
         problems.insert("control:backup".into(), format!("the main server's own has no backup since {}", if last_backup(control).is_empty() { "ever".to_string() } else { last_backup(control) }));
     }
+    if let Some(e) = s3_check(control, &r) {
+        problems.insert("control:s3".into(), e);
+    }
     alarms(control, &r, mute(control, &r, problems));
     push_maintenance(control, &r);
     if let Err(e) = routes(control) {
@@ -580,6 +583,11 @@ pub fn enforce_terms(control: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The day a cell whose contract ended is deleted: 30 days past what was paid for.
+pub fn delete_day(paid_until: &str) -> Option<String> {
+    crate::thingstore::days(paid_until).map(|d| crate::iso_date((d + 30) * 86_400))
+}
+
 /// A contract ended: its cell stays 30 days past what was paid for its owner to take it away, as
 /// the terms say, and is then deleted, unless the operator keeps it. The owner is told the day once.
 pub fn expire(control: &Path) -> Result<(), String> {
@@ -602,8 +610,8 @@ pub fn expire(control: &Path) -> Result<(), String> {
             continue;
         }
         if c.delete_on.is_empty() {
-            let Some(d) = crate::thingstore::days(&until) else { continue };
-            c.delete_on = crate::iso_date((d + 30) * 86_400);
+            let Some(day) = delete_day(&until) else { continue };
+            c.delete_on = day;
             changed = true;
             audit(control, "ops", "deletion planned", cell, &c.delete_on);
             tell.push((cell.clone(), c.owner.clone(), c.delete_on.clone()));
@@ -834,6 +842,89 @@ pub fn upgrade(control: &Path, cell: &str, version: &str) -> Result<String, Stri
         on(n, &["version", cell, &before], None)?;
     }
     Err(format!("{cell} did not answer on {version}; back on {before}"))
+}
+
+// -- the bucket ---------------------------------------------------------------------------------
+
+/// The bucket as the admin pages show it, looked at every ten minutes: whether it answers and how
+/// fast, what it holds by top-level folder, each cell's snapshots, the main server's backups, and
+/// snapshots of cells no longer registered. `ops/s3.json`. What went wrong, for the alarms.
+fn s3_check(control: &Path, r: &Register) -> Option<String> {
+    let path = ops_dir(control).join("s3.json");
+    let last: J = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    if crate::now() - last["checked"].as_i64().unwrap_or(0) < 600 {
+        return last["error"].as_str().map(str::to_string);
+    }
+    let started = std::time::Instant::now();
+    let listed = control_bucket().and_then(|s3| s3.list_sized(""));
+    let ms = started.elapsed().as_millis() as u64;
+    let out = match listed {
+        Err(e) => json!({ "checked": crate::now(), "at": crate::iso_stamp(crate::now()), "ok": false, "error": e, "ms": ms }),
+        Ok(all) => {
+            let mut folders: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+            let mut cells: BTreeMap<String, J> = BTreeMap::new();
+            let (mut control_n, mut control_latest) = (0u64, String::new());
+            for (key, size, _) in &all {
+                let top = key.split('/').next().unwrap_or("").to_string();
+                let f = folders.entry(top).or_default();
+                f.0 += 1;
+                f.1 += size;
+                let parts: Vec<&str> = key.split('/').collect();
+                if let ["cells", cell, "snapshots", file] = parts.as_slice() {
+                    if let Some(stamp) = file.strip_suffix(".zcell") {
+                        let e = cells.entry(cell.to_string()).or_insert_with(|| json!({ "snapshots": 0, "bytes": 0, "latest": "" }));
+                        e["snapshots"] = json!(e["snapshots"].as_u64().unwrap_or(0) + 1);
+                        e["bytes"] = json!(e["bytes"].as_u64().unwrap_or(0) + size);
+                        if stamp > e["latest"].as_str().unwrap_or("") {
+                            e["latest"] = json!(stamp);
+                        }
+                    }
+                }
+                if let ["control", "snapshots", file] = parts.as_slice() {
+                    if let Some(stamp) = file.strip_suffix(".zcell") {
+                        control_n += 1;
+                        if stamp > control_latest.as_str() {
+                            control_latest = stamp.to_string();
+                        }
+                    }
+                }
+            }
+            let orphans: Vec<&String> = cells.keys().filter(|c| !r.cells.contains_key(*c)).collect();
+            json!({
+                "checked": crate::now(), "at": crate::iso_stamp(crate::now()), "ok": true, "ms": ms,
+                "objects": all.len(), "bytes": all.iter().map(|(_, s, _)| s).sum::<u64>(),
+                "folders": folders.iter().map(|(k, (n, b))| (k.clone(), json!({ "objects": n, "bytes": b }))).collect::<serde_json::Map<_, _>>(),
+                "cells": cells, "orphans": orphans,
+                "control": { "backups": control_n, "latest": control_latest },
+            })
+        }
+    };
+    let _ = std::fs::write(&path, serde_json::to_vec_pretty(&out).unwrap_or_default());
+    out["error"].as_str().map(|e| format!("the bucket does not answer: {e}"))
+}
+
+/// What the last look at the bucket found.
+pub fn s3_status(control: &Path) -> J {
+    std::fs::read(ops_dir(control).join("s3.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(J::Null)
+}
+
+/// A removed cell's snapshots gone from the bucket too, for good. Only for a cell the register no
+/// longer holds, and only when its name is typed again.
+pub fn purge(control: &Path, cell: &str, confirm: &str) -> Result<String, String> {
+    if confirm != cell {
+        return Err(format!("{cell}: not purged, its name was not typed to confirm"));
+    }
+    if register(control)?.cells.contains_key(cell) {
+        return Err(format!("{cell} is still registered; remove it first"));
+    }
+    use crate::place::Place;
+    let s3 = control_bucket()?;
+    let keys = s3.list(&format!("cells/{cell}/"))?;
+    for k in &keys {
+        s3.delete(k)?;
+    }
+    let _ = std::fs::remove_file(ops_dir(control).join("s3.json"));
+    Ok(format!("{cell}: {} objects gone from the bucket", keys.len()))
 }
 
 // -- snapshots, from the admin pages ------------------------------------------------------------
@@ -1114,9 +1205,9 @@ fn mute(control: &Path, r: &Register, problems: BTreeMap<String, String>) -> BTr
 
 // -- jobs, from the admin pages -----------------------------------------------------------------
 
-pub const ACTIONS: [&str; 22] = [
+pub const ACTIONS: [&str; 23] = [
     "start", "stop", "restart", "snapshot", "move", "upgrade", "suspend", "resume", "logs", "create", "remove", "set", "limits", "snapshots", "restore", "download",
-    "keep", "unkeep", "node-add", "drain", "undrain", "upgrade-all",
+    "keep", "unkeep", "node-add", "drain", "undrain", "upgrade-all", "purge",
 ];
 
 /// A job for the root side, written by the admin pages. Its id.
@@ -1235,6 +1326,7 @@ pub fn work(control: &Path) {
                     Ok(format!("{cell}: {}", if a == "keep" { "kept, not deleted" } else { "deleted on its day again" }))
                 }
                 "node-add" => node_add(control, &cell, &arg("host")),
+                "purge" => purge(control, &cell, &arg("confirm")),
                 "drain" => drain(control, &cell, true),
                 "undrain" => drain(control, &cell, false),
                 "upgrade-all" => {
@@ -1289,7 +1381,7 @@ pub fn work(control: &Path) {
 
 pub const USAGE: &str = "zetlyn ops [--control <dir>] cells | nodes | poll | work | routes | terms | backup | restore-control [<stamp>|latest] --to <dir> \
 | create <cell> --title … --owner … [--node n] [--house] | move <cell> --to <node> | remove <cell> | upgrade <cell> --to <v> | upgrade --all --to <v> \
-| release <v> [--current] | start|stop|restart|snapshot|logs <cell> | node-add <name> --host <address> | drain <node> [--off]";
+| release <v> [--current] | start|stop|restart|snapshot|logs <cell> | node-add <name> --host <address> | drain <node> [--off] | purge <cell> --confirm <cell>";
 
 pub fn command(args: &[String]) -> Result<(), String> {
     let control = PathBuf::from(crate::flag(args, "--control").unwrap_or(CONTROL));
@@ -1381,6 +1473,11 @@ pub fn command(args: &[String]) -> Result<(), String> {
             save_register(&control, &r)?;
             poll_one(&control, &name)?;
             println!("{name} at {host} joined");
+            Ok(())
+        }
+        Some("purge") => {
+            let cell = rest.first().ok_or("which cell?")?;
+            println!("{}", purge(&control, cell, flag("--confirm").unwrap_or(""))?);
             Ok(())
         }
         Some("drain") => {
@@ -1494,6 +1591,44 @@ fn last_backup(control: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cells_own_numbers_go_over_its_plans_and_only_those() {
+        let plan = crate::billing::Plan { storage_gb: 2, reads: 25_000, mails: 1_000, cap: 50, every: "5m".into(), ..Default::default() };
+        let q = Quota { reads: Some(5_000), cap: Some(0), ..Default::default() };
+        let p = q.over(&plan);
+        assert_eq!((p.storage_gb, p.reads, p.mails, p.cap, p.every.as_str()), (2, 5_000, 1_000, 0, "5m"));
+        assert!(Quota::default().is_empty() && !q.is_empty());
+    }
+
+    #[test]
+    fn a_cell_is_deleted_thirty_days_after_what_was_paid() {
+        assert_eq!(delete_day("2026-10-31").as_deref(), Some("2026-11-30"));
+        assert_eq!(delete_day("2026-12-15").as_deref(), Some("2027-01-14"));
+        assert_eq!(delete_day("soon"), None);
+    }
+
+    #[test]
+    fn maintenance_silences_the_alarms_of_what_it_covers_only() {
+        let control = std::env::temp_dir().join(format!("zetlyn-mute-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&control);
+        std::fs::create_dir_all(ops_dir(&control)).unwrap();
+        let mut r = Register::default();
+        r.cells.insert("acme".into(), CellEntry { node: "n1".into(), ..Default::default() });
+        r.cells.insert("other".into(), CellEntry { node: "n2".into(), ..Default::default() });
+        let problems: BTreeMap<String, String> = [("node:n1:disk", "full"), ("node:n2", "down"), ("cell:acme:down", "down"), ("cell:other:down", "down"), ("control:s3", "gone")].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        // No notice: everything is said.
+        assert_eq!(mute(&control, &r, problems.clone()).len(), 5);
+        let notice = crate::maintenance::Notice { target: "node:n1".into(), announce_from: "2000-01-01T00:00:00Z".into(), from: "2000-01-01T00:00:00Z".into(), until: "2999-01-01T00:00:00Z".into(), ..Default::default() };
+        std::fs::write(maintenance_path(&control), serde_json::to_vec(&notice).unwrap()).unwrap();
+        let left: Vec<String> = mute(&control, &r, problems.clone()).into_keys().collect();
+        assert_eq!(left, vec!["cell:other:down", "control:s3", "node:n2"]);
+        // Everything under maintenance: nothing is said.
+        let all = crate::maintenance::Notice { target: "all".into(), ..notice };
+        std::fs::write(maintenance_path(&control), serde_json::to_vec(&all).unwrap()).unwrap();
+        assert!(mute(&control, &r, problems).is_empty());
+        let _ = std::fs::remove_dir_all(&control);
+    }
 
     #[test]
     fn usage_beyond_the_plan_costs_what_the_page_says() {

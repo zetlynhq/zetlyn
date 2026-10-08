@@ -2970,7 +2970,7 @@ form.billing-open { margin: 0; }
 a.button { display: inline-flex; align-items: center; padding: .5rem .9rem; border: 1px solid var(--fg); color: var(--fg); text-decoration: none; font-size: .92rem; }
 a.button.primary { background: var(--fg); color: var(--bg); }
 a.button.primary:hover { background: var(--accent); border-color: var(--accent); }
-.admin-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: .75rem; margin: 0 0 1.5rem; }
+.admin-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr)); gap: .75rem; margin: 0 0 1.5rem; }
 .admin-kpi { display: flex; flex-direction: column; gap: .15rem; padding: .85rem 1rem; background: var(--panel); border: 1px solid var(--line); border-top: 3px solid var(--line-strong); }
 .admin-kpi span { font-size: .78rem; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); }
 .admin-kpi strong { font-size: 1.6rem; font-weight: 600; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
@@ -3499,6 +3499,7 @@ fn admin(dir: &Path, rest: &[&str], post: bool, form: &BTreeMap<String, String>,
             ask("node-add", &name, &["host"], home.clone())
         }
         (true, ["upgrade-all"]) => ask("upgrade-all", "all", &["version"], home.clone()),
+        (true, ["purge", cell]) => ask("purge", cell, &["confirm"], home.clone()),
         (true, ["maintenance"]) => {
             let path = crate::ops::maintenance_path(dir);
             if form.get("clear").is_some() {
@@ -3881,6 +3882,7 @@ fn admin(dir: &Path, rest: &[&str], post: bool, form: &BTreeMap<String, String>,
             let statuses: Vec<(String, J)> = r.nodes.keys().map(|n| (n.clone(), crate::ops::last_status(dir, n))).collect();
             let nodes_up = statuses.iter().filter(|(_, s)| s["error"].is_null() && !s.is_null()).count();
             let cells_up = rows.iter().filter(|(_, _, s)| cell_health(s).0 == "ok").count();
+            let bucket = crate::ops::s3_status(dir);
             (200, page("Admin", html! {
                 header.admin-head { div { h1 { "Admin" } p.admin-sub { "zetlyn.com, every server and cell" } } a.button.primary href={(home) "new"} { "New cell" } }
                 div.admin-kpis {
@@ -3889,6 +3891,8 @@ fn admin(dir: &Path, rest: &[&str], post: bool, form: &BTreeMap<String, String>,
                     div.admin-kpi.(if alarms.is_empty() { "ok" } else { "bad" }) { span { "Wrong now" } strong { (alarms.len()) } small { @if alarms.is_empty() { "all well" } @else { "mailed to the alarm address" } } }
                     div.admin-kpi.(if notice.is_some() { "warn" } else { "ok" }) { span { "Maintenance" } strong { @if notice.is_some() { "planned" } @else { "none" } }
                         small { @if let Some(n) = &notice { (crate::maintenance::when(&n.from)) } @else { a href={(home) "maintenance"} { "announce one" } } } }
+                    div.admin-kpi.(if bucket["ok"] == true { "ok" } else { "bad" }) { span { "Bucket" } strong { @if bucket.is_null() { "—" } @else if bucket["ok"] == true { (gb(bucket["bytes"].as_f64())) } @else { "down" } }
+                        small { @if bucket.is_null() { "not looked at yet" } @else if bucket["ok"] == true { (bucket["objects"]) " objects, " (bucket["ms"]) " ms" } @else { "since " (stamp_words(bucket["at"].as_str().unwrap_or(""))) } } }
                     div.admin-kpi { span { "Jobs" } strong { (pending) } small { "waiting" } }
                 }
                 @if !alarms.is_empty() {
@@ -3935,6 +3939,8 @@ fn admin(dir: &Path, rest: &[&str], post: bool, form: &BTreeMap<String, String>,
                         }
                     }
                 }
+                h2.admin-section { "Bucket" }
+                (bucket_card(&bucket, &r, &home))
                 h2.admin-section { "Cells" }
                 section.admin-card.flush {
                     table.admin-table {
@@ -5289,6 +5295,20 @@ fn orgs_links(dir: &Path, email: &str) -> Vec<(String, String)> {
 mod tests {
 
     #[test]
+    fn the_admin_pages_say_times_and_health_as_people_read_them() {
+        assert_eq!(super::stamp_words("20261008T080917Z"), "8 Oct 08:09");
+        assert_eq!(super::stamp_words("2026-12-31T23:05:00Z"), "31 Dec 23:05");
+        assert_eq!(super::stamp_words(""), "—");
+        let ok = serde_json::json!({ "active": "active", "answers": 200, "run_result": "success" });
+        let failed = serde_json::json!({ "active": "active", "answers": 200, "run_result": "exit-code" });
+        let down = serde_json::json!({ "active": "failed", "answers": 0 });
+        assert_eq!(super::cell_health(&ok).0, "ok");
+        assert_eq!(super::cell_health(&failed).0, "warn");
+        assert_eq!(super::cell_health(&down).0, "bad");
+        assert_eq!(super::cell_health(&serde_json::Value::Null).0, "bad");
+    }
+
+    #[test]
     fn a_world_paid_for_is_made_for_whoever_paid_and_runs_on_its_plan() {
         let dir = std::env::temp_dir().join(format!("zetlyn-paid-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -5871,5 +5891,65 @@ fn meter_of(used: Option<f64>, of: Option<f64>) -> Markup {
             html! { span.admin-meter.(if p > 90.0 { "bad" } else if p > 75.0 { "warn" } else { "ok" }) { span style={"width:" (format!("{p:.0}")) "%"} {} } }
         }
         None => html! {},
+    }
+}
+
+/// The bucket on the admin overview: whether it answers, what it holds, each cell's snapshots and
+/// the main server's backups, and what removed cells left behind.
+fn bucket_card(b: &J, r: &crate::ops::Register, home: &str) -> Markup {
+    if b.is_null() {
+        return html! { section.admin-card { p.dim { "Looked at every ten minutes by ops poll; nothing yet." } } };
+    }
+    let mb = |x: &J| x.as_f64().map(|v| if v >= 1_073_741_824.0 { format!("{:.1} GB", v / 1_073_741_824.0) } else { format!("{:.1} MB", v / 1_048_576.0) }).unwrap_or_else(|| "—".into());
+    let day_ago = crate::iso_stamp(crate::now() - 26 * 3600).replace([':', '-'], "");
+    html! {
+        div.admin-cards.two {
+            section.admin-card {
+                div.admin-card-head {
+                    h3 { span.(if b["ok"] == true { "dot ok" } else { "dot bad" }) {} "s3://zetlyn" }
+                    span.dim { "looked at " (stamp_words(b["at"].as_str().unwrap_or(""))) }
+                }
+                @if let Some(e) = b["error"].as_str() { p.admin-error { (e) } }
+                dl.admin-kv {
+                    dt { "Answers in" } dd { (b["ms"]) " ms" }
+                    dt { "Holds" } dd { (b["objects"]) " objects, " (mb(&b["bytes"])) }
+                    @for (folder, f) in b["folders"].as_object().into_iter().flatten() {
+                        dt { span.mono { (folder) "/" } } dd { (f["objects"]) " objects, " (mb(&f["bytes"])) }
+                    }
+                    dt { "Main server" } dd {
+                        @let latest = b["control"]["latest"].as_str().unwrap_or("");
+                        span.(if !latest.is_empty() && latest >= day_ago.as_str() { "dot ok" } else { "dot bad" }) {}
+                        (b["control"]["backups"]) " backups, newest " (stamp_words(latest))
+                    }
+                }
+            }
+            section.admin-card.flush {
+                table.admin-table {
+                    thead { tr { th { "Snapshots of" } th.num { "Kept" } th.num { "Size" } th { "Newest" } } }
+                    tbody { @for (cell, c) in b["cells"].as_object().into_iter().flatten() {
+                        @let latest = c["latest"].as_str().unwrap_or("");
+                        @let registered = r.cells.contains_key(cell);
+                        tr {
+                            td { span.(if !registered { "dot" } else if latest >= day_ago.as_str() { "dot ok" } else { "dot bad" }) {} (cell) @if !registered { " " span.chip { "removed" } } }
+                            td.num { (c["snapshots"]) } td.num { (mb(&c["bytes"])) } td.dim.nowrap { (stamp_words(latest)) }
+                        }
+                    } }
+                }
+            }
+        }
+        @if b["orphans"].as_array().is_some_and(|o| !o.is_empty()) {
+            section.admin-card.quiet {
+                h3 { "Left by removed cells" }
+                p.dim { "Their snapshots stay until purged: for good, with no way back." }
+                @for o in b["orphans"].as_array().into_iter().flatten() {
+                    @let name = o.as_str().unwrap_or("");
+                    form.bar method="post" action={(home) "purge/" (name)} {
+                        span.mono { (name) }
+                        input.short type="text" name="confirm" placeholder={"type " (name)} required;
+                        button.danger type="submit" { "Purge" }
+                    }
+                }
+            }
+        }
     }
 }

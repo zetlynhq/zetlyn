@@ -23,7 +23,13 @@ impl Control {
         let dir = std::env::temp_dir().join(format!("zetlyn-admin-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         copy(&Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/control"), &dir);
-        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        // A port of this run's own for each control: a port the system calls free is free for
+        // every test running beside this one too, until one of them takes it.
+        static NEXT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+        let port = (0..50)
+            .map(|_| 30_000 + (std::process::id() % 2_000) as u16 * 10 + NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) % 10)
+            .find(|p| std::net::TcpListener::bind(("127.0.0.1", *p)).is_ok())
+            .expect("a free port");
         std::fs::write(dir.join("workspace.yaml"), format!("title: Zetlyn\nurl: http://127.0.0.1:{port}\naccess:\n  owners: [{OPERATOR}]\n")).unwrap();
         if let Some(mode) = maintenance {
             let n = format!(r#"{{"text":"Testing.","level":"info","mode":"{mode}","target":"all","announce_from":"2000-01-01T00:00:00Z","from":"2000-01-01T00:00:00Z","until":"2999-01-01T00:00:00Z"}}"#);

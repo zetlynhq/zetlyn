@@ -1075,6 +1075,10 @@ impl App {
             }
             (false, ["settings"]) => (200, html_kind, self.settings_page(&query)),
             (false, ["sources"]) => (200, html_kind, self.sources_page()),
+            (false, ["sources", slug]) => match self.source_detail(slug, &query) {
+                Some(p) => (200, html_kind, p),
+                None => (404, html_kind, page("Not here", html! { h1 { "No such source" } p { a href=(serve::at("/sources")) { "Every source" } } })),
+            },
             // All of it, as one archive, for its owner to take away. Made and sent on a thread of its
             // own: it takes most of a minute for a large world and as long as the download takes
             // after, and everybody else is answered meanwhile. The thread ends when the download does.
@@ -1673,7 +1677,7 @@ impl App {
     /// last read and will be next, which trackers it feeds, whether it is shown in public, and what
     /// readers proposed to it.
     fn sources_page(&self) -> String {
-        let trackers: Vec<(String, TrackerDecl)> = crate::tracker::scope_registry(&self.trackers()).into_iter().filter_map(|(n, d)| TrackerDecl::load(&d).ok().map(|t| (n, t))).collect();
+        let trackers: Vec<(String, TrackerDecl)> = crate::tracker::scope_registry(&self.trackers()).into_iter().filter_map(|(_, d)| TrackerDecl::load(&d).ok().map(|t| (d.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(), t))).collect();
         let every = crate::autoupdate::every(&self.root);
         let now = crate::now();
         let rows: Vec<(String, String, Source, PathBuf)> = crate::tracker::registry(&self.sources())
@@ -1706,7 +1710,7 @@ impl App {
                             tr {
                                 td {
                                     span.(if failing { "dot bad" } else if last.is_some() { "dot ok" } else { "dot" }) title=(if failing { "failed three times running" } else if last.is_some() { "read" } else { "never read" }) {}
-                                    strong { (if d.title.is_empty() { name.clone() } else { d.title.clone() }) }
+                                    a href=(serve::at(&format!("/sources/{slug}"))) { strong { (if d.title.is_empty() { name.clone() } else { d.title.clone() }) } }
                                     div.why.mono { (name) }
                                 }
                                 td { span.chip { (kind) } @if !d.kind.is_empty() { div.why { (d.kind) } } }
@@ -1739,12 +1743,118 @@ impl App {
         page("Sources", body)
     }
 
+    /// One source, for the world's members: what it is and where it reads, what it feeds, its
+    /// claims to look through, each with a correction to propose, and rows to propose where it
+    /// takes them. A claim's own page and the proposal forms are a tracker's that holds the source.
+    fn source_detail(&self, slug: &str, query: &BTreeMap<String, String>) -> Option<String> {
+        if slug.contains(['/', '\\']) || slug.starts_with('.') {
+            return None;
+        }
+        let dir = self.sources().join(slug);
+        let ds = Source::open(&dir).ok()?;
+        let d = &ds.decl;
+        let name = d.name.clone();
+        let title = if d.title.is_empty() { name.clone() } else { d.title.clone() };
+        let described = ds.describe();
+        let trackers: Vec<(String, TrackerDecl)> = crate::tracker::scope_registry(&self.trackers()).into_iter().filter_map(|(_, p)| TrackerDecl::load(&p).ok().map(|t| (p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(), t))).filter(|(_, t)| t.members.iter().any(|m| m.dataset == name)).collect();
+        let via = trackers.first().map(|(folder, _)| folder.clone());
+        let made_of = matches!(d.source, crate::sourcedecl::Fetch::Proposals { .. });
+        let takes = made_of || d.proposals.is_some();
+        let rows_possible = made_of || crate::propose::fields(d).iter().any(|f| f.identifies);
+        let waiting = crate::propose::list(&dir).iter().filter(|p| p.status == "pending").count();
+        let corrected: BTreeMap<String, Vec<J>> = crate::propose::corrections(&dir);
+        // Its claims, newest first, fifty a page, or those a search finds.
+        let text = query.get("q").cloned().unwrap_or_default();
+        let page_n: usize = query.get("page").and_then(|p| p.parse().ok()).unwrap_or(1).max(1);
+        let per = 50;
+        let q = crate::source::Query { text: text.clone(), pred: None, ids: Vec::new(), seen_before: None, view: None, sort: None, limit: per, offset: (page_n - 1) * per };
+        let (total, hits) = ds.search(&q).map(|(n, h, _)| (n, h)).unwrap_or_default();
+        let pages = (total as usize).div_ceil(per).max(1);
+        let claim_url = |id: &str| via.as_ref().map(|t| serve::at(&format!("/trackers/{t}/claim/{}/{}", urlencode(&name), urlencode(id))));
+        let propose_url = |claim: Option<&str>| via.as_ref().map(|t| format!("{}{}", serve::at(&format!("/trackers/{t}/propose/{}", urlencode(&name))), claim.map(|c| format!("?claim={}", urlencode(c))).unwrap_or_default()));
+        let here = serve::at(&format!("/sources/{slug}"));
+        let body = html! {
+            p.admin-back { a href=(serve::at("/sources")) { "← Sources" } }
+            header.admin-head {
+                div {
+                    h1 { (title) }
+                    p.admin-sub { span.mono { (name) } @if !d.about.is_empty() { " · " (d.about) } }
+                }
+                div.admin-chips {
+                    span.chip { (described["state"].as_str().unwrap_or("")) }
+                    span.chip { (thousands_of(described["claims"].as_u64().unwrap_or(0))) " claims" }
+                    @if !d.kind.is_empty() { span.chip { (d.kind) } }
+                }
+            }
+            div.admin-cards.two {
+                section.admin-card {
+                    h2 { "Where it reads" }
+                    dl.admin-kv {
+                        dt { "From" } dd { code { (d.source.address()) } }
+                        dt { "Last read" } dd { (crate::autoupdate::last_finished(&ds).map(|t| stamp_words(&crate::iso_stamp(t))).unwrap_or_else(|| "never".into())) }
+                        dt { "How often" } dd { (d.schedule.every.clone().unwrap_or_else(|| "as the world's setting".into())) " · " a href=(serve::at("/settings#updates")) { "change" } }
+                        dt { "In public" } dd { (match d.licence.republish.as_str() { "yes" => "in full", "summary" => "titles, values and a link", _ => "not shown" }) " · " a href=(serve::at("/settings#seen")) { "change" } }
+                        dt { "Feeds" } dd { @for (folder, t) in &trackers { a href=(serve::at(&format!("/trackers/{folder}/"))) { (if t.title.is_empty() { folder.as_str() } else { t.title.as_str() }) } " " } @if trackers.is_empty() { span.dim { "no tracker" } } }
+                    }
+                }
+                section.admin-card {
+                    h2 { "Proposals" }
+                    @if !takes {
+                        p.dim { "It takes none. Turned on, signed-in readers or the world's proposers can propose rows and corrections, and nothing changes until you accept one." }
+                        p { a.button href=(serve::at("/settings#seen")) { "Turn them on in Settings" } }
+                    } @else if via.is_none() {
+                        p.dim { "It takes proposals, but no tracker holds it, and proposals are made on a tracker's pages." }
+                    } @else {
+                        p.dim { "Corrections: at any claim below, " em { "Correct" } ". An accepted correction replaces what the source says, at every read, until you reject it." }
+                        div.bar {
+                            @if rows_possible { @if let Some(u) = propose_url(None) { a.button href=(u) { "Propose a row" } } }
+                            a.button href={(serve::at("/proposals/")) (slug)} { @if waiting > 0 { (waiting) " waiting" } @else { "All proposals" } }
+                        }
+                    }
+                }
+            }
+            section.admin-card.flush {
+                div.source-claims-head {
+                    form.bar method="get" action=(here) {
+                        input type="search" name="q" value=(text) placeholder="Search its claims";
+                        button type="submit" { "Search" }
+                    }
+                    span.dim { (thousands_of(total)) (if text.is_empty() { " claims" } else { " found" }) }
+                }
+                table.admin-table {
+                    thead { tr { th { "Claim" } th { "Says" } th { "Known" } th {} } }
+                    tbody { @for h in &hits {
+                        tr {
+                            td {
+                                @if let Some(u) = claim_url(&h.record_id) { a href=(u) { strong { (h.title) } } } @else { strong { (h.title) } }
+                                div.why.mono { @for i in h.ids.iter().take(2) { (i.scheme) " " (i.value) " " } }
+                                @if corrected.contains_key(&h.record_id) { span.chip { "corrected" } }
+                            }
+                            td.dim { (h.fields.iter().take(3).map(|(k, v)| format!("{k}: {}", v.display())).collect::<Vec<_>>().join(" · ")) }
+                            td.dim.nowrap { (h.known.get(..10).unwrap_or(&h.known)) }
+                            td.num { @if takes { @if let Some(u) = propose_url(Some(&h.record_id)) { a href=(u) { "Correct" } } } }
+                        }
+                    } }
+                }
+                @if hits.is_empty() { p.dim style="padding: 1rem" { "Nothing here." } }
+            }
+            @if pages > 1 {
+                nav.admin-pages {
+                    @if page_n > 1 { a href={(here) "?page=" (page_n - 1) "&q=" (urlencode(&text))} { "← Newer" } }
+                    span.dim { "Page " (page_n) " of " (pages) }
+                    @if page_n < pages { a href={(here) "?page=" (page_n + 1) "&q=" (urlencode(&text))} { "Older →" } }
+                }
+            }
+        };
+        Some(page(&title, body))
+    }
+
     /// Who sees what, for an owner: each tracker public or private, and what each source lets a
     /// public page show of it. A source only private trackers hold is never published.
     fn seen_section(&self, query: &BTreeMap<String, String>) -> Markup {
         let trackers: Vec<(String, PathBuf, TrackerDecl)> = crate::tracker::scope_registry(&self.trackers())
             .into_iter()
-            .filter_map(|(n, d)| TrackerDecl::load(&d).ok().map(|t| (n, d, t)))
+            .filter_map(|(_, d)| TrackerDecl::load(&d).ok().map(|t| (d.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(), d, t)))
             .collect();
         let sources: Vec<(String, PathBuf)> = crate::tracker::registry(&self.sources()).into_iter().collect();
         let republish_of = |name: &str| -> String {
@@ -3191,6 +3301,10 @@ table.account-usage td { padding: .15rem .4rem .15rem 0; border: 0; }
 .billing-failed { margin: .3rem 0 0; padding: .55rem .7rem; font-size: .9rem; border-left: 3px solid var(--accent); background: var(--bg); }
 form.billing-open { margin: 0; }
 p.trap { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
+.source-claims-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .8rem .9rem; border-bottom: 1px solid var(--line); }
+.source-claims-head form { display: flex; gap: .4rem; margin: 0; }
+.source-claims-head input[type=search] { flex: none; width: 18rem; height: auto; padding: .42rem .6rem; font: inherit; font-size: .9rem; background: var(--bg); color: var(--fg); border: 1px solid var(--line); }
+p.admin-back { margin: 0 0 .4rem; font-size: .88rem; }
 nav.settings-jump { display: flex; flex-wrap: wrap; gap: .4rem 1.1rem; margin: .2rem 0 1.4rem; padding: 0 0 .7rem; border-bottom: 1px solid var(--line); font-size: .92rem; }
 h2.settings-section, h2#usage, h2#seen, h2#access { margin-top: 2.2rem; scroll-margin-top: 1rem; }
 table.settings-sources { width: 100%; margin: .8rem 0; font-size: .9rem; }

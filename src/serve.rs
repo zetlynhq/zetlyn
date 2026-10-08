@@ -118,6 +118,7 @@ details.receipt[open] { background: var(--panel); border-left: 3px solid var(--a
 .site-actions { margin-left: auto; display: flex; align-items: center; gap: 18px; font-size: 14px; }
 .site-actions a.nav-gh { color: var(--dim); }
 .site-actions a.nav-gh:hover { color: var(--fg); text-decoration: none; }
+.site-actions .site-local { color: var(--dim); font-size: 13px; }
 .site-actions a.nav-signin { border: 1px solid var(--fg); color: var(--fg); padding: 8px 14px; }
 .site-actions a.nav-signin:hover { background: var(--fg); color: var(--bg); text-decoration: none; }
 .site-actions a.nav-cta { border: 1px solid var(--fg); background: var(--fg); color: var(--bg); padding: 8px 14px; }
@@ -507,6 +508,9 @@ pub struct Frame {
     pub side_more: Vec<(String, Vec<(String, String)>)>,
     /// The address of the page, to mark it in `side_more`.
     pub side_here: Option<String>,
+    /// Where this machine's own app answers (`zetlyn app`), where the page is that app: nothing
+    /// in its frame leads away from it, and nobody signs in.
+    pub local: Option<String>,
 }
 
 /// The one navigation every page of Zetlyn carries, the website's, the hub's, the app's and a
@@ -526,8 +530,9 @@ pub const SOURCE_CODE: &str = "https://github.com/zetlynhq/zetlyn";
 /// that is no part of the app), nobody yet, or somebody and the organisations they belong to.
 pub enum Reader<'a> {
     Anyone,
-    /// The app on somebody's own machine, where there are no accounts and nothing to start.
-    Local,
+    /// The app on somebody's own machine, at this address, where there are no accounts and
+    /// nothing to start.
+    Local(&'a str),
     Nobody,
     Somebody(&'a str, &'a [(String, String)]),
 }
@@ -538,27 +543,33 @@ pub enum Reader<'a> {
 pub fn site_header(current: &str, reader: Reader) -> Markup {
     // Inside a world, signing in and out is the world's, at its own address; elsewhere the
     // machine's account page, which lists the worlds somebody belongs to.
-    let world = FRAME.with(|f| {
+    let (world, home) = FRAME.with(|f| {
         let f = f.borrow();
-        f.org.as_ref().map(|_| format!("{}/", f.home.1.trim_end_matches('/')))
+        (f.org.as_ref().map(|_| format!("{}/", f.home.1.trim_end_matches('/'))), f.home.1.clone())
     });
     let (signin, signout) = match &world {
         Some(w) => (format!("{w}signin"), format!("{w}signout")),
         None => ("https://zetlyn.com/account/".to_string(), "/account/signout".to_string()),
     };
+    // The app on one's own machine keeps its reader on it: the mark leads to its own front page,
+    // and nothing of the website's sits in its header.
+    let local = matches!(reader, Reader::Local(_));
+    let brand = if local && !home.is_empty() { home } else { "https://zetlyn.com/".to_string() };
     html! {
         header.site-header.shell {
-            a.brand href="https://zetlyn.com/" aria-label="Zetlyn home" {
+            a.brand href=(brand) aria-label="Zetlyn home" {
                 img.brand-mark src={"data:image/png;base64," (MARK)} alt="";
                 span { "Zetlyn" }
             }
-            nav.site-nav aria-label="Zetlyn" {
-                @for (key, label, href) in SITE_NAV {
-                    @if *key == current { a href=(href) aria-current="page" { (label) } } @else { a href=(href) { (label) } }
+            @if !local {
+                nav.site-nav aria-label="Zetlyn" {
+                    @for (key, label, href) in SITE_NAV {
+                        @if *key == current { a href=(href) aria-current="page" { (label) } } @else { a href=(href) { (label) } }
+                    }
                 }
             }
             div.site-actions {
-                a.nav-gh href=(SOURCE_CODE) { "GitHub" }
+                @if !local { a.nav-gh href=(SOURCE_CODE) { "GitHub" } }
                 @match reader {
                     Reader::Somebody(email, orgs) => {
                         details.account-menu {
@@ -574,7 +585,7 @@ pub fn site_header(current: &str, reader: Reader) -> Markup {
                             }
                         }
                     }
-                    Reader::Local => {}
+                    Reader::Local(addr) => { span.site-local title="Only on this machine; nobody signs in here" { "Local · " (addr) } }
                     _ => {
                         a.nav-signin href=(signin) { "Sign in" }
                         a.nav-cta href="https://zetlyn.com/docs/getting_started#install" { "Get started" }
@@ -592,24 +603,32 @@ fn reader_of(f: &Frame) -> Reader<'_> {
     match &f.account {
         Some(Some(email)) => Reader::Somebody(email, &f.orgs),
         Some(None) => Reader::Nobody,
-        None if f.area == "app" => Reader::Local,
-        None => Reader::Anyone,
+        None => match &f.local {
+            Some(addr) => Reader::Local(addr),
+            None => Reader::Anyone,
+        },
     }
 }
 
 /// The footer of every page, the website's (zetlyn.com, src/page.html); `extra` is what a page
-/// adds of its own, before the rest.
+/// adds of its own, before the rest. The app on one's own machine has none of the website's
+/// contracts and pages, only the docs, which open beside it.
 pub fn site_footer(extra: &[(String, String)]) -> Markup {
+    let local = FRAME.with(|f| f.borrow().local.is_some());
     html! {
         footer.site-footer.shell {
             span { "© Zetlyn" }
             div {
                 @for (label, href) in extra { a href=(href) { (label) } }
-                a href="mailto:hello@zetlyn.com" { "Contact" }
-                a href="https://zetlyn.com/privacy" { "Privacy" }
-                a href="https://zetlyn.com/terms" { "Terms" }
-                a href="https://zetlyn.com/legal" { "Legal" }
-                a href="https://zetlyn.com/account/cancel" { "Cancel a contract" }
+                @if local {
+                    a href="https://zetlyn.com/docs" target="_blank" rel="noopener" { "Docs ↗" }
+                } @else {
+                    a href="mailto:hello@zetlyn.com" { "Contact" }
+                    a href="https://zetlyn.com/privacy" { "Privacy" }
+                    a href="https://zetlyn.com/terms" { "Terms" }
+                    a href="https://zetlyn.com/legal" { "Legal" }
+                    a href="https://zetlyn.com/account/cancel" { "Cancel a contract" }
+                }
                 button.theme-toggle type="button" id="theme-toggle" { "Theme" }
             }
         }
@@ -722,6 +741,11 @@ pub fn frame_app(jobs: Option<String>, status: Option<(String, String, bool)>) {
         f.status = status;
     });
 }
+/// Whether this page is the app on one's own machine, and where it answers.
+pub fn frame_local(local: Option<String>) {
+    FRAME.with(|f| f.borrow_mut().local = local);
+}
+
 pub fn frame() -> Frame {
     FRAME.with(|f| f.borrow().clone())
 }
@@ -839,6 +863,9 @@ pub fn shell(title: &str, body: Markup) -> String {
                                     @for (label, href) in &f.nav {
                                         @if f.current.as_deref() == Some(label.as_str()) {
                                             a href=(href) aria-current="page" { (label) }
+                                        } @else if href.starts_with("http") {
+                                            // Elsewhere opens beside the page, which stays where it is.
+                                            a href=(href) target="_blank" rel="noopener" { (label) }
                                         } @else {
                                             a href=(href) { (label) }
                                         }
@@ -1636,5 +1663,23 @@ mod tests {
         assert!(p.contains(super::SOURCE_CODE) && p.contains("Sign in") && p.contains("https://zetlyn.com/docs/getting_started#install"), "{p}");
         assert!(p.contains(r#"<footer class="site-footer shell">"#) && p.contains("https://zetlyn.com/privacy"));
         assert!(p.contains("/zetlyn.css?v="), "its own sheet, not the website's /style.css");
+    }
+
+    #[test]
+    fn the_app_on_ones_own_machine_leads_nowhere_else_and_nobody_signs_in() {
+        super::frame_home("Your trackers", "/", vec![("Docs ↗".into(), "https://zetlyn.com/docs".into())]);
+        super::frame_local(Some("127.0.0.1:4747".into()));
+        let p = super::shell("Your trackers", maud::html! {});
+        super::frame_local(None);
+        // The mark leads home, and nothing of the website's is in the header.
+        let header = p.split("<header").nth(1).and_then(|s| s.split("</header>").next()).unwrap_or("");
+        assert!(header.contains(r#"class="brand" href="/""#), "{header}");
+        assert!(!header.contains("https://"), "{header}");
+        assert!(!header.contains("Sign in") && !header.contains("Get started"), "{header}");
+        assert!(header.contains("Local · 127.0.0.1:4747"), "{header}");
+        // The docs open beside it; nothing else leads to the website.
+        let footer = p.split("<footer").nth(1).and_then(|s| s.split("</footer>").next()).unwrap_or("");
+        assert!(footer.contains(r#"href="https://zetlyn.com/docs" target="_blank""#) && !footer.contains("privacy"), "{footer}");
+        assert!(p.contains(r#"href="https://zetlyn.com/docs" target="_blank" rel="noopener">Docs ↗"#), "{p}");
     }
 }

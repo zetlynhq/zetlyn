@@ -786,11 +786,13 @@ impl App {
                 ("Trackers".to_string(), home.clone()),
                 ("Proposals".to_string(), format!("{}/proposals", self.base)),
                 ("Assist".to_string(), format!("{}/assist", self.base)),
-                ("Docs".to_string(), "https://zetlyn.com/docs".to_string()),
+                ("Docs ↗".to_string(), "https://zetlyn.com/docs".to_string()),
             ]
         };
         serve::frame_home("Your trackers", &home, nav);
         serve::frame_hosted(None, None);
+        // Nobody signs in to the app on one's own machine, and nothing in its frame leads away.
+        serve::frame_local(self.hosted.is_none().then(|| self.addr.clone()));
         // On zetlyn.com an organisation's pages wear the website's header and footer, under
         // the machine they are part of, with who is signed in at the right.
         if self.hosted.as_ref().is_some_and(|h| h.shared) {

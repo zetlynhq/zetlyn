@@ -857,7 +857,12 @@ impl App {
             serve::frame_app(Some(home.clone()), Some((words, format!("{}/settings", self.base), on)));
         }
         // A tracker's pages are under the world's trackers, as the address says (trackers/<name>/).
-        serve::frame_group((parts.first().map(String::as_str) == Some("trackers")).then(|| ("Trackers".to_string(), format!("{}/", self.base))));
+        // And a source's own page under the world's sources, the list its members open.
+        serve::frame_group(match (parts.first().map(String::as_str), parts.len()) {
+            (Some("trackers"), _) => Some(("Trackers".to_string(), format!("{}/", self.base))),
+            (Some("sources"), n) if n >= 2 && !self.visitor => Some(("Sources".to_string(), format!("{}/sources", self.base))),
+            _ => None,
+        });
         serve::frame_section(None, Vec::new());
         // A source's own page, for a visitor: under the world's sources, which is no page of its own.
         if self.visitor && parts.first().map(String::as_str) == Some("sources") && parts.len() >= 2 {

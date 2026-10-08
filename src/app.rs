@@ -740,7 +740,7 @@ impl App {
                 }
             }
             // What the world is, where it went, all of it at once: its owners', not every editor's.
-            ["export.tar.gz"] | ["settings", "moved"] | ["settings", "access"] | ["settings", "seen"] | ["settings", "licence", _] | ["settings", "proposals", _] | ["publish", _] | ["assist"] if owner && (post || parts.len() == 1 && parts[0] == "export.tar.gz") && !self.who.as_deref().is_some_and(|e| h.is_owner(e)) => {
+            ["export.tar.gz"] | ["settings", "moved"] | ["settings", "access"] | ["settings", "seen"] | ["settings", "licence", _] | ["settings", "proposals", _] | ["settings", "sources"] | ["publish", _] | ["assist"] if owner && (post || parts.len() == 1 && parts[0] == "export.tar.gz") && !self.who.as_deref().is_some_and(|e| h.is_owner(e)) => {
                 respond(request, 403, html_kind, &page("Owners only", html! { h1 { "Only an owner of this world changes that" } p { a href=(serve::at("/")) { "Back" } } }));
                 None
             }
@@ -808,6 +808,7 @@ impl App {
                 (self.public_of_machine.clone(), here)
             } else {
                 let here = match parts.first().map(String::as_str) {
+                    Some("sources") => "Sources",
                     Some("assist") => "Assist",
                     Some("settings") => "Settings",
                     Some("proposals") => "Proposals",
@@ -817,6 +818,7 @@ impl App {
                 (
                     vec![
                         ("Trackers".to_string(), home.clone()),
+                        ("Sources".to_string(), format!("{}/sources", self.base)),
                         ("Proposals".to_string(), format!("{}/proposals", self.base)),
                         ("Assist".to_string(), format!("{}/assist", self.base)),
                         ("Settings".to_string(), format!("{}/settings", self.base)),
@@ -1072,6 +1074,7 @@ impl App {
                 }
             }
             (false, ["settings"]) => (200, html_kind, self.settings_page(&query)),
+            (false, ["sources"]) => (200, html_kind, self.sources_page()),
             // All of it, as one archive, for its owner to take away. Made and sent on a thread of its
             // own: it takes most of a minute for a large world and as long as the download takes
             // after, and everybody else is answered meanwhile. The thread ends when the download does.
@@ -1203,6 +1206,38 @@ impl App {
                 };
                 forget_tracker(&self.trackers().join(&tracker));
                 let said = said.map(|s| format!("{tracker}: {s}")).unwrap_or_else(|e| e);
+                return redirect(request, &serve::at(&format!("/settings?seen={}#seen", urlencode(&said))));
+            }
+            // Every source's place on public pages and who may propose to it, from one table.
+            (true, ["settings", "sources"]) => {
+                let mut changed = 0;
+                let mut wrong: Vec<String> = Vec::new();
+                for (_, dir) in crate::tracker::registry(&self.sources()) {
+                    let slug = dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                    let Ok(mut decl) = crate::sourcedecl::SourceDecl::load(&dir) else { continue };
+                    let before = (decl.licence.republish.clone(), decl.proposals.clone());
+                    if let Some(r) = form.get(&format!("licence.{slug}")).filter(|r| matches!(r.as_str(), "yes" | "summary" | "no")) {
+                        decl.licence.republish = r.clone();
+                    }
+                    if !matches!(decl.source, crate::sourcedecl::Fetch::Proposals { .. }) {
+                        if let Some(t) = form.get(&format!("proposals.{slug}")) {
+                            decl.proposals = match t.as_str() {
+                                "signed-in" => Some(crate::sourcedecl::Takes { readers: vec![crate::propose::SIGNED_IN.to_string()] }),
+                                "world" => Some(crate::sourcedecl::Takes::default()),
+                                _ => None,
+                            };
+                        }
+                    }
+                    if (decl.licence.republish.clone(), decl.proposals.clone()) != before {
+                        let path = dir.join(crate::sourcedecl::FILE);
+                        match crate::yaml::to_string(&decl).and_then(|t| std::fs::write(&path, t).map_err(|e| e.to_string())) {
+                            Ok(()) => changed += 1,
+                            Err(e) => wrong.push(format!("{slug}: {e}")),
+                        }
+                    }
+                }
+                open_trackers().lock().unwrap_or_else(|e| e.into_inner()).clear();
+                let said = if wrong.is_empty() { format!("Saved: {changed} {} changed.", if changed == 1 { "source" } else { "sources" }) } else { wrong.join("; ") };
                 return redirect(request, &serve::at(&format!("/settings?seen={}#seen", urlencode(&said))));
             }
             // Who may propose rows and corrections to a source read from elsewhere.
@@ -1634,6 +1669,76 @@ impl App {
         page("Publish", body)
     }
 
+    /// Every source this world reads, for its members: what it is, how much it holds, when it was
+    /// last read and will be next, which trackers it feeds, whether it is shown in public, and what
+    /// readers proposed to it.
+    fn sources_page(&self) -> String {
+        let trackers: Vec<(String, TrackerDecl)> = crate::tracker::scope_registry(&self.trackers()).into_iter().filter_map(|(n, d)| TrackerDecl::load(&d).ok().map(|t| (n, t))).collect();
+        let every = crate::autoupdate::every(&self.root);
+        let now = crate::now();
+        let rows: Vec<(String, String, Source, PathBuf)> = crate::tracker::registry(&self.sources())
+            .into_iter()
+            .filter_map(|(name, dir)| {
+                let ds = Source::open(&dir).ok()?;
+                let slug = dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                Some((name, slug, ds, dir))
+            })
+            .collect();
+        let body = html! {
+            header.admin-head {
+                div { h1 { "Sources" } p.admin-sub { (rows.len()) (if rows.len() == 1 { " source" } else { " sources" }) " this world reads. How often each is read, who sees it and who may propose to it: " a href=(serve::at("/settings#seen")) { "Settings" } "." } }
+            }
+            @if rows.is_empty() { p.dim { "None yet. A source comes in with a tracker: " a href=(serve::at("/")) { "start one" } "." } }
+            @else {
+                section.admin-card.flush {
+                    table.admin-table {
+                        thead { tr { th { "Source" } th { "Read from" } th.num { "Claims" } th { "Last read" } th { "Next" } th { "Feeds" } th { "In public" } th { "Proposals" } } }
+                        tbody { @for (name, slug, ds, dir) in &rows {
+                            @let d = &ds.decl;
+                            @let kind = serde_json::to_value(&d.source).ok().and_then(|v| v["type"].as_str().map(str::to_string)).unwrap_or_default();
+                            @let feeds: Vec<&(String, TrackerDecl)> = trackers.iter().filter(|(_, t)| t.members.iter().any(|m| m.dataset == *name)).collect();
+                            @let last = crate::autoupdate::last_finished(ds);
+                            @let held = crate::autoupdate::held(ds, dir);
+                            @let next = crate::autoupdate::next_at(ds, every).filter(|_| held.is_none());
+                            @let takes = matches!(d.source, crate::sourcedecl::Fetch::Proposals { .. }) || d.proposals.is_some();
+                            @let waiting = if takes || dir.join(crate::propose::DIR).is_dir() { crate::propose::list(dir).iter().filter(|p| p.status == "pending").count() } else { 0 };
+                            @let failing = crate::autoupdate::failures(ds) >= crate::autoupdate::PATIENCE;
+                            tr {
+                                td {
+                                    span.(if failing { "dot bad" } else if last.is_some() { "dot ok" } else { "dot" }) title=(if failing { "failed three times running" } else if last.is_some() { "read" } else { "never read" }) {}
+                                    strong { (if d.title.is_empty() { name.clone() } else { d.title.clone() }) }
+                                    div.why.mono { (name) }
+                                }
+                                td { span.chip { (kind) } @if !d.kind.is_empty() { div.why { (d.kind) } } }
+                                td.num { (thousands_of(ds.store.count() as u64)) }
+                                td.dim.nowrap { (last.map(|t| stamp_words(&crate::iso_stamp(t))).unwrap_or_else(|| "never".into())) }
+                                td.nowrap {
+                                    @if failing { span.status { span.dot.bad {} a href=(serve::at("/settings#updates")) { "waits for you" } } }
+                                    @else if let Some(why) = &held { span.dim title=(why) { "by hand" } }
+                                    @else {
+                                        @match (next, every.is_some() || d.schedule.every.is_some()) {
+                                            (Some(at), true) if at > now => span { "in " (crate::web::duration((at - now) as f64)) },
+                                            (Some(_), true) => span { "due now" },
+                                            _ => span.dim { "by hand" },
+                                        }
+                                    }
+                                }
+                                td { @for (folder, t) in &feeds { a href=(serve::at(&format!("/trackers/{folder}/"))) { (if t.title.is_empty() { folder.as_str() } else { t.title.as_str() }) } br; } @if feeds.is_empty() { span.dim { "—" } } }
+                                td { @match d.licence.republish.as_str() { "yes" => span.status { span.dot.ok {} "in full" }, "summary" => span.status { span.dot.ok {} "summary" }, _ => span.dim { "no" } } }
+                                td {
+                                    @if waiting > 0 { a href={(serve::at("/proposals/")) (slug)} { strong { (waiting) " waiting" } } }
+                                    @else if takes { a.dim href={(serve::at("/proposals/")) (slug)} { "taken, none waiting" } }
+                                    @else { span.dim { "—" } }
+                                }
+                            }
+                        } }
+                    }
+                }
+            }
+        };
+        page("Sources", body)
+    }
+
     /// Who sees what, for an owner: each tracker public or private, and what each source lets a
     /// public page show of it. A source only private trackers hold is never published.
     fn seen_section(&self, query: &BTreeMap<String, String>) -> Markup {
@@ -1647,75 +1752,77 @@ impl App {
         };
         let in_public = |name: &str| trackers.iter().any(|(_, _, t)| t.visibility != "private" && t.members.iter().any(|m| m.dataset == name));
         html! {
-            h2 #seen { "Who sees what" }
-            p.lede { "A public tracker is open to anyone: its overview and its pages, at its address and on the hub. A private one is for the signed-in readers it is given to. "
-                "Whether a source may be shown in public is yours to know from its terms: making it public says you may." }
-            @if let Some(s) = query.get("seen") { div.note { (s) } }
-            @if trackers.is_empty() { p.dim { "No tracker here yet." } }
-            @else {
-                table { thead { tr { th { "Tracker" } th { "Now" } th {} } } tbody {
-                    @for (name, _, t) in &trackers {
-                        @let private = t.visibility == "private";
-                        @let blocked: Vec<String> = t.members.iter().map(|m| m.dataset.clone()).filter(|s| !matches!(republish_of(s).as_str(), "yes" | "summary")).collect();
-                        tr {
-                            td { strong { (if t.title.is_empty() { name.clone() } else { t.title.clone() }) } div.why.mono { (name) } }
-                            td { @if private { span.chip { "Private" } } @else { span.chip.on { "Public" } } }
-                            td {
-                                form.bar method="post" action=(serve::at("/settings/seen")) {
-                                    input type="hidden" name="tracker" value=(name);
-                                    @if private {
-                                        input type="hidden" name="visibility" value="public";
-                                        button type="submit" disabled[!blocked.is_empty()] { "Make it public" }
-                                    } @else {
-                                        input type="hidden" name="visibility" value="private";
-                                        button type="submit" { "Make it private" }
+            section.settings-card #seen {
+                header.settings-card-head {
+                    h2 { "Who sees what" }
+                    p { "A public tracker is open to anyone, at its address and on the hub; a private one is for the signed-in readers it is given to. "
+                        "Whether a source may be shown in public is yours to know from its terms: making it public says you may." }
+                }
+                @if let Some(s) = query.get("seen") { div.settings-said { (s) } }
+                h3 { "Trackers" }
+                @if trackers.is_empty() { p.dim { "No tracker here yet." } }
+                @else {
+                    table.admin-table {
+                        thead { tr { th { "Tracker" } th { "Who reads it" } th {} } }
+                        tbody { @for (name, _, t) in &trackers {
+                            @let private = t.visibility == "private";
+                            @let blocked: Vec<String> = t.members.iter().map(|m| m.dataset.clone()).filter(|s| !matches!(republish_of(s).as_str(), "yes" | "summary")).collect();
+                            tr {
+                                td { strong { (if t.title.is_empty() { name.clone() } else { t.title.clone() }) } div.why.mono { (name) } }
+                                td { @if private { span.status { span.dot {} "Private: its readers" } } @else { span.status { span.dot.ok {} "Public: anyone" } } }
+                                td.num {
+                                    form method="post" action=(serve::at("/settings/seen")) {
+                                        input type="hidden" name="tracker" value=(name);
+                                        @if private {
+                                            input type="hidden" name="visibility" value="public";
+                                            button type="submit" disabled[!blocked.is_empty()] title=(if blocked.is_empty() { String::new() } else { format!("First let {} be shown in public, below", blocked.join(", ")) }) { "Make public" }
+                                        } @else {
+                                            input type="hidden" name="visibility" value="private";
+                                            button type="submit" { "Make private" }
+                                        }
                                     }
                                 }
-                                @if private && !blocked.is_empty() { div.why { "First let " (blocked.join(", ")) " be shown in public, below." } }
                             }
-                        }
+                        } }
                     }
-                } }
-            }
-            @if !sources.is_empty() {
-                table { thead { tr { th { "Source" } th { "On public pages" } th { "Published" } th { "Proposals from readers" } } } tbody {
-                    @for (name, dir) in &sources {
-                        @if let Ok(d) = crate::sourcedecl::SourceDecl::load(dir) {
-                            @let slug = dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-                            @let now = d.licence.republish.clone();
-                            tr {
-                                td { strong { (if d.title.is_empty() { name.clone() } else { d.title.clone() }) } div.why.mono { (name) }
-                                    @if !d.licence.terms.is_empty() { div.why { a href=(d.licence.terms) rel="noopener" { "its terms" } } } }
-                                td {
-                                    form.bar method="post" action={(serve::at("/settings/licence/")) (slug)} {
-                                        select name="republish" {
-                                            @for (v, l) in [("no", "Not shown"), ("summary", "Titles, values and a link"), ("yes", "In full")] {
+                }
+                @if !sources.is_empty() {
+                    h3 { "Sources" }
+                    form method="post" action=(serve::at("/settings/sources")) {
+                        table.admin-table {
+                            thead { tr { th { "Source" } th { "On public pages" } th { "Proposals from readers" } th { "Published" } } }
+                            tbody { @for (name, dir) in &sources {
+                                @if let Ok(d) = crate::sourcedecl::SourceDecl::load(dir) {
+                                    @let slug = dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                                    @let now = d.licence.republish.clone();
+                                    tr {
+                                        td { strong { (if d.title.is_empty() { name.clone() } else { d.title.clone() }) } div.why.mono { (name) }
+                                            @if !d.licence.terms.is_empty() { div.why { a href=(d.licence.terms) rel="noopener" { "its terms" } } } }
+                                        td { select name={"licence." (slug)} {
+                                            @for (v, l) in [("no", "Not shown"), ("summary", "Titles, values, a link"), ("yes", "In full")] {
                                                 option value=(v) selected[now == v || (now.is_empty() && v == "no")] { (l) }
                                             }
-                                        }
-                                        button type="submit" { "Set" }
-                                    }
-                                }
-                                td { @if in_public(name) && matches!(now.as_str(), "yes" | "summary") { "with its public trackers" } @else { span.dim { "no" } } }
-                                td {
-                                    @if matches!(d.source, crate::sourcedecl::Fetch::Proposals { .. }) {
-                                        a href={(serve::at("/proposals/")) (slug)} { "made of them" }
-                                    } @else {
-                                        @let takes = d.proposals.as_ref().map(|t| if t.readers.iter().any(|r| r == crate::propose::SIGNED_IN) { "signed-in" } else { "world" }).unwrap_or("off");
-                                        form.bar method="post" action={(serve::at("/settings/proposals/")) (slug)} {
-                                            select name="takes" {
-                                                @for (v, l) in [("off", "None"), ("world", "Its proposers and editors"), ("signed-in", "Anybody signed in")] {
-                                                    option value=(v) selected[takes == v] { (l) }
+                                        } }
+                                        td {
+                                            @if matches!(d.source, crate::sourcedecl::Fetch::Proposals { .. }) {
+                                                a href={(serve::at("/proposals/")) (slug)} { "made of them" }
+                                            } @else {
+                                                @let takes = d.proposals.as_ref().map(|t| if t.readers.iter().any(|r| r == crate::propose::SIGNED_IN) { "signed-in" } else { "world" }).unwrap_or("off");
+                                                select name={"proposals." (slug)} {
+                                                    @for (v, l) in [("off", "None"), ("world", "Its proposers and editors"), ("signed-in", "Anybody signed in")] {
+                                                        option value=(v) selected[takes == v] { (l) }
+                                                    }
                                                 }
                                             }
-                                            button type="submit" { "Set" }
                                         }
+                                        td { @if in_public(name) && matches!(now.as_str(), "yes" | "summary") { span.status { span.dot.ok {} "with its trackers" } } @else { span.dim { "no" } } }
                                     }
                                 }
-                            }
+                            } }
                         }
+                        div.settings-actions { button.primary type="submit" { "Save" } span.dim { "A source only private trackers hold is never published." } }
                     }
-                } }
+                }
             }
         }
     }
@@ -2132,7 +2239,6 @@ impl App {
                 Some((slug, ds.decl.title.clone(), own, held, effective, last, reads, stuck))
             })
             .collect();
-        let section = |id: &str, title: &str| html! { h2.settings-section id=(id) { (title) } };
         let jump: Vec<(&str, &str)> = [
             hosted_cell.then_some(("usage", "Plan and usage")),
             owner.then_some(("seen", "Who sees what")),
@@ -2147,31 +2253,36 @@ impl App {
             h1 { "Settings" }
             nav.settings-jump { @for (id, label) in &jump { a href={"#" (id)} { (label) } } }
             @if let Some(s) = query.get("saved") { div.note { (s) } }
-            @if hosted_cell { (cell_usage_section(&sources)) }
+            @if hosted_cell { section.settings-card { (cell_usage_section(&sources)) } }
             @if owner { (self.seen_section(query)) }
             @if self.hosted.is_some() {
                 @let access = crate::account::Site::load(&self.root).access;
                 @let lines = |l: &[String]| l.join("\n");
-                h2 #access { "Who may do what" }
-                p.lede { "Everybody reads what this world makes public. These lists say who may do more. One to a line: an address, "
-                    code { "domain:example.org" } " for every confirmed address there, " code { "@zetlyn.com" } " for whoever that world vouches for, or "
-                    code { "signed-in" } " for anybody signed in." }
-                form.settings method="post" action=(serve::at("/settings/access")) {
-                    p { label { strong { "Owners" } span.dim { " · everything, its settings and its export too" } br;
-                        textarea.wide name="owners" rows="3" { (lines(&access.owners)) } } }
-                    p { label { strong { "Editors" } span.dim { " · its sources and trackers, and deciding proposals" } br;
-                        textarea.wide name="editors" rows="3" { (lines(&access.editors)) } } }
-                    p { label { strong { "Proposers" } span.dim { " · rows and corrections for every source that names nobody of its own" } br;
-                        textarea.wide name="proposers" rows="3" { (lines(&access.proposers)) } } }
-                    p { button.primary type="submit" { "Save who may do what" } }
+                section.settings-card #access {
+                    header.settings-card-head {
+                        h2 { "Who may do what" }
+                        p { "Everybody reads what this world makes public; these lists say who may do more. One to a line: an address, "
+                            code { "domain:example.org" } " for every confirmed address there, " code { "@zetlyn.com" } " for whoever that world vouches for, or "
+                            code { "signed-in" } " for anybody signed in." }
+                    }
+                    form.admin-form method="post" action=(serve::at("/settings/access")) {
+                        div.settings-roles {
+                            label { strong { "Owners" } span { "Everything: its settings, its export, its plan" } textarea name="owners" rows="4" { (lines(&access.owners)) } }
+                            label { strong { "Editors" } span { "Its sources and trackers, and deciding proposals" } textarea name="editors" rows="4" { (lines(&access.editors)) } }
+                            label { strong { "Proposers" } span { "Rows and corrections, where a source names nobody of its own" } textarea name="proposers" rows="4" { (lines(&access.proposers)) } }
+                        }
+                        div.settings-actions { button.primary type="submit" { "Save" } span.dim { "Only an owner changes these. An owner the machine's members name stays one whatever these lists say." } }
+                    }
                 }
-                p.dim { "Only an owner changes these. Whoever this machine's own list of members names counts besides; an owner named there stays one whatever these lists say. Another world, zetlyn.com among them, only says who somebody is: what they may do here, this world says." }
             }
-            (section("updates", "Updates"))
-            p.lede {
+            section.settings-card #updates {
+            header.settings-card-head {
+                h2 { "Updates" }
+                p {
                 @if hosted_cell { "Your sources are read on our servers by themselves, also with no page open, as often as you say here." }
                 @else { "Zetlyn can read your sources again by itself and tell you what changed. It works for as long as Zetlyn runs, with or without a page open; quit it and it stops. On a machine that should keep watching without the app, "
                     code { "zetlyn run " (self.root.display()) } " does the same." }
+                }
             }
             form.settings method="post" action=(serve::at("/settings/updates")) {
                 p { label { strong { "Every source" } span.dim { " · unless it says otherwise below" } br;
@@ -2234,7 +2345,10 @@ impl App {
                     li { "Keep asking a source that failed three times running: it waits, with the reason, until you say try again." }
                 }
             }
-            (section("moving", "Moving"))
+            }
+            section.settings-card #moving {
+            header.settings-card-head { h2 { "Moving" } p { "Taking it with you, bringing a world here, and saying where it went." } }
+
             h3 { "Taking it with you" }
             p.dim { "Everything this world holds in one archive: its sources and their history, its trackers, its readers and what they proposed, its keys. "
                 code { "zetlyn world up <domain> --owner <you> --from <archive>" } " makes it again on a machine of yours." }
@@ -2276,6 +2390,7 @@ impl App {
                     input type="hidden" name="to" value="";
                     button type="submit" { "It did not move: answer here again" }
                 }
+            }
             }
         };
         page("Settings", body)
@@ -3080,6 +3195,28 @@ nav.settings-jump { display: flex; flex-wrap: wrap; gap: .4rem 1.1rem; margin: .
 h2.settings-section, h2#usage, h2#seen, h2#access { margin-top: 2.2rem; scroll-margin-top: 1rem; }
 table.settings-sources { width: 100%; margin: .8rem 0; font-size: .9rem; }
 table.settings-sources td, table.settings-sources th { padding: .45rem .6rem .45rem 0; vertical-align: middle; }
+
+/* A world's settings: one card a part, the same fields as the admin pages. */
+section.settings-card { background: var(--panel); border: 1px solid var(--line); padding: 1.2rem 1.35rem; margin: 0 0 1.1rem; scroll-margin-top: 1rem; }
+section.settings-card h2, section.settings-card h3 { font-family: inherit; text-transform: none; letter-spacing: 0; color: var(--fg); }
+section.settings-card h2 { margin: 0 0 .35rem; font-size: 1.15rem; font-weight: 600; }
+section.settings-card h3 { margin: 1.3rem 0 .5rem; font-size: .95rem; font-weight: 600; }
+section.settings-card > h2#usage { margin-top: 0; }
+header.settings-card-head { margin: 0 0 .9rem; }
+header.settings-card-head p { margin: 0; color: var(--dim); font-size: .92rem; max-width: 52rem; line-height: 1.5; }
+.settings-said { padding: .55rem .8rem; margin: 0 0 .8rem; border-left: 3px solid var(--accent); background: var(--bg); font-size: .9rem; }
+.settings-actions { display: flex; align-items: center; gap: .9rem; margin: .9rem 0 0; flex-wrap: wrap; }
+.settings-actions .dim { font-size: .85rem; }
+.settings-roles { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: .9rem; }
+.settings-roles label strong { color: var(--fg); font-size: .92rem; }
+.settings-roles label span { font-size: .82rem; }
+section.settings-card select, section.settings-card input[type=text], section.settings-card input[type=url], section.settings-card textarea { flex: none; box-sizing: border-box; padding: .42rem .6rem; font: inherit; font-size: .9rem; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 0; height: auto; }
+section.settings-card table select { width: 100%; max-width: 15rem; }
+section.settings-card button { padding: .4rem .8rem; font-size: .88rem; }
+section.settings-card .admin-table th:first-child, section.settings-card .admin-table td:first-child { padding-left: 0; }
+section.settings-card form.settings > p { margin: 0 0 .8rem; }
+section.settings-card details { margin: 1rem 0 0; font-size: .9rem; }
+section.settings-card details summary { cursor: pointer; color: var(--dim); }
 table.settings-sources tfoot td { border-top: 1px solid var(--line); font-weight: 600; }
 nav.admin-tabs { display: flex; gap: 1.2rem; border-bottom: 1px solid var(--line); margin: 0 0 1rem; }
 nav.admin-tabs a { padding: .5rem 0; color: var(--dim); text-decoration: none; border-bottom: 2px solid transparent; margin-bottom: -1px; }
@@ -3087,7 +3224,8 @@ nav.admin-tabs a[aria-current] { color: var(--fg); border-bottom-color: var(--ac
 form.admin-filter { display: flex; flex-wrap: wrap; align-items: flex-end; gap: .6rem .9rem; margin: 0 0 1rem; padding: .8rem 1rem; background: var(--panel); border: 1px solid var(--line); font-size: .85rem; }
 form.admin-filter label { display: flex; flex-direction: column; gap: .2rem; color: var(--dim); }
 form.admin-filter label.check { flex-direction: row; align-items: center; gap: .35rem; color: var(--fg); }
-form.admin-filter input:not([type=checkbox]), form.admin-filter select { padding: .38rem .5rem; font: inherit; background: var(--bg); color: var(--fg); border: 1px solid var(--line); }
+form.admin-filter input:not([type=checkbox]), form.admin-filter select { flex: none; height: auto; padding: .38rem .5rem; font: inherit; background: var(--bg); color: var(--fg); border: 1px solid var(--line); }
+form.admin-filter input[type=search] { width: 14rem; }
 .admin-quick { display: flex; gap: .3rem; flex-basis: 100%; }
 .admin-quick a.chip { text-decoration: none; }
 tr.admin-day td { background: var(--wash); font-size: .75rem; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); font-weight: 600; padding: .4rem .9rem; }
@@ -3839,7 +3977,7 @@ fn admin(dir: &Path, rest: &[&str], post: bool, form: &BTreeMap<String, String>,
             };
             let quick = if from.is_empty() && to.is_empty() { if since.is_empty() { "24h".to_string() } else { since.clone() } } else { String::new() };
             let (cell_f, who_f, kind_f, text_f) = (q("cell"), q("who"), q("kind"), q("q").to_lowercase());
-            let with_selftest = q("selftest") == "1";
+            // What the release selftest does is not anybody's activity: it is said where it runs.
             let page_n: usize = q("page").parse().unwrap_or(1).max(1);
             let per = 50;
             let in_window = |at: &str| at >= lo.as_str() && at <= hi.as_str();
@@ -3875,12 +4013,12 @@ fn admin(dir: &Path, rest: &[&str], post: bool, form: &BTreeMap<String, String>,
             let kind_of = |r: &Row| -> &'static str {
                 if r.failed { "failed" } else if r.what == "mail" { "mail" } else if r.what.starts_with("maintenance") { "maintenance" } else if r.what.starts_with("delet") || r.what == "remove" || r.what == "purge" { "deletion" } else if r.waiting { "waiting" } else { "done" }
             };
-            let cells: BTreeSet<String> = rows.iter().map(|r| r.cell.clone()).filter(|c| !c.is_empty()).collect();
-            let whos: BTreeSet<String> = rows.iter().map(|r| r.by.clone()).filter(|b| !b.is_empty()).collect();
+            let cells: BTreeSet<String> = rows.iter().map(|r| r.cell.clone()).filter(|c| !c.is_empty() && !c.starts_with("selftest-")).collect();
+            let whos: BTreeSet<String> = rows.iter().map(|r| r.by.clone()).filter(|b| !b.is_empty() && b != "selftest").collect();
             let shown: Vec<&Row> = rows
                 .iter()
                 .filter(|r| in_window(&r.at))
-                .filter(|r| with_selftest || (r.by != "selftest" && !r.cell.starts_with("selftest-")))
+                .filter(|r| r.by != "selftest" && !r.cell.starts_with("selftest-"))
                 .filter(|r| cell_f.is_empty() || r.cell == cell_f)
                 .filter(|r| who_f.is_empty() || r.by == who_f)
                 .filter(|r| kind_f.is_empty() || kind_of(r) == kind_f)
@@ -3943,7 +4081,6 @@ fn admin(dir: &Path, rest: &[&str], post: bool, form: &BTreeMap<String, String>,
                         label { "Kind" select name="kind" { option value="" { "any" } @for (v, l) in [("done", "done"), ("waiting", "waiting"), ("failed", "failed"), ("mail", "mail"), ("maintenance", "maintenance"), ("deletion", "deletion")] { option value=(v) selected[kind_f == v] { (l) } } } }
                     }
                     label { "Search" input type="search" name="q" value=(q("q")) placeholder="restore, n2, …"; }
-                    label.check { input type="checkbox" name="selftest" value="1" checked[with_selftest]; " selftest" }
                     button type="submit" { "Show" }
                 }
                 @if tab == "actions" {

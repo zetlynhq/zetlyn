@@ -32,6 +32,10 @@ pub fn resolve(raw: &str) -> Result<Option<String>, String> {
             Some(n) => (n, true),
             None => (named, false),
         };
+        // A cell's own workings (its mail token, its paths) are not a source's to read.
+        if name.starts_with("ZETLYN_") && crate::usage::in_cell() {
+            return Err(format!("{name}: a hosted world's own settings are not given to its sources"));
+        }
         match std::env::var(name) {
             Ok(value) => out.push_str(&value),
             Err(_) if optional => return Ok(None),

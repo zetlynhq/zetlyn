@@ -253,6 +253,10 @@ impl Watch {
                     done.push(format!("webhook {url}"));
                 }
                 "command" => {
+                    // A hosted world runs no programs on the server; a webhook reaches yours.
+                    if crate::usage::in_cell() {
+                        return Err("a hosted world delivers by mail, feed or webhook, not by running a command".into());
+                    }
                     let argv: Vec<String> = d
                         .run
                         .iter()

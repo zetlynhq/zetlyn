@@ -1002,7 +1002,7 @@ pub fn schedule_pass(root: &Path, deliver: bool, limits: &Limits) -> Option<i64>
                 eprintln!("{name}: not read, the month's reads are used up");
                 continue;
             }
-            crate::usage::count(crate::usage::READS);
+            crate::usage::count_read(&name);
             match ds.run() {
                 Ok(r) => {
                     println!(
@@ -1047,7 +1047,7 @@ pub fn schedule_pass(root: &Path, deliver: bool, limits: &Limits) -> Option<i64>
                 eprintln!("{name}: not read, the month's reads are used up");
                 continue;
             }
-            crate::usage::count(crate::usage::READS);
+            crate::usage::count_read(&name);
             match ds.run() {
                 Ok(r) => println!(
                     "{name} update {} {} after {}: +{} ~{} −{} ={}",

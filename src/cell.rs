@@ -81,6 +81,22 @@ pub struct Terms {
     /// May answer at a domain of its own.
     #[serde(default = "yes")]
     pub domain: bool,
+    /// The plan as its owner sees it in the cell's settings, written by the main server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<PlanShown>,
+}
+
+/// What a cell's owner is shown of its plan: what it includes, the spending limit, and the
+/// month's storage so far as the main server counts it (megabyte-days).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanShown {
+    pub title: String,
+    pub storage_gb: u64,
+    pub reads: u64,
+    pub mails: u64,
+    pub cap: u64,
+    pub mb_days: u64,
 }
 
 fn yes() -> bool {
@@ -89,7 +105,7 @@ fn yes() -> bool {
 
 impl Default for Terms {
     fn default() -> Terms {
-        Terms { active: true, sources: None, every: String::new(), mails: None, reads: None, domain: true }
+        Terms { active: true, sources: None, every: String::new(), mails: None, reads: None, domain: true, plan: None }
     }
 }
 
@@ -437,6 +453,7 @@ fn install(name: &str, port: Option<u16>, version: &str) -> Result<(), String> {
     env.insert("VERSION".into(), version.to_string());
     env.entry("STATE".into()).or_insert_with(|| "running".into());
     write_env(name, &env)?;
+    ensure_mail_token(name)?;
     systemctl(&["daemon-reload"])?;
     start(name)?;
     sync_routes()?;
@@ -540,6 +557,7 @@ pub fn set_version(name: &str, version: &str) -> Result<(), String> {
     let mut env = read_env(name);
     env.insert("VERSION".into(), version.to_string());
     write_env(name, &env)?;
+    ensure_mail_token(name)?;
     if env.get("STATE").map(String::as_str) == Some("running") {
         systemctl(&["restart", &format!("zetlyn-cell@{name}")])?;
     }
@@ -699,11 +717,24 @@ pub fn sync_routes() -> Result<(), String> {
 pub fn sync() -> Result<(), String> {
     for name in cells() {
         let env = read_env(&name);
+        // A cell made before the relay gets its token, and is started again to see it.
+        if ensure_mail_token(&name).unwrap_or(false) && env.get("STATE").map(String::as_str) == Some("running") {
+            let _ = systemctl(&["restart", &format!("zetlyn-cell@{name}")]);
+            continue;
+        }
         if env.get("STATE").map(String::as_str) == Some("running") && show(&format!("zetlyn-cell@{name}"), "ActiveState") != "active" {
             let _ = systemctl(&["start", &format!("zetlyn-cell@{name}"), &format!("zetlyn-cell-run@{name}.timer")]);
         }
     }
     sync_routes()?;
+    // An import an owner asked for, one a minute.
+    if let Some(name) = cells().into_iter().find(|n| dir_of(n).join(INCOMING).join(ASKED).exists()) {
+        match import_into(&name) {
+            Ok(n) => println!("{name}: imported, {n} files"),
+            Err(e) => eprintln!("{name}: import: {e}"),
+        }
+        return Ok(());
+    }
     let day_ago = crate::iso_stamp(crate::now() - 86_400).replace([':', '-'], "");
     let due = cells()
         .into_iter()
@@ -717,11 +748,244 @@ pub fn sync() -> Result<(), String> {
     Ok(())
 }
 
+// -- a world brought into a cell ----------------------------------------------------------------
+
+/// Where an owner's upload waits for the server, inside the cell's directory.
+const INCOMING: &str = "incoming";
+const ASKED: &str = "import.json";
+const ARCHIVE: &str = "world.tar.gz";
+/// What the last import came to, for the settings page.
+pub const LAST_IMPORT: &str = "last-import.json";
+
+/// An owner's upload, taken inside the cell: checked to be an export, kept, and asked of the
+/// server, which brings it in within a minute. What to tell the owner.
+pub fn take_upload(body: &mut dyn Read, by: &str) -> Result<String, String> {
+    let cell = crate::usage::cell_dir().ok_or("Only a world on Zetlyn Managed imports from here. On your own machine: zetlyn world import.")?;
+    let incoming = cell.join(INCOMING);
+    if incoming.join(ASKED).exists() {
+        return Err("An import is waiting already; it starts within a minute.".into());
+    }
+    std::fs::create_dir_all(&incoming).map_err(|e| e.to_string())?;
+    let gb = terms(&cell).and_then(|t| t.plan).map(|p| p.storage_gb).filter(|g| *g > 0).unwrap_or(2);
+    let limit = gb << 30;
+    let partial = incoming.join(format!("{ARCHIVE}.partial"));
+    let result = (|| {
+        let mut out = std::fs::File::create(&partial).map_err(|e| e.to_string())?;
+        let n = std::io::copy(&mut body.take(limit + 1), &mut out).map_err(|e| format!("the upload broke off: {e}"))?;
+        if n > limit {
+            return Err(format!("Larger than the {gb} GB the plan includes. Write to hello@zetlyn.com and we bring it in for you."));
+        }
+        if n == 0 {
+            return Err("Nothing arrived.".into());
+        }
+        let files = crate::world::check_export(&partial)?;
+        std::fs::rename(&partial, incoming.join(ARCHIVE)).map_err(|e| e.to_string())?;
+        let asked = json!({ "by": by, "at": crate::iso_stamp(crate::now()), "files": files, "bytes": n });
+        std::fs::write(incoming.join(ASKED), asked.to_string()).map_err(|e| e.to_string())?;
+        Ok(format!("Received, {files} files. Within a minute this world is replaced by it: a snapshot of it is taken first, and a mail says when it is done."))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&partial);
+    }
+    result
+}
+
+/// Whether an import waits, and what the last one came to: for the settings page.
+pub fn import_state() -> (bool, Option<J>) {
+    let Some(cell) = crate::usage::cell_dir() else { return (false, None) };
+    let incoming = cell.join(INCOMING);
+    (incoming.join(ASKED).exists(), std::fs::read(incoming.join(LAST_IMPORT)).ok().and_then(|b| serde_json::from_slice(&b).ok()))
+}
+
+/// An import a cell asked for, done as root on its server: a snapshot, the cell stopped, its world
+/// set aside and the upload put in its place, the cell started again. Where the upload does not
+/// import, the world set aside goes back.
+fn import_into(name: &str) -> Result<usize, String> {
+    let dir = dir_of(name);
+    let incoming = dir.join(INCOMING);
+    let asked: J = std::fs::read(incoming.join(ASKED)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let by = asked["by"].as_str().unwrap_or("").to_string();
+    let world = dir.join("orgs").join(name);
+    let running = read_env(name).get("STATE").map(String::as_str) == Some("running");
+    let result = (|| {
+        snapshot(name, "before import")?;
+        let _ = systemctl(&["stop", &format!("zetlyn-cell-run@{name}.timer"), &format!("zetlyn-cell-run@{name}.service"), &format!("zetlyn-cell@{name}")]);
+        let aside = dir.join(format!("replaced-{}", stamp()));
+        std::fs::rename(&world, &aside).map_err(|e| format!("{}: {e}", world.display()))?;
+        match crate::world::import_hosted(&incoming.join(ARCHIVE), &world) {
+            Ok(n) => {
+                let _ = std::fs::remove_dir_all(&aside);
+                Ok(n)
+            }
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&world);
+                let _ = std::fs::rename(&aside, &world);
+                Err(e)
+            }
+        }
+    })();
+    let _ = std::fs::remove_file(incoming.join(ARCHIVE));
+    let _ = std::fs::remove_file(incoming.join(ASKED));
+    let last = match &result {
+        Ok(n) => json!({ "at": crate::iso_stamp(crate::now()), "by": by, "ok": true, "files": n }),
+        Err(e) => json!({ "at": crate::iso_stamp(crate::now()), "by": by, "ok": false, "error": e }),
+    };
+    let _ = std::fs::write(incoming.join(LAST_IMPORT), last.to_string());
+    give_back(&dir);
+    if running {
+        let _ = systemctl(&["start", &format!("zetlyn-cell@{name}"), &format!("zetlyn-cell-run@{name}.timer")]);
+    }
+    if by.contains('@') {
+        let url = node().map(|n| format!("{}/{name}/", n.url.trim_end_matches('/'))).unwrap_or_default();
+        let text = match &result {
+            Ok(n) => format!("Hello,\n\nthe world you uploaded is now the one at {url}: {n} files, its sources, trackers and their history.\n\nWhat was there before is kept as a snapshot; write to hello@zetlyn.com within fourteen days if you want it back.\n\nBest regards,\nThe Zetlyn team\n\n--\nZetlyn · https://zetlyn.com · hello@zetlyn.com\n"),
+            Err(e) => format!("Hello,\n\nthe world you uploaded for {url} could not be brought in:\n\n  {e}\n\nNothing changed there; it runs as before. Write to hello@zetlyn.com if you need a hand.\n\nBest regards,\nThe Zetlyn team\n\n--\nZetlyn · https://zetlyn.com · hello@zetlyn.com\n"),
+        };
+        let subject = if result.is_ok() { "Your world is imported" } else { "Your import did not go through" };
+        if let Err(e) = server_mail(&by, subject, &text) {
+            eprintln!("{name}: import mail to {by}: {e}");
+        }
+    }
+    result
+}
+
+/// A mail from the server itself, through its mailer.
+fn server_mail(to: &str, subject: &str, body: &str) -> Result<(), String> {
+    let central = std::env::var("ZETLYN_MAIL").unwrap_or_else(|_| "/etc/zetlyn/mail.yaml".into());
+    match crate::yaml::read::<crate::account::Mail>(Path::new(&central))? {
+        crate::account::Mail { smtp: Some(s), .. } => crate::mail::send(&s, to, subject, body),
+        _ => Err(format!("{central} names no SMTP server")),
+    }
+}
+
+// -- mail, sent for the cells -------------------------------------------------------------------
+
+/// The key a server makes each cell's mail token from, root's alone.
+pub const MAIL_KEY: &str = "/etc/zetlyn/mail.key";
+/// Where a server's mail relay listens, for its own cells only.
+pub const MAIL_RELAY: &str = "127.0.0.1:2525";
+
+/// The mail key, made the first time it is asked for.
+fn mail_key() -> Result<ring::hmac::Key, String> {
+    let path = Path::new(MAIL_KEY);
+    if !path.exists() {
+        let mut raw = [0u8; 32];
+        ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut raw).map_err(|_| "no randomness")?;
+        let partial = path.with_extension("partial");
+        std::fs::write(&partial, crate::key::hex(&raw)).map_err(|e| format!("{}: {e}", partial.display()))?;
+        run("chmod", &["0600", &partial.to_string_lossy()])?;
+        std::fs::rename(&partial, path).map_err(|e| e.to_string())?;
+    }
+    let hex = std::fs::read_to_string(path).map_err(|e| format!("{MAIL_KEY}: {e}"))?;
+    Ok(ring::hmac::Key::new(ring::hmac::HMAC_SHA256, hex.trim().as_bytes()))
+}
+
+/// What a cell shows the relay to send as itself: the key's mark of its name.
+fn mail_token(key: &ring::hmac::Key, name: &str) -> String {
+    crate::key::hex(ring::hmac::sign(key, format!("mail:{name}").as_bytes()).as_ref())
+}
+
+/// A cell's file given its mail token where it has none. Whether it was given one.
+fn ensure_mail_token(name: &str) -> Result<bool, String> {
+    let mut env = read_env(name);
+    let token = mail_token(&mail_key()?, name);
+    if env.get("ZETLYN_MAIL_TOKEN") == Some(&token) {
+        return Ok(false);
+    }
+    env.insert("ZETLYN_MAIL_TOKEN".into(), token);
+    write_env(name, &env)?;
+    Ok(true)
+}
+
+/// The relay, `zetlyn node mail`: a cell's mail, sent through the server's mailer
+/// (/etc/zetlyn/mail.yaml), so no cell holds the mailer's password. A cell names itself and shows
+/// its token; what it sends is counted for it and stops at its month's limit.
+pub fn serve_mail() -> Result<(), String> {
+    let key = std::sync::Arc::new(mail_key()?);
+    let server = tiny_http::Server::http(MAIL_RELAY).map_err(|e| format!("{MAIL_RELAY}: {e}"))?;
+    println!("mail relay on {MAIL_RELAY}");
+    for mut request in server.incoming_requests() {
+        let key = key.clone();
+        std::thread::spawn(move || {
+            let (code, said) = relay(&key, &mut request);
+            if code != 200 {
+                eprintln!("mail relay: {code} {said}");
+            }
+            let _ = request.respond(tiny_http::Response::from_string(said).with_status_code(code));
+        });
+    }
+    Ok(())
+}
+
+fn relay(key: &ring::hmac::Key, request: &mut tiny_http::Request) -> (u16, String) {
+    if request.method() != &tiny_http::Method::Post || request.url() != "/send" {
+        return (404, "POST /send".into());
+    }
+    let header = |name: &str| request.headers().iter().find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name)).map(|h| h.value.as_str().to_string()).unwrap_or_default();
+    let name = header("X-Zetlyn-Cell");
+    let token = header("Authorization").strip_prefix("Bearer ").unwrap_or("").to_string();
+    if !name_ok(&name) || !env_of(&name).exists() || !crate::place::same(&token, &mail_token(key, &name)) {
+        return (403, "not a cell of this server".into());
+    }
+    let mut body = String::new();
+    if std::io::Read::read_to_string(&mut std::io::Read::take(request.as_reader(), 512 << 10), &mut body).is_err() {
+        return (400, "not text".into());
+    }
+    let Ok(m) = serde_json::from_str::<J>(&body) else { return (400, "not JSON".into()) };
+    let (to, subject, text) = (m["to"].as_str().unwrap_or(""), m["subject"].as_str().unwrap_or(""), m["body"].as_str().unwrap_or(""));
+    if to.len() > 320 || subject.len() > 300 || subject.contains(['\r', '\n']) {
+        return (400, "not a mail to send".into());
+    }
+    let dir = dir_of(&name);
+    let month = crate::usage::month();
+    if let Some(cap) = terms(&dir).and_then(|t| t.mails) {
+        if crate::usage::used(&dir, crate::usage::MAILS, &month) >= cap {
+            return (429, "this world has sent every mail its month allows".into());
+        }
+    }
+    let central = std::env::var("ZETLYN_MAIL").unwrap_or_else(|_| "/etc/zetlyn/mail.yaml".into());
+    let smtp = match crate::yaml::read::<crate::account::Mail>(Path::new(&central)) {
+        Ok(crate::account::Mail { smtp: Some(s), .. }) => s,
+        Ok(_) => return (503, format!("{central} names no SMTP server")),
+        Err(e) => return (503, format!("{central}: {e}")),
+    };
+    match crate::mail::send(&smtp, to, subject, text) {
+        Ok(()) => {
+            crate::usage::count_in(&dir, crate::usage::MAILS);
+            (200, "sent".into())
+        }
+        Err(e) => (502, e),
+    }
+}
+
+/// A cell's mail, handed to its server's relay: what a cell's `Site::send` does instead of
+/// speaking SMTP itself.
+pub fn relay_mail(to: &str, subject: &str, body: &str) -> Result<(), String> {
+    let name = std::env::var("ZETLYN_CELL").map_err(|_| "ZETLYN_CELL is not set: is this a cell?")?;
+    let token = std::env::var("ZETLYN_MAIL_TOKEN").map_err(|_| "this cell has no mail token yet; it gets one when its server next syncs")?;
+    let at = std::env::var("ZETLYN_MAIL_RELAY").unwrap_or_else(|_| format!("http://{MAIL_RELAY}"));
+    let agent = ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(90))).http_status_as_error(false).build().new_agent();
+    let mut answer = agent
+        .post(&format!("{at}/send"))
+        .header("X-Zetlyn-Cell", &name)
+        .header("Authorization", &format!("Bearer {token}"))
+        .header("Content-Type", "application/json")
+        .send(json!({ "to": to, "subject": subject, "body": body }).to_string())
+        .map_err(|e| format!("the mail relay: {e}"))?;
+    let code = answer.status().as_u16();
+    if code == 200 {
+        return Ok(());
+    }
+    let said = answer.body_mut().read_to_string().unwrap_or_default();
+    Err(format!("the mail relay: {code} {said}"))
+}
+
 // -- the command, and the one way the main server reaches it ------------------------------------
 
 pub const USAGE: &str = "zetlyn node status [--json] | sync | create <cell> --title … --owner … [--version v] | start|stop|restart <cell> \
 | snapshot <cell> [--why …] | restore <cell> [--from <stamp>|latest] [--port p] [--version v] | remove <cell> [--no-snapshot] \
-| terms <cell> --active yes|no [--sources n] [--every 1h] [--mails n] [--reads n] [--domain yes|no] | limit <cell> --memory 512M --cpu 100% \
+| terms <cell> --active yes|no [--sources n] [--every 1h] [--mails n] [--reads n] [--domain yes|no] \
+[--plan <title> --plan-storage-gb n --plan-reads n --plan-mails n --plan-cap n --mb-days n] | mail | limit <cell> --memory 512M --cpu 100% \
 | version <cell> <v> | install <v> --sha256 <hash> [--current] | logs <cell> [--lines n] | key-check | ca";
 
 pub fn command(args: &[String]) -> Result<(), String> {
@@ -745,6 +1009,7 @@ pub fn command(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         Some("sync") => sync(),
+        Some("mail") => serve_mail(),
         Some("create") => {
             let n = cell()?;
             // A title crosses SSH as one word, its spaces as no-break spaces.
@@ -779,6 +1044,11 @@ pub fn command(args: &[String]) -> Result<(), String> {
                 mails: flag("--mails").and_then(|v| v.parse().ok()),
                 reads: flag("--reads").and_then(|v| v.parse().ok()),
                 domain: yes_no("--domain", true),
+                // A plan's title crosses SSH as one word, its spaces as no-break spaces.
+                plan: flag("--plan").map(|title| {
+                    let n = |f: &str| flag(f).and_then(|v| v.parse().ok()).unwrap_or(0);
+                    PlanShown { title: title.replace('\u{a0}', " "), storage_gb: n("--plan-storage-gb"), reads: n("--plan-reads"), mails: n("--plan-mails"), cap: n("--plan-cap"), mb_days: n("--mb-days") }
+                }),
             };
             set_terms(&n, &t)?;
             sync_routes()

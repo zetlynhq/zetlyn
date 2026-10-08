@@ -660,6 +660,11 @@ impl Site {
         if !crate::usage::allowed(crate::usage::MAILS) {
             return Err("this world has sent every mail its month allows".into());
         }
+        // A cell holds no mailer of its own and runs none: its server's relay sends and counts.
+        if crate::usage::in_cell() {
+            crate::cell::relay_mail(to, subject, body)?;
+            return Ok(true);
+        }
         crate::usage::count(crate::usage::MAILS);
         if let Some(smtp) = &self.mail.smtp {
             crate::mail::send(smtp, to, subject, body)?;
@@ -1244,7 +1249,14 @@ pub fn remote_member(session: &str) -> Option<String> {
         .call()
         .ok()
         .and_then(|mut r| r.body_mut().read_json::<serde_json::Value>().ok())
-        .and_then(|j| j["email"].as_str().map(str::to_lowercase));
+        .and_then(|j| {
+            let email = j["email"].as_str().map(str::to_lowercase)?;
+            // The main server says who runs zetlyn.com; their menu here leads to its admin pages.
+            if j["operator"].as_bool() == Some(true) {
+                operators().lock().unwrap_or_else(|e| e.into_inner()).insert(email.clone());
+            }
+            Some(email)
+        });
     let mut kept = cache.lock().unwrap_or_else(|e| e.into_inner());
     if kept.len() > 10_000 {
         kept.clear();
@@ -1261,4 +1273,22 @@ pub fn session_cookie(cookie: &str) -> Option<String> {
 /// The main server's address a cell sends people to for signing in and out: `https://zetlyn.com`.
 pub fn identity_origin() -> Option<String> {
     IDENTITY.get().map(|u| u.trim_end_matches("/account/me").to_string())
+}
+
+/// Who runs zetlyn.com, as far as this process knows: the main server's owners, or whom the main
+/// server said so of when a cell asked.
+fn operators() -> &'static std::sync::Mutex<std::collections::BTreeSet<String>> {
+    static OPERATORS: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> = std::sync::OnceLock::new();
+    OPERATORS.get_or_init(Default::default)
+}
+
+/// The main server's owners, noted as its operators.
+pub fn note_operators(owners: &[String]) {
+    let set = owners.iter().filter(|o| o.contains('@') && !o.contains(':')).map(|o| o.to_lowercase()).collect();
+    *operators().lock().unwrap_or_else(|e| e.into_inner()) = set;
+}
+
+/// Whether an address runs zetlyn.com.
+pub fn is_operator(email: &str) -> bool {
+    operators().lock().unwrap_or_else(|e| e.into_inner()).contains(&email.to_lowercase())
 }

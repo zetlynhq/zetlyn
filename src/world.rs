@@ -586,7 +586,9 @@ pub fn export(dir: &Path, to: &Path) -> Result<usize, String> {
         for path in files(dir)? {
             let rel = path.strip_prefix(dir).map_err(|e| e.to_string())?;
             let name = rel.to_string_lossy().replace('\\', "/");
-            if name.ends_with("-wal") || name.ends_with("-shm") || name.ends_with("-journal") || name.ends_with(".arriving") || name.ends_with(".partial") {
+            if name.ends_with("-wal") || name.ends_with("-shm") || name.ends_with("-journal") || name.ends_with(".arriving") || name.ends_with(".partial")
+                // A cell's upload waiting to be imported is not part of it.
+                || name.starts_with("incoming/world.tar.gz") {
                 continue;
             }
             let inside = format!("world/{name}");
@@ -1052,6 +1054,47 @@ pub fn import(file: &Path, dir: &Path, url: Option<&str>, owner: Option<&str>) -
             }
         }
     }
+    Ok(n)
+}
+
+/// Whether a file is an export this imports, without unpacking it: how many files it holds.
+pub fn check_export(file: &Path) -> Result<usize, String> {
+    let reader = std::fs::File::open(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(reader));
+    let (mut n, mut about, mut ws, mut bytes) = (0usize, false, false, 0u64);
+    for entry in tar.entries().map_err(|_| "not a .tar.gz archive".to_string())? {
+        let entry = entry.map_err(|_| "the archive is cut short or damaged".to_string())?;
+        let path = entry.path().map_err(|e| e.to_string())?.into_owned();
+        if path == Path::new("EXPORT.json") {
+            about = true;
+            continue;
+        }
+        let kind = entry.header().entry_type();
+        if !kind.is_file() && !kind.is_dir() {
+            return Err(format!("{} is a link or a device, which no export holds", path.display()));
+        }
+        if path == Path::new("world").join(crate::account::WORKSPACE) {
+            ws = true;
+        }
+        bytes += entry.size();
+        n += 1;
+        if n > IMPORT_MAX_FILES || bytes > IMPORT_MAX_BYTES {
+            return Err("more files or bytes than a world holds".into());
+        }
+    }
+    if !about || !ws {
+        return Err("not an archive made by `zetlyn world export` or by Download all of it".into());
+    }
+    Ok(n)
+}
+
+/// An export made the world of a hosted cell: imported as any is, then at the address its cell
+/// gives it rather than the one it had. A mailer it names is not used there: a cell sends through
+/// its server.
+pub fn import_hosted(file: &Path, dir: &Path) -> Result<usize, String> {
+    let n = import(file, dir, None, None)?;
+    let ws = dir.join(crate::account::WORKSPACE);
+    set_top(&ws, "url", None)?;
     Ok(n)
 }
 

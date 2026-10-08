@@ -563,6 +563,7 @@ pub fn site_header(current: &str, reader: Reader) -> Markup {
                             summary { (email) }
                             div.account-panel {
                                 a href="https://zetlyn.com/account/" { "Your account" }
+                                @if crate::account::is_operator(email) { a href="https://zetlyn.com/account/admin/" { "Admin" } }
                                 @if !orgs.is_empty() {
                                     p.account-label { "Your organisations" }
                                     @for (label, href) in orgs { a href=(href) { (label) } }

@@ -65,6 +65,7 @@ const REFUSED: &[&str] = &[
     "order",
     "terms",
     "withdrawal",
+    "dpa",
     "docs",
     "legal",
     "privacy",

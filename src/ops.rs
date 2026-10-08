@@ -437,6 +437,14 @@ pub fn enforce_terms(control: &Path) -> Result<(), String> {
             mails: mail_cap,
             reads: read_cap,
             domain: plan.domain,
+            plan: (plan.storage_gb > 0).then(|| crate::cell::PlanShown {
+                title: if plan.title.is_empty() { customer.plan.clone() } else { plan.title.clone() },
+                storage_gb: plan.storage_gb,
+                reads: plan.reads,
+                mails: plan.mails,
+                cap: plan.cap,
+                mb_days: u.mb_days,
+            }),
         };
         let have: crate::cell::Terms = serde_json::from_value(s["terms"].clone()).unwrap_or_default();
         if serde_json::to_value(&have).ok() != serde_json::to_value(&want).ok() {
@@ -453,6 +461,12 @@ pub fn enforce_terms(control: &Path) -> Result<(), String> {
             }
             if !want.every.is_empty() {
                 words.extend(["--every".into(), want.every.clone()]);
+            }
+            if let Some(p) = &want.plan {
+                words.extend(["--plan".into(), p.title.replace(' ', "\u{a0}")]);
+                for (f, v) in [("--plan-storage-gb", p.storage_gb), ("--plan-reads", p.reads), ("--plan-mails", p.mails), ("--plan-cap", p.cap), ("--mb-days", p.mb_days)] {
+                    words.extend([f.to_string(), v.to_string()]);
+                }
             }
             let refs: Vec<&str> = words.iter().map(String::as_str).collect();
             on(n, &refs, None)?;

@@ -18,18 +18,80 @@ fn dir() -> Option<PathBuf> {
     std::env::var_os("ZETLYN_USAGE").map(PathBuf::from).filter(|p| !p.as_os_str().is_empty())
 }
 
+/// Whether this process is a cell's: a cell sends its mail through its server's relay, runs no
+/// commands and reads none of the server's own variables.
+pub fn in_cell() -> bool {
+    dir().is_some()
+}
+
+/// The cell's own directory, where its terms and its counts are; None outside a cell.
+pub fn cell_dir() -> Option<PathBuf> {
+    dir()?.parent().map(Path::to_path_buf)
+}
+
+fn append(file: &Path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(file) {
+        let _ = f.write_all(b".");
+    }
+}
+
 /// One more of a kind, this month.
 pub fn count(kind: &str) {
     let Some(d) = dir() else { return };
     let _ = std::fs::create_dir_all(&d);
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(d.join(format!("{kind}-{}", month()))) {
-        let _ = f.write_all(b".");
+    append(&d.join(format!("{kind}-{}", month())));
+}
+
+/// One more read, this month, and one more for that source, so the owner sees which source the
+/// reads went to.
+pub fn count_read(source: &str) {
+    count(READS);
+    let Some(d) = dir() else { return };
+    let per = d.join(format!("{READS}-{}.d", month()));
+    let _ = std::fs::create_dir_all(&per);
+    append(&per.join(file_of(source)));
+}
+
+/// One more of a kind for a cell, counted from outside it: its server's mail relay. What it makes
+/// stays the cell's, so the cell still writes there.
+pub fn count_in(cell: &Path, kind: &str) {
+    use std::os::unix::fs::MetadataExt;
+    let d = cell.join("usage");
+    let owner = std::fs::metadata(cell).ok().map(|m| (m.uid(), m.gid()));
+    let made = !d.exists();
+    let _ = std::fs::create_dir_all(&d);
+    let file = d.join(format!("{kind}-{}", month()));
+    let new = !file.exists();
+    append(&file);
+    if let Some((uid, gid)) = owner {
+        for (p, fresh) in [(&d, made), (&file, new)] {
+            if fresh {
+                let _ = std::os::unix::fs::chown(p, Some(uid), Some(gid));
+            }
+        }
     }
+}
+
+/// A source's name as a file's: `models/gguf` as `models%2Fgguf`.
+fn file_of(source: &str) -> String {
+    source.replace('%', "%25").replace('/', "%2F")
 }
 
 /// How many of a kind a cell's directory counted in a month.
 pub fn used(cell: &Path, kind: &str, month: &str) -> u64 {
     std::fs::metadata(cell.join("usage").join(format!("{kind}-{month}"))).map(|m| m.len()).unwrap_or(0)
+}
+
+/// A month's reads, source by source, the most first.
+pub fn reads_by_source(cell: &Path, month: &str) -> Vec<(String, u64)> {
+    let mut out: Vec<(String, u64)> = std::fs::read_dir(cell.join("usage").join(format!("{READS}-{month}.d")))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| Some((e.file_name().to_string_lossy().replace("%2F", "/").replace("%25", "%"), e.metadata().ok()?.len())))
+        .collect();
+    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    out
 }
 
 /// Whether one more is allowed this month: the cell's terms may cap a kind (`reads:`, `mails:`
@@ -70,6 +132,13 @@ mod tests {
         assert_eq!(used(&cell, MAILS, &month()), 2);
         assert!(!allowed(MAILS), "two of two sent");
         assert!(allowed(READS), "reads have no cap here");
+        count_read("models/gguf");
+        count_read("models/gguf");
+        count_read("cve");
+        assert_eq!(used(&cell, READS, &month()), 3);
+        assert_eq!(reads_by_source(&cell, &month()), vec![("models/gguf".to_string(), 2), ("cve".to_string(), 1)]);
+        count_in(&cell, MAILS);
+        assert_eq!(used(&cell, MAILS, &month()), 3);
         std::env::remove_var("ZETLYN_USAGE");
         let _ = std::fs::remove_dir_all(&cell);
     }

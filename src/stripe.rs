@@ -258,6 +258,11 @@ pub fn cancel_at_period_end(subscription: &str) -> Result<J, String> {
     post(&format!("subscriptions/{subscription}"), &[p("cancel_at_period_end", "true")], None)
 }
 
+/// A cancellation taken back while the subscription still runs: it goes on as before.
+pub fn keep_subscription(subscription: &str) -> Result<J, String> {
+    post(&format!("subscriptions/{subscription}"), &[p("cancel_at_period_end", "false")], None)
+}
+
 /// Stripe's customer portal for one customer, opened without signing in there: where to send them.
 pub fn portal_session(customer: &str, back: &str) -> Result<String, String> {
     let s = post("billing_portal/sessions", &[p("customer", customer), p("return_url", back)], None)?;

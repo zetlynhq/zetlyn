@@ -127,22 +127,78 @@ impl Quota {
 
 /// What was done, by whom, when: every job asked and answered, every mail, every deletion.
 pub fn audit(control: &Path, by: &str, what: &str, cell: &str, said: &str) {
-    let line = json!({ "at": crate::iso_stamp(crate::now()), "by": by, "what": what, "cell": cell, "said": said });
-    let path = ops_dir(control).join("audit.jsonl");
+    audit_job(control, by, what, cell, said, "");
+}
+
+/// The same, for a job: its id, so its asking and its answer are one line on the pages.
+pub fn audit_job(control: &Path, by: &str, what: &str, cell: &str, said: &str, job: &str) {
+    let mut line = json!({ "at": crate::iso_stamp(crate::now()), "by": by, "what": what, "cell": cell, "said": said });
+    if !job.is_empty() {
+        line["job"] = json!(job);
+    }
+    append_log(control, "audit", &line);
+}
+
+/// One line onto a log of the ops directory, in the file of this month (`audit-2026-10.jsonl`),
+/// so a year of it is twelve files and the oldest go as they age (`prune_logs`). Written by root
+/// (the jobs) and by the pages (mail): it stays the directory's owner's.
+pub fn append_log(control: &Path, base: &str, line: &J) {
+    let path = ops_dir(control).join(format!("{base}-{}.jsonl", crate::usage::month()));
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(f, "{line}");
     }
-    // Written by root (the jobs) and by the pages (mail): it stays the directory's owner's.
     use std::os::unix::fs::MetadataExt;
     if let Ok(m) = std::fs::metadata(ops_dir(control)) {
         let _ = std::os::unix::fs::chown(&path, Some(m.uid()), Some(m.gid()));
     }
 }
 
+/// Every line of one of the ops logs, newest first: the monthly files and the one from before
+/// there were months (`audit.jsonl`).
+pub fn log_all(control: &Path, base: &str) -> Vec<J> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(ops_dir(control))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n == format!("{base}.jsonl") || (n.starts_with(&format!("{base}-")) && n.ends_with(".jsonl"))))
+        .collect();
+    // `audit.jsonl` sorts before `audit-2026-10.jsonl` reversed; it is the oldest, so last.
+    files.sort_by_key(|p| { let n = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(); if n == format!("{base}.jsonl") { String::new() } else { n } });
+    files.reverse();
+    let mut out = Vec::new();
+    for f in files {
+        let text = std::fs::read_to_string(&f).unwrap_or_default();
+        out.extend(text.lines().rev().filter_map(|l| serde_json::from_str::<J>(l).ok()));
+    }
+    out
+}
+
 /// The newest lines of one of the ops logs, newest first.
-pub fn log_lines(control: &Path, file: &str, n: usize) -> Vec<J> {
-    let text = std::fs::read_to_string(ops_dir(control).join(file)).unwrap_or_default();
-    text.lines().rev().take(n).filter_map(|l| serde_json::from_str(l).ok()).collect()
+pub fn log_lines(control: &Path, base: &str, n: usize) -> Vec<J> {
+    let mut all = log_all(control, base.trim_end_matches(".jsonl"));
+    all.truncate(n);
+    all
+}
+
+/// The logs a year old and more gone: what is kept is twelve months, as the terms say of what is
+/// written down about who did what.
+fn prune_logs(control: &Path) {
+    let keep_from = {
+        let m = crate::usage::month();
+        let (y, mo): (i32, u32) = (m.get(..4).and_then(|s| s.parse().ok()).unwrap_or(2026), m.get(5..7).and_then(|s| s.parse().ok()).unwrap_or(1));
+        format!("{:04}-{:02}", y - 1, mo)
+    };
+    for e in std::fs::read_dir(ops_dir(control)).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        for base in ["audit", "alarms", "mail"] {
+            if let Some(month) = name.strip_prefix(&format!("{base}-")).and_then(|r| r.strip_suffix(".jsonl")) {
+                if month.len() == 7 && month < keep_from.as_str() {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
@@ -303,6 +359,7 @@ pub fn poll(control: &Path) -> Result<(), String> {
         eprintln!("expire: {e}");
     }
     clean_downloads(control);
+    prune_logs(control);
     work(control);
     if !r.heartbeat.is_empty() {
         let _ = ureq::get(&r.heartbeat).call();
@@ -1222,7 +1279,7 @@ pub fn ask(control: &Path, action: &str, cell: &str, args: &BTreeMap<String, Str
     let partial = dir.join(format!("{id}.partial"));
     std::fs::write(&partial, job.to_string()).map_err(|e| e.to_string())?;
     std::fs::rename(&partial, dir.join(format!("{id}.json"))).map_err(|e| e.to_string())?;
-    audit(control, by, &format!("asked {action}"), cell, &serde_json::to_string(args).unwrap_or_default());
+    audit_job(control, by, &format!("asked {action}"), cell, &serde_json::to_string(args).unwrap_or_default(), &id);
     Ok(id)
 }
 
@@ -1367,7 +1424,7 @@ pub fn work(control: &Path) {
         let what = format!("done {}", job["action"].as_str().unwrap_or(""));
         let outcome = job["said"].as_str().map(|s| s.lines().next().unwrap_or("").to_string()).or_else(|| job["error"].as_str().map(|e| format!("failed: {e}"))).unwrap_or_default();
         if job["action"] != "snapshots" && job["action"] != "logs" {
-            audit(control, &by, &what, &cell, &outcome);
+            audit_job(control, &by, &what, &cell, &outcome, job["id"].as_str().unwrap_or(""));
         }
         let id = job["id"].as_str().unwrap_or("job").to_string();
         let _ = std::fs::write(dir.join("done").join(format!("{id}.json")), job.to_string());
@@ -1496,13 +1553,9 @@ pub fn command(args: &[String]) -> Result<(), String> {
 pub fn mail(control: &Path, to: &[String], subject: &str, text: &str, by: &str) -> Result<usize, String> {
     let site = crate::account::Site::load(control);
     let mut sent = 0;
-    let log = ops_dir(control).join("mail.jsonl");
     for address in to {
         let result = site.send(address, subject, text);
-        let line = json!({ "at": crate::iso_stamp(crate::now()), "to": address, "subject": subject, "by": by, "ok": result.is_ok(), "error": result.as_ref().err() });
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log) {
-            let _ = writeln!(f, "{line}");
-        }
+        append_log(control, "mail", &json!({ "at": crate::iso_stamp(crate::now()), "to": address, "subject": subject, "by": by, "ok": result.is_ok(), "error": result.as_ref().err() }));
         if result.is_ok() {
             sent += 1;
         }
@@ -1698,8 +1751,5 @@ pub fn reconcile(control: &Path) {
 
 /// Every alarm raised and cleared, for the admin pages' history.
 fn history(control: &Path, what: &str, key: &str, text: &str) {
-    let line = json!({ "at": crate::iso_stamp(crate::now()), "what": what, "key": key, "text": text });
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(ops_dir(control).join("alarms.jsonl")) {
-        let _ = writeln!(f, "{line}");
-    }
+    append_log(control, "alarms", &json!({ "at": crate::iso_stamp(crate::now()), "what": what, "key": key, "text": text }));
 }

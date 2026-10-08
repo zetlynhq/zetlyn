@@ -141,6 +141,8 @@ pub struct Entry {
     pub by: String,
     pub received: String,
     pub row: J,
+    /// What a correction says: `record` and `fields`. Null for a row.
+    pub correct: J,
     pub read_at: String,
     pub read_from: String,
     pub attest: String,
@@ -157,11 +159,13 @@ pub struct Entry {
     pub verified: bool,
 }
 
-/// The keys this source takes proposals from. Only a proposals source has any.
+/// The keys this source takes proposals from: a proposals source's invitations; none for a
+/// source that takes them from readers only.
 fn invited(dir: &Path) -> Result<Vec<String>, String> {
     let decl = crate::sourcedecl::SourceDecl::load(dir)?;
     match decl.source {
         Fetch::Proposals { from, .. } => Ok(from),
+        _ if decl.proposals.is_some() => Ok(Vec::new()),
         _ => Err(format!("{} takes no proposals", decl.name)),
     }
 }
@@ -171,19 +175,58 @@ pub fn readers(dir: &Path) -> Result<Vec<String>, String> {
     let decl = crate::sourcedecl::SourceDecl::load(dir)?;
     match decl.source {
         Fetch::Proposals { readers, .. } => Ok(readers),
-        _ => Err(format!("{} takes no proposals", decl.name)),
+        _ => decl.proposals.map(|t| t.readers).ok_or_else(|| format!("{} takes no proposals", decl.name)),
     }
 }
 
 /// Says who among the readers may propose, in the source's own declaration.
 pub fn set_readers(dir: &Path, readers: Vec<String>) -> Result<(), String> {
     let mut decl = crate::sourcedecl::SourceDecl::load(dir)?;
-    let Fetch::Proposals { readers: now, .. } = &mut decl.source else {
-        return Err(format!("{} takes no proposals", decl.name));
-    };
-    *now = readers;
+    match &mut decl.source {
+        Fetch::Proposals { readers: now, .. } => *now = readers,
+        _ => decl.proposals = Some(crate::sourcedecl::Takes { readers }),
+    }
     let path = dir.join(crate::sourcedecl::FILE);
     std::fs::write(&path, crate::yaml::to_string(&decl)?).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// A source that is read from elsewhere taking proposals, or no longer: `None` takes none. A
+/// proposals source always takes them.
+pub fn set_takes(dir: &Path, readers: Option<Vec<String>>) -> Result<(), String> {
+    let mut decl = crate::sourcedecl::SourceDecl::load(dir)?;
+    if matches!(decl.source, Fetch::Proposals { .. }) {
+        return match readers {
+            Some(r) => set_readers(dir, r),
+            None => Err(format!("{} is made of proposals; it always takes them", decl.name)),
+        };
+    }
+    decl.proposals = readers.map(|readers| crate::sourcedecl::Takes { readers });
+    let path = dir.join(crate::sourcedecl::FILE);
+    std::fs::write(&path, crate::yaml::to_string(&decl)?).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Where accepted corrections and rows wait for the next update of a source that is read from
+/// elsewhere: the update puts each correction over the claim it names, and reads each row as
+/// one more of its own.
+pub const CORRECTED: &str = "corrected";
+pub const ADDED: &str = "added";
+
+/// Every accepted correction, by the claim it corrects, in the order accepted: what an update
+/// puts over that claim's properties.
+pub fn corrections(dir: &Path) -> BTreeMap<String, Vec<J>> {
+    let mut out: BTreeMap<String, Vec<J>> = BTreeMap::new();
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(dir.join(CORRECTED)).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
+    files.sort();
+    for f in files {
+        let Some(j) = std::fs::read(&f).ok().and_then(|b| serde_json::from_slice::<J>(&b).ok()) else { continue };
+        if let Some(record) = j["record"].as_str().map(str::to_string) {
+            out.entry(record).or_default().push(j);
+        }
+    }
+    for list in out.values_mut() {
+        list.sort_by(|a, b| a["accepted_at"].as_str().cmp(&b["accepted_at"].as_str()));
+    }
+    out
 }
 
 /// Whether this reader may propose to this source from the browser.
@@ -334,12 +377,25 @@ pub fn check(body: &[u8]) -> Result<J, String> {
         return Err(format!("a proposal is at most {MAX_BODY} bytes"));
     }
     let j: J = serde_json::from_slice(body).map_err(|e| format!("not JSON: {e}"))?;
-    let row = j["row"].as_object().ok_or("no `row`: the values proposed, as an object")?;
-    if row.is_empty() {
-        return Err("`row` is empty".into());
-    }
-    if let Some(taken) = row.keys().find(|k| RESERVED.contains(&k.as_str())) {
-        return Err(format!("`row` may not name `{taken}`: the proposal itself says that"));
+    // A correction names the claim it corrects and the properties it says otherwise; a row is
+    // one more claim.
+    if let Some(c) = j.get("correct") {
+        let record = c["record"].as_str().unwrap_or("");
+        if record.is_empty() || record.len() > 500 || record.chars().any(char::is_control) {
+            return Err("`correct.record`: the claim it corrects".into());
+        }
+        let fields = c["fields"].as_object().ok_or("`correct.fields`: the properties it says otherwise, as an object")?;
+        if fields.is_empty() || fields.values().any(|v| !v.is_string()) {
+            return Err("`correct.fields`: at least one property, each a text".into());
+        }
+    } else {
+        let row = j["row"].as_object().ok_or("no `row`: the values proposed, as an object")?;
+        if row.is_empty() {
+            return Err("`row` is empty".into());
+        }
+        if let Some(taken) = row.keys().find(|k| RESERVED.contains(&k.as_str())) {
+            return Err(format!("`row` may not name `{taken}`: the proposal itself says that"));
+        }
     }
     let read_at = j["read_at"].as_str().unwrap_or("");
     let dated = read_at.len() >= 10 && read_at.as_bytes()[..10].iter().enumerate().all(|(i, b)| if i == 4 || i == 7 { *b == b'-' } else { b.is_ascii_digit() });
@@ -463,6 +519,7 @@ pub fn list(dir: &Path) -> Vec<Entry> {
                 by: kept.by,
                 received: kept.received,
                 row: j["row"].clone(),
+                correct: j.get("correct").cloned().unwrap_or(J::Null),
                 read_at: text("read_at"),
                 read_from: text("read_from"),
                 attest: text("attest"),
@@ -498,8 +555,37 @@ pub fn decide(dir: &Path, name: &str, accept: bool, by: &str, why: &str) -> Resu
     let kept = load(dir, name)?;
     let inbox = dir.join(crate::hook::INBOX);
     let at = crate::iso_stamp(crate::now());
-    if accept {
-        let j = check(kept.body.as_bytes())?;
+    let made_of_proposals = matches!(crate::sourcedecl::SourceDecl::load(dir)?.source, Fetch::Proposals { .. });
+    let who = || {
+        let via = if kept.issuer.is_empty() { String::new() } else { format!(", via {}", kept.issuer.split("://").nth(1).unwrap_or(&kept.issuer).trim_end_matches('/')) };
+        if kept.name.is_empty() { format!("{}{via}", kept.by) } else { format!("{} ({}{via})", kept.name, kept.by) }
+    };
+    // A correction, or a row for a source read from elsewhere: kept where its next update puts it
+    // over what it reads, and taken away again on a rejection.
+    let parked = |sub: &str, j: J| -> Result<(), String> {
+        let d = dir.join(sub);
+        std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+        std::fs::write(d.join(name), j.to_string()).map_err(|e| e.to_string())
+    };
+    if !accept {
+        for sub in [CORRECTED, ADDED] {
+            let _ = std::fs::remove_file(dir.join(sub).join(name));
+        }
+    }
+    let j = check(kept.body.as_bytes())?;
+    if accept && j.get("correct").is_some() {
+        parked(CORRECTED, json!({
+            "record": j["correct"]["record"], "fields": j["correct"]["fields"], "proposal": name, "proposed_by": who(),
+            "read_from": j["read_from"], "read_at": j["read_at"], "note": j["note"], "accepted_by": by.trim(), "accepted_at": at,
+        }))?;
+    } else if accept && !made_of_proposals {
+        let mut row = j["row"].as_object().cloned().unwrap_or_default();
+        row.insert("proposed_by".into(), json!(who()));
+        row.insert("proposal".into(), json!(name));
+        row.insert("accepted_by".into(), json!(by.trim()));
+        row.insert("accepted_at".into(), json!(at));
+        parked(ADDED, J::Object(row))?;
+    } else if accept {
         let mut row = j["row"].as_object().cloned().unwrap_or_default();
         let via = if kept.issuer.is_empty() { String::new() } else { format!(", via {}", kept.issuer.split("://").nth(1).unwrap_or(&kept.issuer).trim_end_matches('/')) };
         row.insert("proposed_by".into(), json!(if kept.name.is_empty() { format!("{}{via}", kept.by) } else { format!("{} ({}{via})", kept.name, kept.by) }));
@@ -606,6 +692,48 @@ pub fn send(to: &str, body: &[u8]) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_source_read_from_elsewhere_takes_corrections_that_replace_what_it_says() {
+        let root = std::env::temp_dir().join(format!("zetlyn-propose-correct-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("sources").join("advisories");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(root.join("workspace.yaml"), "title: T\n").unwrap();
+        operator_key(&root).unwrap();
+        std::fs::write(dir.join("source.yaml"), "name: t/advisories\nkind: vulnerability\nfetch:\n  type: csv\n  path: a.csv\nclaims:\n  id:\n    scheme: cve\n    from: field:cve\n  title: field:title\n  known: field:published\n  properties:\n    cvss:\n      type: number\n      from: field:cvss\n").unwrap();
+        std::fs::write(dir.join("a.csv"), "cve,title,cvss,published\nCVE-2026-0001,foo,9.8,2026-08-30\n").unwrap();
+        let ds = crate::source::Source::open(&dir).unwrap();
+        ds.run().unwrap();
+        let q = crate::source::Query { text: String::new(), pred: None, ids: vec!["CVE-2026-0001".into()], seen_before: None, view: None, sort: None, limit: 5, offset: 0 };
+        let record = ds.search(&q).unwrap().1.into_iter().next().unwrap().record_id;
+        let ann = Reader { id: "reader:0123456789abcdef".into(), name: "Ann".into(), email: "ann@example.org".into(), owner: false, issuers: Vec::new() };
+        let body = json!({ "correct": { "record": record, "fields": { "cvss": "5.0" } }, "read_at": "2026-10-08", "read_from": "https://vendor.example/advisory", "attest": "read" }).to_string();
+        // Nobody may until the source takes proposals.
+        assert!(receive_from_reader(&dir, &root, body.as_bytes(), &ann).is_err());
+        set_takes(&dir, Some(vec![SIGNED_IN.into()])).unwrap();
+        let name = receive_from_reader(&dir, &root, body.as_bytes(), &ann).unwrap();
+        assert_eq!(list(&dir)[0].correct["fields"]["cvss"], "5.0");
+        let cvss = |ds: &crate::source::Source| ds.store.get(&record).unwrap().fields.get("cvss").map(|v| v.display());
+        decide(&dir, &name, true, "owner", "").unwrap();
+        ds.run().unwrap();
+        assert_eq!(cvss(&ds).as_deref(), Some("5"), "the correction replaces what the source says");
+        let rec = ds.store.get(&record).unwrap();
+        assert!(rec.excerpt.as_ref().is_some_and(|e| e["corrected"][0]["accepted_by"] == "owner"), "the receipt says who");
+        // At every update, until it is rejected.
+        ds.run().unwrap();
+        assert_eq!(cvss(&ds).as_deref(), Some("5"));
+        decide(&dir, &name, false, "owner", "the vendor was right").unwrap();
+        ds.run().unwrap();
+        assert_eq!(cvss(&ds).as_deref(), Some("9.8"), "rejected, the source's own value is back");
+        // A row for it too, where the declaration reads fields.
+        let row = json!({ "row": { "cve": "CVE-2026-0099", "title": "baz", "cvss": "7.1", "published": "2026-10-01" }, "read_at": "2026-10-08", "read_from": "https://vendor.example/new", "attest": "read" }).to_string();
+        let added = receive_from_reader(&dir, &root, row.as_bytes(), &ann).unwrap();
+        decide(&dir, &added, true, "owner", "").unwrap();
+        ds.run().unwrap();
+        assert_eq!(ds.store.count(), 2, "the accepted row is one more claim, and stays after a full read");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn a_number_is_read_as_its_writer_meant_it_or_not_at_all() {

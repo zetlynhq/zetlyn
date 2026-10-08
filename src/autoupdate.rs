@@ -13,6 +13,18 @@ use crate::source::Source;
 
 /// The workspace updates nothing more often than this: a quarter of an hour is often for a file.
 pub const FLOOR: i64 = 15 * 60;
+
+/// The rhythms offered, for every source and for one: one list, so both say the same.
+pub const INTERVALS: [(&str, &str); 7] = [("5m", "Every 5 minutes"), ("15m", "Every 15 minutes"), ("30m", "Every 30 minutes"), ("1h", "Every hour"), ("6h", "Every 6 hours"), ("12h", "Every 12 hours"), ("1d", "Once a day")];
+
+/// The shortest rhythm here: what the plan allows in a hosted cell (`every:` in cell.yaml, five
+/// minutes where it says none), a quarter of an hour on one's own machine.
+pub fn floor() -> i64 {
+    match crate::usage::cell_dir() {
+        Some(cell) => crate::cell::terms(&cell).and_then(|t| crate::fetch::duration(&t.every)).unwrap_or(5 * 60),
+        None => FLOOR,
+    }
+}
 /// Failures in a row before a source waits for a person.
 pub const PATIENCE: i64 = 3;
 
@@ -38,7 +50,7 @@ pub struct Config {
 /// How often the workspace updates its sources, in seconds; `None` when it is off.
 pub fn every(root: &Path) -> Option<i64> {
     let site = crate::account::Site::load(root);
-    site.update.every.as_deref().and_then(crate::fetch::duration).map(|s| s.max(FLOOR))
+    site.update.every.as_deref().and_then(crate::fetch::duration).map(|s| s.max(floor()))
 }
 
 pub fn offered(root: &Path) -> bool {
@@ -161,7 +173,7 @@ pub fn forgive(dir: &Path) {
     }
 }
 
-fn last_finished(ds: &Source) -> Option<i64> {
+pub(crate) fn last_finished(ds: &Source) -> Option<i64> {
     ds.store.run_report(ds.store.last_run()).and_then(|r| r.finished).map(|f| crate::fetch::seconds_of(&f))
 }
 

@@ -740,7 +740,7 @@ impl App {
                 }
             }
             // What the world is, where it went, all of it at once: its owners', not every editor's.
-            ["export.tar.gz"] | ["settings", "moved"] | ["settings", "access"] | ["settings", "seen"] | ["settings", "licence", _] | ["publish", _] | ["assist"] if owner && (post || parts.len() == 1 && parts[0] == "export.tar.gz") && !self.who.as_deref().is_some_and(|e| h.is_owner(e)) => {
+            ["export.tar.gz"] | ["settings", "moved"] | ["settings", "access"] | ["settings", "seen"] | ["settings", "licence", _] | ["settings", "proposals", _] | ["publish", _] | ["assist"] if owner && (post || parts.len() == 1 && parts[0] == "export.tar.gz") && !self.who.as_deref().is_some_and(|e| h.is_owner(e)) => {
                 respond(request, 403, html_kind, &page("Owners only", html! { h1 { "Only an owner of this world changes that" } p { a href=(serve::at("/")) { "Back" } } }));
                 None
             }
@@ -1133,7 +1133,7 @@ impl App {
                 return redirect(request, &serve::at(&format!("/settings?saved={}", urlencode(&said))));
             }
             (true, ["settings"]) => {
-                let every = form.get("every").map(String::as_str).filter(|e| matches!(*e, "1h" | "6h" | "1d"));
+                let every = form.get("every").map(String::as_str).filter(|e| crate::autoupdate::INTERVALS.iter().any(|(i, _)| i == e) && crate::fetch::duration(e).is_some_and(|s| s >= crate::autoupdate::floor()));
                 let said = match crate::autoupdate::set(&self.root, every, true) {
                     Ok(()) => match every.and_then(crate::fetch::duration) {
                         Some(s) => format!("Saved. Zetlyn now updates your sources {}.", crate::autoupdate::words(s)),
@@ -1153,7 +1153,7 @@ impl App {
             }
             (true, ["settings", "source", slug]) => {
                 let dir = self.sources().join(slug);
-                let every = form.get("every").map(String::as_str).filter(|e| matches!(*e, "15m" | "1h" | "6h" | "1d" | "never"));
+                let every = form.get("every").map(String::as_str).filter(|e| *e == "never" || (crate::autoupdate::INTERVALS.iter().any(|(i, _)| i == e) && crate::fetch::duration(e).is_some_and(|s| s >= crate::autoupdate::floor())));
                 let said = (|| -> Result<String, String> {
                     let mut decl = crate::sourcedecl::SourceDecl::load(&dir)?;
                     decl.schedule.every = every.map(str::to_string);
@@ -1164,6 +1164,36 @@ impl App {
                 .unwrap_or_else(|e| e);
                 return redirect(request, &serve::at(&format!("/settings?saved={}", urlencode(&said))));
             }
+            // Every source's rhythm and the one for all, from one form: each a rhythm offered and
+            // allowed here, `never` for one source, empty for off or as above.
+            (true, ["settings", "updates"]) => {
+                let floor = crate::autoupdate::floor();
+                let ok = |v: &str| crate::autoupdate::INTERVALS.iter().any(|(i, _)| *i == v) && crate::fetch::duration(v).is_some_and(|s| s >= floor);
+                let mut said: Vec<String> = Vec::new();
+                let every = form.get("every").map(String::as_str).filter(|e| ok(e));
+                if let Err(e) = crate::autoupdate::set(&self.root, every, true) {
+                    said.push(e);
+                }
+                let mut changed = 0;
+                for (name, dir) in crate::tracker::registry(&self.sources()) {
+                    let slug = dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or(name);
+                    let Some(v) = form.get(&format!("every.{slug}")) else { continue };
+                    let want = match v.as_str() { "" => None, "never" => Some("never".to_string()), v if ok(v) => Some(v.to_string()), _ => continue };
+                    let Ok(mut decl) = crate::sourcedecl::SourceDecl::load(&dir) else { continue };
+                    if decl.schedule.every != want {
+                        decl.schedule.every = want;
+                        let path = dir.join(crate::sourcedecl::FILE);
+                        match crate::yaml::to_string(&decl).and_then(|t| std::fs::write(&path, t).map_err(|e| e.to_string())) {
+                            Ok(()) => changed += 1,
+                            Err(e) => said.push(format!("{slug}: {e}")),
+                        }
+                    }
+                }
+                if said.is_empty() {
+                    said.push(format!("Saved. {}{}", match every.and_then(crate::fetch::duration) { Some(s) => format!("Every source {}", crate::autoupdate::words(s)), None => "Automatic updates are off".to_string() }, if changed > 0 { format!("; {changed} sources of their own.") } else { ".".to_string() }));
+                }
+                return redirect(request, &serve::at(&format!("/settings?saved={}#updates", urlencode(&said.join(" ")))));
+            }
             // A tracker public or private, from Who sees what.
             (true, ["settings", "seen"]) => {
                 let tracker = form.get("tracker").cloned().unwrap_or_default();
@@ -1173,6 +1203,21 @@ impl App {
                 };
                 forget_tracker(&self.trackers().join(&tracker));
                 let said = said.map(|s| format!("{tracker}: {s}")).unwrap_or_else(|e| e);
+                return redirect(request, &serve::at(&format!("/settings?seen={}#seen", urlencode(&said))));
+            }
+            // Who may propose rows and corrections to a source read from elsewhere.
+            (true, ["settings", "proposals", slug]) => {
+                let dir = self.sources().join(slug);
+                let takes = match form.get("takes").map(String::as_str) {
+                    Some("signed-in") => Some(vec![crate::propose::SIGNED_IN.to_string()]),
+                    Some("world") => Some(Vec::new()),
+                    _ => None,
+                };
+                let said = match crate::propose::set_takes(&dir, takes.clone()) {
+                    Ok(()) => format!("{slug}: {}.", match takes.as_deref() { None => "takes no proposals", Some([]) => "takes proposals from its proposers and editors", Some(_) => "takes proposals from anybody signed in" }),
+                    Err(e) => e,
+                };
+                open_trackers().lock().unwrap_or_else(|e| e.into_inner()).clear();
                 return redirect(request, &serve::at(&format!("/settings?seen={}#seen", urlencode(&said))));
             }
             // What a source lets a public page show of it: `licence: { republish }` in its file.
@@ -1633,7 +1678,7 @@ impl App {
                 } }
             }
             @if !sources.is_empty() {
-                table { thead { tr { th { "Source" } th { "On public pages" } th { "Published" } } } tbody {
+                table { thead { tr { th { "Source" } th { "On public pages" } th { "Published" } th { "Proposals from readers" } } } tbody {
                     @for (name, dir) in &sources {
                         @if let Ok(d) = crate::sourcedecl::SourceDecl::load(dir) {
                             @let slug = dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
@@ -1652,6 +1697,21 @@ impl App {
                                     }
                                 }
                                 td { @if in_public(name) && matches!(now.as_str(), "yes" | "summary") { "with its public trackers" } @else { span.dim { "no" } } }
+                                td {
+                                    @if matches!(d.source, crate::sourcedecl::Fetch::Proposals { .. }) {
+                                        a href={(serve::at("/proposals/")) (slug)} { "made of them" }
+                                    } @else {
+                                        @let takes = d.proposals.as_ref().map(|t| if t.readers.iter().any(|r| r == crate::propose::SIGNED_IN) { "signed-in" } else { "world" }).unwrap_or("off");
+                                        form.bar method="post" action={(serve::at("/settings/proposals/")) (slug)} {
+                                            select name="takes" {
+                                                @for (v, l) in [("off", "None"), ("world", "Its proposers and editors"), ("signed-in", "Anybody signed in")] {
+                                                    option value=(v) selected[takes == v] { (l) }
+                                                }
+                                            }
+                                            button type="submit" { "Set" }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -2045,84 +2105,143 @@ impl App {
     fn settings_page(&self, query: &BTreeMap<String, String>) -> String {
         let every = crate::autoupdate::every(&self.root);
         let current = crate::account::Site::load(&self.root).update.every.unwrap_or_default();
-        let choices = [("", "Off", "You update with Update now."), ("1h", "Every hour", ""), ("6h", "Every 6 hours", ""), ("1d", "Once a day", "")];
         let sources: Vec<(String, PathBuf)> = crate::tracker::registry(&self.sources()).into_iter().collect();
         let now = crate::now();
+        let hosted_cell = crate::usage::cell_dir().is_some();
+        let owner = self.hosted.as_ref().is_none_or(|h| self.who.as_deref().is_some_and(|e| h.is_owner(e)));
+        // The shortest interval: what the plan allows in a cell, a quarter of an hour elsewhere.
+        let floor = crate::autoupdate::floor();
+        let choices: Vec<(&str, &str)> = crate::autoupdate::INTERVALS.to_vec();
+        let allowed = |v: &str| crate::fetch::duration(v).is_some_and(|s| s >= floor);
+        // What the plan includes, to set the month's reads against.
+        let plan_reads = crate::usage::cell_dir().and_then(|c| crate::cell::terms(&c)).and_then(|t| t.plan).map(|p| p.reads);
+        let month = 30 * 86_400;
+        let mut estimate = 0i64;
+        let rows: Vec<(String, String, String, Option<String>, Option<i64>, Option<i64>, Option<i64>, bool)> = sources
+            .iter()
+            .filter_map(|(_, dir)| {
+                let ds = Source::open(dir).ok()?;
+                let slug = dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                let own = ds.decl.schedule.every.clone().unwrap_or_default();
+                let held = crate::autoupdate::held(&ds, dir);
+                let effective = crate::autoupdate::source_every(&ds, every).filter(|_| held.is_none());
+                let reads = effective.map(|e| month / e.max(60));
+                estimate += reads.unwrap_or(0);
+                let last = crate::autoupdate::last_finished(&ds);
+                let stuck = crate::autoupdate::failures(&ds) >= crate::autoupdate::PATIENCE;
+                Some((slug, ds.decl.title.clone(), own, held, effective, last, reads, stuck))
+            })
+            .collect();
+        let section = |id: &str, title: &str| html! { h2.settings-section id=(id) { (title) } };
+        let jump: Vec<(&str, &str)> = [
+            hosted_cell.then_some(("usage", "Plan and usage")),
+            owner.then_some(("seen", "Who sees what")),
+            self.hosted.is_some().then_some(("access", "Who may do what")),
+            Some(("updates", "Updates")),
+            Some(("moving", "Moving")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
         let body = html! {
-            (cell_usage_section(&sources))
-            h1 { "Automatic updates" }
-            p.lede { "Zetlyn can read your sources again by itself and tell you what changed. It is off until you turn it on." }
+            h1 { "Settings" }
+            nav.settings-jump { @for (id, label) in &jump { a href={"#" (id)} { (label) } } }
             @if let Some(s) = query.get("saved") { div.note { (s) } }
-            form.settings method="post" action=(serve::at("/settings")) {
-                @for (value, label, hint) in choices {
-                    label.choice {
-                        input type="radio" name="every" value=(value) checked[current == value];
-                        span { strong { (label) } @if !hint.is_empty() { " " span.dim { (hint) } } }
-                    }
+            @if hosted_cell { (cell_usage_section(&sources)) }
+            @if owner { (self.seen_section(query)) }
+            @if self.hosted.is_some() {
+                @let access = crate::account::Site::load(&self.root).access;
+                @let lines = |l: &[String]| l.join("\n");
+                h2 #access { "Who may do what" }
+                p.lede { "Everybody reads what this world makes public. These lists say who may do more. One to a line: an address, "
+                    code { "domain:example.org" } " for every confirmed address there, " code { "@zetlyn.com" } " for whoever that world vouches for, or "
+                    code { "signed-in" } " for anybody signed in." }
+                form.settings method="post" action=(serve::at("/settings/access")) {
+                    p { label { strong { "Owners" } span.dim { " · everything, its settings and its export too" } br;
+                        textarea.wide name="owners" rows="3" { (lines(&access.owners)) } } }
+                    p { label { strong { "Editors" } span.dim { " · its sources and trackers, and deciding proposals" } br;
+                        textarea.wide name="editors" rows="3" { (lines(&access.editors)) } } }
+                    p { label { strong { "Proposers" } span.dim { " · rows and corrections for every source that names nobody of its own" } br;
+                        textarea.wide name="proposers" rows="3" { (lines(&access.proposers)) } } }
+                    p { button.primary type="submit" { "Save who may do what" } }
                 }
-                p { button.primary type="submit" { "Save" } }
+                p.dim { "Only an owner changes these. Whoever this machine's own list of members names counts besides; an owner named there stays one whatever these lists say. Another world, zetlyn.com among them, only says who somebody is: what they may do here, this world says." }
             }
-            div.note {
-                "It works for as long as Zetlyn runs, with or without a page open in the browser, and shows at the bottom of every page while it works. Quit Zetlyn and it stops. "
-                "On a machine that should keep watching without the app, " code { "zetlyn run " (self.root.display()) } " does the same, or use the hosted version."
+            (section("updates", "Updates"))
+            p.lede {
+                @if hosted_cell { "Your sources are read on our servers by themselves, also with no page open, as often as you say here." }
+                @else { "Zetlyn can read your sources again by itself and tell you what changed. It works for as long as Zetlyn runs, with or without a page open; quit it and it stops. On a machine that should keep watching without the app, "
+                    code { "zetlyn run " (self.root.display()) } " does the same." }
             }
-            h2 { "What it never does by itself" }
-            ul {
-                li { "Read a source for the first time, or a trial of one page: that is yours to start." }
-                li { "Go on with a read you stopped, or read a list further back." }
-                li { "Ask any source more often than every 15 minutes." }
-                li { "Keep asking a source that failed three times running: it waits, with the reason, until you say try again." }
-            }
-            details open[sources.iter().any(|(_, d)| Source::open(d).ok().is_some_and(|ds| ds.decl.schedule.every.is_some()))] {
-                summary { "Each source" }
-                p.dim { "A source follows the setting above unless it has its own." }
-                table {
-                    thead { tr { th { "Source" } th { "How often" } th { "Now" } } }
+            form.settings method="post" action=(serve::at("/settings/updates")) {
+                p { label { strong { "Every source" } span.dim { " · unless it says otherwise below" } br;
+                    select name="every" {
+                        option value="" selected[current.is_empty()] { "Off: only when you say Update now" }
+                        @for (v, l) in &choices { option value=(v) selected[current == *v] disabled[!allowed(v)] { (l) } }
+                    }
+                } }
+                table.settings-sources {
+                    thead { tr { th { "Source" } th { "How often" } th { "Last read" } th { "Next" } th.num { "Reads a month" } } }
                     tbody {
-                        @for (_, dir) in &sources {
-                            @if let Ok(ds) = Source::open(dir) {
-                                @let slug = dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-                                @let own = ds.decl.schedule.every.clone().unwrap_or_default();
-                                @let held = crate::autoupdate::held(&ds, dir);
-                                tr {
-                                    td { strong { (ds.decl.title) } div.why.mono { (slug) } }
-                                    td {
-                                        form.bar method="post" action={(serve::at("/settings/source/")) (slug)} {
-                                            select name="every" {
-                                                @for (v, l) in [("", "As above"), ("15m", "Every 15 minutes"), ("1h", "Every hour"), ("6h", "Every 6 hours"), ("1d", "Once a day"), ("never", "Never")] {
-                                                    option value=(v) selected[own == v] { (l) }
-                                                }
-                                            }
-                                            button type="submit" { "Set" }
-                                        }
-                                    }
-                                    td {
-                                        @match (&held, crate::autoupdate::next_at(&ds, every)) {
-                                            (Some(why), _) => {
-                                                span.dim { (why) }
-                                                @if crate::autoupdate::failures(&ds) >= crate::autoupdate::PATIENCE {
-                                                    form method="post" action={(serve::at("/settings/retry/")) (slug)} { button type="submit" { "Try again" } }
-                                                }
-                                            }
-                                            (None, None) => span.dim { "not updated by itself" },
-                                            (None, Some(at)) if at <= now => span { "due now" },
-                                            (None, Some(at)) => span { "next in " (crate::web::duration((at - now) as f64)) },
+                        @for (slug, title, own, held, effective, last, reads, stuck) in &rows {
+                            tr {
+                                td { strong { (title) } div.why.mono { (slug) } }
+                                td {
+                                    @if let Some(why) = held { span.dim { (why) } }
+                                    @else {
+                                        select name={"every." (slug)} {
+                                            option value="" selected[own.is_empty()] { "as above" @if own.is_empty() { @if let Some(e) = every { " (" (crate::autoupdate::words(e)) ")" } @else { " (off)" } } }
+                                            @for (v, l) in &choices { option value=(v) selected[own == v] disabled[!allowed(v)] { (l) } }
+                                            option value="never" selected[own == "never"] { "Never by itself" }
                                         }
                                     }
                                 }
+                                td.dim.nowrap { (last.map(|t| stamp_words(&crate::iso_stamp(t))).unwrap_or_else(|| "never".into())) }
+                                td.nowrap {
+                                    @if *stuck {
+                                        span.status { span.dot.bad {} "waits for you" }
+                                    } @else {
+                                        @match (effective, last) {
+                                            (None, _) => span.dim { "—" },
+                                            (Some(e), Some(l)) if l + e > now => span { "in " (crate::web::duration((l + e - now) as f64)) },
+                                            (Some(_), _) => span { "due now" },
+                                        }
+                                    }
+                                }
+                                td.num { (reads.map(|r| thousands_of(r as u64)).unwrap_or_else(|| "—".into())) }
                             }
                         }
                     }
+                    tfoot { tr {
+                        td colspan="4" { "Together" @if let Some(p) = plan_reads { span.dim { ", of " (thousands_of(p)) " the plan includes" } } }
+                        td.num { @if plan_reads.is_some_and(|p| estimate as u64 > p) { span.status { span.dot.bad {} (thousands_of(estimate as u64)) } } @else { (thousands_of(estimate as u64)) } }
+                    } }
+                }
+                @if let Some(p) = plan_reads.filter(|p| estimate as u64 > *p) {
+                    p.dim { "That is about " (thousands_of(estimate as u64 - p)) " reads a month beyond the plan, about €" (format!("{:.0}", (estimate as u64 - p) as f64 / 10_000.0)) " at €1 per 10,000. A source read less often reads less." }
+                }
+                p { button.primary type="submit" { "Save" } }
+            }
+            @for (slug, _, _, _, _, _, _, stuck) in &rows {
+                @if *stuck { form.bar method="post" action={(serve::at("/settings/retry/")) (slug)} { span.dim { (slug) ": failed three times running and waits. " } button type="submit" { "Try it again" } } }
+            }
+            details {
+                summary { "What it never does by itself" }
+                ul {
+                    li { "Read a source for the first time, or a trial of one page: that is yours to start." }
+                    li { "Go on with a read you stopped, or read a list further back." }
+                    li { "Ask any source more often than " (crate::autoupdate::words(floor)) "." }
+                    li { "Keep asking a source that failed three times running: it waits, with the reason, until you say try again." }
                 }
             }
-            // Leaving is part of what a world is: all of it, and saying where it went.
-            h2 { "Taking it with you" }
+            (section("moving", "Moving"))
+            h3 { "Taking it with you" }
             p.dim { "Everything this world holds in one archive: its sources and their history, its trackers, its readers and what they proposed, its keys. "
                 code { "zetlyn world up <domain> --owner <you> --from <archive>" } " makes it again on a machine of yours." }
             p { a.chip href=(serve::at("/export.tar.gz")) { "Download all of it" } }
             @if crate::usage::in_cell() && self.hosted.as_ref().zip(self.who.as_deref()).is_some_and(|(h, e)| h.is_owner(e)) {
                 @let (waiting, last) = crate::cell::import_state();
-                h2 #import { "Bringing a world here" }
+                h3 #import { "Bringing a world here" }
                 p.dim { "A world from your own machine, or from another Zetlyn, takes the place of this one: its sources and their history, its trackers, its readers and their proposals. On your machine, "
                     code { "zetlyn world export <workspace> --to <file>.tar.gz" } " makes the archive; another Zetlyn's " em { "Download all of it" } " does too. "
                     "A snapshot of this world is taken first. Who may do what here stays as it is, and the address stays " code { "zetlyn.com/…" } "." }
@@ -2143,6 +2262,7 @@ impl App {
                     script { (PreEscaped(IMPORT_SCRIPT)) }
                 }
             }
+            h3 { "Where it went" }
             @let moved = crate::account::Site::load(&self.root).moved_to;
             @if moved.is_empty() {
                 p.dim { "Once it answers at its new address, say so here: this one then says where it went, and sends everybody there." }
@@ -2157,30 +2277,8 @@ impl App {
                     button type="submit" { "It did not move: answer here again" }
                 }
             }
-            @if self.hosted.as_ref().is_none_or(|h| self.who.as_deref().is_some_and(|e| h.is_owner(e))) {
-                (self.seen_section(query))
-            }
-            @if self.hosted.is_some() {
-                @let access = crate::account::Site::load(&self.root).access;
-                @let lines = |l: &[String]| l.join("\n");
-                h2 #access { "Who may do what" }
-                p.lede { "Everybody reads what this world makes public. These lists say who may do more. One to a line: an address, "
-                    code { "domain:example.org" } " for every confirmed address there, " code { "@zetlyn.com" } " for whoever that world vouches for, or "
-                    code { "signed-in" } " for anybody signed in." }
-                @if let Some(s) = query.get("saved").filter(|s| s.contains("lists") || s.starts_with("Not saved")) { div.note { (s) } }
-                form.settings method="post" action=(serve::at("/settings/access")) {
-                    p { label { strong { "Owners" } span.dim { " · everything, its settings and its export too" } br;
-                        textarea.wide name="owners" rows="3" { (lines(&access.owners)) } } }
-                    p { label { strong { "Editors" } span.dim { " · its sources and trackers, and deciding proposals" } br;
-                        textarea.wide name="editors" rows="3" { (lines(&access.editors)) } } }
-                    p { label { strong { "Proposers" } span.dim { " · rows for every source that names no readers of its own" } br;
-                        textarea.wide name="proposers" rows="3" { (lines(&access.proposers)) } } }
-                    p { button.primary type="submit" { "Save who may do what" } }
-                }
-                p.dim { "Only an owner changes these. Whoever this machine's own list of members names counts besides; an owner named there stays one whatever these lists say. Another world, zetlyn.com among them, only says who somebody is: what they may do here, this world says." }
-            }
         };
-        page("Automatic updates", body)
+        page("Settings", body)
     }
     /// A proposal for one of this workspace's sources, as `/propose/<source>` answers it.
     fn take_proposal(&self, source: &str, body: &[u8], key: Option<&str>, signature: Option<&str>) -> (u16, String) {
@@ -2219,7 +2317,9 @@ impl App {
         for e in std::fs::read_dir(self.sources()).into_iter().flatten().flatten() {
             let dir = e.path();
             let Ok(decl) = crate::sourcedecl::SourceDecl::load(&dir) else { continue };
-            if matches!(decl.source, crate::sourcedecl::Fetch::Proposals { .. }) {
+            // A proposals source, one read from elsewhere that takes proposals, or one that took
+            // some once.
+            if matches!(decl.source, crate::sourcedecl::Fetch::Proposals { .. }) || decl.proposals.is_some() || dir.join(crate::propose::DIR).is_dir() {
                 let waiting = crate::propose::list(&dir).iter().filter(|p| p.status == "pending").count();
                 out.push((e.file_name().to_string_lossy().into_owned(), if decl.title.is_empty() { decl.name } else { decl.title }, waiting));
             }
@@ -2233,7 +2333,7 @@ impl App {
         let all = self.proposal_sources();
         let body = html! {
             h1 { "Proposals" }
-            p.lede { "A source nobody publishes as data can still be read by people. Each row is proposed by somebody you invited, signed with their own key, and becomes a claim only when you accept it." }
+            p.lede { "What readers propose: rows for a source people read for, and corrections and rows for any source that takes them (Settings, Who sees what). Nothing reaches a source until you accept it; an accepted correction replaces what the source says, at every update, until you reject it." }
             @if let Some(s) = query.get("said") { div.note { (s) } }
             @if all.is_empty() { p.dim { "No source here takes proposals yet." } }
             table { tbody {
@@ -2342,10 +2442,16 @@ impl App {
     fn proposals_page(&self, source: &str, query: &BTreeMap<String, String>) -> Result<String, String> {
         let dir = self.sources().join(source);
         let decl = crate::sourcedecl::SourceDecl::load(&dir)?;
-        let crate::sourcedecl::Fetch::Proposals { from, readers } = &decl.source else {
-            return Err(format!("{} takes no proposals", decl.name));
-        };
         let all = crate::propose::list(&dir);
+        // A proposals source invites keys and readers; a source read from elsewhere takes them from
+        // readers only, and its page stays for what was proposed while it took them.
+        let made_of = matches!(decl.source, crate::sourcedecl::Fetch::Proposals { .. });
+        let (from, readers) = match &decl.source {
+            crate::sourcedecl::Fetch::Proposals { from, readers } => (from.clone(), readers.clone()),
+            _ if decl.proposals.is_some() || !all.is_empty() => (Vec::new(), decl.proposals.clone().map(|t| t.readers).unwrap_or_default()),
+            _ => return Err(format!("{} takes no proposals", decl.name)),
+        };
+        let (from, readers) = (&from, &readers);
         let show = query.get("show").map(String::as_str).unwrap_or("pending");
         let shown: Vec<_> = all.iter().filter(|e| show == "all" || e.status == show).rev().collect();
         let count = |s: &str| all.iter().filter(|e| e.status == s).count();
@@ -2354,7 +2460,7 @@ impl App {
             h1 { "Proposals: " (if decl.title.is_empty() { decl.name.clone() } else { decl.title.clone() }) }
             p.about { "Rows people read for this source and proposed, each signed with their own key. Only what is accepted reaches the source; a rejection withdraws a row accepted before, and every decision stays in " code { "decisions.jsonl" } "." }
             @if let Some(s) = query.get("said") { div.note { (s) } }
-            details open[from.is_empty()] {
+            details.keys open[from.is_empty()] hidden[!made_of] {
                 summary { "Who may propose: " (from.len()) (if from.len() == 1 { " key" } else { " keys" }) }
                 @if from.is_empty() { p.dim { "Nobody yet, so every proposal is refused. A proposer runs " code { "zetlyn id new --name … --contact …" } " once and sends you the key it prints." } }
                 table { tbody {
@@ -2384,7 +2490,7 @@ impl App {
                     p { button.primary type="submit" { "Save" } }
                 }
             }
-            details {
+            details hidden[!made_of] {
                 summary { "How a proposer sends a row" }
                 p { "A file, " code { "row.json" } ", with the row and how it was read:" }
                 pre { (format!("{{\n  \"row\": {{ … the fields of one row … }},\n  \"read_at\": \"{}\",\n  \"read_from\": \"https://… where it was read\",\n  \"attest\": \"read\",\n  \"note\": \"optional\"\n}}", crate::iso_stamp(crate::now()).get(..10).unwrap_or(""))) }
@@ -2403,7 +2509,12 @@ impl App {
                 @for e in &shown {
                     tr {
                         td {
-                            code { (e.row) }
+                            @if e.correct.is_null() { code { (e.row) } } @else {
+                                strong { "Correction" } " of " code { (e.correct["record"].as_str().unwrap_or("")) } ": "
+                                @for (k, v) in e.correct["fields"].as_object().into_iter().flatten() {
+                                    span.chip { (k) " → " @if v.as_str() == Some("") { em { "none" } } @else { (v.as_str().unwrap_or("")) } } " "
+                                }
+                            }
                             div.why {
                                 "read " (e.read_at) " from " @if e.read_from.starts_with("https://") || e.read_from.starts_with("http://") { a href=(e.read_from) { (e.read_from) } } @else { (e.read_from) } " · " (if e.attest == "read" { "read by the proposer" } else { "relayed" })
                                 @if !e.note.is_empty() { " · " (e.note) }
@@ -2964,6 +3075,25 @@ table.account-usage { width: 100%; margin: .2rem 0 0; font-size: .9rem; }
 table.account-usage td { padding: .15rem .4rem .15rem 0; border: 0; }
 .billing-failed { margin: .3rem 0 0; padding: .55rem .7rem; font-size: .9rem; border-left: 3px solid var(--accent); background: var(--bg); }
 form.billing-open { margin: 0; }
+p.trap { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
+nav.settings-jump { display: flex; flex-wrap: wrap; gap: .4rem 1.1rem; margin: .2rem 0 1.4rem; padding: 0 0 .7rem; border-bottom: 1px solid var(--line); font-size: .92rem; }
+h2.settings-section, h2#usage, h2#seen, h2#access { margin-top: 2.2rem; scroll-margin-top: 1rem; }
+table.settings-sources { width: 100%; margin: .8rem 0; font-size: .9rem; }
+table.settings-sources td, table.settings-sources th { padding: .45rem .6rem .45rem 0; vertical-align: middle; }
+table.settings-sources tfoot td { border-top: 1px solid var(--line); font-weight: 600; }
+nav.admin-tabs { display: flex; gap: 1.2rem; border-bottom: 1px solid var(--line); margin: 0 0 1rem; }
+nav.admin-tabs a { padding: .5rem 0; color: var(--dim); text-decoration: none; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+nav.admin-tabs a[aria-current] { color: var(--fg); border-bottom-color: var(--accent); }
+form.admin-filter { display: flex; flex-wrap: wrap; align-items: flex-end; gap: .6rem .9rem; margin: 0 0 1rem; padding: .8rem 1rem; background: var(--panel); border: 1px solid var(--line); font-size: .85rem; }
+form.admin-filter label { display: flex; flex-direction: column; gap: .2rem; color: var(--dim); }
+form.admin-filter label.check { flex-direction: row; align-items: center; gap: .35rem; color: var(--fg); }
+form.admin-filter input:not([type=checkbox]), form.admin-filter select { padding: .38rem .5rem; font: inherit; background: var(--bg); color: var(--fg); border: 1px solid var(--line); }
+.admin-quick { display: flex; gap: .3rem; flex-basis: 100%; }
+.admin-quick a.chip { text-decoration: none; }
+tr.admin-day td { background: var(--wash); font-size: .75rem; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); font-weight: 600; padding: .4rem .9rem; }
+nav.admin-pages { display: flex; justify-content: center; gap: 1.2rem; margin: 1rem 0; font-size: .9rem; }
+table.admin-table details summary { cursor: pointer; list-style: none; }
+table.admin-table details pre { white-space: pre-wrap; font-size: .82rem; margin: .4rem 0 0; }
 /* The admin pages: cards, figures, quiet tables. */
 .admin-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 1rem; flex-wrap: wrap; margin: .4rem 0 1.4rem; }
 .admin-head h1 { margin: 0; font-size: 1.8rem; letter-spacing: -.02em; }
@@ -3695,20 +3825,182 @@ fn admin(dir: &Path, rest: &[&str], post: bool, form: &BTreeMap<String, String>,
             }))
         }
         (false, ["activity"]) => {
-            let done = crate::ops::log_lines(dir, "audit.jsonl", 200);
-            let alarmed = crate::ops::log_lines(dir, "alarms.jsonl", 100);
+            let q = |k: &str| form.get(k).map(|v| v.trim().to_string()).unwrap_or_default();
+            let tab = if q("tab") == "alarms" { "alarms" } else { "actions" };
+            let now = crate::now();
+            // The window: a quick choice, or from and to as days; one day is from = to.
+            let since = q("since");
+            let (from, to) = (q("from"), q("to"));
+            let (lo, hi): (String, String) = if !from.is_empty() || !to.is_empty() {
+                (if from.is_empty() { String::new() } else { format!("{from}T00:00:00Z") }, if to.is_empty() { "9999".into() } else { format!("{to}T23:59:59Z") })
+            } else {
+                let back = match since.as_str() { "1h" => 3600, "7d" => 7 * 86_400, "30d" => 30 * 86_400, "all" => i64::MAX / 4, _ => 86_400 };
+                (crate::iso_stamp(now.saturating_sub(back)), "9999".into())
+            };
+            let quick = if from.is_empty() && to.is_empty() { if since.is_empty() { "24h".to_string() } else { since.clone() } } else { String::new() };
+            let (cell_f, who_f, kind_f, text_f) = (q("cell"), q("who"), q("kind"), q("q").to_lowercase());
+            let with_selftest = q("selftest") == "1";
+            let page_n: usize = q("page").parse().unwrap_or(1).max(1);
+            let per = 50;
+            let in_window = |at: &str| at >= lo.as_str() && at <= hi.as_str();
+            // Every job's asking and answer as one row; anything else a row of its own.
+            #[derive(Default, Clone)]
+            struct Row { at: String, done: String, by: String, what: String, cell: String, said: String, failed: bool, waiting: bool }
+            let mut rows: Vec<Row> = Vec::new();
+            let mut by_job: BTreeMap<String, usize> = BTreeMap::new();
+            let all = crate::ops::log_all(dir, "audit");
+            for l in all.iter().rev() {
+                let s = |k: &str| l[k].as_str().unwrap_or("").to_string();
+                let what = s("what");
+                let job = s("job");
+                if let (Some(action), false) = (what.strip_prefix("done "), job.is_empty()) {
+                    if let Some(i) = by_job.get(&job) {
+                        let r = &mut rows[*i];
+                        r.done = s("at");
+                        r.said = s("said");
+                        r.failed = r.said.starts_with("failed: ");
+                        r.waiting = false;
+                        continue;
+                    }
+                    rows.push(Row { at: s("at"), done: s("at"), by: s("by"), what: action.to_string(), cell: s("cell"), said: s("said"), failed: s("said").starts_with("failed: "), waiting: false });
+                    continue;
+                }
+                let asked = what.strip_prefix("asked ").map(str::to_string);
+                rows.push(Row { at: s("at"), done: String::new(), by: s("by"), what: asked.clone().unwrap_or(what.clone()), cell: s("cell"), said: if asked.is_some() { String::new() } else { s("said") }, failed: false, waiting: asked.is_some() });
+                if !job.is_empty() {
+                    by_job.insert(job, rows.len() - 1);
+                }
+            }
+            rows.reverse();
+            let kind_of = |r: &Row| -> &'static str {
+                if r.failed { "failed" } else if r.what == "mail" { "mail" } else if r.what.starts_with("maintenance") { "maintenance" } else if r.what.starts_with("delet") || r.what == "remove" || r.what == "purge" { "deletion" } else if r.waiting { "waiting" } else { "done" }
+            };
+            let cells: BTreeSet<String> = rows.iter().map(|r| r.cell.clone()).filter(|c| !c.is_empty()).collect();
+            let whos: BTreeSet<String> = rows.iter().map(|r| r.by.clone()).filter(|b| !b.is_empty()).collect();
+            let shown: Vec<&Row> = rows
+                .iter()
+                .filter(|r| in_window(&r.at))
+                .filter(|r| with_selftest || (r.by != "selftest" && !r.cell.starts_with("selftest-")))
+                .filter(|r| cell_f.is_empty() || r.cell == cell_f)
+                .filter(|r| who_f.is_empty() || r.by == who_f)
+                .filter(|r| kind_f.is_empty() || kind_of(r) == kind_f)
+                .filter(|r| text_f.is_empty() || format!("{} {} {} {}", r.what, r.cell, r.by, r.said).to_lowercase().contains(&text_f))
+                .collect();
+            // Alarms: each from when it was raised to when it was right again.
+            #[derive(Default, Clone)]
+            struct Spell { key: String, text: String, from: String, to: String }
+            let mut spells: Vec<Spell> = Vec::new();
+            let mut open: BTreeMap<String, usize> = BTreeMap::new();
+            for l in crate::ops::log_all(dir, "alarms").iter().rev() {
+                let s = |k: &str| l[k].as_str().unwrap_or("").to_string();
+                if s("what") == "wrong" {
+                    spells.push(Spell { key: s("key"), text: s("text"), from: s("at"), to: String::new() });
+                    open.insert(s("key"), spells.len() - 1);
+                } else if let Some(i) = open.remove(&s("key")) {
+                    spells[i].to = s("at");
+                }
+            }
+            spells.reverse();
+            let spells_shown: Vec<&Spell> = spells.iter().filter(|a| in_window(&a.from) || (a.to.is_empty() || in_window(&a.to))).filter(|a| cell_f.is_empty() || a.key.contains(&format!(":{cell_f}:")) || a.key.ends_with(&format!(":{cell_f}"))).filter(|a| text_f.is_empty() || a.text.to_lowercase().contains(&text_f)).collect();
+            let total = if tab == "alarms" { spells_shown.len() } else { shown.len() };
+            let pages = total.div_ceil(per).max(1);
+            let page_n = page_n.min(pages);
+            let link = |changes: &[(&str, &str)]| -> String {
+                let mut p: BTreeMap<String, String> = form.iter().filter(|(_, v)| !v.is_empty()).map(|(k, v)| (k.clone(), v.clone())).collect();
+                for (k, v) in changes {
+                    if v.is_empty() { p.remove(*k); } else { p.insert(k.to_string(), v.to_string()); }
+                }
+                let qs: Vec<String> = p.iter().map(|(k, v)| format!("{k}={}", urlencode(v))).collect();
+                format!("{home}activity{}{}", if qs.is_empty() { "" } else { "?" }, qs.join("&"))
+            };
+            let day_words = |at: &str| -> String {
+                let d = at.get(..10).unwrap_or("");
+                if d == crate::iso_date(now) { "Today".into() } else if d == crate::iso_date(now - 86_400) { "Yesterday".into() } else { stamp_words(&format!("{d}T00:00")).rsplit_once(' ').map(|(a, _)| a.to_string()).unwrap_or_default() }
+            };
+            let took = |a: &str, b: &str| -> String {
+                let secs = |s: &str| crate::thingstore::days(s).map(|d| d * 86_400 + s.get(11..13).and_then(|h| h.parse::<i64>().ok()).unwrap_or(0) * 3600 + s.get(14..16).and_then(|m| m.parse::<i64>().ok()).unwrap_or(0) * 60 + s.get(17..19).and_then(|x| x.parse::<i64>().ok()).unwrap_or(0));
+                match (secs(a), secs(b)) { (Some(x), Some(y)) if y >= x => crate::web::duration((y - x) as f64), _ => String::new() }
+            };
+            let failed_n = shown.iter().filter(|r| r.failed).count();
             (200, page("Admin · Activity", html! {
-
-                header.admin-head { div { h1 { "Activity" } p.admin-sub { "What was done, by whom, and every alarm." } } }
-                table { thead { tr { th { "When" } th { "Who" } th { "What" } th { "Cell" } th { "" } } } tbody { @for l in &done { tr {
-                    td.dim { (l["at"].as_str().unwrap_or("")) } td.dim { (l["by"].as_str().unwrap_or("")) } td { (l["what"].as_str().unwrap_or("")) }
-                    td { (l["cell"].as_str().unwrap_or("")) } td.dim { (l["said"].as_str().unwrap_or("").chars().take(160).collect::<String>()) }
-                } } } }
-                h2 { "Alarms" }
-                @if alarmed.is_empty() { p.dim { "None mailed yet." } }
-                table { tbody { @for l in &alarmed { tr {
-                    td.dim { (l["at"].as_str().unwrap_or("")) } td { @if l["what"] == "wrong" { span.chip.on { "wrong" } } @else { span.chip { "right" } } } td { (l["text"].as_str().unwrap_or("")) }
-                } } } }
+                header.admin-head { div { h1 { "Activity" } p.admin-sub { "What was done, by whom, and every alarm. Kept twelve months." } } }
+                nav.admin-tabs {
+                    a href=(link(&[("tab", ""), ("page", "")])) aria-current=[(tab == "actions").then_some("page")] { "Actions" }
+                    a href=(link(&[("tab", "alarms"), ("page", "")])) aria-current=[(tab == "alarms").then_some("page")] { "Alarms" }
+                }
+                form.admin-filter method="get" action={(home) "activity"} {
+                    @if tab == "alarms" { input type="hidden" name="tab" value="alarms"; }
+                    div.admin-quick {
+                        @for (v, l) in [("1h", "1 h"), ("24h", "24 h"), ("7d", "7 days"), ("30d", "30 days"), ("all", "all")] {
+                            a.chip.on[quick == v] href=(link(&[("since", v), ("from", ""), ("to", ""), ("page", "")])) { (l) }
+                        }
+                    }
+                    label { "From" input type="date" name="from" value=(from); }
+                    label { "To" input type="date" name="to" value=(to); }
+                    label { "Cell" select name="cell" { option value="" { "all" } @for c in &cells { option value=(c) selected[*c == cell_f] { (c) } } } }
+                    @if tab == "actions" {
+                        label { "Who" select name="who" { option value="" { "anybody" } @for w in &whos { option value=(w) selected[*w == who_f] { (w) } } } }
+                        label { "Kind" select name="kind" { option value="" { "any" } @for (v, l) in [("done", "done"), ("waiting", "waiting"), ("failed", "failed"), ("mail", "mail"), ("maintenance", "maintenance"), ("deletion", "deletion")] { option value=(v) selected[kind_f == v] { (l) } } } }
+                    }
+                    label { "Search" input type="search" name="q" value=(q("q")) placeholder="restore, n2, …"; }
+                    label.check { input type="checkbox" name="selftest" value="1" checked[with_selftest]; " selftest" }
+                    button type="submit" { "Show" }
+                }
+                @if tab == "actions" {
+                    p.admin-sub { (shown.len()) " actions" @if failed_n > 0 { ", " span.status { span.dot.bad {} (failed_n) " failed" } } ", " (spells_shown.len()) " alarms in this window." }
+                    section.admin-card.flush {
+                        table.admin-table {
+                            thead { tr { th { "When" } th { "What" } th { "Cell" } th { "Who" } th { "Outcome" } } }
+                            tbody {
+                                @let mut last_day = String::new();
+                                @for r in shown.iter().skip((page_n - 1) * per).take(per) {
+                                    @let day = r.at.get(..10).unwrap_or("").to_string();
+                                    @if day != last_day {
+                                        tr.admin-day { td colspan="5" { (day_words(&r.at)) } }
+                                    }
+                                    @let _ = { last_day = day; };
+                                    tr {
+                                        td.dim.nowrap { (r.at.get(11..16).unwrap_or("")) @if !r.done.is_empty() && r.done != r.at { br; span.dim { (took(&r.at, &r.done)) } } }
+                                        td { (r.what) }
+                                        td { (r.cell) }
+                                        td.dim { (r.by) }
+                                        td {
+                                            @if r.waiting { span.dim { "waiting" } }
+                                            @else if r.said.chars().count() > 90 {
+                                                details { summary { span.(if r.failed { "dot bad" } else { "dot ok" }) {} (r.said.chars().take(90).collect::<String>()) "…" } pre { (r.said) } }
+                                            } @else if !r.said.is_empty() { span.(if r.failed { "dot bad" } else { "dot ok" }) {} (r.said) }
+                                        }
+                                    }
+                                }
+                                @if shown.is_empty() { tr { td colspan="5" { span.dim { "Nothing in this window." } } } }
+                            }
+                        }
+                    }
+                } @else {
+                    section.admin-card.flush {
+                        table.admin-table {
+                            thead { tr { th { "From" } th { "Until" } th.num { "For" } th { "What" } } }
+                            tbody {
+                                @for a in spells_shown.iter().skip((page_n - 1) * per).take(per) {
+                                    tr {
+                                        td.nowrap { span.(if a.to.is_empty() { "dot bad" } else { "dot ok" }) {} (stamp_words(&a.from)) }
+                                        td.dim.nowrap { @if a.to.is_empty() { "still wrong" } @else { (stamp_words(&a.to)) } }
+                                        td.num.dim { @if !a.to.is_empty() { (took(&a.from, &a.to)) } }
+                                        td { (a.text) }
+                                    }
+                                }
+                                @if spells_shown.is_empty() { tr { td colspan="4" { span.dim { "No alarm in this window." } } } }
+                            }
+                        }
+                    }
+                }
+                @if pages > 1 {
+                    nav.admin-pages {
+                        @if page_n > 1 { a href=(link(&[("page", &(page_n - 1).to_string())])) { "← Newer" } }
+                        span.dim { "Page " (page_n) " of " (pages) }
+                        @if page_n < pages { a href=(link(&[("page", &(page_n + 1).to_string())])) { "Older →" } }
+                    }
+                }
             }))
         }
         (false, ["cell", cell]) => {
@@ -4333,7 +4625,8 @@ fn hosting_worker(server: &tiny_http::Server, dir: &Path, addr: &str, jobs: &Sha
         // Maintenance in force: closed for everybody but the operator, or nothing changed, or no
         // order; what signing in, Stripe and the admin pages need stays open.
         if let Some(mode) = crate::maintenance::mode().filter(|m| m != "notice") {
-            let open = ["/billing/stripe", "/account/signin", "/account/signout", "/account/me", "/account/maintenance", "/account/style.css", "/oauth/"].iter().any(|p| path.starts_with(p)) || path.starts_with("/account/admin");
+            // Cancelling stays open whatever is under maintenance, as § 312k BGB asks of the button.
+            let open = ["/billing/stripe", "/account/signin", "/account/signout", "/account/me", "/account/maintenance", "/account/style.css", "/account/cancel", "/oauth/"].iter().any(|p| path.starts_with(p)) || path.starts_with("/account/admin");
             let changing = request.method() != &tiny_http::Method::Get && request.method() != &tiny_http::Method::Head;
             let ordering = path == "/order" || path.starts_with("/account/new");
             let blocked = match mode.as_str() {
@@ -4637,21 +4930,51 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
         // that say so with the moment it was asked. Where the world and the address it was bought
         // with go together, Stripe ends the subscription at the end of the month; every
         // cancellation is kept and told to the operator either way.
+        //
+        // Signed in, the organisations one owns are offered and one click ends one. Not signed in,
+        // the form still ends it, but its mail goes to the address on the contract with a link that
+        // takes the cancellation back, so nobody ends another's contract by knowing its name and
+        // address. A hidden field and a count per address and per organisation keep scripts out.
         ["cancel"] => {
             let billing = dir.join(BILLING);
             let base = crate::account::Site::load(dir).url.trim_end_matches('/').to_string();
+            let book = crate::billing::Book::read(&billing).ok();
+            let owned: Vec<(String, crate::billing::Customer)> = who
+                .as_ref()
+                .map(|a| membership.orgs_of(&a.email).into_iter().filter(|(_, r)| r == "owner").filter_map(|(o, _)| book.as_ref().and_then(|b| b.get(&o)).filter(|c| c.state != "cancelled").map(|c| (o, c))).collect())
+                .unwrap_or_default();
             if !post {
                 return respond(request, 200, html_kind, &page("Cancel a contract", html! {
                     div.account-hero { p.overline { "Cancel a contract" } h1 { "End your Zetlyn Managed plan" } }
-                    form method="post" action=(serve::at("/cancel")) {
-                        p { label { "Your organisation's address on Zetlyn, zetlyn.com/<address>" br; input type="text" name="world" required pattern="[a-z0-9-]+" placeholder="acme-research"; } }
-                        p { label { "The address it was ordered with" br; input.wide type="email" name="email" required; } }
-                        p { "Kind of cancellation" br
-                            label { input type="radio" name="kind" value="ordinary" checked; " Ordinary, at the end of the current month" } br
-                            label { input type="radio" name="kind" value="extraordinary"; " Extraordinary, for a reason" } }
-                        p { label { "The reason, for an extraordinary cancellation" br; textarea.wide name="reason" rows="3" {} } }
-                        p { button.primary type="submit" { "Cancel now" } }
-                        p.dim { "You get a confirmation by mail, with the date and time it was received." }
+                    @if !owned.is_empty() {
+                        form method="post" action=(serve::at("/cancel")) {
+                            p { "Which organisation:" }
+                            @for (i, (o, c)) in owned.iter().enumerate() {
+                                p { label { input type="radio" name="world" value=(o) checked[i == 0]; " zetlyn.com/" (o) span.dim { " · " (c.plan) @if let Some(u) = &c.paid_until { ", paid until " (u) } } } }
+                            }
+                            p { "Kind of cancellation" br
+                                label { input type="radio" name="kind" value="ordinary" checked; " Ordinary, at the end of the current month" } br
+                                label { input type="radio" name="kind" value="extraordinary"; " Extraordinary, for a reason" } }
+                            p { label { "The reason, for an extraordinary cancellation" br; textarea.wide name="reason" rows="3" {} } }
+                            input type="hidden" name="signed" value="1";
+                            p { button.primary type="submit" { "Cancel now" } }
+                            p.dim { "You get a confirmation by mail, with the date and time it was received." }
+                        }
+                        p.dim { "Another organisation, not in your name? Sign out and use the form for anybody." }
+                    } @else {
+                        form method="post" action=(serve::at("/cancel")) {
+                            p { label { "Your organisation's address on Zetlyn, zetlyn.com/<address>" br; input type="text" name="world" required pattern="[a-z0-9-]+" placeholder="acme-research"; } }
+                            p { label { "The address it was ordered with" br; input.wide type="email" name="email" required; } }
+                            // Left empty by people, filled by scripts that fill everything.
+                            p.trap aria-hidden="true" { label { "Website" input type="text" name="website" tabindex="-1" autocomplete="off"; } }
+                            p { "Kind of cancellation" br
+                                label { input type="radio" name="kind" value="ordinary" checked; " Ordinary, at the end of the current month" } br
+                                label { input type="radio" name="kind" value="extraordinary"; " Extraordinary, for a reason" } }
+                            p { label { "The reason, for an extraordinary cancellation" br; textarea.wide name="reason" rows="3" {} } }
+                            p { button.primary type="submit" { "Cancel now" } }
+                            p.dim { "You get a confirmation by mail, with the date and time it was received. "
+                                @if who.is_none() { "Signed in, you can " a href={(serve::at("/signin")) "?next=/account/cancel"} { "choose your organisation" } " instead." } }
+                        }
                     }
                 }));
             }
@@ -4659,36 +4982,54 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
             let _ = std::io::Read::read_to_string(&mut std::io::Read::take(request.as_reader(), 32 << 10), &mut body);
             let form = parse_form(&body);
             let get = |k: &str| form.get(k).map(|v| v.trim().to_string()).unwrap_or_default();
-            let (world, email, kind, reason) = (get("world").to_lowercase(), get("email").to_lowercase(), get("kind"), get("reason"));
+            let (world, kind, reason) = (get("world").to_lowercase(), get("kind"), get("reason"));
+            let signed = get("signed") == "1" && owned.iter().any(|(o, _)| *o == world);
             let at = crate::iso_stamp(crate::now());
+            // Scripts: the hidden field, five a hour from one address, one mail a ten minutes about
+            // one organisation. Answered as if taken, so a script learns nothing from the answer.
+            let ip = request.headers().iter().find(|h| h.field.equiv("X-Forwarded-For")).map(|h| h.value.as_str().split(',').next().unwrap_or("").trim().to_string()).unwrap_or_else(|| request.remote_addr().map(|a| a.ip().to_string()).unwrap_or_default());
+            let throttled = !signed && (!get("website").is_empty() || !cancel_allowed(&billing, &ip, &world));
             let book = crate::billing::Book::read(&billing).ok();
+            let email = if signed { owned.iter().find(|(o, _)| *o == world).map(|(_, c)| c.email.clone()).unwrap_or_default() } else { get("email").to_lowercase() };
             let customer = book.as_ref().and_then(|b| b.get(&world)).filter(|c| c.email.eq_ignore_ascii_case(&email));
-            // Ended at Stripe where the contract was found, at the end of the month either way.
-            let done = match (&customer, book.as_ref().and_then(|b| b.subscription_of(&world))) {
-                (Some(_), Some(sub)) => crate::stripe::cancel_at_period_end(&sub).map(|_| ()),
-                (Some(_), None) => Err("no subscription on record".into()),
-                (None, _) => Err("no contract for that organisation and address".into()),
+            let mut undo = String::new();
+            let done = if throttled {
+                Err("held back: too many, or filled in by a script".to_string())
+            } else {
+                match (&customer, book.as_ref().and_then(|b| b.subscription_of(&world))) {
+                    (Some(_), Some(sub)) => crate::stripe::cancel_at_period_end(&sub).map(|_| {
+                        // The way back, for whoever the contract's address is, until it ends.
+                        undo = crate::jwt::random();
+                        let _ = std::fs::create_dir_all(billing.join("undo"));
+                        let _ = std::fs::write(billing.join("undo").join(format!("{undo}.json")), json!({ "world": world, "subscription": sub, "at": at }).to_string());
+                    }),
+                    (Some(_), None) => Err("no subscription on record".into()),
+                    (None, _) => Err("no contract for that organisation and address".into()),
+                }
             };
             let until = customer.as_ref().and_then(|c| c.paid_until.clone()).unwrap_or_default();
-            let line = json!({ "at": at, "world": world, "email": email, "kind": kind, "reason": reason, "found": customer.is_some(), "ended_at_stripe": done.is_ok(), "error": done.as_ref().err() });
+            let line = json!({ "at": at, "world": world, "email": email, "kind": kind, "reason": reason, "found": customer.is_some(), "ended_at_stripe": done.is_ok(), "error": done.as_ref().err(), "signed_in": signed, "throttled": throttled });
             if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(billing.join("cancellations.jsonl")) {
                 let _ = std::io::Write::write_all(&mut f, format!("{line}\n").as_bytes());
             }
-            let site = crate::account::Site::load(dir);
-            // The confirmation goes to the address on the contract where there is one, else to the
-            // one typed, so nobody learns of a contract by typing another's name.
-            let to = customer.as_ref().map(|c| c.email.clone()).unwrap_or(email.clone());
-            let text = format!(
-                "Hello,\n\nwe received your cancellation on {at} (UTC).\n\n  Organisation: zetlyn.com/{world}\n  Kind: {kind}\n{}\n{}\n\nIf you did not send it, write to hello@zetlyn.com straight away.\n\nBest regards,\nThe Zetlyn team\n\n--\nZetlyn · https://zetlyn.com · hello@zetlyn.com\n",
-                if reason.is_empty() { String::new() } else { format!("  Reason: {reason}\n") },
-                if customer.is_some() { format!("Your plan ends at the end of the current month{}. Until then your organisation runs as before, and you can take all of it with you from its settings.", if until.is_empty() { String::new() } else { format!(", on {until}") }) } else { "We look up the contract it belongs to and confirm it to the address it was ordered with.".to_string() }
-            );
-            if !to.is_empty() {
-                let _ = site.send(&to, "Your Zetlyn cancellation was received", &text);
-            }
-            if let Ok(r) = crate::ops::register(dir) {
-                if !r.alarm.is_empty() {
-                    let _ = site.send(&r.alarm, &format!("Zetlyn: cancellation of {world}"), &format!("{line}\n\n{base}/account/admin/cell/{world}\n"));
+            if !throttled {
+                let site = crate::account::Site::load(dir);
+                // The confirmation goes to the address on the contract where there is one, else to
+                // the one typed, so nobody learns of a contract by typing another's name.
+                let to = customer.as_ref().map(|c| c.email.clone()).unwrap_or(email.clone());
+                let text = format!(
+                    "Hello,\n\nwe received your cancellation on {at} (UTC).\n\n  Organisation: zetlyn.com/{world}\n  Kind: {kind}\n{}\n{}\n{}\nBest regards,\nThe Zetlyn team\n\n--\nZetlyn · https://zetlyn.com · hello@zetlyn.com\n",
+                    if reason.is_empty() { String::new() } else { format!("  Reason: {reason}\n") },
+                    if customer.is_some() { format!("Your plan ends at the end of the current month{}. Until then your organisation runs as before, and you can take all of it with you from its settings.", if until.is_empty() { String::new() } else { format!(", on {until}") }) } else { "We look up the contract it belongs to and confirm it to the address it was ordered with.".to_string() },
+                    if undo.is_empty() { "If you did not send it, write to hello@zetlyn.com straight away.\n".to_string() } else { format!("If you did not send it, or changed your mind, keep your plan here:\n{base}/account/cancel/undo/{undo}\n") }
+                );
+                if !to.is_empty() {
+                    let _ = site.send(&to, "Your Zetlyn cancellation was received", &text);
+                }
+                if let Ok(r) = crate::ops::register(dir) {
+                    if !r.alarm.is_empty() {
+                        let _ = site.send(&r.alarm, &format!("Zetlyn: cancellation of {world}{}", if signed { "" } else { " (not signed in)" }), &format!("{line}\n\n{base}/account/admin/cell/{world}\n"));
+                    }
                 }
             }
             respond(request, 200, html_kind, &page("Cancellation received", html! {
@@ -4696,9 +5037,51 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                     p.overline { "Cancel a contract" }
                     h1 { "Your cancellation was received" }
                     p.lede { "On " (at) " (UTC), for " code { (world) } "." }
-                    p { "A confirmation is on its way by mail. "
+                    p { "A confirmation is on its way by mail, to the address the organisation was ordered with. "
                         @if customer.is_some() { "Your plan ends at the end of the current month; until then your organisation runs as before." }
-                        @else { "We look up the contract it belongs to and confirm it to the address it was ordered with." } }
+                        @else { "We look up the contract it belongs to and confirm it there." } }
+                }
+            }));
+        }
+        // A cancellation taken back from the link in its mail, while the contract still runs: asked
+        // on a page, done on its button, so a mail scanner opening the link changes nothing.
+        ["cancel", "undo", token] => {
+            let billing = dir.join(BILLING);
+            let ok = token.len() >= 20 && token.chars().all(|c| c.is_ascii_alphanumeric());
+            let path = billing.join("undo").join(format!("{token}.json"));
+            let Some(u) = std::fs::read(&path).ok().filter(|_| ok).and_then(|b| serde_json::from_slice::<J>(&b).ok()) else {
+                return respond(request, 404, html_kind, &page("Not here", html! { div.account-hero { h1 { "This link is used or unknown" } p.lede { "Write to " a href="mailto:hello@zetlyn.com" { "hello@zetlyn.com" } " and we sort it out." } } }));
+            };
+            let world = u["world"].as_str().unwrap_or("").to_string();
+            if !post {
+                return respond(request, 200, html_kind, &page("Keep your plan", html! {
+                    div.account-hero {
+                        p.overline { "Cancel a contract" }
+                        h1 { "Keep zetlyn.com/" (world) "?" }
+                        p.lede { "A cancellation was received on " (u["at"].as_str().unwrap_or("")) " (UTC). Taken back, your plan goes on as before." }
+                        form method="post" action=(serve::at(&format!("/cancel/undo/{token}"))) { button.primary type="submit" { "Keep my plan" } }
+                    }
+                }));
+            }
+            let kept = crate::stripe::keep_subscription(u["subscription"].as_str().unwrap_or(""));
+            let at = crate::iso_stamp(crate::now());
+            let line = json!({ "at": at, "world": world, "undone": true, "ok": kept.is_ok(), "error": kept.as_ref().err() });
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(billing.join("cancellations.jsonl")) {
+                let _ = std::io::Write::write_all(&mut f, format!("{line}\n").as_bytes());
+            }
+            if kept.is_ok() {
+                let _ = std::fs::remove_file(&path);
+            }
+            if let Ok(r) = crate::ops::register(dir) {
+                if !r.alarm.is_empty() {
+                    let _ = crate::account::Site::load(dir).send(&r.alarm, &format!("Zetlyn: cancellation of {world} taken back"), &format!("{line}\n"));
+                }
+            }
+            respond(request, 200, html_kind, &page("Keep your plan", html! {
+                div.account-hero {
+                    p.overline { "Cancel a contract" }
+                    @if kept.is_ok() { h1 { "Your plan goes on" } p.lede { "zetlyn.com/" (world) " runs as before." } }
+                    @else { h1 { "That did not work" } p.lede { "Write to " a href="mailto:hello@zetlyn.com" { "hello@zetlyn.com" } " and we keep it for you." } }
                 }
             }));
         }
@@ -4929,7 +5312,8 @@ fn hosting_root(mut request: tiny_http::Request, dir: &Path, accounts: &crate::a
                     None => respond(request, 404, html_kind, &page("Not here", html! { h1 { "No such download" } })),
                 };
             }
-            let mut form = BTreeMap::new();
+            // A page asked for with its filters in the address reads them as a form.
+            let mut form = if post { BTreeMap::new() } else { serve::params(request.url()) };
             if post {
                 let mut body = String::new();
                 let _ = std::io::Read::read_to_string(&mut std::io::Read::take(request.as_reader(), 256 << 10), &mut body);
@@ -5826,7 +6210,7 @@ fn cell_usage_section(sources: &[(String, PathBuf)]) -> Markup {
     let percent = |used: u64, of: u64| if of == 0 { 0 } else { (used * 100 / of).min(100) };
     let storage_gb = shown.mb_days as f64 / days as f64 / 1024.0;
     html! {
-        h1 #usage { "Plan and usage" }
+        h2 #usage { "Plan and usage" }
         p.lede { (shown.title) ", " (month_words(&month)) " so far." }
         @if !terms.active { div.note { "This world's plan is not paid up: its sources are not read until it is. " a href="/account/billing" { "Billing" } } }
         @else if paused { div.note { "The spending limit of €" (shown.cap) " for this month is reached: sources are not read and no mails are sent until the month ends. Write to " a href="mailto:hello@zetlyn.com" { "hello@zetlyn.com" } " to raise it." } }
@@ -5988,4 +6372,24 @@ fn bucket_card(b: &J, r: &crate::ops::Register, home: &str) -> Markup {
             }
         }
     }
+}
+
+/// Whether one more cancellation without signing in is taken: five an hour from one address, one
+/// mail a ten minutes about one organisation. Counted in `billing/cancel-counts.json`.
+fn cancel_allowed(billing: &Path, ip: &str, world: &str) -> bool {
+    let path = billing.join("cancel-counts.json");
+    let now = crate::now();
+    let mut c: BTreeMap<String, Vec<i64>> = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    for times in c.values_mut() {
+        times.retain(|t| now - t < 3600);
+    }
+    c.retain(|_, t| !t.is_empty());
+    let (by_ip, by_world) = (format!("ip:{ip}"), format!("world:{world}"));
+    let allowed = c.get(&by_ip).map_or(0, Vec::len) < 5 && c.get(&by_world).and_then(|t| t.last()).is_none_or(|t| now - t >= 600);
+    if allowed {
+        c.entry(by_ip).or_default().push(now);
+        c.entry(by_world).or_default().push(now);
+    }
+    let _ = std::fs::write(&path, serde_json::to_vec(&c).unwrap_or_default());
+    allowed
 }

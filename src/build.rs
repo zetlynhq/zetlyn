@@ -191,7 +191,7 @@ fn as_bool(raw: &str) -> Option<bool> {
     }
 }
 
-fn typed(kind: PropertyType, vocabulary: Option<&str>, raw: &str) -> Option<Value> {
+pub(crate) fn typed(kind: PropertyType, vocabulary: Option<&str>, raw: &str) -> Option<Value> {
     Some(match kind {
         PropertyType::Text => Value::Text(raw.to_string()),
         PropertyType::Code => Value::Code {

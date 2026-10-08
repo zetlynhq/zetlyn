@@ -54,6 +54,35 @@ impl Source {
 
     // -- the run ------------------------------------------------------------------------------
 
+    /// What readers corrected and the owner accepted, over what the source says: each property as
+    /// the declaration types it, the latest accepted last, an empty one taken away, and the
+    /// receipt saying who corrected what and who accepted it.
+    fn correct(&self, rec: &mut Claim, list: &[J]) {
+        let mut said = Vec::new();
+        for c in list {
+            for (property, raw) in c["fields"].as_object().into_iter().flatten() {
+                let Some(raw) = raw.as_str().map(str::trim) else { continue };
+                if raw.is_empty() {
+                    rec.fields.remove(property);
+                    continue;
+                }
+                let spec = self.decl.records.fields.get(property);
+                let kind = spec.map(|s| s.kind).unwrap_or(PropertyType::Text);
+                if let Some(v) = build::typed(kind, spec.and_then(|s| s.vocabulary.as_deref()), raw) {
+                    rec.fields.insert(property.clone(), v);
+                }
+            }
+            said.push(json!({
+                "proposal": c["proposal"], "proposed_by": c["proposed_by"], "accepted_by": c["accepted_by"],
+                "accepted_at": c["accepted_at"], "fields": c["fields"], "read_from": c["read_from"],
+            }));
+        }
+        rec.hash = rec.compute_hash();
+        let mut excerpt = rec.excerpt.take().filter(J::is_object).unwrap_or_else(|| json!({}));
+        excerpt["corrected"] = J::Array(said);
+        rec.excerpt = Some(excerpt);
+    }
+
     pub fn run(&self) -> Result<RunReport, String> {
         self.run_with(false, false)
     }
@@ -114,18 +143,20 @@ impl Source {
             .db
             .execute_batch("begin")
             .map_err(|e| e.to_string())?;
-        let outcome = crate::rows::each_row(
-            &self.decl,
-            &self.dir,
-            &root,
-            mark.clone(),
-            |produced: crate::rows::Produced| {
+        // What readers corrected and the owner accepted, put over the claims it names at every
+        // read, so the correction stands until the source says the same itself (propose.rs).
+        let corrections = crate::propose::corrections(&self.dir);
+        let made_of_proposals = matches!(self.decl.source, crate::sourcedecl::Fetch::Proposals { .. });
+        let mut handle = |produced: crate::rows::Produced| -> Result<(), String> {
                 for (sub, origin) in
                     build::expand(&self.decl, produced.row, produced.origin, produced.expanded)
                 {
-                    let Some(rec) = build::build(&self.decl, sub, origin, &mut notes) else {
+                    let Some(mut rec) = build::build(&self.decl, sub, origin, &mut notes) else {
                         continue;
                     };
+                    if let Some(list) = corrections.get(&rec.record_id) {
+                        self.correct(&mut rec, list);
+                    }
                     // A claim id seen twice in one run is the source repeating itself
                     // under one key, not a change. Written through, each pair would
                     // report a change on every run for ever.
@@ -145,8 +176,27 @@ impl Source {
                     }
                 }
                 Ok(())
-            },
-        );
+        };
+        let mut outcome = crate::rows::each_row(&self.decl, &self.dir, &root, mark.clone(), &mut handle);
+        // The rows readers proposed and the owner accepted, for a source read from elsewhere: one
+        // more claim each at every read, so a sweep keeps them. A proposals source reads its own.
+        if outcome.is_ok() && !made_of_proposals {
+            let mut files: Vec<PathBuf> = std::fs::read_dir(self.dir.join(crate::propose::ADDED)).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
+            files.sort();
+            for f in files {
+                let Some(value) = std::fs::read(&f).ok().and_then(|b| serde_json::from_slice::<J>(&b).ok()) else { continue };
+                let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let produced = crate::rows::Produced {
+                    expanded: false,
+                    row: crate::expr::Row { value, meta: Default::default(), file: None, text: String::new(), root: &root },
+                    origin: crate::claim::Origin { url: Some(format!("proposal#{name}")), ..Default::default() },
+                };
+                if let Err(e) = handle(produced) {
+                    outcome = Err(e);
+                    break;
+                }
+            }
+        }
         let mut high: Option<String> = None;
         match outcome {
             Ok(mark) => high = mark,

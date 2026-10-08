@@ -196,9 +196,10 @@ fn every_form_asks_for_the_job_it_says() {
     let (s, _, _) = c.ask("POST", "/account/admin/cell/acme/format-the-disk", Some(&op), "");
     assert_eq!(s, 400);
     // What was asked is in the activity, by whom.
-    let audit = std::fs::read_to_string(c.dir.join("ops/audit.jsonl")).unwrap();
+    let audit: String = std::fs::read_dir(c.dir.join("ops")).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("audit-")).map(|e| std::fs::read_to_string(e.path()).unwrap()).collect();
     assert!(audit.contains("asked limits") && audit.contains(OPERATOR));
-    assert!(c.get("/account/admin/activity", Some(&op)).1.contains("asked restore"));
+    let activity = c.get("/account/admin/activity", Some(&op)).1;
+    assert!(activity.contains(">restore<") && activity.contains("waiting"), "asked, not yet answered");
     // Nobody else's form does anything.
     let somebody = c.sign_in("someone@example.org");
     let before = c.jobs().len();
@@ -249,7 +250,9 @@ fn read_only_lets_reading_on_and_ordering_off() {
     assert!(c.get("/account/signin", None).1.contains("maintenance-banner"), "the banner is on the page");
     assert_eq!(c.get("/order", None).0, 503);
     let (s, _, _) = c.ask("POST", "/account/cancel", None, "world=acme&email=a%40b.c");
-    assert_eq!(s, 503, "nothing is changed");
+    assert_eq!(s, 200, "cancelling is never under maintenance");
+    let (s, _, _) = c.ask("POST", "/account/new", None, "cell=x");
+    assert_eq!(s, 503, "nothing else is changed");
 }
 
 #[test]
@@ -260,4 +263,55 @@ fn no_login_stops_new_sign_ins_and_orders_only() {
     assert_eq!(s, 503);
     let op = c.sign_in(OPERATOR);
     assert_eq!(c.get("/account/", Some(&op)).0, 200);
+}
+
+#[test]
+fn a_cancellation_is_taken_from_anybody_but_not_from_a_script() {
+    let c = Control::start("cancel", None);
+    let (s, body) = c.get("/account/cancel", None);
+    assert_eq!(s, 200);
+    assert!(body.contains("name=\"website\""), "the field only scripts fill");
+    // A script fills the hidden field: answered as if taken, held back.
+    let (s, _, _) = c.ask("POST", "/account/cancel", None, "world=acme&email=anna%40acme.example&kind=ordinary&website=spam");
+    assert_eq!(s, 200);
+    // Five an hour from one address; one mail a ten minutes about one organisation.
+    for i in 0..6 {
+        let (s, _, _) = c.ask("POST", "/account/cancel", None, &format!("world=org{i}&email=x%40y.z&kind=ordinary"));
+        assert_eq!(s, 200);
+    }
+    let _ = c.ask("POST", "/account/cancel", None, "world=org0&email=x%40y.z&kind=ordinary");
+    let lines: Vec<serde_json::Value> = std::fs::read_to_string(c.dir.join("billing/cancellations.jsonl")).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    let held: Vec<bool> = lines.iter().map(|l| l["throttled"] == true).collect();
+    assert_eq!(held, vec![true, false, false, false, false, false, true, true], "{lines:?}");
+    // Every cancellation is kept, held back or not, and none signed in.
+    assert!(lines.iter().all(|l| l["signed_in"] == false));
+}
+
+#[test]
+fn the_activity_is_filtered_paged_and_one_line_a_job() {
+    let c = Control::start("activity", None);
+    let op = c.sign_in(OPERATOR);
+    for (cell, action) in [("acme", "restart"), ("pilot", "snapshot"), ("acme", "logs")] {
+        let (s, _, _) = c.ask("POST", &format!("/account/admin/cell/{cell}/{action}"), Some(&op), "");
+        assert_eq!(s, 303);
+    }
+    // A job the root side answered: its asking and its answer, one line.
+    let restart = c.job("restart");
+    let id = restart["id"].as_str().unwrap();
+    let month = std::fs::read_dir(c.dir.join("ops")).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).find(|n| n.starts_with("audit-") && n.ends_with(".jsonl")).expect("a log of this month");
+    let mut f = std::fs::OpenOptions::new().append(true).open(c.dir.join("ops").join(&month)).unwrap();
+    writeln!(f, r#"{{"at":"2999-01-01T00:00:00Z","by":"{OPERATOR}","what":"done restart","cell":"acme","said":"acme: restart ok","job":"{id}"}}"#).unwrap();
+    let page = |q: &str| c.get(&format!("/account/admin/activity{q}"), Some(&op)).1;
+    let all = page("?since=all");
+    assert!(all.contains("acme: restart ok"), "the answer is on the row it was asked on");
+    assert_eq!(all.matches(">restart<").count(), 1, "one row for the job, not two");
+    assert!(all.contains(">snapshot<") && all.contains(">logs<"));
+    let acme = page("?since=all&cell=acme");
+    assert!(!acme.contains(">snapshot<"), "only acme's");
+    let waiting = page("?since=all&kind=waiting");
+    assert!(waiting.contains(">snapshot<") && !waiting.contains(">restart<"), "the answered one is not waiting");
+    let found = page("?since=all&q=pilot");
+    assert!(found.contains(">snapshot<") && !found.contains(">logs<"));
+    assert!(page("?tab=alarms").contains("No alarm in this window"));
+    assert!(page("?from=2000-01-01&to=2000-01-02").contains("Nothing in this window"));
 }

@@ -270,6 +270,12 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
         div.meta {
             span.(if stale { "partial" } else { "current" }) { @if stale { "Behind" } @else { "Current" } }
             span { (plural(scope.members.len(), "source")) }
+            // Who may read it, said where one reads it; its owner sees where to change that.
+            @if is_operator(v) {
+                a.chip href={(crate::serve::frame().home.1) "settings#seen"} title="Who sees what" { (if scope.private() { "Private" } else { "Public" }) }
+            } @else if scope.private() {
+                span.chip { "Private" }
+            }
             @if let Some(p) = &d.package {
                 span title=(if p.sealed { "What it answers with, every claim and its history; how it was made stays with whoever published it." } else { "" }) {
                     @if p.sealed { "sealed package " } @else { "package " } (p.version.get(..8).unwrap_or(&p.version))
@@ -486,7 +492,9 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
                 div.card {
                     h4 { (m.title()) " " span.cover { (m.decl.priority.name()) } }
                     p.dim { (m.decl.why) }
-                    @if open_to.iter().any(|(n, _)| n == m.name()) {
+                    // A row only where a proposal can say what identifies one; a correction is
+                    // offered on each claim.
+                    @if open_to.iter().find(|(n, _)| n == m.name()).and_then(|(_, d)| crate::sourcedecl::SourceDecl::load(d).ok()).is_some_and(|d| matches!(d.source, crate::sourcedecl::Fetch::Proposals { .. }) || crate::propose::fields(&d).iter().any(|f| f.identifies)) {
                         p { a href=(at(&format!("/propose/{}", urlencode(m.name())))) { "Propose a row" } }
                     }
                     div.facet {
@@ -763,6 +771,15 @@ fn record_page(scope: &Tracker, member: &str, id: &str, operator: bool) -> Optio
         h1 { (rec.title) }
         @if correctable {
             p { a href={(at(&format!("/propose/{}", urlencode(member)))) "?claim=" (urlencode(&rec.record_id))} { "Propose a correction" } }
+        }
+        // What readers corrected here, over what the source says.
+        @for c in rec.excerpt.as_ref().and_then(|e| e["corrected"].as_array()).into_iter().flatten() {
+            div.note {
+                "Corrected: " (c["fields"].as_object().map(|f| f.keys().cloned().collect::<Vec<_>>().join(", ")).unwrap_or_default())
+                ", proposed by " (c["proposed_by"].as_str().unwrap_or("a reader")) ", accepted by " (c["accepted_by"].as_str().unwrap_or("the owner"))
+                " on " (c["accepted_at"].as_str().unwrap_or("").get(..10).unwrap_or(""))
+                @if let Some(u) = c["read_from"].as_str().filter(|u| u.starts_with("http")) { " · " a href=(u) rel="noopener nofollow" { "where it was read" } }
+            }
         }
         p.state { span.chip { (member) } " " span.chip { (rec.kind) } " "
             @for i in &rec.ids { span.chip { (i.scheme) " " (i.value) } " " }
@@ -3600,6 +3617,9 @@ fn propose_page(
     let p = params(url);
     // A correction starts from what the claim says now.
     let correcting = p.get("claim").and_then(|id| scope.records_of(member, std::slice::from_ref(id), false).into_iter().next());
+    // A source read from elsewhere is corrected property by property, over what it says; a
+    // proposals source by proposing its row again.
+    let by_property = correcting.is_some() && !matches!(decl.source, crate::sourcedecl::Fetch::Proposals { .. });
     let mut value: BTreeMap<String, String> = BTreeMap::new();
     if let Some(rec) = &correcting {
         // The row as it was proposed, where the claim came from one; what the claim says
@@ -3639,7 +3659,16 @@ fn propose_page(
             (Some(_), Err(e)) => { div.note { (e) "." } }
             (Some(r), Ok(())) => {
                 form.settings method="post" action=(at(&here)) {
-                    @for f in &fields {
+                    @if let (true, Some(rec)) = (by_property, &correcting) {
+                        input type="hidden" name="correct_record" value=(rec.record_id);
+                        p.dim { "Change what is wrong; what you leave as it is stays as the source says it. Empty a value to say it does not hold." }
+                        @for (property, v) in &rec.fields {
+                            @let shown = given.get(&format!("c.{property}")).cloned().unwrap_or_else(|| v.display());
+                            p { label { (property) br; input.wide type="text" name={"c." (property)} value=(shown); } }
+                            input type="hidden" name={"o." (property)} value=(v.display());
+                        }
+                    }
+                    @for f in fields.iter().filter(|_| !by_property) {
                         p { label {
                             (f.name) @if f.identifies { " *" }
                             @if let Some(p) = &f.property { span.dim { " → " (p) } }
@@ -3682,16 +3711,34 @@ fn propose_page(
 /// signed by this workspace for the reader. The file it was kept under.
 fn take_from_form(scope: &Tracker, accounts: &Accounts, dir: &Path, reader: &mut crate::propose::Reader, account: Option<i64>, form: &str) -> Result<String, String> {
     let decl = crate::sourcedecl::SourceDecl::load(dir)?;
-    let fields = crate::propose::fields(&decl);
-    let said: BTreeMap<String, String> = fields.iter().map(|f| (f.name.clone(), form_field(form, &format!("f.{}", f.name)))).collect();
-    let row = crate::propose::row_from(&fields, &said)?;
-    let body = json!({
-        "row": row,
+    let record = form_field(form, "correct_record");
+    let what = if !record.trim().is_empty() {
+        // A correction: only what was changed from what the claim said.
+        let mut changed = serde_json::Map::new();
+        for pair in form.split('&') {
+            let Some((k, v)) = pair.split_once('=') else { continue };
+            let Some(property) = crate::serve::urldecode(k).strip_prefix("c.").map(str::to_string) else { continue };
+            let new = crate::serve::urldecode(v).trim().to_string();
+            if new != form_field(form, &format!("o.{property}")).trim() {
+                changed.insert(property, J::String(new));
+            }
+        }
+        if changed.is_empty() {
+            return Err("Nothing was changed.".into());
+        }
+        ("correct", json!({ "record": record.trim(), "fields": changed }))
+    } else {
+        let fields = crate::propose::fields(&decl);
+        let said: BTreeMap<String, String> = fields.iter().map(|f| (f.name.clone(), form_field(form, &format!("f.{}", f.name)))).collect();
+        ("row", J::Object(crate::propose::row_from(&fields, &said)?))
+    };
+    let mut body = json!({
         "read_at": form_field(form, "read_at").trim(),
         "read_from": form_field(form, "read_from").trim(),
         "attest": form_field(form, "attest"),
         "note": form_field(form, "note").trim(),
     });
+    body[what.0] = what.1;
     // The name it is shown as, where the form asked for one (the owner's has no such field, and an
     // absent field is not an empty name). Kept only once the proposal is.
     let named = account.filter(|_| !reader.owner && form.split('&').any(|p| p == "name" || p.starts_with("name=")));

@@ -49,6 +49,20 @@ pub struct SourceDecl {
     /// `no` or says nothing.
     #[serde(default, skip_serializing_if = "Licence::is_empty")]
     pub licence: Licence,
+    /// Proposals from readers, for a source that is read from somewhere else: new rows where the
+    /// declaration reads fields, and corrections of what a claim says. Who may: as a proposals
+    /// source's `readers` (`signed-in`, addresses, `domain:`…; empty, the world's own proposers).
+    /// Absent, it takes none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposals: Option<Takes>,
+}
+
+/// Who may propose to a source that is not itself a proposals source.
+#[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Takes {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub readers: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

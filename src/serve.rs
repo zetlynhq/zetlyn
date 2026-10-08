@@ -13,6 +13,45 @@ use crate::store::Hit;
 
 pub const STYLE: &str = r#".maintenance-banner { padding: .55rem 1rem; text-align: center; font-size: .92rem; border-bottom: 1px solid var(--line); background: var(--panel); }
 .maintenance-banner.warning { border-bottom-color: var(--accent); box-shadow: inset 0 -2px 0 var(--accent); }
+/* A claim, and proposing to it: panes, a quiet table of values, one form. */
+p.back { margin: 0 0 .5rem; font-size: .88rem; }
+header.pane-title { display: flex; justify-content: space-between; align-items: flex-end; gap: 1rem; flex-wrap: wrap; margin: 0 0 .8rem; }
+header.pane-title h1 { margin: 0; font-size: 1.85rem; letter-spacing: -.02em; }
+p.sub { margin: .35rem 0 0; color: var(--dim); font-size: .92rem; line-height: 1.5; max-width: 50rem; }
+.pane-actions { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+a.button { display: inline-flex; align-items: center; padding: .5rem .9rem; border: 1px solid var(--fg); color: var(--fg); text-decoration: none; font-size: .9rem; background: transparent; }
+a.button:hover { background: var(--wash); }
+a.button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+p.chips { display: flex; flex-wrap: wrap; gap: .35rem; margin: 0 0 1.1rem; }
+p.chips a.chip { text-decoration: none; }
+.pane-note { padding: .65rem .9rem; margin: 0 0 1rem; border: 1px solid var(--line); border-left: 3px solid var(--accent); background: var(--panel); font-size: .92rem; }
+.pane-note.bad { border-left-color: #d23c2a; }
+section.pane { background: var(--panel); border: 1px solid var(--line); padding: 1.1rem 1.25rem; margin: 0 0 1rem; }
+section.pane.quiet { background: transparent; }
+section.pane h2 { margin: 0 0 .6rem; font-family: inherit; font-size: 1.05rem; font-weight: 600; text-transform: none; letter-spacing: 0; color: var(--fg); }
+section.pane p.sub { margin: -.2rem 0 .8rem; }
+table.kv-table { width: 100%; border-collapse: collapse; margin: 0; font-size: .92rem; }
+table.kv-table th { width: 11rem; text-align: left; vertical-align: top; padding: .6rem 1rem .6rem 0; color: var(--dim); font-weight: 500; font-family: inherit; text-transform: none; letter-spacing: 0; font-size: .88rem; border-bottom: 1px solid var(--line); }
+table.kv-table td { padding: .6rem 1rem .6rem 0; vertical-align: top; border-bottom: 1px solid var(--line); }
+table.kv-table tr:last-child th, table.kv-table tr:last-child td { border-bottom: 0; }
+table.kv-table .value { font-weight: 500; }
+table.kv-table td.row-action { text-align: right; white-space: nowrap; width: 5rem; }
+table.kv-table td.now { width: 30%; color: var(--fg); }
+code.wrap { overflow-wrap: anywhere; font-size: .82rem; }
+.propose-layout { display: grid; grid-template-columns: minmax(0, 1fr) 16rem; gap: 1.2rem; align-items: start; }
+@media (max-width: 900px) { .propose-layout { grid-template-columns: 1fr; } }
+.propose-aside { padding: 1rem 1.1rem; border: 1px dashed var(--line); font-size: .88rem; color: var(--dim); }
+.propose-aside h3 { margin: 0 0 .5rem; font-size: .95rem; color: var(--fg); }
+.propose-aside ol { margin: 0; padding-left: 1.1rem; display: flex; flex-direction: column; gap: .35rem; }
+.field-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr)); gap: .7rem 1rem; margin: 0 0 .8rem; }
+.field-grid label { display: flex; flex-direction: column; gap: .3rem; font-size: .85rem; color: var(--dim); }
+.field-grid label.wide { grid-column: 1 / -1; }
+.propose-form input:not([type=radio]):not([type=hidden]), .propose-form select { flex: none; width: 100%; box-sizing: border-box; height: auto; padding: .5rem .65rem; font: inherit; font-size: .92rem; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 0; }
+.propose-form input:focus, .propose-form select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: .6rem; margin: 0 0 .9rem; }
+label.choice { display: flex; gap: .55rem; align-items: flex-start; padding: .65rem .8rem; border: 1px solid var(--line); background: var(--bg); font-size: .9rem; cursor: pointer; }
+label.choice:has(input:checked) { border-color: var(--accent); }
+.propose-form .pane-actions { margin: 0 0 1rem; }
 
 /* Square, as the website is: no rounded corner anywhere, so a field, a button or a card looks
    the same here as on zetlyn.com. */

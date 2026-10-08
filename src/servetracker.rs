@@ -767,50 +767,83 @@ fn record_page(scope: &Tracker, member: &str, id: &str, operator: bool) -> Optio
         .next()?;
     let (source, answered) = said_by(scope, member);
     let correctable = proposable(scope, operator).iter().any(|(n, _)| n == member);
+    let propose = format!("{}?claim={}", at(&format!("/propose/{}", urlencode(member))), urlencode(&rec.record_id));
+    // The source's own page in the world, and its title, where the world holds it.
+    let world = crate::serve::frame().home.1;
+    let source_dir = crate::tracker::registry(&scope.root.join("sources")).get(member).cloned();
+    let source_page = source_dir.as_ref().and_then(|d| d.file_name()).map(|f| format!("{}sources/{}", world, f.to_string_lossy()));
+    let source_title = source_dir.as_ref().and_then(|d| crate::sourcedecl::SourceDecl::load(d).ok()).map(|d| if d.title.is_empty() { d.name } else { d.title }).unwrap_or_else(|| member.to_string());
+    let corrected: Vec<J> = rec.excerpt.as_ref().and_then(|e| e["corrected"].as_array().cloned()).unwrap_or_default();
+    let corrected_fields: Vec<String> = corrected.iter().flat_map(|c| c["fields"].as_object().map(|f| f.keys().cloned().collect::<Vec<_>>()).unwrap_or_default()).collect();
     let body = html! {
-        h1 { (rec.title) }
-        @if correctable {
-            p { a href={(at(&format!("/propose/{}", urlencode(member)))) "?claim=" (urlencode(&rec.record_id))} { "Propose a correction" } }
+        p.back { a href=(at("/")) { "← " (scope.decl.title) } }
+        header.pane-title {
+            div {
+                h1 { (rec.title) }
+                p.sub {
+                    "A claim of "
+                    @if operator { @if let Some(u) = &source_page { a href=(u) { (source_title) } } @else { (source_title) } } @else { (source_title) }
+                    " · known " (rec.known.get(..10).unwrap_or(&rec.known))
+                }
+            }
+            div.pane-actions {
+                @if correctable {
+                    a.button.primary href=(propose) { "Propose a correction" }
+                } @else if operator {
+                    a.button href={(world) "settings#seen"} title="Readers' proposals are off for this source" { "Turn on proposals" }
+                }
+            }
         }
-        // What readers corrected here, over what the source says.
-        @for c in rec.excerpt.as_ref().and_then(|e| e["corrected"].as_array()).into_iter().flatten() {
-            div.note {
-                "Corrected: " (c["fields"].as_object().map(|f| f.keys().cloned().collect::<Vec<_>>().join(", ")).unwrap_or_default())
+        p.chips {
+            span.chip { (rec.kind) }
+            @for i in &rec.ids { span.chip.mono { (i.scheme) " " (i.value) } }
+            @if let Some(u) = &rec.url { a.chip href=(u) rel="noopener" { "at the source ↗" } }
+        }
+        @for c in &corrected {
+            div.pane-note {
+                strong { "Corrected" } ": " (c["fields"].as_object().map(|f| f.keys().cloned().collect::<Vec<_>>().join(", ")).unwrap_or_default())
                 ", proposed by " (c["proposed_by"].as_str().unwrap_or("a reader")) ", accepted by " (c["accepted_by"].as_str().unwrap_or("the owner"))
                 " on " (c["accepted_at"].as_str().unwrap_or("").get(..10).unwrap_or(""))
                 @if let Some(u) = c["read_from"].as_str().filter(|u| u.starts_with("http")) { " · " a href=(u) rel="noopener nofollow" { "where it was read" } }
             }
         }
-        p.state { span.chip { (member) } " " span.chip { (rec.kind) } " "
-            @for i in &rec.ids { span.chip { (i.scheme) " " (i.value) } " " }
-            span.dim { "known " (rec.known) } }
-        @if let Some(u) = &rec.url { p { a href=(u) { (u) } } }
         @if !rec.fields.is_empty() {
-            h2 { "Properties" }
-            table { tbody {
-                @for (name, value) in &rec.fields {
-                    tr {
-                        th style="width: 12rem" { (name) }
-                        td { (value.display())
-                            @if let Some(t) = definition(scope, member, &value.display()) {
-                                div.why { (t) }
+            section.pane {
+                h2 { "Properties" }
+                table.kv-table { tbody {
+                    @for (name, value) in &rec.fields {
+                        tr {
+                            th { (name) @if corrected_fields.contains(name) { " " span.chip { "corrected" } } }
+                            td {
+                                span.value { (value.display()) }
+                                @if let Some(t) = definition(scope, member, &value.display()) { div.why { (t) } }
+                                (crate::serve::receipt(&rec, name, &source, answered.as_deref()))
                             }
-                            (crate::serve::receipt(&rec, name, &source, answered.as_deref()))
+                            td.row-action { @if correctable { a href={(propose) "#c-" (name)} { "Correct" } } }
                         }
                     }
-                }
-            } }
-        }
-        @if !rec.text.trim().is_empty() {
-            h2 { "Text" }
-            @if operator || scope.text_shown(member) {
-                div.text { (rec.text) }
-            } @else {
-                p.dim { "This source's terms allow its title, its values and a link here, not its text."
-                    @if let Some(u) = &rec.url { " It is at " a href=(u) { (u) } "." } }
+                } }
             }
         }
-        footer { "from " (rec.from.address()) " · " (rec.hash) }
+        @if !rec.text.trim().is_empty() {
+            section.pane {
+                h2 { "Text" }
+                @if operator || scope.text_shown(member) {
+                    div.text { (rec.text) }
+                } @else {
+                    p.dim { "This source's terms allow its title, its values and a link here, not its text."
+                        @if let Some(u) = &rec.url { " It is at " a href=(u) { (u) } "." } }
+                }
+            }
+        }
+        section.pane.quiet {
+            h2 { "Where it comes from" }
+            table.kv-table { tbody {
+                tr { th { "Read from" } td { code { (rec.from.address()) } } td {} }
+                tr { th { "Claim" } td { code.wrap { (rec.record_id) } } td {} }
+                tr { th { "Fingerprint" } td { code.wrap { (rec.hash) } } td {} }
+            } }
+        }
     };
     Some(shell(&rec.title, body))
 }
@@ -3642,64 +3675,102 @@ fn propose_page(
     let today = crate::iso_date(crate::now());
     let here = format!("/propose/{}{}", urlencode(member), correcting.as_ref().map(|r| format!("?claim={}", urlencode(&r.record_id))).unwrap_or_default());
     let body = html! {
-        p { a href=(at("/")) { "← " (scope.decl.title) } }
-        h1 { @if let Some(rec) = &correcting { "A correction to " (rec.title) } @else { "A row for " (title) } }
-        p.about {
-            "What you propose waits for the owner of " (title) ", and is part of it only once they accept it. "
-            "Say where you read it: the receipt for every value names that place, and you."
+        p.back {
+            @if let Some(rec) = &correcting { a href=(at(&format!("/claim/{}/{}", urlencode(member), urlencode(&rec.record_id)))) { "← " (rec.title) } }
+            @else { a href=(at("/")) { "← " (scope.decl.title) } }
         }
-        @if let Some(s) = said { div.note { (s) } }
+        header.pane-title {
+            div {
+                h1 { @if let Some(rec) = &correcting { "Correct " (rec.title) } @else { "Propose a row for " (title) } }
+                p.sub { "Nothing changes until the owner of " (title) " accepts it. Every value then names where it was read, and who proposed it." }
+            }
+        }
+        @if let Some(s) = said { div.pane-note.bad { (s) } }
         @match (reader, &may) {
             (None, _) => {
-                div.note {
-                    "Proposing needs you signed in, so the owner can tell you what they decided. "
-                    a href={(at("/signin")) "?next=" (urlencode(&here))} { "Sign in with your address" } "."
+                section.pane {
+                    h2 { "Sign in to propose" }
+                    p { "Proposing needs you signed in, so the owner can tell you what they decided. There is no password: a link comes by mail." }
+                    p { a.button.primary href={(at("/signin")) "?next=" (urlencode(&here))} { "Sign in with your address" } }
                 }
             }
-            (Some(_), Err(e)) => { div.note { (e) "." } }
+            (Some(_), Err(e)) => { div.pane-note { (e) "." } }
             (Some(r), Ok(())) => {
-                form.settings method="post" action=(at(&here)) {
-                    @if let (true, Some(rec)) = (by_property, &correcting) {
-                        input type="hidden" name="correct_record" value=(rec.record_id);
-                        p.dim { "Change what is wrong; what you leave as it is stays as the source says it. Empty a value to say it does not hold." }
-                        @for (property, v) in &rec.fields {
-                            @let shown = given.get(&format!("c.{property}")).cloned().unwrap_or_else(|| v.display());
-                            p { label { (property) br; input.wide type="text" name={"c." (property)} value=(shown); } }
-                            input type="hidden" name={"o." (property)} value=(v.display());
+                div.propose-layout {
+                    form.propose-form method="post" action=(at(&here)) {
+                        @if let (true, Some(rec)) = (by_property, &correcting) {
+                            input type="hidden" name="correct_record" value=(rec.record_id);
+                            section.pane {
+                                h2 { "What is wrong" }
+                                p.sub { "Change only what is wrong; what you leave stays as the source says it. Empty a value to say it does not hold." }
+                                table.kv-table.edit { tbody {
+                                    @for (property, v) in &rec.fields {
+                                        @let shown = given.get(&format!("c.{property}")).cloned().unwrap_or_else(|| v.display());
+                                        tr {
+                                            th { label for={"c-" (property)} { (property) } }
+                                            td.now { span.dim { "now " } (v.display()) }
+                                            td { input id={"c-" (property)} type="text" name={"c." (property)} value=(shown); }
+                                        }
+                                        input type="hidden" name={"o." (property)} value=(v.display());
+                                    }
+                                } }
+                            }
+                        } @else {
+                            section.pane {
+                                h2 { @if correcting.is_some() { "The row as it should be" } @else { "The row" } }
+                                p.sub { "Fields marked * identify the row." }
+                                div.field-grid {
+                                    @for f in &fields {
+                                        label {
+                                            span { (f.name) @if f.identifies { " *" } @if let Some(p) = &f.property { span.dim { " → " (p) } } }
+                                            @if f.kind == crate::sourcedecl::PropertyType::Number {
+                                                input type="text" inputmode="decimal" name={"f." (f.name)} value=(get(&format!("f.{}", f.name))) required[f.identifies];
+                                            } @else if f.kind == crate::sourcedecl::PropertyType::Date {
+                                                input type="date" name={"f." (f.name)} value=(get(&format!("f.{}", f.name))) required[f.identifies];
+                                            } @else if f.kind == crate::sourcedecl::PropertyType::Bool {
+                                                @let said = get(&format!("f.{}", f.name)).to_lowercase();
+                                                select name={"f." (f.name)} required[f.identifies] {
+                                                    option value="" { "" }
+                                                    option value="yes" selected[matches!(said.as_str(), "yes" | "true" | "ja")] { "yes" }
+                                                    option value="no" selected[matches!(said.as_str(), "no" | "false" | "nein")] { "no" }
+                                                }
+                                            } @else {
+                                                input type="text" name={"f." (f.name)} value=(get(&format!("f.{}", f.name))) required[f.identifies];
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        section.pane {
+                            h2 { "Where you read it" }
+                            div.field-grid {
+                                label.wide { span { "The page it was read on *" } input type="url" name="read_from" placeholder="https://…" value=(get("read_from")) required; }
+                                label { span { "On *" } input type="date" name="read_at" value=(if get("read_at").is_empty() { today.clone() } else { get("read_at") }) required; }
+                            }
+                            div.choices {
+                                label.choice { input type="radio" name="attest" value="read" checked[get("attest") != "relayed"]; span { strong { "I read it there myself" } } }
+                                label.choice { input type="radio" name="attest" value="relayed" checked[get("attest") == "relayed"]; span { strong { "Somebody passed it on" } " and allows it: name them in the note" } }
+                            }
+                            div.field-grid {
+                                label.wide { span { "Note" } input type="text" name="note" value=(if get("note").is_empty() { correcting.as_ref().map(|c| format!("Corrects {}", c.title)).unwrap_or_default() } else { get("note") }); }
+                                @if !r.owner {
+                                    label.wide { span { "Shown as" } input type="text" name="name" placeholder="your name, or leave it empty" value=(if given.contains_key("name") { get("name") } else { r.name.clone() }); }
+                                }
+                            }
+                            @if !r.owner { p.sub { "The owner and the receipts show this name and " code { (r.id) } ". Your address is never shown." } }
+                        }
+                        div.pane-actions { button.primary type="submit" { "Propose" } }
+                    }
+                    aside.propose-aside {
+                        h3 { "What happens next" }
+                        ol {
+                            li { "It waits for the owner of " (title) "." }
+                            li { "They accept or decline it, with a reason." }
+                            li { @if correcting.is_some() && by_property { "Accepted, it replaces what the source says, at every update, until they take it back." } @else { "Accepted, it is part of the source." } }
+                            @if !r.owner { li { "You get a mail either way." } }
                         }
                     }
-                    @for f in fields.iter().filter(|_| !by_property) {
-                        p { label {
-                            (f.name) @if f.identifies { " *" }
-                            @if let Some(p) = &f.property { span.dim { " → " (p) } }
-                            br;
-                            @if f.kind == crate::sourcedecl::PropertyType::Number {
-                                input.wide type="text" inputmode="decimal" name={"f." (f.name)} value=(get(&format!("f.{}", f.name))) required[f.identifies];
-                            } @else if f.kind == crate::sourcedecl::PropertyType::Date {
-                                input.wide type="date" name={"f." (f.name)} value=(get(&format!("f.{}", f.name))) required[f.identifies];
-                            } @else if f.kind == crate::sourcedecl::PropertyType::Bool {
-                                @let said = get(&format!("f.{}", f.name)).to_lowercase();
-                                select name={"f." (f.name)} required[f.identifies] {
-                                    option value="" { "" }
-                                    option value="yes" selected[matches!(said.as_str(), "yes" | "true" | "ja")] { "yes" }
-                                    option value="no" selected[matches!(said.as_str(), "no" | "false" | "nein")] { "no" }
-                                }
-                            } @else {
-                                input.wide type="text" name={"f." (f.name)} value=(get(&format!("f.{}", f.name))) required[f.identifies];
-                            }
-                        } }
-                    }
-                    h2 { "Where you read it" }
-                    p { label { "The page it was read on *" br; input.wide type="url" name="read_from" placeholder="https://…" value=(get("read_from")) required; } }
-                    p { label { "On *" br; input type="date" name="read_at" value=(if get("read_at").is_empty() { today.clone() } else { get("read_at") }) required; } }
-                    p { label { input type="radio" name="attest" value="read" checked[get("attest") != "relayed"]; " I read it there myself" } }
-                    p { label { input type="radio" name="attest" value="relayed" checked[get("attest") == "relayed"]; " Somebody who read it passed it on, and allows it (name them below)" } }
-                    p { label { "Note" br; input.wide type="text" name="note" value=(if get("note").is_empty() { correcting.as_ref().map(|c| format!("Corrects {}", c.title)).unwrap_or_default() } else { get("note") }); } }
-                    @if !r.owner {
-                        p { label { "Shown as" br; input.wide type="text" name="name" placeholder="your name, or leave it empty" value=(if given.contains_key("name") { get("name") } else { r.name.clone() }); } }
-                        p.dim { "Beside your proposal the owner and the receipts show this name and " code { (r.id) } ". Your address is never shown." }
-                    }
-                    p { button.primary type="submit" { "Propose" } }
                 }
             }
         }
@@ -3927,7 +3998,7 @@ mod tests {
         assert_eq!(status, 200, "{page}");
         assert!(page.contains("Propose a correction"), "{page}");
         let (_, page) = ask("GET", &format!("{form_url}?claim={}", urlencode(&id)), Some(&ann), "");
-        assert!(page.contains("A correction to") && page.contains(r#"value="44990""#) && page.contains(r#"value="DEU""#), "{page}");
+        assert!(page.contains("<h1>Correct ") && page.contains(r#"value="44990""#) && page.contains(r#"value="DEU""#), "{page}");
         let (_, page) = ask("GET", &format!("{base}/account"), Some(&ann), "");
         assert!(page.contains("accepted"), "{page}");
         let _ = std::fs::remove_dir_all(&root);

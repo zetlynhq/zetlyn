@@ -1051,7 +1051,9 @@ fn account_page(scope: &Tracker, accounts: &Accounts, site: &Site, v: &Viewer) -
         (proposals_section(scope, accounts, a.id))
 
         h2 { "API keys" }
-        @if !entitled {
+        // Where nothing costs anything, a key is anybody's who signed in: it reads what they read,
+        // no more, and stops where they are taken off.
+        @if !entitled && !v.free {
             p.dim { "A key answers only for a subscription." }
         } @else {
             table { tbody {
@@ -1821,8 +1823,10 @@ impl TrackerSite {
                 None,
             ),
 
+            // Made by the person signed in as themselves, never by a key; for a subscription, or by
+            // anybody where nothing costs anything.
             "/account/key" if post => match &v.account {
-                Some(a) if a.entitled(&scope.decl.name) => {
+                Some(a) if !v.by_key && (a.entitled(&scope.decl.name) || v.free) => {
                     let name = form_field(&form, "name");
                     let name = if name.trim().is_empty() {
                         "a key".into()

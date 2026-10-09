@@ -169,7 +169,9 @@ pub fn start_export(root: &Path) -> Result<(), String> {
     let root = root.to_path_buf();
     let dir = exports_dir(&root);
     let state = dir.join("state.json");
-    write_json(&state, &json!({ "state": "making", "at": crate::iso_stamp(crate::now()) }));
+    // Where nothing can be written (a full disk, a folder not ours), said now rather than never.
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Not exported: {}: {e}", dir.display()))?;
+    std::fs::write(&state, json!({ "state": "making", "at": crate::iso_stamp(crate::now()) }).to_string()).map_err(|e| format!("Not exported: {}: {e}", dir.display()))?;
     std::thread::spawn(move || {
         let name = format!("{}-{}.tar.gz", root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "world".into()), crate::cell::stamp());
         let file = dir.join(&name);

@@ -1667,6 +1667,10 @@ impl Store {
             ex("insert into d.revision select * from main.revision where run in (select id from d.run)", &[])?;
             ex("insert into d.removed select * from main.removed where run in (select id from d.run)", &[])?;
             ex("insert or ignore into d.excerpt select * from main.excerpt where digest in (select excerpt from d.record union select excerpt from d.revision)", &[])?;
+            // What each claim here was before these runs: the other side, seeing its own there,
+            // knows these came after it, whatever the clocks say to the second.
+            ex("create table if not exists d.was(record_id text not null, hash text not null)", &[])?;
+            ex("insert into d.was select distinct record_id, hash from main.revision where record_id in (select record_id from d.record) and run not in (select id from d.run)", &[])?;
             Ok(())
         })();
         let _ = self.db.execute("detach database d", []);
@@ -1735,10 +1739,19 @@ impl Store {
                 let their_at = other.run_time(their_run);
                 let ours: Option<(i64, String)> = self.db.query_row("select last_run, hash from record where record_id = ?1", rusqlite::params![id], |r| Ok((r.get(0)?, r.get(1)?))).ok();
                 let our_at = ours.as_ref().map(|(r, _)| self.run_time(*r)).unwrap_or_default();
-                // In the same second, what came from them gives way to what they saw after it; two
-                // observations of their own each give way to the same one on both sides.
+                // In the same second, the clocks say nothing: what each side saw before decides. Theirs
+                // came after ours where ours is among what theirs was; ours after theirs where theirs
+                // is in our history. Otherwise what came from them gives way to what they saw after
+                // it, and two observations of their own each give way to the same one on both sides.
                 let tie_theirs = their_at == our_at
-                    && ours.as_ref().is_some_and(|(r, h)| *h != claim.hash && (*r <= base || self.run_note(*r).starts_with(&format!("merged from {peer} run ")) || claim.hash > *h));
+                    && ours.as_ref().is_some_and(|(r, h)| {
+                        if *h == claim.hash {
+                            return false;
+                        }
+                        let they_saw_ours = other.db.query_row("select 1 from was where record_id = ?1 and hash = ?2", rusqlite::params![id, h], |_| Ok(())).is_ok();
+                        let we_saw_theirs = self.db.query_row("select 1 from revision where record_id = ?1 and hash = ?2 and run < ?3", rusqlite::params![id, claim.hash, r], |_| Ok(())).is_ok();
+                        they_saw_ours || (!we_saw_theirs && (*r <= base || self.run_note(*r).starts_with(&format!("merged from {peer} run ")) || claim.hash > *h))
+                    });
                 if ours.is_none() || their_at > our_at || tie_theirs {
                     self.put(&claim, run, &their_at, history)?;
                     m.current += 1;

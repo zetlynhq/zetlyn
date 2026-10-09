@@ -999,6 +999,11 @@ pub fn schedule_pass(root: &Path, deliver: bool, limits: &Limits) -> Option<i64>
                     continue;
                 }
             };
+            // Paused after failing, a trial, a read not finished, never read in full: the person's to
+            // start or go on with, here as on one's own machine (autoupdate.rs).
+            if autoupdate::held(&ds, &dir).is_some() {
+                continue;
+            }
             let Some(due) = autoupdate::next_at(&ds, workspace) else { continue };
             // And no more often than the plan allows, whatever the source asks for.
             let due = match last_finished(&ds) {
@@ -1015,7 +1020,10 @@ pub fn schedule_pass(root: &Path, deliver: bool, limits: &Limits) -> Option<i64>
                 continue;
             }
             crate::usage::count_read(&name);
-            match ds.run() {
+            let outcome = ds.run();
+            // A failure counted, so the third in a row pauses it; a success clears the count.
+            autoupdate::record(&ds, &outcome);
+            match outcome {
                 Ok(r) => {
                     println!(
                         "{} update {} {}: +{} ~{} −{} ={}{}",
@@ -1060,7 +1068,10 @@ pub fn schedule_pass(root: &Path, deliver: bool, limits: &Limits) -> Option<i64>
                 continue;
             }
             crate::usage::count_read(&name);
-            match ds.run() {
+            let outcome = ds.run();
+            // A failure counted, so the third in a row pauses it; a success clears the count.
+            autoupdate::record(&ds, &outcome);
+            match outcome {
                 Ok(r) => println!(
                     "{name} update {} {} after {}: +{} ~{} −{} ={}",
                     r.id,

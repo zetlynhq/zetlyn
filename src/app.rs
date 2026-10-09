@@ -598,9 +598,18 @@ impl App {
         let (cookie, signature) = (header("Cookie"), header("X-Hub-Signature-256").or_else(|| header("X-Zetlyn-Signature")));
         let session = cookie.and_then(|c| c.split(';').filter_map(|p| p.trim().split_once('=')).find(|(k, _)| *k == "zs").map(|(_, v)| v.to_string()));
         let signed_in = session.and_then(|s| h.accounts.by_session(&s, crate::account::Kind::Member).map(|a| a.email).or_else(|| crate::account::remote_member(&s)));
-        let owner = signed_in.as_deref().is_some_and(|e| h.is_member(e));
-        self.who = signed_in;
         let post = request.method() == &tiny_http::Method::Post;
+        // A program with a key of one of the world's members, made in Settings, API keys: it reads
+        // what they read here, and changes nothing. Nobody is signed in by it.
+        let keyed = (!post && signed_in.is_none() && parts.first().map(String::as_str) != Some("sync"))
+            .then(|| header("Authorization"))
+            .flatten()
+            .and_then(|a| a.strip_prefix("Bearer ").map(|k| k.trim().to_string()))
+            .and_then(|k| h.accounts.by_key(&k))
+            .map(|a| a.email)
+            .filter(|e| h.is_member(e));
+        let owner = signed_in.as_deref().is_some_and(|e| h.is_member(e)) || keyed.is_some();
+        self.who = signed_in;
         let html_kind = "text/html; charset=utf-8";
         match parts.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
             ["style.css" | "zetlyn.css"] => Some(request),
@@ -1300,6 +1309,30 @@ impl App {
                 return redirect(request, &serve::at(&format!("/settings/access?saved={}", urlencode(&said))));
             }
             // A key for `zetlyn world sync`, shown once: what it is is never stored, only its hash.
+            // A member's own key, for a program: shown once; revoked by its name.
+            (true, ["settings", "keys"]) | (true, ["settings", "keys", "drop"]) => {
+                let name = form.get("name").map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).unwrap_or_else(|| "a key".into());
+                let account = self.hosted.as_ref().zip(self.who.as_deref()).and_then(|(h, e)| h.accounts.ensure(e).ok().map(|a| (h, a)));
+                let Some((h, a)) = account else {
+                    return redirect(request, &serve::at("/settings/keys?saved=Keys+are+for+somebody+signed+in."));
+                };
+                if parts.len() == 3 {
+                    h.accounts.drop_key(a.id, &name);
+                    return redirect(request, &serve::at(&format!("/settings/keys?saved={}", urlencode(&format!("Revoked: {name}. It reads nothing any more.")))));
+                }
+                let body = match h.accounts.new_key(a.id, &name) {
+                    Ok(key) => html! {
+                        p.back { a href=(serve::at("/settings/keys")) { "← Settings" } }
+                        h1 { "Your key for " (name) }
+                        p { "Shown this once:" }
+                        pre #api-key { (key) }
+                        p.dim { "Send it as " code { "Authorization: Bearer " (key) } ". It reads what you read here and changes nothing." }
+                    },
+                    Err(e) => html! { p.back { a href=(serve::at("/settings/keys")) { "← Settings" } } h1 { "No key made" } p { (e) } },
+                };
+                respond(request, 200, html_kind, &page("Your key", body));
+                return;
+            }
             // A sign-in link an owner hands on: good once, for seven days, shown here once.
             (true, ["settings", "signin-link"]) => {
                 let email = form.get("email").map(|e| e.trim().to_lowercase()).unwrap_or_default();
@@ -2805,6 +2838,7 @@ impl App {
             owner.then(|| ("profile", "World", "Profile", "What the About page says about this world, to anybody. Empty fields are left out.".to_string())),
             owner.then(|| ("seen", "Access", "Who sees what", "What is open to anyone, and who may propose rows and corrections to a source.".to_string())),
             owner.then(|| ("access", "Access", "Who may do what", "Everybody reads what this world makes public; these lists say who may do more.".to_string())),
+            self.hosted.is_some().then(|| ("keys", "Access", "API keys", "Keys of your own for programs: each reads what you read here, and changes nothing.".to_string())),
             Some(("updates", "Data", "Updates", if hosted_cell { "Your sources are read on our servers by themselves, also with no page open, as often as you say here.".to_string() } else { "Zetlyn reads your sources again by itself and tells you what changed, for as long as it runs, with or without a page open.".to_string() })),
             Some(("assist", "Data", "Assist", "A model that proposes where a pattern cannot: reading an API it has not seen, turning a question into filters, matching the words of two sources.".to_string())),
             Some(("moving", "Data", "Moving", "Taking it with you, bringing a world here, and working on it from your machine too.".to_string())),
@@ -2861,6 +2895,29 @@ impl App {
                 }
             }
             @if tab == "seen" { (self.seen_section(query, sub)) }
+            @if tab == "keys" {
+                @let mine = self.hosted.as_ref().zip(self.who.as_deref()).and_then(|(h, e)| h.accounts.ensure(e).ok().map(|a| h.accounts.keys(a.id))).unwrap_or_default();
+                section.settings-card #keys {
+                    header.settings-card-head { h2 { "Your keys" } p { "Sent as " code { "Authorization: Bearer zk_…" } ", a key reads this world's pages and its trackers' API as you would, private ones included, and changes nothing. Taken off its lists, you are out, and so is every key of yours." } }
+                    @if mine.is_empty() { p.dim { "None yet." } }
+                    @else {
+                        table.admin-table { thead { tr { th { "For" } th { "Made" } th { "Last used" } th {} } } tbody {
+                            @for (name, made, used) in &mine {
+                                tr {
+                                    td { (name) }
+                                    td.dim.nowrap { (stamp_words(made)) }
+                                    td.dim.nowrap { @match used { Some(u) => (stamp_words(u)), None => "never" } }
+                                    td.num { form.inline method="post" action=(serve::at("/settings/keys/drop")) { input type="hidden" name="name" value=(name); button type="submit" { "Revoke" } } }
+                                }
+                            }
+                        } }
+                    }
+                    form.bar method="post" action=(serve::at("/settings/keys")) {
+                        input.wide type="text" name="name" placeholder="what this key is for" required;
+                        button.primary type="submit" { "Make a key" }
+                    }
+                }
+            }
             @if tab == "access" {
                 @let access = crate::account::Site::load(&self.root).access;
                 @let lines = |l: &[String]| l.join("\n");
@@ -7361,7 +7418,7 @@ fn month_words(month: &str) -> String {
 
 /// The import form: the archive sent as it is (PUT), what happens said as it does.
 /// The parts of Settings, each a page of its own at `/settings/<part>`.
-const SETTINGS_TABS: [&str; 7] = ["usage", "profile", "seen", "access", "updates", "assist", "moving"];
+const SETTINGS_TABS: [&str; 8] = ["usage", "profile", "seen", "access", "keys", "updates", "assist", "moving"];
 
 
 /// The upload of a world, in pieces (transfer.rs): begun, or found again for the same file, each

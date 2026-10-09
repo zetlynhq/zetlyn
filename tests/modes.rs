@@ -223,6 +223,11 @@ impl World {
 
     /// Run `mode` in `tmp`, over the workspace `existing` where one is given, as it is.
     fn start_in(mode: Mode, tmp: PathBuf, existing: Option<PathBuf>, apart: bool) -> World {
+        World::start_prepared(mode, tmp, existing, apart, &|_| {})
+    }
+
+    /// As `start_in`, with `prepare` given the workspace before anything runs it.
+    fn start_prepared(mode: Mode, tmp: PathBuf, existing: Option<PathBuf>, apart: bool, prepare: &dyn Fn(&Path)) -> World {
         std::fs::create_dir_all(&tmp).unwrap();
         match mode {
             Mode::L => {
@@ -272,6 +277,7 @@ impl World {
                 let cell = tmp.join("cell");
                 let root = cell.join("orgs/acme");
                 acme(&root, if apart { "update:\n  every: 5m\n" } else { "" });
+                prepare(&root);
                 std::fs::write(cell.join("cell.yaml"), "active: true\n").unwrap();
                 std::fs::write(cell.join("workspace.yaml"), format!("title: Acme\nurl: http://127.0.0.1:{}\n", main.port)).unwrap();
                 std::fs::write(cell.join("members.yaml"), format!("acme:\n  - email: {OWNER}\n    role: owner\n")).unwrap();
@@ -754,4 +760,402 @@ fn a_team_runs_a_world_in_its_own_network() {
     assert_eq!(http(port, "GET", &format!("/signin/{raw}"), "", "").0, 410, "once");
     drop(web);
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// UC-D11, UC-J2: a program reads a private tracker with a key of a reader of it, and with nothing
+/// more than that reader may: taken off, the key is out at once; revoked, it is dead; a key makes
+/// no key.
+#[test]
+fn a_program_reads_with_a_key_what_its_person_may_and_no_more() {
+    for mode in SERVED {
+        let w = World::start(mode, "keys");
+        let owner = w.sign_in(OWNER);
+        let anna = w.sign_in("anna@example.org");
+        let bob = w.sign_in("bob@elsewhere.org");
+        let (s, _) = w.post("/settings/seen", &owner, "tracker=cve&visibility=private");
+        assert_eq!(s, 303, "{mode:?}");
+        let (s, _) = w.post("/settings/readers/cve", &owner, &format!("readers={}", enc("anna@example.org")));
+        assert_eq!(s, 303, "{mode:?}");
+
+        let make = |cookie: &str| -> Option<String> {
+            let (_, page) = w.post("/trackers/cve/account/key", cookie, "name=script");
+            page.split("zk_").nth(1).map(|k| format!("zk_{}", k.split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-').next().unwrap()))
+        };
+        let api = |key: &str| http_raw(w.port(), "GET", &format!("{}/trackers/cve/api/describe", w.base), &format!("x=y\r\nAuthorization: Bearer {key}"), "", b"").0;
+        let anna_key = make(&anna).unwrap_or_else(|| panic!("{mode:?}: Anna makes a key"));
+        assert_eq!(api(&anna_key), 200, "{mode:?}: Anna's program reads it");
+        assert_ne!(http_raw(w.port(), "GET", &format!("{}/trackers/cve/api/describe", w.base), "", "", b"").0, 200, "{mode:?}: nobody without a key");
+        if let Some(bob_key) = make(&bob) {
+            assert_ne!(api(&bob_key), 200, "{mode:?}: Bob's key reads what Bob reads: not this");
+        }
+        let (_, page) = w.post("/trackers/cve/account/key", &format!("x=y\r\nAuthorization: Bearer {anna_key}"), "name=another");
+        assert!(!page.contains("zk_"), "{mode:?}: a key makes no key");
+
+        // Taken off: out at once, key and all. Named again: in again.
+        let (s, _) = w.post("/settings/readers/cve", &owner, "readers=");
+        assert_eq!(s, 303, "{mode:?}");
+        assert_ne!(api(&anna_key), 200, "{mode:?}: Anna's key is out with her");
+        let (s, _) = w.post("/settings/readers/cve", &owner, &format!("readers={}", enc("anna@example.org")));
+        assert_eq!(s, 303, "{mode:?}");
+        assert_eq!(api(&anna_key), 200, "{mode:?}");
+
+        // Revoked by Anna: dead.
+        let (s, _) = w.post("/trackers/cve/account/key/drop", &anna, "name=script");
+        assert!(s == 200 || s == 303, "{mode:?}: {s}");
+        assert_ne!(api(&anna_key), 200, "{mode:?}: a revoked key reads nothing");
+    }
+}
+
+/// UC-J4: an owner's or an editor's program reads all they may, private trackers included, with a
+/// key of their own from Settings, and changes nothing; off the lists, the key is out.
+#[test]
+fn a_members_key_reads_all_they_may_and_changes_nothing() {
+    for mode in SERVED {
+        let w = World::start(mode, "member-keys");
+        let owner = w.sign_in(OWNER);
+        let (s, _) = w.post("/settings/access", &owner, &format!("owners={}&editors={}", enc(OWNER), enc("ed@example.org")));
+        assert_eq!(s, 303, "{mode:?}");
+        let (s, _) = w.post("/settings/seen", &owner, "tracker=cve&visibility=private");
+        assert_eq!(s, 303, "{mode:?}");
+        let key_of = |cookie: &str| -> String {
+            let (s, page) = w.post("/settings/keys", cookie, "name=script");
+            assert_eq!(s, 200, "{mode:?}: {page}");
+            page.split("<pre id=\"api-key\">").nth(1).and_then(|k| k.split('<').next()).unwrap_or_else(|| panic!("{mode:?}: a key on {page}")).to_string()
+        };
+        let with = |key: &str| format!("x=y\r\nAuthorization: Bearer {key}");
+        let api = |key: &str| http_raw(w.port(), "GET", &format!("{}/trackers/cve/api/describe", w.base), &with(key), "", b"").0;
+
+        let k = key_of(&owner);
+        assert_eq!(api(&k), 200, "{mode:?}: the owner's program reads the private tracker");
+        assert_eq!(w.get("/sources", &with(&k)).0, 200, "{mode:?}: and the world's pages");
+        let (s, _) = w.post("/settings/profile", &with(&k), "title=By+a+program");
+        assert_ne!(s, 200, "{mode:?}");
+        assert!(!w.workspace().contains("By a program"), "{mode:?}: a key changes nothing");
+        let (_, list) = w.get("/settings/keys", &owner);
+        assert!(list.contains("script"), "{mode:?}: listed");
+
+        let ed = w.sign_in("ed@example.org");
+        let e = key_of(&ed);
+        assert_eq!(api(&e), 200, "{mode:?}: an editor's program reads it too");
+        let (s, _) = w.post("/settings/access", &owner, &format!("owners={}", enc(OWNER)));
+        assert_eq!(s, 303, "{mode:?}");
+        assert_ne!(api(&e), 200, "{mode:?}: off the lists, the editor's key is out");
+
+        let (s, _) = w.post("/settings/keys/drop", &owner, "name=script");
+        assert_eq!(s, 303, "{mode:?}");
+        assert_ne!(api(&k), 200, "{mode:?}: revoked, it reads nothing");
+    }
+}
+
+/// A claim as `zetlyn claim` prints it for a source of a workspace: its current raw value of a
+/// property, and how many versions it has.
+fn claim_of(root: &Path, source: &str, id: &str, property: &str) -> (String, usize) {
+    let (ok, printed) = z(&["claim", &root.join("sources").join(source).display().to_string(), id]);
+    assert!(ok, "{printed}");
+    let j: serde_json::Value = serde_json::from_str(&printed[printed.find(['{', '[']).unwrap_or(0)..]).unwrap_or_default();
+    let c = if j.is_array() { j[0].clone() } else { j };
+    (c["excerpt"]["row"][property].as_str().unwrap_or("").to_string(), c["versions"].as_array().map_or(0, Vec::len))
+}
+
+/// The sync key an owner makes for a world, off the page that shows it.
+fn sync_key(w: &World, owner: &str) -> String {
+    let (s, page) = w.post("/settings/sync-key", owner, "");
+    assert_eq!(s, 200, "{page}");
+    page.split("--key ").nth(1).and_then(|k| k.split(|c: char| !c.is_ascii_alphanumeric() && c != '_').next()).unwrap().to_string()
+}
+
+fn edit(file: &Path, from: &str, to: &str) {
+    let t = std::fs::read_to_string(file).unwrap();
+    assert!(t.contains(from), "{}: no {from:?}", file.display());
+    std::fs::write(file, t.replacen(from, to, 1)).unwrap();
+}
+
+/// UC-H13: two people, each with a copy on their own machine, kept one with the same world on
+/// zetlyn.com: what either changes reaches the other through it; the same thing changed by both is
+/// the second one's to decide; what either read is read by all, once.
+#[test]
+fn two_machines_and_one_world_on_zetlyn_com_stay_one() {
+    let m = World::start(Mode::M, "two-machines");
+    let owner = m.sign_in(OWNER);
+    let key = sync_key(&m, &owner);
+    let (l1, l2) = (m.tmp.join("one"), m.tmp.join("two"));
+    let sync = |l: &Path, more: &[&str]| -> (bool, String) {
+        let mut args = vec!["world", "sync"];
+        let (url, dir) = (m.url(), l.display().to_string());
+        args.push(&url);
+        args.push(&dir);
+        args.extend_from_slice(more);
+        z(&args)
+    };
+    for l in [&l1, &l2] {
+        let (ok, said) = sync(l, &["--key", &key]);
+        assert!(ok, "{said}");
+    }
+
+    // Each changes something of their own; both have both after a round.
+    edit(&l1.join("trackers/cve/tracker.yaml"), "title: CVE", "title: CVE from one");
+    edit(&l2.join("sources/vendor-b/source.yaml"), "title:", "title: From two,");
+    for l in [&l1, &l2, &l1] {
+        let (ok, said) = sync(l, &[]);
+        assert!(ok, "{said}");
+    }
+    for root in [&l1, &l2, &m.root] {
+        assert!(std::fs::read_to_string(root.join("trackers/cve/tracker.yaml")).unwrap().contains("CVE from one"), "{}", root.display());
+        assert!(std::fs::read_to_string(root.join("sources/vendor-b/source.yaml")).unwrap().contains("From two,"), "{}", root.display());
+    }
+
+    // The same thing changed by both: the first to sync has it there; the second is asked, and
+    // nothing of theirs goes until they say.
+    edit(&l1.join("trackers/cve/tracker.yaml"), "title: CVE from one", "title: CVE by one");
+    edit(&l2.join("trackers/cve/tracker.yaml"), "title: CVE from one", "title: CVE by two");
+    let (ok, said) = sync(&l1, &[]);
+    assert!(ok, "{said}");
+    let (ok, said) = sync(&l2, &[]);
+    assert!(!ok && said.contains("not synced"), "the second is asked: {said}");
+    assert!(std::fs::read_to_string(m.root.join("trackers/cve/tracker.yaml")).unwrap().contains("CVE by one"), "nothing of two's went");
+    let (ok, said) = sync(&l2, &["--take", "theirs"]);
+    assert!(ok, "{said}");
+    assert!(std::fs::read_to_string(l2.join("trackers/cve/tracker.yaml")).unwrap().contains("CVE by one"));
+
+    // Read on one machine: the new value everywhere, its version before kept, and each once
+    // however often the copies sync after.
+    std::fs::copy(fixture("update-2/vendor-a.csv"), l1.join("sources/vendor-a/advisories.csv")).unwrap();
+    let (ok, said) = z(&["source", "update", &l1.join("sources/vendor-a").display().to_string()]);
+    assert!(ok, "{said}");
+    for l in [&l1, &l2, &l1, &l2, &l1] {
+        let (ok, said) = sync(l, &[]);
+        assert!(ok, "{said}");
+    }
+    for root in [&l1, &l2, &m.root] {
+        assert_eq!(claim_of(root, "vendor-a", "CVE-2026-0001", "cvss"), ("8.1".to_string(), 2), "{}", root.display());
+    }
+}
+
+/// UC-H16: both copies read the same sources on their own rhythm and sync between: every sync goes
+/// through, nothing about the data is ever a conflict, and the same observation read on both sides
+/// is one version, not two.
+#[test]
+fn both_copies_reading_their_sources_and_syncing_never_conflict() {
+    let m = World::start(Mode::M, "both-read");
+    let owner = m.sign_in(OWNER);
+    let key = sync_key(&m, &owner);
+    let mine = m.tmp.join("mine");
+    let (url, dir) = (m.url(), mine.display().to_string());
+    let (ok, said) = z(&["world", "sync", &url, &dir, "--key", &key]);
+    assert!(ok, "{said}");
+    let read = |root: &Path| {
+        for s in MEMBERS {
+            let (ok, said) = z(&["source", "update", &root.join("sources").join(s).display().to_string()]);
+            assert!(ok, "{said}");
+        }
+    };
+    // Rounds of both reading, nothing new at the sources, and syncing.
+    for _ in 0..3 {
+        read(&m.root);
+        read(&mine);
+        let (ok, said) = z(&["world", "sync", &url, &dir]);
+        assert!(ok, "a round: {said}");
+    }
+    // Something new at a source, read on both sides, at different times.
+    std::fs::copy(fixture("update-2/vendor-a.csv"), m.root.join("sources/vendor-a/advisories.csv")).unwrap();
+    read(&m.root);
+    let (ok, said) = z(&["world", "sync", &url, &dir]);
+    assert!(ok, "{said}");
+    read(&mine);
+    for _ in 0..2 {
+        let (ok, said) = z(&["world", "sync", &url, &dir]);
+        assert!(ok, "{said}");
+    }
+    for root in [&mine, &m.root] {
+        assert_eq!(claim_of(root, "vendor-a", "CVE-2026-0001", "cvss"), ("8.1".to_string(), 2), "one version each, read twice: {}", root.display());
+    }
+}
+
+/// UC-K3, UC-B7: a source that cannot be read is tried again at its rhythm, and after three
+/// failures in a row it waits, says why, and is not asked again until its owner says try again,
+/// wherever the world runs: here the pass a server of its own and a cell run, `zetlyn run`.
+#[test]
+fn a_source_that_keeps_failing_waits_for_its_owner() {
+    let w = World::start(Mode::S, "failing");
+    let owner = w.sign_in(OWNER);
+    let decl = w.root.join("sources/kev/source.yaml");
+    let t = std::fs::read_to_string(&decl).unwrap();
+    std::fs::write(&decl, format!("{}\nschedule:\n  every: 1s\n", t.trim_end())).unwrap();
+    let file = w.root.join("sources/kev/kev.csv");
+    let kept = std::fs::read(&file).unwrap();
+    std::fs::remove_file(&file).unwrap();
+    let root = w.root.display().to_string();
+    let pass = || {
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        z(&["run", &root, "--once"]).1
+    };
+    for i in 1..=3 {
+        let said = pass();
+        assert!(said.contains("test/kev"), "try {i}: {said}");
+    }
+    let (_, page) = w.get("/settings/updates", &owner);
+    assert!(page.contains("waits for you") && page.contains("Try it again"), "after three, it waits and says so");
+    let said = pass();
+    assert!(!said.contains("test/kev"), "not asked again: {said}");
+
+    std::fs::write(&file, kept).unwrap();
+    let (s, _) = w.post("/settings/retry/kev", &owner, "");
+    assert_eq!(s, 303);
+    let said = pass();
+    assert!(said.contains("test/kev update"), "asked again, and read: {said}");
+    let (_, page) = w.get("/settings/updates", &owner);
+    assert!(!page.contains("waits for you"), "and no longer waiting");
+}
+
+/// UC-K2: the machine goes down in the middle of reading a source (here: the process killed while
+/// the source is half sent). What the source held before is still what it holds, and the next pass
+/// reads it whole.
+#[test]
+fn a_read_cut_off_halfway_leaves_the_source_as_it_was_and_the_next_one_reads_it() {
+    let tmp = std::env::temp_dir().join(format!("zetlyn-modes-{}-cut-off", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let root = tmp.join("w");
+    acme(&root, "");
+    let csv = std::fs::read(root.join("sources/kev/kev.csv")).unwrap();
+    let before = claim_of(&root, "kev", "CVE-2026-0001", "vendorProject");
+
+    // A source that sends half and then nothing, until it is told to send all.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let whole = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let (csv, whole) = (csv.clone(), whole.clone());
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let (csv, whole) = (csv.clone(), whole.clone());
+                std::thread::spawn(move || {
+                let mut s = stream;
+                let mut buf = [0u8; 2048];
+                let _ = s.read(&mut buf);
+                let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/csv\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", csv.len()).as_bytes());
+                if whole.load(std::sync::atomic::Ordering::SeqCst) {
+                    let _ = s.write_all(&csv);
+                } else {
+                    let _ = s.write_all(&csv[..csv.len() / 2]);
+                    std::thread::sleep(std::time::Duration::from_secs(60));
+                }
+                });
+            }
+        });
+    }
+    let decl = root.join("sources/kev/source.yaml");
+    let t = std::fs::read_to_string(&decl).unwrap();
+    std::fs::write(&decl, t.replace("path: kev.csv", &format!("path: http://127.0.0.1:{port}/kev.csv"))).unwrap();
+
+    let mut reading = Command::new(env!("CARGO_BIN_EXE_zetlyn")).args(["source", "update", &root.join("sources/kev").display().to_string()]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    assert!(reading.try_wait().unwrap().is_none(), "still reading when it is cut off");
+    reading.kill().unwrap();
+    let _ = reading.wait();
+    assert_eq!(claim_of(&root, "kev", "CVE-2026-0001", "vendorProject"), before, "what it held before, it holds");
+
+    whole.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (ok, said) = z(&["source", "update", &root.join("sources/kev").display().to_string()]);
+    assert!(ok, "read whole the next time: {said}");
+    assert_eq!(claim_of(&root, "kev", "CVE-2026-0001", "vendorProject").0, before.0);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// UC-K1: where nothing more can be written (a full disk, a folder not ours), an export and an
+/// import say so and leave what was there as it was: no half archive, no half world.
+#[test]
+fn where_nothing_can_be_written_an_export_and_an_import_change_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+    let l = World::start(Mode::L, "unwritable");
+    let ro = |p: &Path, on: bool| std::fs::set_permissions(p, std::fs::Permissions::from_mode(if on { 0o555 } else { 0o755 })).unwrap();
+
+    // Out: the exports folder takes nothing.
+    let exports = l.root.join(".zetlyn/exports");
+    std::fs::create_dir_all(&exports).unwrap();
+    ro(&exports, true);
+    let (s, said) = l.post("/settings/export", "", "");
+    assert_eq!(s, 303);
+    assert!(said.contains("Not+exported") || said.contains("Not%20exported"), "said at once: {said}");
+    let (_, page) = l.get("/settings/moving", "");
+    assert!(!page.contains("Download the archive"), "no archive offered");
+    ro(&exports, false);
+    assert!(std::fs::read_dir(&exports).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().ends_with(".tar.gz")), "no half archive");
+
+    // In: the folder around the workspace takes no new one.
+    let archive = l.tmp.join("other.tar.gz");
+    let (ok, said) = z(&["world", "export", &l.root.display().to_string(), "--to", &archive.display().to_string()]);
+    assert!(ok, "{said}");
+    let bytes = std::fs::read(&archive).unwrap();
+    let title_before = l.workspace();
+    let (s, begun) = l.post("/settings/upload", "", &format!("size={}&name=other.tar.gz", bytes.len()));
+    assert_eq!(s, 200, "{begun}");
+    let id = begun.split("\"id\":\"").nth(1).unwrap().split('"').next().unwrap().to_string();
+    assert_eq!(l.put(&format!("/settings/upload/{id}/0"), "", &bytes).0, 200);
+    let around = l.root.parent().unwrap().to_path_buf();
+    ro(&around, true);
+    let (s, b) = l.post(&format!("/settings/upload/{id}/done"), "", "");
+    assert_eq!(s, 200, "{b}");
+    let last = l.root.join(".zetlyn/incoming/last-import.json");
+    wait_for("the import to end", || std::fs::read_to_string(&last).is_ok());
+    ro(&around, false);
+    let said = std::fs::read_to_string(&last).unwrap();
+    assert!(said.contains("\"ok\":false"), "it says it did not go: {said}");
+    assert_eq!(l.workspace(), title_before, "the world is as it was");
+    assert!(l.reads_tracker(""), "and answers");
+}
+
+/// A source at an address that sends half of what it says it will and then nothing, for as long as
+/// anybody waits: a read that never ends by itself.
+fn a_source_that_hangs(csv: Vec<u8>) -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let csv = csv.clone();
+            std::thread::spawn(move || {
+                let mut s = stream;
+                let mut buf = [0u8; 2048];
+                let _ = s.read(&mut buf);
+                let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/csv\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", csv.len()).as_bytes());
+                let _ = s.write_all(&csv[..csv.len() / 2]);
+                std::thread::sleep(std::time::Duration::from_secs(120));
+            });
+        }
+    });
+    port
+}
+
+/// UC-K6: a cell's pass killed from outside (its memory gone over, as the kernel ends it): the cell
+/// says how it ended, keeps answering, and its sources are as they were.
+#[test]
+fn a_cells_pass_killed_from_outside_is_said_and_the_cell_answers_on() {
+    let tmp = std::env::temp_dir().join(format!("zetlyn-modes-{}-killed-M", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let prepare = |root: &Path| {
+        let csv = std::fs::read(root.join("sources/kev/kev.csv")).unwrap();
+        let port = a_source_that_hangs(csv);
+        let decl = root.join("sources/kev/source.yaml");
+        let t = std::fs::read_to_string(&decl).unwrap();
+        std::fs::write(&decl, format!("{}\nschedule:\n  every: 1s\n", t.replace("path: kev.csv", &format!("path: http://127.0.0.1:{port}/kev.csv")).trim_end())).unwrap();
+        // Due by the time the cell starts.
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+    };
+    let w = World::start_prepared(Mode::M, tmp, None, true, &prepare);
+    let before = claim_of(&w.root, "kev", "CVE-2026-0001", "vendorProject");
+    let cell = w.host.display().to_string();
+    let mut pid = String::new();
+    wait_for("the cell's pass to start", || {
+        let out = Command::new("pgrep").args(["-f", &format!("hosting run {cell}")]).output().unwrap();
+        pid = String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or("").to_string();
+        !pid.is_empty()
+    });
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(Command::new("kill").args(["-9", &pid]).status().unwrap().success());
+    let last = w.host.join("last-run.json");
+    wait_for("the cell to say how its pass ended", || std::fs::read_to_string(&last).is_ok_and(|s| s.contains("\"result\"")));
+    let said = std::fs::read_to_string(&last).unwrap();
+    assert!(!said.contains("\"success\""), "not a success: {said}");
+    assert!(said.contains("signal") || said.contains("ended"), "{said}");
+    assert_eq!(w.get("/about", "").0, 200, "the cell answers on");
+    assert_eq!(claim_of(&w.root, "kev", "CVE-2026-0001", "vendorProject"), before, "its source as it was");
 }

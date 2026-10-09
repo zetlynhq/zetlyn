@@ -23,34 +23,44 @@ impl Control {
         let dir = std::env::temp_dir().join(format!("zetlyn-admin-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         copy(&Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/control"), &dir);
-        // A port of this run's own for each control: a port the system calls free is free for
-        // every test running beside this one too, until one of them takes it.
-        static NEXT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
-        let port = (0..50)
-            .map(|_| 30_000 + (std::process::id() % 2_000) as u16 * 10 + NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) % 10)
-            .find(|p| std::net::TcpListener::bind(("127.0.0.1", *p)).is_ok())
-            .expect("a free port");
-        std::fs::write(dir.join("workspace.yaml"), format!("title: Zetlyn\nurl: http://127.0.0.1:{port}\naccess:\n  owners: [{OPERATOR}]\n")).unwrap();
         if let Some(mode) = maintenance {
             let n = format!(r#"{{"text":"Testing.","level":"info","mode":"{mode}","target":"all","announce_from":"2000-01-01T00:00:00Z","from":"2000-01-01T00:00:00Z","until":"2999-01-01T00:00:00Z"}}"#);
             std::fs::write(dir.join("ops/maintenance.json"), n).unwrap();
         }
-        let log = std::fs::File::create(dir.join("log")).unwrap();
-        let child = Command::new(env!("CARGO_BIN_EXE_zetlyn"))
-            .args(["hosting", "serve", &dir.display().to_string(), "--addr", &format!("127.0.0.1:{port}"), "--no-updates"])
-            .stdout(Stdio::from(log.try_clone().unwrap()))
-            .stderr(Stdio::from(log))
-            .spawn()
-            .expect("the binary runs");
-        let c = Control { dir, port, child };
-        for _ in 0..100 {
-            // This process answering, not one of a test beside it that took the port meanwhile.
-            if std::fs::read_to_string(c.dir.join("log")).is_ok_and(|l| l.contains(&format!("127.0.0.1:{port}"))) && TcpStream::connect(("127.0.0.1", port)).is_ok() {
-                return c;
+        // A port of this run's own for each control: a port the system calls free is free for
+        // every test running beside this one too, until one of them takes it. Taken meanwhile,
+        // the control cannot listen and ends, and is started again on another.
+        static NEXT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+        for _ in 0..5 {
+            let port = (0..200)
+                .map(|_| 30_000 + (std::process::id() % 1_000) as u16 * 10 + NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) % 200)
+                .find(|p| std::net::TcpListener::bind(("127.0.0.1", *p)).is_ok())
+                .expect("a free port");
+            std::fs::write(dir.join("workspace.yaml"), format!("title: Zetlyn\nurl: http://127.0.0.1:{port}\naccess:\n  owners: [{OPERATOR}]\n")).unwrap();
+            let log = std::fs::File::create(dir.join("log")).unwrap();
+            let child = Command::new(env!("CARGO_BIN_EXE_zetlyn"))
+                .args(["hosting", "serve", &dir.display().to_string(), "--addr", &format!("127.0.0.1:{port}"), "--no-updates"])
+                .stdout(Stdio::from(log.try_clone().unwrap()))
+                .stderr(Stdio::from(log))
+                .spawn()
+                .expect("the binary runs");
+            let mut c = Control { dir: dir.clone(), port, child };
+            for _ in 0..100 {
+                if let Ok(Some(_)) = c.child.try_wait() {
+                    break;
+                }
+                // This process answering, not one of a test beside it that took the port meanwhile.
+                if std::fs::read_to_string(c.dir.join("log")).is_ok_and(|l| l.contains(&format!("127.0.0.1:{port}"))) && TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                    return c;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            // Not this one: ended, or never answered. Its folder stays for the next try.
+            let _ = c.child.kill();
+            let _ = c.child.wait();
+            std::mem::forget(c);
         }
-        panic!("the control did not answer on {port}");
+        panic!("the control did not answer in five tries: {}", std::fs::read_to_string(dir.join("log")).unwrap_or_default());
     }
 
     /// One request, by hand: status, headers, body. No redirect is followed.

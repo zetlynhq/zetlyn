@@ -50,6 +50,7 @@ mod rows;
 mod schemes;
 mod store;
 mod sync;
+mod transfer;
 mod teach;
 mod thingquery;
 mod thingstore;

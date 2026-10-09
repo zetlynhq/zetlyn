@@ -261,7 +261,9 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
     let world = Site::for_workspace(&scope.root);
     let entry = hub_entry(scope, &world);
     let body = html! {
-        p.overline { span.live-dot {} "Live" @if !world.title.is_empty() { " · run by " (world.title) } }
+        // On one's own machine nothing is live for anybody else: it says where it is instead.
+        @if crate::serve::is_local() { p.overline { "On this machine · only you see it here" } }
+        @else { p.overline { span.live-dot {} "Live" @if !world.title.is_empty() { " · run by " (world.title) } } }
         h1 { (d.title) }
         @if !d.about.is_empty() { p.lede { (d.about) } }
         @if let Some(entry) = &entry {

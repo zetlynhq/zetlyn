@@ -455,6 +455,20 @@ impl S3 {
         self.call("DELETE", path, "", b"", None).map(|_| ())
     }
 
+    /// An address anybody holding it may download a private object from, for `seconds`, under the
+    /// file name given: the signature in the query, so a browser fetches it from the storage
+    /// itself and nothing of ours carries the bytes.
+    pub fn presigned_get(&self, path: &str, seconds: u64, file_name: &str) -> Result<String, String> {
+        if self.key.is_empty() || self.secret.is_empty() {
+            return Err("ZETLYN_S3_KEY and ZETLYN_S3_SECRET are not set".into());
+        }
+        let uri = format!("/{}/{}", self.bucket, self.key_for(path).split('/').map(uri_encode).collect::<Vec<_>>().join("/"));
+        let mut extra = BTreeMap::new();
+        extra.insert("response-content-disposition".to_string(), format!("attachment; filename=\"{}\"", file_name.replace('"', "")));
+        let query = presign_query(&self.host(), &uri, &self.key, &self.secret, &self.region, amz_now(), seconds.min(604_800), &extra);
+        Ok(format!("{}{uri}?{query}", self.endpoint))
+    }
+
     /// A small object, private.
     pub fn put_private(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
         self.call("PUT", path, "", bytes, Some("private")).map(|_| ())
@@ -485,6 +499,29 @@ fn hmac(key: &[u8], message: &[u8]) -> Vec<u8> {
 
 /// `20260927`, `20260927T101530Z`. The same two values the rest of the program prints with
 /// hyphens and colons, spelled the way this signature wants them.
+/// The query of an address signed in itself (SigV4, `host` the one header signed), for `GET` of
+/// `uri` until `expires` seconds after `now`: what a browser may follow without any key.
+#[allow(clippy::too_many_arguments)]
+fn presign_query(host: &str, uri: &str, key: &str, secret: &str, region: &str, now: (String, String), expires: u64, extra: &BTreeMap<String, String>) -> String {
+    let (date, stamp) = now;
+    let scope = format!("{date}/{region}/s3/aws4_request");
+    let mut q = extra.clone();
+    q.insert("X-Amz-Algorithm".into(), "AWS4-HMAC-SHA256".into());
+    q.insert("X-Amz-Credential".into(), format!("{key}/{scope}"));
+    q.insert("X-Amz-Date".into(), stamp.clone());
+    q.insert("X-Amz-Expires".into(), expires.to_string());
+    q.insert("X-Amz-SignedHeaders".into(), "host".into());
+    let query: String = q.iter().map(|(k, v)| format!("{}={}", uri_encode(k), uri_encode(v))).collect::<Vec<_>>().join("&");
+    let canonical = format!("GET\n{uri}\n{query}\nhost:{host}\n\nhost\nUNSIGNED-PAYLOAD");
+    let to_sign = format!("AWS4-HMAC-SHA256\n{stamp}\n{scope}\n{}", sha256(canonical.as_bytes()));
+    let mut signing = hmac(format!("AWS4{secret}").as_bytes(), date.as_bytes());
+    signing = hmac(&signing, region.as_bytes());
+    signing = hmac(&signing, b"s3");
+    signing = hmac(&signing, b"aws4_request");
+    let signature: String = hmac(&signing, to_sign.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
+    format!("{query}&X-Amz-Signature={signature}")
+}
+
 fn amz_now() -> (String, String) {
     let stamp = crate::iso_stamp(crate::now());
     let flat: String = stamp.chars().filter(|c| *c != '-' && *c != ':').collect();
@@ -598,6 +635,23 @@ fn unescape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A presigned address, against the worked example in Amazon's own documentation of query
+    /// signing (examplebucket, test.txt, 24 May 2013, a day): the same signature, to the character.
+    #[test]
+    fn a_presigned_address_agrees_with_amazons_example() {
+        let q = presign_query(
+            "examplebucket.s3.amazonaws.com",
+            "/test.txt",
+            "AKIAIOSFODNN7EXAMPLE",
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            "us-east-1",
+            ("20130524".into(), "20130524T000000Z".into()),
+            86_400,
+            &BTreeMap::new(),
+        );
+        assert!(q.ends_with("&X-Amz-Signature=aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404"), "{q}");
+    }
 
     /// The one piece of cryptography in this program written by hand, and it is checked against
     /// somebody else's implementation rather than against itself. The expected values below came

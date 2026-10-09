@@ -364,8 +364,14 @@ fn a_world_and_a_copy_of_it_sync_both_ways() {
     let ours = copy_dir.join("sources/vendor-b/source.yaml");
     let o = std::fs::read_to_string(&ours).unwrap();
     std::fs::write(&ours, o.replacen("title:", "title: Mine,", 1)).unwrap();
+    // Who may do what, decided on the machine, holds there too.
+    let ws = copy_dir.join("workspace.yaml");
+    let w = std::fs::read_to_string(&ws).unwrap();
+    assert!(!w.contains("access:"), "{w}");
+    std::fs::write(&ws, format!("{}\naccess:\n  editors:\n  - ed@example.org\n", w.trim_end())).unwrap();
     let (ok, said) = z(&["world", "sync", &url, &mine]);
     assert!(ok, "the key is kept after the first sync: {said}");
+    assert!(std::fs::read_to_string(world.join("workspace.yaml")).unwrap().contains("ed@example.org"), "{said}");
     assert!(std::fs::read_to_string(world.join("sources/vendor-b/source.yaml")).unwrap().contains("Mine,"), "{said}");
     assert!(std::fs::read_to_string(copy_dir.join("trackers/cve/tracker.yaml")).unwrap().contains("CVE there"), "{said}");
 
@@ -385,5 +391,67 @@ fn a_world_and_a_copy_of_it_sync_both_ways() {
     // Nothing changed: a second sync changes nothing either.
     let (ok, said) = z(&["world", "sync", &url, &mine]);
     assert!(ok, "{said}");
+
+    // From the app on the machine, as its page asks: the address and key kept from before. The
+    // same setting changed on both sides is decided there, and nothing goes until it is.
+    let app = LocalApp::start(&copy_dir);
+    let theirs = world.join("trackers/cve/tracker.yaml");
+    let ours = copy_dir.join("trackers/cve/tracker.yaml");
+    std::fs::write(&theirs, std::fs::read_to_string(&theirs).unwrap().replacen("title: CVE there", "title: CVE from there", 1)).unwrap();
+    std::fs::write(&ours, std::fs::read_to_string(&ours).unwrap().replacen("title: CVE there", "title: CVE from here", 1)).unwrap();
+    let state = app.sync("");
+    assert_eq!(state["state"], "failed", "{state}");
+    assert_eq!(state["conflicts"], true, "{state}");
+    assert!(std::fs::read_to_string(&theirs).unwrap().contains("CVE from there"), "nothing went: {state}");
+    let state = app.sync("take=theirs");
+    assert_eq!(state["state"], "ok", "{state}");
+    assert!(std::fs::read_to_string(&ours).unwrap().contains("CVE from there"), "{state}");
+    drop(app);
     let _ = std::fs::remove_dir_all(&copy_dir);
+}
+
+/// The app on one's own machine, over a workspace, on a port of its own, until it is dropped.
+struct LocalApp {
+    child: Child,
+    port: u16,
+    dir: PathBuf,
+}
+
+impl LocalApp {
+    fn start(dir: &Path) -> LocalApp {
+        let port = (0..50).map(|i| 40_000 + (std::process::id() % 2_000) as u16 * 5 + i).find(|p| std::net::TcpListener::bind(("127.0.0.1", *p)).is_ok()).expect("a free port");
+        let child = Command::new(env!("CARGO_BIN_EXE_zetlyn")).args(["--port", &port.to_string(), "--no-open"]).current_dir(dir).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("the binary runs");
+        for _ in 0..100 {
+            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                return LocalApp { child, port, dir: dir.to_path_buf() };
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("the app did not answer on {port}");
+    }
+
+    /// Settings, Moving, Sync now, with what the form says; how it went, once it has.
+    fn sync(&self, form: &str) -> serde_json::Value {
+        let mut s = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+        let head = format!("POST /settings/sync HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n{form}", self.port, form.len());
+        s.write_all(head.as_bytes()).unwrap();
+        let mut answer = String::new();
+        let _ = s.read_to_string(&mut answer);
+        assert!(answer.starts_with("HTTP/1.1 303"), "{answer}");
+        let file = self.dir.join(".zetlyn/sync/last.json");
+        for _ in 0..200 {
+            if let Some(j) = std::fs::read(&file).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()).filter(|j| j["state"] != "running") {
+                return j;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("the sync did not end");
+    }
+}
+
+impl Drop for LocalApp {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }

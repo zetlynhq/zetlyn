@@ -589,8 +589,8 @@ pub fn export(dir: &Path, to: &Path) -> Result<usize, String> {
             let rel = path.strip_prefix(dir).map_err(|e| e.to_string())?;
             let name = rel.to_string_lossy().replace('\\', "/");
             if name.ends_with("-wal") || name.ends_with("-shm") || name.ends_with("-journal") || name.ends_with(".arriving") || name.ends_with(".partial")
-                // A cell's upload waiting to be imported is not part of it.
-                || name.starts_with("incoming/world.tar.gz") {
+                // An upload waiting to be imported, or an export waiting to be fetched, is not part of it.
+                || name.starts_with("incoming/") || name.starts_with(".zetlyn/incoming/") || name.starts_with(".zetlyn/exports/") {
                 continue;
             }
             let inside = format!("world/{name}");

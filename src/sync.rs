@@ -24,8 +24,9 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value as J};
 
-/// The keys of workspace.yaml that travel: what the world is, not where or how it runs.
-const WORLD_KEYS: [&str; 4] = ["title", "contact", "profile", "update"];
+/// The keys of workspace.yaml that travel: what the world is and who may do what in it, not where
+/// or how it runs. An owner a machine names in its members.yaml stays one there whatever `access:` says.
+const WORLD_KEYS: [&str; 5] = ["title", "contact", "profile", "update", "access"];
 /// Kept beside each source, merged as unions, never three ways.
 const UNIONS: [&str; 2] = [crate::propose::DIR, crate::propose::DECISIONS];
 
@@ -526,6 +527,25 @@ pub fn command(args: &[String]) -> Result<(), String> {
         .or_else(|| std::fs::read_to_string(keyfile(&root)).ok().map(|k| k.trim().to_string()))
         .filter(|k| k.starts_with("zk_"))
         .ok_or("a key: in the world's Settings, Moving, Make a sync key; then --key zk_…")?;
+    let said = run(&root, &url, &key, take.as_deref(), with_data, true)?;
+    println!("{said}");
+    Ok(())
+}
+
+/// The address and key this workspace last synced with, kept after the first sync.
+pub fn last_peer(root: &Path) -> Option<(String, bool)> {
+    let key = root.join(".zetlyn").join("sync").join("key");
+    let dir = root.join(".zetlyn").join("sync");
+    let address = std::fs::read_dir(&dir).ok()?.flatten().filter_map(|e| std::fs::read_to_string(e.path().join("address")).ok()).next()?;
+    Some((address.trim().to_string(), key.exists()))
+}
+
+/// A sync of the workspace at `root` with the world at `url`: what came and went, in a sentence.
+/// Where both changed one thing, `take` decides; without it, a terminal is asked where
+/// `interactive`, and elsewhere nothing is synced and the error names each.
+pub fn run(root: &Path, url: &str, key: &str, take: Option<&str>, with_data: bool, interactive: bool) -> Result<String, String> {
+    let (root, url, key, take) = (root.to_path_buf(), url.trim_end_matches('/').to_string(), key.to_string(), take.map(str::to_string));
+    let mut log: Vec<String> = Vec::new();
     let agent = ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(600))).http_status_as_error(false).user_agent(crate::sourcedecl::AGENT).build().new_agent();
     let remote = Remote { url: url.clone(), key: key.clone(), agent };
     let theirs_state = remote.state()?;
@@ -533,7 +553,6 @@ pub fn command(args: &[String]) -> Result<(), String> {
 
     // A first sync into an empty directory: the whole world, as it is there.
     if !root.join(crate::account::WORKSPACE).exists() {
-        println!("Taking {url} into {}", root.display());
         let archive = remote.get("/sync/export")?;
         let file = std::env::temp_dir().join(format!("zetlyn-sync-{}.tar.gz", crate::jwt::random()));
         std::fs::write(&file, archive).map_err(|e| e.to_string())?;
@@ -552,12 +571,8 @@ pub fn command(args: &[String]) -> Result<(), String> {
                 ds.store.set_meta(&format!("sync.{peer}.base"), &last)?;
             }
         }
-        std::fs::create_dir_all(keyfile(&root).parent().unwrap_or(&root)).map_err(|e| e.to_string())?;
-        std::fs::write(keyfile(&root), &key).map_err(|e| e.to_string())?;
-        { use std::os::unix::fs::PermissionsExt; let _ = std::fs::set_permissions(keyfile(&root), std::fs::Permissions::from_mode(0o600)); }
-        std::fs::write(base_dir(&root, &peer).join("address"), &url).map_err(|e| e.to_string())?;
-        println!("Done: the world is here. Work on it, then run this again to bring both together.");
-        return Ok(());
+        remember(&root, &peer, &url, &key)?;
+        return Ok(format!("Taken: {url} is here, in {}. Work on it, then sync again to bring both together.", root.display()));
     }
     let me = instance(&root);
     for attempt in 1..=3 {
@@ -576,6 +591,7 @@ pub fn command(args: &[String]) -> Result<(), String> {
             for (key, o, t) in &m.conflicts {
                 let choice = match take.as_deref() {
                     Some(c) => c.to_string(),
+                    None if !interactive => String::new(),
                     None => ask(&format!("{rel}{}{key}\n  ours:   {o}\n  theirs: {t}\nKeep [o]urs or [t]heirs? ", if key.is_empty() { "" } else { ": " })),
                 };
                 if choice.starts_with('t') {
@@ -661,24 +677,38 @@ pub fn command(args: &[String]) -> Result<(), String> {
                     }
                 }
                 write_base(&root, &peer, &definitions(&root))?;
-                println!(
+                remember(&root, &peer, &url, &key)?;
+                log.push(format!(
                     "Synced with {url}: {} definitions there from here, {} gone, {} proposals here from there, {} observations here from there, {} sources' observations there from here.",
                     changed.len(),
                     gone.len(),
                     came,
                     data_in,
                     said["data"].as_object().map_or(0, |d| d.len())
-                );
-                return Ok(());
+                ));
+                return Ok(log.join("\n"));
             }
             409 if attempt < 3 => {
-                println!("Changed there meanwhile ({}); syncing again.", said["files"]);
+                log.push(format!("Changed there meanwhile ({}); synced again.", said["files"]));
                 continue;
             }
             _ => return Err(format!("{url} did not take it: {code} {}", said["error"].as_str().unwrap_or(&said.to_string()))),
         }
     }
     Err("changed there three times while syncing; try again".into())
+}
+
+/// The key a sync was made with, readable by its owner alone, and the address it was made with:
+/// the next sync needs neither said again.
+fn remember(root: &Path, peer: &str, url: &str, key: &str) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let file = root.join(".zetlyn").join("sync").join("key");
+    std::fs::create_dir_all(file.parent().unwrap_or(root)).map_err(|e| e.to_string())?;
+    std::fs::write(&file, key).map_err(|e| e.to_string())?;
+    let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
+    let dir = base_dir(root, peer);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("address"), url).map_err(|e| e.to_string())
 }
 
 /// A question in the terminal, its answer in lower case; nothing where there is no terminal.

@@ -207,6 +207,18 @@ nav.links a[aria-current] { border-bottom-color: var(--accent); }
 .autoupdate:hover { color: var(--fg); text-decoration: none; }
 .autoupdate .dot { width: .5rem; height: .5rem; border-radius: 50%; background: var(--line-strong); }
 .autoupdate.on .dot { background: #2e7d32; }
+/* On a phone: the page is as wide as the screen, whatever it holds. Its links scroll sideways, a
+   wide table scrolls within itself, and the machine's address shortens. */
+@media (max-width: 620px) {
+  .context .shell { gap: .5rem 1rem; padding-block: .4rem; }
+  nav.links { flex-wrap: nowrap; overflow-x: auto; max-width: 100%; gap: 16px; }
+  nav.links a { white-space: nowrap; padding-block: .45rem; }
+  .context .autoupdate { margin-left: 0; }
+  .site-actions { min-width: 0; }
+  .site-actions .site-local { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 52vw; font-size: 12px; }
+  main table, .dash-body table { display: block; max-width: 100%; overflow-x: auto; }
+  main pre { max-width: 100%; overflow-x: auto; }
+}
 
 /* The app, at zetlyn.com/app/ and every organisation's pages: under the same header, the
    organisation and its pages at the left and a place to work beside them, in the same colours. */
@@ -638,6 +650,15 @@ pub fn site_header(current: &str, reader: Reader) -> Markup {
 }
 
 /// The reader a frame says is there.
+/// The app on one's own machine, where nobody signs in and nothing is served to anybody else.
+pub fn is_local() -> bool {
+    FRAME.with(|f| {
+        let f = f.borrow();
+        f.account.is_none() && f.local.is_some()
+    })
+}
+
+
 fn reader_of(f: &Frame) -> Reader<'_> {
     match &f.account {
         Some(Some(email)) => Reader::Somebody(email, &f.orgs),

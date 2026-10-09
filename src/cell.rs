@@ -735,7 +735,18 @@ pub fn sync() -> Result<(), String> {
         }
         return Ok(());
     }
-    let day_ago = crate::iso_stamp(crate::now() - 86_400).replace([':', '-'], "");
+    // An export an owner asked for, one a minute; one whose day is over, gone.
+    for name in cells() {
+        expire_export(&name);
+    }
+    if let Some(name) = cells().into_iter().find(|n| dir_of(n).join(INCOMING).join(EXPORT_ASKED).exists()) {
+        match export_for(&name) {
+            Ok(n) => println!("{name}: exported, {n} bytes"),
+            Err(e) => eprintln!("{name}: export: {e}"),
+        }
+        return Ok(());
+    }
+    let day_ago =crate::iso_stamp(crate::now() - 86_400).replace([':', '-'], "");
     let due = cells()
         .into_iter()
         .filter(|n| dir_of(n).is_dir())
@@ -757,44 +768,109 @@ const ARCHIVE: &str = "world.tar.gz";
 /// What the last import came to, for the settings page.
 pub const LAST_IMPORT: &str = "last-import.json";
 
-/// An owner's upload, taken inside the cell: checked to be an export, kept, and asked of the
-/// server, which brings it in within a minute. What to tell the owner.
-pub fn take_upload(body: &mut dyn Read, by: &str) -> Result<String, String> {
-    let cell = crate::usage::cell_dir().ok_or("Only a world on Zetlyn Managed imports from here. On your own machine: zetlyn world import.")?;
-    let incoming = cell.join(INCOMING);
-    if incoming.join(ASKED).exists() {
-        return Err("An import is waiting already; it starts within a minute.".into());
-    }
-    std::fs::create_dir_all(&incoming).map_err(|e| e.to_string())?;
-    let gb = terms(&cell).and_then(|t| t.plan).map(|p| p.storage_gb).filter(|g| *g > 0).unwrap_or(2);
-    let limit = gb << 30;
-    let partial = incoming.join(format!("{ARCHIVE}.partial"));
-    let result = (|| {
-        let mut out = std::fs::File::create(&partial).map_err(|e| e.to_string())?;
-        let n = std::io::copy(&mut body.take(limit + 1), &mut out).map_err(|e| format!("the upload broke off: {e}"))?;
-        if n > limit {
-            return Err(format!("Larger than the {gb} GB the plan includes. Write to hello@zetlyn.com and we bring it in for you."));
-        }
-        if n == 0 {
-            return Err("Nothing arrived.".into());
-        }
-        let files = crate::world::check_export(&partial)?;
-        std::fs::rename(&partial, incoming.join(ARCHIVE)).map_err(|e| e.to_string())?;
-        let asked = json!({ "by": by, "at": crate::iso_stamp(crate::now()), "files": files, "bytes": n });
-        std::fs::write(incoming.join(ASKED), asked.to_string()).map_err(|e| e.to_string())?;
-        Ok(format!("Received, {files} files. Within a minute this world is replaced by it: a snapshot of it is taken first, and a mail says when it is done."))
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&partial);
-    }
-    result
+/// An export an owner asked for, and the one made: `incoming/` of the cell.
+const EXPORT_ASKED: &str = "export.json";
+const EXPORT_READY: &str = "export-ready.json";
+
+/// Where a cell's uploads arrive and its requests to the server wait, seen from inside the cell.
+pub fn incoming() -> Option<PathBuf> {
+    crate::usage::cell_dir().map(|c| c.join(INCOMING))
+}
+
+/// How large an upload the plan allows: its storage, 2 GB where it says none.
+pub fn upload_limit() -> u64 {
+    let gb = crate::usage::cell_dir().and_then(|c| terms(&c)).and_then(|t| t.plan).map(|p| p.storage_gb).filter(|g| *g > 0).unwrap_or(2);
+    gb << 30
+}
+
+/// An upload, whole in `incoming/`, asked of the server: it goes to the bucket first and is
+/// brought in within a minute. What to tell the owner.
+pub fn ask_import(by: &str, files: usize, bytes: u64) -> Result<String, String> {
+    let incoming = incoming().ok_or("Only a world on Zetlyn Managed hands an import to its server.")?;
+    std::fs::write(incoming.join(ASKED), json!({ "by": by, "at": crate::iso_stamp(crate::now()), "files": files, "bytes": bytes }).to_string()).map_err(|e| e.to_string())?;
+    Ok(format!("Received, {files} files. Within a minute it is kept safe and then takes this world's place; a snapshot of this world is taken first, and a mail says when it is done."))
 }
 
 /// Whether an import waits, and what the last one came to: for the settings page.
 pub fn import_state() -> (bool, Option<J>) {
-    let Some(cell) = crate::usage::cell_dir() else { return (false, None) };
-    let incoming = cell.join(INCOMING);
+    let Some(incoming) = incoming() else { return (false, None) };
     (incoming.join(ASKED).exists(), std::fs::read(incoming.join(LAST_IMPORT)).ok().and_then(|b| serde_json::from_slice(&b).ok()))
+}
+
+/// An export asked of the server, for `by`, who gets a mail when it can be downloaded.
+pub fn ask_export(by: &str) -> Result<(), String> {
+    let incoming = incoming().ok_or("Only a world on Zetlyn Managed asks its server for an export.")?;
+    std::fs::create_dir_all(&incoming).map_err(|e| e.to_string())?;
+    std::fs::write(incoming.join(EXPORT_ASKED), json!({ "by": by, "at": crate::iso_stamp(crate::now()) }).to_string()).map_err(|e| e.to_string())
+}
+
+/// Whether an export is being made, and the one ready to download while its address holds.
+pub fn export_state() -> (bool, Option<J>) {
+    let Some(incoming) = incoming() else { return (false, None) };
+    let ready: Option<J> = std::fs::read(incoming.join(EXPORT_READY)).ok().and_then(|b| serde_json::from_slice(&b).ok());
+    let ready = ready.filter(|r| r["until"].as_i64().is_some_and(|u| u > crate::now()));
+    (incoming.join(EXPORT_ASKED).exists(), ready)
+}
+
+/// An export a cell asked for, made as root on its server: the world as one archive, into the
+/// bucket, and an address for a day to download it from, which the owner is sent. The export
+/// before it goes.
+fn export_for(name: &str) -> Result<u64, String> {
+    let node = node()?;
+    let dir = dir_of(name);
+    let incoming = dir.join(INCOMING);
+    let asked: J = std::fs::read(incoming.join(EXPORT_ASKED)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let by = asked["by"].as_str().unwrap_or("").to_string();
+    let s3 = bucket(&node)?;
+    let at = stamp();
+    let work = Path::new("/var/tmp").join(format!("zetlyn-export-{name}-{at}"));
+    let result = (|| {
+        std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
+        let file = work.join("world.tar.gz");
+        let files = crate::world::export(&dir.join("orgs").join(name), &file)?;
+        let key = format!("cells/{name}/exports/{at}.tar.gz");
+        let bytes = s3.upload_private(&key, &file)?;
+        let until = crate::now() + 86_400;
+        let url = s3.presigned_get(&key, 86_400, &format!("{name}-{at}.tar.gz"))?;
+        let before: Option<J> = std::fs::read(incoming.join(EXPORT_READY)).ok().and_then(|b| serde_json::from_slice(&b).ok());
+        if let Some(old) = before.as_ref().and_then(|b| b["key"].as_str()) {
+            let _ = s3.delete(old);
+        }
+        let ready = json!({ "at": crate::iso_stamp(crate::now()), "by": by, "files": files, "bytes": bytes, "key": key, "url": url, "until": until });
+        std::fs::write(incoming.join(EXPORT_READY), ready.to_string()).map_err(|e| e.to_string())?;
+        Ok((bytes, url))
+    })();
+    let _ = std::fs::remove_dir_all(&work);
+    let _ = std::fs::remove_file(incoming.join(EXPORT_ASKED));
+    give_back(&dir);
+    if by.contains('@') {
+        let (subject, text) = match &result {
+            Ok((bytes, url)) => (
+                "Your export is ready",
+                format!("Hello,\n\nall of {name} is in one archive, {:.1} MB, ready to download for a day:\n\n{url}\n\nOn a machine of yours, `zetlyn world up <domain> --owner <you> --from <archive>` makes it a world again.\n\nBest regards,\nThe Zetlyn team\n\n--\nZetlyn · https://zetlyn.com · hello@zetlyn.com\n", *bytes as f64 / 1_048_576.0),
+            ),
+            Err(e) => ("Your export did not go through", format!("Hello,\n\nthe export of {name} you asked for could not be made:\n\n  {e}\n\nNothing changed. Try again in Settings, Moving, or write to hello@zetlyn.com.\n\nBest regards,\nThe Zetlyn team\n\n--\nZetlyn · https://zetlyn.com · hello@zetlyn.com\n")),
+        };
+        if let Err(e) = server_mail(&by, subject, &text) {
+            eprintln!("{name}: export mail to {by}: {e}");
+        }
+    }
+    result.map(|(b, _)| b)
+}
+
+/// An export whose day is over: out of the bucket, and no longer offered.
+fn expire_export(name: &str) {
+    let incoming = dir_of(name).join(INCOMING);
+    let Some(ready) = std::fs::read(incoming.join(EXPORT_READY)).ok().and_then(|b| serde_json::from_slice::<J>(&b).ok()) else { return };
+    if ready["until"].as_i64().is_some_and(|u| u > crate::now()) {
+        return;
+    }
+    if let (Ok(node), Some(key)) = (node(), ready["key"].as_str()) {
+        if let Ok(s3) = bucket(&node) {
+            let _ = s3.delete(key);
+        }
+    }
+    let _ = std::fs::remove_file(incoming.join(EXPORT_READY));
 }
 
 /// An import a cell asked for, done as root on its server: a snapshot, the cell stopped, its world
@@ -808,6 +884,14 @@ fn import_into(name: &str) -> Result<usize, String> {
     let world = dir.join("orgs").join(name);
     let running = read_env(name).get("STATE").map(String::as_str) == Some("running");
     let result = (|| {
+        // The upload kept safe first, sealed, where the snapshots are: an import that goes wrong
+        // halfway has it still.
+        let s3 = bucket(&node()?)?;
+        let sealed = incoming.join(format!("{ARCHIVE}.zcell"));
+        seal(&key()?, &incoming.join(ARCHIVE), &sealed)?;
+        let kept = s3.upload_private(&format!("cells/{name}/imports/{}.zcell", stamp()), &sealed);
+        let _ = std::fs::remove_file(&sealed);
+        kept?;
         snapshot(name, "before import")?;
         let _ = systemctl(&["stop", &format!("zetlyn-cell-run@{name}.timer"), &format!("zetlyn-cell-run@{name}.service"), &format!("zetlyn-cell@{name}")]);
         let aside = dir.join(format!("replaced-{}", stamp()));

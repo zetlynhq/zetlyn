@@ -1088,6 +1088,31 @@ pub fn schedule_pass(root: &Path, deliver: bool, limits: &Limits) -> Option<i64>
             }
         }
 
+        // Sources taken from a hub: asked what is new at the world's rhythm, hourly where it says
+        // none, and no more often than every quarter of an hour. What comes is in the trackers below
+        // like anything read here. Until 2026-10-09 only `zetlyn source pull` asked.
+        let hub_every = workspace.unwrap_or(3600).max(900);
+        for (name, dir) in tracker::registry(&root.join("sources")) {
+            let Ok(ds) = Source::open(&dir) else { continue };
+            if !matches!(ds.decl.source, sourcedecl::Fetch::Hub { .. }) {
+                continue;
+            }
+            let checked = ds.store.meta("hub_checked").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+            if checked + hub_every > now() {
+                soonest = Some(soonest.map_or(checked + hub_every, |s: i64| s.min(checked + hub_every)));
+                continue;
+            }
+            drop(ds);
+            match pull_source(&dir) {
+                Ok(lines) => lines.iter().for_each(|l| println!("{name}: {l}")),
+                Err(e) => eprintln!("{name}: {e}"),
+            }
+            if let Ok(ds) = Source::open(&dir) {
+                let _ = ds.store.set_meta("hub_checked", &now().to_string());
+            }
+            soonest = Some(soonest.map_or(now() + hub_every, |s: i64| s.min(now() + hub_every)));
+        }
+
         // The world this one syncs with by itself, where one is set and due (sync.rs): what came
         // from there is in the trackers below like anything read here.
         if let Some(next) = crate::sync::scheduled(&root) {
@@ -1533,11 +1558,15 @@ fn dataset_subscribe(args: &[String]) -> Result<(), String> {
 }
 
 /// `zetlyn source update <dir>`: ask the hub this one came from whether there is a newer version.
-fn dataset_update(args: &[String]) -> Result<(), String> {
-    let dir = dir_at(args, 2)?;
+/// A subscribed source brought up to what its hub offers: by delta where one applies, whole where
+/// not, told where its publisher withdrew it. What happened, a line each.
+pub fn pull_source(dir: &Path) -> Result<Vec<String>, String> {
+    let dir = dir.to_path_buf();
+    let mut said: Vec<String> = Vec::new();
+
     // From a world: where it publishes now, followed when it moved.
-    if let Some(said) = world::follow(&dir)? {
-        println!("{said}");
+    if let Some(said_now) = world::follow(&dir)? {
+        said.push(said_now);
     }
     let decl = sourcedecl::SourceDecl::load(&dir)?;
     let sourcedecl::Fetch::Hub {
@@ -1554,32 +1583,40 @@ fn dataset_update(args: &[String]) -> Result<(), String> {
     let place = place::at(at)?;
     // Withdrawn by whoever published it: what is held here stays, and nothing newer comes.
     if let Some(since) = artifact::withdrawn(place.as_ref(), "sources", &format!("{}/{}", reference.owner, reference.name)) {
-        println!("{reference} is no longer published at {at} (withdrawn {since}); what you hold stays as it is");
-        return Ok(());
+        said.push(format!("{reference} is no longer published at {at} (withdrawn {since}); what you hold stays as it is"));
+        return Ok(said);
     }
     let manifest = artifact::manifest_signed_by(place.as_ref(), &reference, "sources", pinned)?;
     let offered = manifest["version"].as_str().unwrap_or_default();
     let held = artifact::held_version(&dir).unwrap_or_default();
     if artifact::take_statement(&dir, &manifest)? {
-        println!("{reference}: the publisher's licence and terms, taken");
+        said.push(format!("{reference}: the publisher's licence and terms, taken"));
     }
     if offered == held {
-        println!("{reference} is at {held}, which is what you hold");
-        return Ok(());
+        said.push(format!("{reference} is at {held}, which is what you hold"));
+        return Ok(said);
     }
     // The delta first, and the whole where there is none or it did not hold together.
     if !held.is_empty() {
         match artifact::apply_delta(place.as_ref(), &reference, &dir, &held, offered, &manifest) {
             Ok(Some((added, changed, removed))) => {
-                println!("{reference} {held} → {offered} by delta: +{added} ~{changed} −{removed}");
-                return Ok(());
+                said.push(format!("{reference} {held} → {offered} by delta: +{added} ~{changed} −{removed}"));
+                return Ok(said);
             }
             Ok(None) => {}
-            Err(e) => eprintln!("the delta did not apply, taking the whole: {e}"),
+            Err(e) => said.push(format!("the delta did not apply, taking the whole: {e}")),
         }
     }
     let (n, version) = artifact::subscribe(place.as_ref(), &reference, &dir, at, pinned)?;
-    println!("{reference} {held} → {version}, {n} claims, whole");
+    said.push(format!("{reference} {held} → {version}, {n} claims, whole"));
+    Ok(said)
+}
+
+fn dataset_update(args: &[String]) -> Result<(), String> {
+    let dir = dir_at(args, 2)?;
+    for line in pull_source(&dir)? {
+        println!("{line}");
+    }
     Ok(())
 }
 

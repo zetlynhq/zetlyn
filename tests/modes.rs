@@ -246,7 +246,8 @@ impl World {
                     Some(r) => {
                         let ws = r.join("workspace.yaml");
                         let t = std::fs::read_to_string(&ws).unwrap();
-                        std::fs::write(&ws, format!("{}\nurl: http://127.0.0.1:{port}\n", t.trim_end())).unwrap();
+                        let kept: Vec<&str> = t.lines().filter(|l| !l.starts_with("url:")).collect();
+                        std::fs::write(&ws, format!("{}\nurl: http://127.0.0.1:{port}\n", kept.join("\n").trim_end())).unwrap();
                         r
                     }
                     None => {
@@ -1339,4 +1340,261 @@ fn what_is_made_private_is_withdrawn_from_the_hub_and_subscribers_keep_their_cop
     assert_eq!(s, 303);
     let said = pass();
     assert!(hub.join("sources/test/kev/tags/latest").exists(), "{said}");
+}
+
+/// UC-A10: a world on a server of its own, back from its backup: as it was when the backup was made,
+/// its data, its settings and its accounts, keys included.
+#[test]
+fn a_world_comes_back_from_its_backup_as_it_was() {
+    let w = World::start(Mode::S, "backup");
+    let owner = w.sign_in(OWNER);
+    let (s, page) = w.post("/settings/keys", &owner, "name=script");
+    assert_eq!(s, 200);
+    let key = page.split("<pre id=\"api-key\">").nth(1).and_then(|k| k.split('<').next()).unwrap().to_string();
+    let backups = w.tmp.join("backups");
+    let (ok, said) = z(&["world", "backup", &w.root.display().to_string(), &backups.display().to_string()]);
+    assert!(ok, "{said}");
+    let archive = std::fs::read_dir(&backups).unwrap().flatten().map(|e| e.path()).find(|p| p.to_string_lossy().ends_with(".tar.gz")).expect("an archive");
+
+    // Things change after it.
+    std::fs::copy(fixture("update-2/vendor-a.csv"), w.root.join("sources/vendor-a/advisories.csv")).unwrap();
+    let (ok, said) = z(&["source", "update", &w.root.join("sources/vendor-a").display().to_string()]);
+    assert!(ok, "{said}");
+    let (s, _) = w.post("/settings/profile", &owner, "title=Changed");
+    assert_eq!(s, 303);
+    let (tmp, _) = w.stop();
+
+    // Back from the backup, in a folder of its own, served.
+    let restored = tmp.join("restored");
+    let (ok, said) = z(&["world", "import", &archive.display().to_string(), "--to", &restored.display().to_string()]);
+    assert!(ok, "{said}");
+    let back = World::start_in(Mode::S, tmp.join("again"), Some(restored.clone()), false);
+    assert_eq!(claim_of(&restored, "vendor-a", "CVE-2026-0001", "cvss").0, "9.8", "its data as it was");
+    assert!(back.workspace().contains("title: Acme"), "its settings as they were");
+    let (s, _, _) = http_raw(back.port(), "GET", "/sources", &format!("x=y\r\nAuthorization: Bearer {key}"), "", b"");
+    assert_eq!(s, 200, "its accounts and their keys as they were");
+    drop(back);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// UC-C4, UC-G6: a tracker taken from another world's hub is kept current by the pass that keeps
+/// everything else current, and what the publisher changes reaches the taker's trackers, where a
+/// watch would hear it.
+#[test]
+fn a_tracker_taken_from_a_hub_keeps_itself_current() {
+    let w = World::start(Mode::P, "taken");
+    let ws = w.root.join("workspace.yaml");
+    let t = std::fs::read_to_string(&ws).unwrap();
+    std::fs::write(&ws, format!("{}\npublish:\n  to: hub\n", t.trim_end())).unwrap();
+    let publish = || {
+        let (ok, said) = z(&["hosting", "run", &w.host.display().to_string()]);
+        assert!(ok, "{said}");
+    };
+    publish();
+    let hub = w.root.join("hub");
+    let other = w.tmp.join("other");
+    std::fs::create_dir_all(other.join("sources")).unwrap();
+    std::fs::create_dir_all(other.join("trackers")).unwrap();
+    std::fs::write(other.join("workspace.yaml"), "title: Other\nupdate:\n  every: 15m\n").unwrap();
+    let (ok, said) = z(&["tracker", "subscribe", "test/cve", "--from", &hub.display().to_string(), "--at", &other.display().to_string()]);
+    assert!(ok, "{said}");
+    let theirs = std::fs::read_dir(other.join("sources")).unwrap().flatten().map(|e| e.path()).find(|p| std::fs::read_to_string(p.join("source.yaml")).is_ok_and(|t| t.contains("test/vendor-a"))).expect("vendor-a taken");
+    let slug = theirs.file_name().unwrap().to_string_lossy().into_owned();
+    assert_eq!(claim_of(&other, &slug, "CVE-2026-0001", "cvss").0, "9.8");
+
+    // The publisher reads something new and publishes it.
+    std::fs::copy(fixture("update-2/vendor-a.csv"), w.root.join("sources/vendor-a/advisories.csv")).unwrap();
+    let (ok, said) = z(&["source", "update", &w.root.join("sources/vendor-a").display().to_string()]);
+    assert!(ok, "{said}");
+    publish();
+
+    // The taker's own pass, nothing asked by hand: it is there.
+    let (ok, said) = z(&["run", &other.display().to_string(), "--once"]);
+    assert!(ok, "{said}");
+    assert_eq!(claim_of(&other, &slug, "CVE-2026-0001", "cvss").0, "8.1", "kept current by its pass: {said}");
+}
+
+type Kept = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+/// A mail server on this machine that takes every message and keeps it: SMTP without TLS, as a
+/// world may use one on its own machine.
+fn a_mailer() -> (u16, Kept) {
+    use std::io::BufRead;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let kept: Kept = Default::default();
+    let k = kept.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let k = k.clone();
+            std::thread::spawn(move || {
+                let mut out = stream.try_clone().unwrap();
+                let mut lines = std::io::BufReader::new(stream);
+                let _ = out.write_all(b"220 test\r\n");
+                let mut line = String::new();
+                while lines.read_line(&mut line).unwrap_or(0) > 0 {
+                    let upper = line.to_uppercase();
+                    if upper.starts_with("DATA") {
+                        let _ = out.write_all(b"354 go on\r\n");
+                        let mut message = String::new();
+                        let mut l = String::new();
+                        while lines.read_line(&mut l).unwrap_or(0) > 0 && l != ".\r\n" {
+                            message.push_str(&l);
+                            l.clear();
+                        }
+                        k.lock().unwrap().push(message);
+                        let _ = out.write_all(b"250 kept\r\n");
+                    } else if upper.starts_with("QUIT") {
+                        let _ = out.write_all(b"221 bye\r\n");
+                        break;
+                    } else {
+                        let _ = out.write_all(b"250 ok\r\n");
+                    }
+                    line.clear();
+                }
+            });
+        }
+    });
+    (port, kept)
+}
+
+/// A program at an address that takes what is posted to it and keeps the bodies.
+fn a_webhook(listener: std::net::TcpListener) -> Kept {
+    let kept: Kept = Default::default();
+    let k = kept.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut s = stream;
+            let mut raw = Vec::new();
+            let mut buf = [0u8; 65536];
+            // Headers, then as much body as they say.
+            loop {
+                let n = s.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                raw.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&raw).into_owned();
+                if let Some((h, b)) = text.split_once("\r\n\r\n") {
+                    let len = h.lines().find_map(|l| l.to_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0))).unwrap_or(0);
+                    if b.len() >= len {
+                        k.lock().unwrap().push(b.to_string());
+                        break;
+                    }
+                }
+            }
+            let _ = s.write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n");
+        }
+    });
+    kept
+}
+
+fn wait_kept(kept: &Kept, what: &str) -> String {
+    wait_for(what, || !kept.lock().unwrap().is_empty());
+    kept.lock().unwrap().last().cloned().unwrap()
+}
+
+/// UC-D6, UC-G3: a world on a server of its own sends its mail through its own mail server: a
+/// sign-in link that signs in; and where the mail server does not answer, the page still does.
+#[test]
+fn a_world_on_its_own_server_signs_people_in_by_its_own_mail() {
+    let w = World::start(Mode::S, "mail");
+    let (port, mails) = a_mailer();
+    let ws = w.root.join("workspace.yaml");
+    let t = std::fs::read_to_string(&ws).unwrap();
+    std::fs::write(&ws, format!("{}\nmail:\n  smtp:\n    host: 127.0.0.1\n    port: {port}\n    tls: none\n    from: Acme <world@example.org>\n", t.trim_end())).unwrap();
+
+    let (s, _) = w.post("/signin", "", "email=anna%40example.org");
+    assert_eq!(s, 200);
+    let mail = wait_kept(&mails, "the sign-in mail");
+    assert!(mail.contains("To: anna@example.org") && mail.contains("From: Acme <world@example.org>"), "{mail}");
+    let link = mail.split("/signin/").nth(1).and_then(|r| r.split(|c: char| c.is_whitespace()).next()).expect("a link in the mail");
+    let (s, h, _) = http(w.port(), "GET", &format!("/signin/{link}"), "", "");
+    assert_eq!(s, 303, "the link signs in: {h}");
+    assert!(!cookies_of(&h).is_empty());
+
+    // The mail server gone: the page answers still, and says the mail is on its way, as it cannot
+    // tell a stranger whether that address is known.
+    let t = std::fs::read_to_string(&ws).unwrap();
+    std::fs::write(&ws, t.replace(&format!("port: {port}"), "port: 1")).unwrap();
+    let (s, _) = w.post("/signin", "", "email=bob%40example.org");
+    assert_eq!(s, 200);
+    assert!(std::fs::read_to_string(&w.web.as_ref().unwrap().log).unwrap().contains("sign-in mail"), "and says why where it runs");
+}
+
+/// UC-G2: what a watch catches reaches a program by webhook and a person by mail; a webhook not
+/// reached is told the next time, not lost.
+#[test]
+fn what_a_watch_catches_reaches_a_webhook_and_a_mail_and_is_not_lost() {
+    let tmp = std::env::temp_dir().join(format!("zetlyn-modes-{}-watch", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let root = tmp.join("w");
+    acme(&root, "");
+    let (mail_port, mails) = a_mailer();
+    let hook = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let hook_port = hook.local_addr().unwrap().port();
+    drop(hook); // Not there yet.
+    let ws = root.join("workspace.yaml");
+    std::fs::write(&ws, format!("title: Acme\nmail:\n  smtp:\n    host: 127.0.0.1\n    port: {mail_port}\n    tls: none\n    from: world@example.org\n")).unwrap();
+    std::fs::write(
+        root.join("watches/vendor-a-critical.yaml"),
+        format!("name: vendor-a-critical\ntitle: Critical at vendor A\nsource: test/vendor-a\nquery: severity=critical\ndeliver:\n- to: webhook\n  url: http://127.0.0.1:{hook_port}/hook\n- to: mail\n  address: anna@example.org\n"),
+    )
+    .unwrap();
+    let run = || z(&["run", &root.display().to_string(), "--once"]).1;
+    run(); // What there is now is where it starts.
+    mails.lock().unwrap().clear();
+
+    std::fs::copy(fixture("update-2/vendor-a.csv"), root.join("sources/vendor-a/advisories.csv")).unwrap();
+    let (ok, said) = z(&["source", "update", &root.join("sources/vendor-a").display().to_string()]);
+    assert!(ok, "{said}");
+    let said = run();
+    assert!(said.contains(&format!("127.0.0.1:{hook_port}")), "the webhook not reached is said: {said}");
+
+    // Reached the next time: what was caught then, not lost.
+    let hooked = a_webhook(std::net::TcpListener::bind(("127.0.0.1", hook_port)).unwrap());
+    run();
+    let body = wait_kept(&hooked, "the webhook");
+    assert!(body.contains("CVE-2026-0004"), "{body}");
+    let mail = wait_kept(&mails, "the mail");
+    assert!(mail.contains("To: anna@example.org") && mail.contains("Critical at vendor A"), "{mail}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// UC-F6: a source made only of what people propose, made from the Sources page: a declaration
+/// whose fields are the ones said, taking proposals from anybody signed in, with its own page of
+/// proposals.
+#[test]
+fn a_source_made_of_proposals_is_made_from_the_page() {
+    let l = World::start(Mode::L, "proposals-source");
+    let (s, h) = l.post("/proposals", "", "title=Stall+prices&identify=stall%2C+week&numbers=price&words=currency");
+    assert_eq!(s, 303, "{h}");
+    let decl = std::fs::read_to_string(l.root.join("sources/stall-prices/source.yaml")).expect("its declaration");
+    assert!(decl.contains("type: proposals") && decl.contains("signed-in"), "{decl}");
+    for field in ["stall", "week", "price", "currency"] {
+        assert!(decl.contains(field), "{field}: {decl}");
+    }
+    let (s, page) = l.get("/proposals/stall-prices", "");
+    assert_eq!(s, 200);
+    assert!(page.contains("Stall prices"), "its own page of proposals");
+}
+
+/// UC-E4: a world's About page says to anybody who runs it, how to reach them, its imprint, and
+/// what it makes public: its public trackers and the public pages of its sources, and nothing private.
+#[test]
+fn a_worlds_about_page_says_who_runs_it_and_what_it_makes_public() {
+    for mode in SERVED {
+        let w = World::start(mode, "about");
+        let owner = w.sign_in(OWNER);
+        let (s, _) = w.post("/settings/profile", &owner, "title=Acme&operator=Acme+Research+GmbH&contact=hello%40acme.example&imprint=Acme+Research+GmbH%2C+Hauptstr.+1%2C+Berlin&about=What+four+sources+say.");
+        assert_eq!(s, 303, "{mode:?}");
+        let (s, _) = w.post("/settings/sources", &owner, "page.exploits=private");
+        assert_eq!(s, 303, "{mode:?}");
+        let (s, page) = w.get("/about", "");
+        assert_eq!(s, 200, "{mode:?}: for anybody");
+        for said in ["Acme Research GmbH", "hello@acme.example", "Hauptstr. 1", "What four sources say.", "CVE", "Known exploited"] {
+            assert!(page.contains(said), "{mode:?}: {said}");
+        }
+        assert!(!page.contains("Exploits"), "{mode:?}: a private source is not listed");
+    }
 }

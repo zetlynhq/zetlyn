@@ -776,6 +776,36 @@ fn world_of(dir: &Path) -> Option<String> {
     (!url.is_empty()).then(|| url.trim_end_matches('/').to_string())
 }
 
+/// What a withdrawn entry leaves behind in a hub, for whoever held it to be told.
+pub const WITHDRAWN: &str = "withdrawn";
+
+/// A tracker's or a source's entry taken out of a hub: every version and tag of it gone, so nobody
+/// fetches it any more, and a note in their place saying when. Whoever holds a copy keeps it; their
+/// next pull is told. How many files went.
+pub fn withdraw(place: &dyn Place, tree: &str, name: &str) -> Result<usize, String> {
+    let reference = Reference::parse(name)?;
+    let under = format!("{}/", reference.under(tree));
+    let files = place.list(&under)?;
+    let mut gone = 0;
+    for f in files.iter().filter(|f| !f.ends_with(&format!("/{WITHDRAWN}"))) {
+        place.remove(f)?;
+        gone += 1;
+    }
+    place.put(&format!("{under}{WITHDRAWN}"), crate::iso_stamp(crate::now()).as_bytes())?;
+    Ok(gone)
+}
+
+/// Whether a hub says this entry was withdrawn, and since when.
+pub fn withdrawn(place: &dyn Place, tree: &str, name: &str) -> Option<String> {
+    let reference = Reference::parse(name).ok()?;
+    let note = place.get(&format!("{}/{WITHDRAWN}", reference.under(tree))).ok()?;
+    // Published again since, it is not withdrawn whatever the note says.
+    if place.exists(&reference.tag_path(tree)) {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&note).trim().to_string())
+}
+
 pub fn publish_scope(
     dir: &Path,
     datasets: &Path,

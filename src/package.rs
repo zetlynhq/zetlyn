@@ -767,6 +767,10 @@ pub fn pull(dir: &Path, root: &Path) -> Result<String, String> {
     };
     let r = Reference::parse(reference)?;
     let place = crate::place::at(&p.from)?;
+    // Withdrawn by whoever published it: what is held here stays, and nothing newer comes.
+    if let Some(since) = crate::artifact::withdrawn(place.as_ref(), TREE, &format!("{}/{}", r.owner, r.name)) {
+        return Ok(format!("{r} is no longer published at {} (withdrawn {since}); what you hold stays as it is", p.from));
+    }
     let pinned = Some(p.key.as_str()).filter(|k| !k.is_empty());
     let manifest = crate::artifact::manifest_signed_by(place.as_ref(), &r, TREE, pinned)?;
     let offered = manifest["version"].as_str().unwrap_or_default();

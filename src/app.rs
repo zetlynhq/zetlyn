@@ -6778,10 +6778,26 @@ pub(crate) fn publish_root(root: &Path, org: &str, answers: impl FnOnce(&str) ->
     let in_public: BTreeSet<String> = trackers.iter().filter(|(_, d)| d.visibility != "private").flat_map(|(_, d)| d.members.iter().map(|m| m.dataset.clone())).collect();
     let in_private: BTreeSet<String> = trackers.iter().filter(|(_, d)| d.visibility == "private").flat_map(|(_, d)| d.members.iter().map(|m| m.dataset.clone())).collect();
     for (name, sdir) in crate::tracker::registry(&root.join("sources")) {
-        if in_private.contains(&name) && !in_public.contains(&name) {
+        let Ok(ds) = Source::open(&sdir) else { continue };
+        // Private as its owner said, or as its trackers are where they said nothing: not put out,
+        // and taken back out where it was before (subscribers keep their copy and are told).
+        let private = match crate::sourcedecl::page_said(&ds.decl) {
+            Some(public) => !public,
+            None => in_private.contains(&name) && !in_public.contains(&name),
+        };
+        if private {
+            if ds.store.meta("published_run").is_some_and(|r| !r.is_empty()) {
+                match crate::artifact::withdraw(place.as_ref(), "sources", &name) {
+                    Ok(n) => {
+                        ds.store.set_meta("published_run", "")?;
+                        println!("{org}: {name} withdrawn from the hub, {n} files");
+                        moved += 1;
+                    }
+                    Err(e) => eprintln!("{org}: {name}: not withdrawn: {e}"),
+                }
+            }
             continue;
         }
-        let Ok(ds) = Source::open(&sdir) else { continue };
         // What arrived built belongs to whoever built it.
         if matches!(ds.decl.source, crate::sourcedecl::Fetch::Hub { .. } | crate::sourcedecl::Fetch::Package { .. }) {
             continue;
@@ -6806,6 +6822,17 @@ pub(crate) fn publish_root(root: &Path, org: &str, answers: impl FnOnce(&str) ->
         }
     }
     for (tdir, decl) in &trackers {
+        // Made private after it was published: taken back out of the hub.
+        if decl.package.is_none() && decl.visibility == "private" && tdir.join(".published").exists() {
+            match crate::artifact::withdraw(place.as_ref(), "trackers", &decl.name) {
+                Ok(n) => {
+                    let _ = std::fs::remove_file(tdir.join(".published"));
+                    println!("{org}: {} withdrawn from the hub, {n} files", decl.name);
+                    moved += 1;
+                }
+                Err(e) => eprintln!("{org}: {}: not withdrawn: {e}", decl.name),
+            }
+        }
         if decl.package.is_some() || decl.visibility == "private" {
             continue;
         }

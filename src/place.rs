@@ -30,6 +30,12 @@ pub trait Place {
         let _ = prefix;
         Err(format!("{}: cannot list what it holds", self.describe()))
     }
+    /// A file gone, so nobody fetches it any more: what is withdrawn from a hub. A place that
+    /// cannot, a web server, says so.
+    fn remove(&self, path: &str) -> Result<(), String> {
+        let _ = path;
+        Err(format!("{}: cannot remove what it holds", self.describe()))
+    }
 }
 
 /// What a browser is told a file is, by its name: a hub's pages are read straight out of where
@@ -103,6 +109,23 @@ impl Place for Folder {
     }
     fn exists(&self, path: &str) -> bool {
         self.resolve(path).map(|p| p.exists()).unwrap_or(false)
+    }
+    fn remove(&self, path: &str) -> Result<(), String> {
+        let p = self.resolve(path)?;
+        match std::fs::remove_file(&p) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("{}: {e}", p.display())),
+        }
+        // And the folders it leaves empty, up to the place itself: a bucket has none to leave.
+        let mut dir = p.parent().map(std::path::Path::to_path_buf);
+        while let Some(d) = dir.filter(|d| d.starts_with(&self.root) && *d != self.root) {
+            if std::fs::remove_dir(&d).is_err() {
+                break;
+            }
+            dir = d.parent().map(std::path::Path::to_path_buf);
+        }
+        Ok(())
     }
     fn list(&self, prefix: &str) -> Result<Vec<String>, String> {
         let mut out = Vec::new();
@@ -531,6 +554,9 @@ fn amz_now() -> (String, String) {
 impl Place for S3 {
     fn describe(&self) -> String {
         format!("s3://{}/{}", self.bucket, self.prefix)
+    }
+    fn remove(&self, path: &str) -> Result<(), String> {
+        S3::delete(self, path)
     }
     fn get(&self, path: &str) -> Result<Vec<u8>, String> {
         let url = self.url(path);

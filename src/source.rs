@@ -11,6 +11,9 @@ use crate::expr::Pred;
 use crate::claim::Claim;
 use crate::store::{Filter, Hit, RunReport, Store, Unanswered};
 
+/// What a source says while another process reads it: not a failure, a read left to that one.
+pub const BUSY: &str = "being read already by another process";
+
 pub struct Source {
     pub dir: PathBuf,
     pub decl: SourceDecl,
@@ -99,6 +102,15 @@ impl Source {
         // recorded as one that failed.
         if let crate::sourcedecl::Fetch::Package { tracker, .. } = &self.decl.source {
             return Err(format!("it came in the package {tracker}. `zetlyn tracker pull` takes a newer version"));
+        }
+        // One read of a source at a time, whoever asks: the app, `zetlyn run`, a server's pass. The
+        // lock is the system's, held while this read is, so one that dies leaves none behind.
+        let lock_path = self.dir.join(".reading");
+        let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&lock_path).map_err(|e| format!("{}: {e}", lock_path.display()))?;
+        match lock.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => return Err(format!("{}: {BUSY}; left to that read", self.decl.name)),
+            Err(std::fs::TryLockError::Error(e)) => return Err(format!("{}: {e}", lock_path.display())),
         }
         // A claim is held under the name its identifier gives it. Named another way now, every
         // claim held is under a name no update gives any more, so this update reads from the

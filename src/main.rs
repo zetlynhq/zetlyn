@@ -649,9 +649,11 @@ fn run(args: &[String]) -> Result<(), String> {
         // A published artifact names the build that made it, so the build has to name itself.
         // Nothing asked for: the workspace, in a browser.
         None | Some("app") => app::run(args),
-        // `zetlyn ~/zetlyn`: a directory on its own is a workspace to open.
+        // `zetlyn ~/zetlyn`: a directory on its own is a workspace to open; a path to one that is
+        // not there yet (`zetlyn ./prices`, `zetlyn ~/new`) is made one. A bare word is a command,
+        // so a mistyped one says so rather than making a folder of itself.
         // `zetlyn --no-open`, `zetlyn --port 4800`: the app's own options, with nothing before them.
-        Some(p) if (!p.starts_with('-') && std::path::Path::new(p).is_dir()) || p == "--no-open" || p == "--port" => {
+        Some(p) if (!p.starts_with('-') && (std::path::Path::new(p).is_dir() || p.contains('/') || p.starts_with('.') || p.starts_with('~'))) || p == "--no-open" || p == "--port" => {
             let with: Vec<String> = std::iter::once("app".to_string()).chain(args.iter().cloned()).collect();
             app::run(&with)
         }
@@ -1550,6 +1552,11 @@ fn dataset_update(args: &[String]) -> Result<(), String> {
     let pinned = Some(key.as_str()).filter(|k| !k.trim().is_empty());
     let reference = artifact::Reference::parse(reference)?;
     let place = place::at(at)?;
+    // Withdrawn by whoever published it: what is held here stays, and nothing newer comes.
+    if let Some(since) = artifact::withdrawn(place.as_ref(), "sources", &format!("{}/{}", reference.owner, reference.name)) {
+        println!("{reference} is no longer published at {at} (withdrawn {since}); what you hold stays as it is");
+        return Ok(());
+    }
     let manifest = artifact::manifest_signed_by(place.as_ref(), &reference, "sources", pinned)?;
     let offered = manifest["version"].as_str().unwrap_or_default();
     let held = artifact::held_version(&dir).unwrap_or_default();

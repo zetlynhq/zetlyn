@@ -156,6 +156,8 @@ pub fn record(ds: &Source, outcome: &Result<crate::store::RunReport, String>) {
         Err(e) => Some(e.clone()),
     };
     match failed {
+        // Read by another process meanwhile: that one's to count, not this one.
+        Some(e) if e.contains(crate::source::BUSY) => {}
         None => {
             let _ = ds.store.set_meta("auto_failures", "0");
         }

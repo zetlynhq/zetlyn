@@ -1159,3 +1159,184 @@ fn a_cells_pass_killed_from_outside_is_said_and_the_cell_answers_on() {
     assert_eq!(w.get("/about", "").0, 200, "the cell answers on");
     assert_eq!(claim_of(&w.root, "kev", "CVE-2026-0001", "vendorProject"), before, "its source as it was");
 }
+
+/// A source at an address that sends all of what it says, slowly: a read that takes a while.
+fn a_slow_source(csv: Vec<u8>, millis: u64) -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let csv = csv.clone();
+            std::thread::spawn(move || {
+                let mut s = stream;
+                let mut buf = [0u8; 2048];
+                let _ = s.read(&mut buf);
+                let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/csv\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", csv.len()).as_bytes());
+                let half = csv.len() / 2;
+                let _ = s.write_all(&csv[..half]);
+                std::thread::sleep(std::time::Duration::from_millis(millis));
+                let _ = s.write_all(&csv[half..]);
+            });
+        }
+    });
+    port
+}
+
+/// UC-B13: the app and `zetlyn run` (or two of anything) read the same source at the same time: one
+/// reads, the other leaves it to it and says so, and what the source holds is whole.
+#[test]
+fn two_processes_reading_one_source_at_once_read_it_once() {
+    let tmp = std::env::temp_dir().join(format!("zetlyn-modes-{}-two-readers", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let root = tmp.join("w");
+    acme(&root, "");
+    let csv = std::fs::read(root.join("sources/kev/kev.csv")).unwrap();
+    let port = a_slow_source(csv, 1500);
+    let decl = root.join("sources/kev/source.yaml");
+    let t = std::fs::read_to_string(&decl).unwrap();
+    std::fs::write(&decl, t.replace("path: kev.csv", &format!("path: http://127.0.0.1:{port}/kev.csv"))).unwrap();
+    let dir = root.join("sources/kev").display().to_string();
+    let start = { let dir = dir.clone(); move || Command::new(env!("CARGO_BIN_EXE_zetlyn")).args(["source", "update", &dir]).output() };
+    let start_b = start.clone();
+    let a = std::thread::spawn(start);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let b = start_b().unwrap();
+    let a = a.join().unwrap().unwrap();
+    let said = |o: &std::process::Output| format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+    eprintln!("A: {} {}\nB: {} {}", a.status, said(&a), b.status, said(&b));
+    assert!(a.status.success(), "the first reads: {}", said(&a));
+    assert!(said(&b).contains("being read already"), "the second leaves it to the first, and says so: {}", said(&b));
+    let (ok, printed) = z(&["claim", &dir, "CVE-2026-0001"]);
+    assert!(ok, "whole: {printed}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// UC-A2: the app started on a folder that is not a workspace yet makes it one, and asks what to
+/// track first.
+#[test]
+fn the_app_on_an_empty_folder_makes_a_workspace_and_asks_what_to_track() {
+    let tmp = std::env::temp_dir().join(format!("zetlyn-modes-{}-first", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let root = tmp.join("new-world");
+    let port = free_port();
+    let app = spawn(&[&root.display().to_string(), "--port", &port.to_string(), "--no-open"], &[], None, tmp.join("app.log"), port);
+    assert!(root.join("workspace.yaml").exists() && root.join("sources").is_dir() && root.join("trackers").is_dir(), "made a workspace");
+    let (s, _, page) = http(app.port, "GET", "/", "", "");
+    assert_eq!(s, 200);
+    assert!(page.contains("What do you want to track?") && page.contains("action=\"/new\""), "asks what to track first");
+    drop(app);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// UC-A14: two worlds of one person on one machine, each its own folder and app: the second takes
+/// the next port, and each answers as itself.
+#[test]
+fn two_worlds_on_one_machine_each_answer_as_themselves() {
+    let tmp = std::env::temp_dir().join(format!("zetlyn-modes-{}-two-worlds", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let (a, b) = (tmp.join("a"), tmp.join("b"));
+    for (d, t) in [(&a, "Prices"), (&b, "Papers")] {
+        std::fs::create_dir_all(d).unwrap();
+        std::fs::write(d.join("workspace.yaml"), format!("title: {t}\n")).unwrap();
+    }
+    let port = free_port();
+    let first = spawn(&[&a.display().to_string(), "--port", &port.to_string(), "--no-open"], &[], None, tmp.join("a.log"), port);
+    let second = spawn(&[&b.display().to_string(), "--port", &port.to_string(), "--no-open"], &[], None, tmp.join("b.log"), port);
+    assert_ne!(first.port, second.port, "the second on a port of its own");
+    for (p, t) in [(first.port, "Prices"), (second.port, "Papers")] {
+        let (_, _, page) = http(p, "GET", "/settings/profile", "", "");
+        assert!(page.contains(&format!("value=\"{t}\"")), "{t} on {p}");
+    }
+    drop((first, second));
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// UC-B5: a source missed while the machine slept is read once when it wakes, not once for every
+/// time it missed.
+#[test]
+fn a_source_missed_while_asleep_is_read_once() {
+    let tmp = std::env::temp_dir().join(format!("zetlyn-modes-{}-asleep", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let root = tmp.join("w");
+    acme(&root, "");
+    let decl = root.join("sources/kev/source.yaml");
+    let t = std::fs::read_to_string(&decl).unwrap();
+    std::fs::write(&decl, format!("{}\nschedule:\n  every: 1s\n", t.trim_end())).unwrap();
+    // Asleep for several of its rhythms.
+    std::thread::sleep(std::time::Duration::from_millis(3500));
+    let (ok, said) = z(&["run", &root.display().to_string(), "--once"]);
+    assert!(ok, "{said}");
+    assert_eq!(said.matches("test/kev update").count(), 1, "once: {said}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// UC-F8, UC-G5: on one's own machine nobody signs in, so its owner proposes as the world itself;
+/// and the app says it reads and tells only while it runs.
+#[test]
+fn on_ones_machine_the_owner_proposes_and_is_told_what_runs_when() {
+    let l = World::start(Mode::L, "local-propose");
+    let (s, _) = l.post("/settings/sources", "", "proposals.kev=world");
+    assert_eq!(s, 303);
+    let (s, page) = l.get("/trackers/cve/propose/test%2Fkev", "");
+    assert_eq!(s, 200, "{page}");
+    assert!(!page.contains("Sign in to propose") && page.contains("type=\"submit\""), "the owner proposes, signed in as nobody");
+    let (_, page) = l.get("/settings/updates", "");
+    assert!(page.contains("Quit Zetlyn and it stops"), "only while it runs, and says so");
+}
+
+/// UC-C10: what a world published and then made private is taken out of its hub, so nobody takes
+/// it any more; whoever took it keeps their copy, and their next pull says it is withdrawn.
+#[test]
+fn what_is_made_private_is_withdrawn_from_the_hub_and_subscribers_keep_their_copy() {
+    let w = World::start(Mode::P, "withdrawn");
+    let owner = w.sign_in(OWNER);
+    let ws = w.root.join("workspace.yaml");
+    let t = std::fs::read_to_string(&ws).unwrap();
+    std::fs::write(&ws, format!("{}\npublish:\n  to: hub\n", t.trim_end())).unwrap();
+    let pass = || {
+        let (ok, said) = z(&["hosting", "run", &w.host.display().to_string()]);
+        assert!(ok, "{said}");
+        said
+    };
+    let said = pass();
+    let hub = w.root.join("hub");
+    assert!(hub.join("trackers/test/cve/tags/latest").exists(), "published: {said}");
+    assert!(hub.join("sources/test/kev/tags/latest").exists(), "{said}");
+
+    // Somebody takes the tracker from that hub.
+    let other = w.tmp.join("other");
+    std::fs::create_dir_all(other.join("sources")).unwrap();
+    std::fs::create_dir_all(other.join("trackers")).unwrap();
+    std::fs::write(other.join("workspace.yaml"), "title: Other\n").unwrap();
+    let (ok, said) = z(&["tracker", "subscribe", "test/cve", "--from", &hub.display().to_string(), "--at", &other.display().to_string()]);
+    assert!(ok, "{said}");
+    let held = other.join("trackers/cve/tracker.yaml");
+    assert!(held.exists(), "{said}");
+
+    // Made private: out of the hub, with a note where it was.
+    let (s, _) = w.post("/settings/seen", &owner, "tracker=cve&visibility=private");
+    assert_eq!(s, 303);
+    let said = pass();
+    assert!(said.contains("withdrawn"), "{said}");
+    assert!(!hub.join("trackers/test/cve/tags/latest").exists() && !hub.join("trackers/test/cve/versions").exists(), "nothing of it to take");
+    assert!(hub.join("trackers/test/cve/withdrawn").exists());
+
+    assert!(held.exists(), "their copy stays");
+
+    // A source said private by its owner: out of the hub too.
+    let (s, _) = w.post("/settings/sources", &owner, "page.kev=private");
+    assert_eq!(s, 303);
+    let said = pass();
+    assert!(!hub.join("sources/test/kev/tags/latest").exists(), "{said}");
+    // The one who took it: told, and keeps what they hold.
+    let theirs = std::fs::read_dir(other.join("sources")).unwrap().flatten().map(|e| e.path()).find(|p| std::fs::read_to_string(p.join("source.yaml")).is_ok_and(|t| t.contains("test/kev"))).expect("the source they took");
+    let (ok, said) = z(&["source", "pull", &theirs.display().to_string()]);
+    assert!(ok && said.contains("no longer published"), "{said}");
+    assert!(theirs.join("source.yaml").exists(), "their copy stays");
+    // And made public again, published again.
+    let (s, _) = w.post("/settings/sources", &owner, "page.kev=public");
+    assert_eq!(s, 303);
+    let said = pass();
+    assert!(hub.join("sources/test/kev/tags/latest").exists(), "{said}");
+}

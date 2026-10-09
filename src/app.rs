@@ -746,7 +746,7 @@ impl App {
                 if h.is_member(&email) {
                     let path = if h.shared || self.base.is_empty() { "/".to_string() } else { self.base.clone() };
                     if let Ok(member) = h.accounts.ensure(&email).and_then(|a| h.accounts.new_session(a.id, crate::account::Kind::Member)) {
-                        cookies.push(format!("zs={member}; Path={path}; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000"));
+                        cookies.push(format!("zs={member}; Path={path}; HttpOnly{}; SameSite=Lax; Max-Age=2592000", secure_flag(&site)));
                     }
                 }
                 cookies.push(crate::servetracker::reader_cookie(&site, &session, 2_592_000));
@@ -770,7 +770,7 @@ impl App {
                 for (k, v) in [
                     ("Location".to_string(), serve::at("/")),
                     ("Set-Cookie".to_string(), crate::servetracker::reader_cookie(&site, "", 0)),
-                    ("Set-Cookie".to_string(), format!("zs=; Path={path}; HttpOnly; Secure; SameSite=Lax; Max-Age=0")),
+                    ("Set-Cookie".to_string(), format!("zs=; Path={path}; HttpOnly{}; SameSite=Lax; Max-Age=0", secure_flag(&site))),
                 ] {
                     if let Ok(hd) = tiny_http::Header::from_bytes(k.as_bytes(), v.as_bytes()) {
                         response = response.with_header(hd);
@@ -809,7 +809,7 @@ impl App {
                 }
             }
             // What the world is, where it went, all of it at once: its owners', not every editor's.
-            ["export.tar.gz"] | ["settings", "moved"] | ["settings", "access"] | ["settings", "seen"] | ["settings", "licence", _] | ["settings", "proposals", _] | ["settings", "sources"] | ["settings", "profile"] | ["settings", "sync-key"] | ["settings", "export"] | ["settings", "upload", ..] | ["settings", "sync"] | ["publish", _] | ["assist"] if owner && (post || parts.len() == 1 && parts[0] == "export.tar.gz") && !self.who.as_deref().is_some_and(|e| h.is_owner(e)) => {
+            ["export.tar.gz"] | ["settings", "moved"] | ["settings", "access"] | ["settings", "seen"] | ["settings", "licence", _] | ["settings", "proposals", _] | ["settings", "sources"] | ["settings", "profile"] | ["settings", "sync-key"] | ["settings", "export"] | ["settings", "upload", ..] | ["settings", "sync"] | ["settings", "readers", _] | ["settings", "signin-link"] | ["publish", _] | ["assist"] if owner && (post || parts.len() == 1 && parts[0] == "export.tar.gz") && !self.who.as_deref().is_some_and(|e| h.is_owner(e)) => {
                 respond(request, 403, html_kind, &page("Owners only", html! { h1 { "Only an owner of this world changes that" } p { a href=(serve::at("/")) { "Back" } } }));
                 None
             }
@@ -1241,6 +1241,12 @@ impl App {
                 let url = form.get("url").filter(|u| !u.trim().is_empty()).cloned().or_else(|| last.as_ref().map(|l| l.0.clone())).unwrap_or_default();
                 let key = form.get("key").filter(|k| !k.trim().is_empty()).map(|k| k.trim().to_string()).or_else(|| std::fs::read_to_string(self.root.join(".zetlyn/sync/key")).ok().map(|k| k.trim().to_string())).unwrap_or_default();
                 let take = form.get("take").map(String::as_str).filter(|t| *t == "ours" || *t == "theirs");
+                // How often by itself, where the form says: empty, only when asked.
+                if let Some(e) = form.get("every") {
+                    if let Err(e) = crate::sync::set_every(&self.root, Some(e.as_str()).filter(|e| !e.is_empty())) {
+                        return redirect(request, &serve::at(&format!("/settings/moving?saved={}#sync-with", urlencode(&e))));
+                    }
+                }
                 let said = if !url.starts_with("http") {
                     Err("The address of the other world, https://…".to_string())
                 } else if !key.starts_with("zk_") {
@@ -1248,7 +1254,7 @@ impl App {
                 } else {
                     crate::transfer::start_sync(&self.root, &url, &key, take).map(|_| "Syncing; this page shows how it went.".to_string())
                 };
-                return redirect(request, &serve::at(&format!("/settings/moving?saved={}#sync", urlencode(&said.unwrap_or_else(|e| e)))));
+                return redirect(request, &serve::at(&format!("/settings/moving?saved={}#sync-with", urlencode(&said.unwrap_or_else(|e| e)))));
             }
             // An export made here, for its owner to take away.
             (false, ["settings", "export", name]) if !crate::usage::in_cell() => {
@@ -1294,6 +1300,33 @@ impl App {
                 return redirect(request, &serve::at(&format!("/settings/access?saved={}", urlencode(&said))));
             }
             // A key for `zetlyn world sync`, shown once: what it is is never stored, only its hash.
+            // A sign-in link an owner hands on: good once, for seven days, shown here once.
+            (true, ["settings", "signin-link"]) => {
+                let email = form.get("email").map(|e| e.trim().to_lowercase()).unwrap_or_default();
+                let made = if !email.contains('@') || email.contains(char::is_whitespace) {
+                    Err("An address, anna@example.org.".to_string())
+                } else if crate::account::remote_identity() {
+                    Err("This world signs people in at zetlyn.com.".to_string())
+                } else {
+                    crate::account::Accounts::open(&self.root).and_then(|a| a.ensure(&email).and_then(|acc| a.new_link_for(acc.id, 7 * 86_400)))
+                };
+                let site = crate::account::Site::for_workspace(&self.root);
+                let body = match made {
+                    Ok(raw) => {
+                        let link = site.link(&serve::at(&format!("/signin/{raw}")));
+                        html! {
+                            p.back { a href=(serve::at("/settings/access")) { "← Settings" } }
+                            h1 { "A link for " (email) }
+                            p { "Shown this once. It signs " (email) " in, once, within seven days:" }
+                            pre #signin-link { (link) }
+                            p.dim { "What they may do here is what Who may do what says of their address. Somebody else who has the link signs in as them, so send it only to them." }
+                        }
+                    }
+                    Err(e) => html! { p.back { a href=(serve::at("/settings/access")) { "← Settings" } } h1 { "No link made" } p { (e) } },
+                };
+                respond(request, 200, html_kind, &page("A link to sign in", body));
+                return;
+            }
             (true, ["settings", "sync-key"]) => {
                 let made = match (self.hosted.as_ref(), self.who.as_deref()) {
                     (Some(h), Some(email)) => h.accounts.ensure(email).and_then(|a| h.accounts.new_key(a.id, "sync")),
@@ -1385,6 +1418,24 @@ impl App {
                 return redirect(request, &serve::at(&format!("/settings/updates?saved={}", urlencode(&said.join(" ")))));
             }
             // A tracker public or private, from Who sees what.
+            // Who reads a private tracker, one to a line, each checked as the world's lists are.
+            (true, ["settings", "readers", tracker]) => {
+                let dir = self.trackers().join(tracker);
+                let readers: Vec<String> = form.get("readers").map(|t| t.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect()).unwrap_or_default();
+                let wrong: Vec<String> = readers.iter().filter_map(|p| crate::account::pattern_problem(p)).collect();
+                let said = if tracker.contains(['/', '.']) || !dir.join(crate::trackerdecl::FILE).exists() {
+                    format!("{tracker}: no such tracker here.")
+                } else if !wrong.is_empty() {
+                    format!("Not saved. {}", wrong.join("; "))
+                } else {
+                    match crate::trackerdecl::set_readers(&dir, &readers) {
+                        Ok(()) => format!("Saved. {} reads it now besides its owners and editors.", match readers.len() { 0 => "Nobody".to_string(), 1 => "One more".to_string(), n => format!("{n} more") }),
+                        Err(e) => e,
+                    }
+                };
+                open_trackers().lock().unwrap_or_else(|e| e.into_inner()).clear();
+                return redirect(request, &serve::at(&format!("/settings/seen/trackers?seen={}#readers-{tracker}", urlencode(&said))));
+            }
             (true, ["settings", "seen"]) => {
                 let tracker = form.get("tracker").cloned().unwrap_or_default();
                 let said = match form.get("visibility").map(String::as_str) {
@@ -1419,9 +1470,24 @@ impl App {
                 for (_, dir) in crate::tracker::registry(&self.sources()) {
                     let slug = dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
                     let Ok(mut decl) = crate::sourcedecl::SourceDecl::load(&dir) else { continue };
-                    let before = (decl.licence.republish.clone(), decl.proposals.clone());
-                    if let Some(r) = form.get(&format!("licence.{slug}")).filter(|r| matches!(r.as_str(), "yes" | "summary" | "no")) {
+                    let before = (decl.licence.republish.clone(), decl.proposals.clone(), decl.visibility.clone());
+                    // Its own page: as its trackers are, public, or private. Said here, a `no` from
+                    // before has said its last: how much trackers show is the other choice now.
+                    if let Some(p) = form.get(&format!("page.{slug}")).filter(|p| matches!(p.as_str(), "auto" | "public" | "private")) {
+                        let was_no = decl.licence.republish.trim() == "no";
+                        decl.visibility = if p == "auto" { String::new() } else { p.clone() };
+                        if was_no {
+                            decl.licence.republish = "summary".into();
+                        }
+                    }
+                    if let Some(r) = form.get(&format!("licence.{slug}")).filter(|r| matches!(r.as_str(), "yes" | "summary")) {
                         decl.licence.republish = r.clone();
+                    }
+                    // `no` alone, as a program or an older page says it: the page private, its
+                    // values in trackers as titles, values and a link.
+                    if form.get(&format!("licence.{slug}")).is_some_and(|r| r == "no") && !form.contains_key(&format!("page.{slug}")) {
+                        decl.visibility = "private".into();
+                        decl.licence.republish = "summary".into();
                     }
                     if !matches!(decl.source, crate::sourcedecl::Fetch::Proposals { .. }) {
                         if let Some(t) = form.get(&format!("proposals.{slug}")) {
@@ -1432,7 +1498,7 @@ impl App {
                             };
                         }
                     }
-                    if (decl.licence.republish.clone(), decl.proposals.clone()) != before {
+                    if (decl.licence.republish.clone(), decl.proposals.clone(), decl.visibility.clone()) != before {
                         let path = dir.join(crate::sourcedecl::FILE);
                         match crate::yaml::to_string(&decl).and_then(|t| std::fs::write(&path, t).map_err(|e| e.to_string())) {
                             Ok(()) => changed += 1,
@@ -1889,7 +1955,7 @@ impl App {
         let member = !self.visitor;
         let hosted_cell = crate::usage::in_cell();
         let trackers: Vec<(String, TrackerDecl)> = crate::tracker::scope_registry(&self.trackers()).into_iter().filter_map(|(_, d)| TrackerDecl::load(&d).ok().map(|t| (d.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(), t))).filter(|(_, t)| member || t.visibility != "private").collect();
-        let sources: Vec<(String, crate::sourcedecl::SourceDecl)> = crate::tracker::registry(&self.sources()).into_iter().filter_map(|(_, d)| crate::sourcedecl::SourceDecl::load(&d).ok().map(|s| (d.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(), s))).filter(|(_, s)| member || matches!(s.licence.republish.as_str(), "yes" | "summary")).collect();
+        let sources: Vec<(String, crate::sourcedecl::SourceDecl)> = crate::tracker::registry(&self.sources()).into_iter().filter_map(|(_, d)| crate::sourcedecl::SourceDecl::load(&d).ok().map(|s| (d.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(), s))).filter(|(slug, _)| member || shown_source(&self.root, slug).is_some()).collect();
         let taking: Vec<&(String, crate::sourcedecl::SourceDecl)> = sources.iter().filter(|(_, s)| matches!(s.source, crate::sourcedecl::Fetch::Proposals { .. }) || s.proposals.is_some()).collect();
         let version = env!("CARGO_PKG_VERSION");
         let platform = format!("{} {}", std::env::consts::OS, std::env::consts::ARCH);
@@ -1932,7 +1998,7 @@ impl App {
                         p.dim { "Sources" }
                         ul.admin-list { @for (slug, s) in &sources { li {
                             a href=(serve::at(&format!("/sources/{slug}"))) { (if s.title.is_empty() { s.name.as_str() } else { s.title.as_str() }) }
-                            span.dim { " · " (match s.licence.republish.as_str() { "yes" => "may be republished", "summary" => "titles and values may be shown", _ => "not shown in public" }) }
+                            span.dim { " · " (match crate::sourcedecl::shown(&s.licence.republish) { "yes" => "may be republished", "summary" => "titles and values may be shown", _ => "not shown in public" }) }
                             @if !s.licence.terms.is_empty() { " · " a href=(s.licence.terms) rel="noopener" { "its terms" } }
                         } } }
                     }
@@ -2027,7 +2093,7 @@ impl App {
             @else {
                 section.admin-card.flush {
                     table.admin-table {
-                        thead { tr { th { "Source" } th { "Read from" } th.num { "Claims" } th { "Last read" } th { "Next" } th { "Feeds" } th { "In public" } th { "Proposals" } } }
+                        thead { tr { th { "Source" } th { "Read from" } th.num { "Claims" } th { "Last read" } th { "Next" } th { "Feeds" } th { "Its page" } th { "Proposals" } } }
                         tbody { @for (name, slug, ds, dir) in &rows {
                             @let d = &ds.decl;
                             @let kind = serde_json::to_value(&d.source).ok().and_then(|v| v["type"].as_str().map(str::to_string)).unwrap_or_default();
@@ -2059,7 +2125,7 @@ impl App {
                                     }
                                 }
                                 td { @for (folder, t) in &feeds { a href=(serve::at(&format!("/trackers/{folder}/"))) { (if t.title.is_empty() { folder.as_str() } else { t.title.as_str() }) } br; } @if feeds.is_empty() { span.dim { "—" } } }
-                                td { @match d.licence.republish.as_str() { "yes" => span.status { span.dot.ok {} "in full" }, "summary" => span.status { span.dot.ok {} "summary" }, _ => span.dim { "no" } } }
+                                td { @if shown_source(&self.root, &slug).is_some() { span.status { span.dot.ok {} "public" } } @else { span.status { span.dot {} "private" } } }
                                 td {
                                     @if waiting > 0 { a href={(serve::at("/proposals/")) (slug)} { strong { (waiting) " waiting" } } }
                                     @else if takes { a.dim href={(serve::at("/proposals/")) (slug)} { "taken, none waiting" } }
@@ -2138,7 +2204,8 @@ impl App {
                         dt { "From" } dd { code { (d.source.address()) } }
                         dt { "Last read" } dd { (crate::autoupdate::last_finished(&ds).map(|t| stamp_words(&crate::iso_stamp(t))).unwrap_or_else(|| "never".into())) }
                         dt { "How often" } dd { (d.schedule.every.clone().unwrap_or_else(|| "as the world's setting".into())) " · " a href=(serve::at("/settings/updates")) { "change" } }
-                        dt { "In public" } dd { (match d.licence.republish.as_str() { "yes" => "in full", "summary" => "titles, values and a link", _ => "not shown" }) " · " a href=(serve::at("/settings/seen/sources")) { "change" } }
+                        dt { "Its page" } dd { (if shown_source(&self.root, slug).is_some() { "public" } else { "private" }) " · " a href=(serve::at("/settings/seen/sources")) { "change" } }
+                        dt { "In public trackers" } dd { (match crate::sourcedecl::shown(&d.licence.republish) { "yes" => "everything", _ => "titles, values and a link" }) }
                         dt { "Feeds" } dd { @for (folder, t) in &trackers { a href=(serve::at(&format!("/trackers/{folder}/"))) { (if t.title.is_empty() { folder.as_str() } else { t.title.as_str() }) } " " } @if trackers.is_empty() { span.dim { "no tracker" } } }
                     }
                 }
@@ -2203,7 +2270,7 @@ impl App {
             .collect();
         let sources: Vec<(String, PathBuf)> = crate::tracker::registry(&self.sources()).into_iter().collect();
         let republish_of = |name: &str| -> String {
-            sources.iter().find(|(n, _)| n == name).and_then(|(_, d)| crate::sourcedecl::SourceDecl::load(d).ok()).map(|d| d.licence.republish).unwrap_or_default()
+            sources.iter().find(|(n, _)| n == name).and_then(|(_, d)| crate::sourcedecl::SourceDecl::load(d).ok()).map(|d| crate::sourcedecl::shown(&d.licence.republish).to_string()).unwrap_or_else(|| "yes".into())
         };
         let in_public = |name: &str| trackers.iter().any(|(_, _, t)| t.visibility != "private" && t.members.iter().any(|m| m.dataset == name));
         html! {
@@ -2227,7 +2294,7 @@ impl App {
                             @let blocked: Vec<String> = t.members.iter().map(|m| m.dataset.clone()).filter(|s| !matches!(republish_of(s).as_str(), "yes" | "summary")).collect();
                             tr {
                                 td { strong { (if t.title.is_empty() { name.clone() } else { t.title.clone() }) } div.why.mono { (name) } }
-                                td { @if private { span.status { span.dot {} "Private: its readers" } } @else { span.status { span.dot.ok {} "Public: anyone" } } }
+                                td { @if private { span.status { span.dot {} "Private: " (match t.readers.len() { 0 => "owners and editors".to_string(), 1 => "1 reader more".to_string(), n => format!("{n} readers more") }) } } @else { span.status { span.dot.ok {} "Public: anyone" } } }
                                 td.num {
                                     form method="post" action=(serve::at("/settings/seen")) {
                                         input type="hidden" name="tracker" value=(name);
@@ -2245,28 +2312,51 @@ impl App {
                     }
                 }
             }
+            // Who reads each private tracker, beside the world's owners and editors.
+            @for (name, _, t) in trackers.iter().filter(|(_, _, t)| t.visibility == "private") {
+                section.settings-card id={"readers-" (name)} {
+                    header.settings-card-head {
+                        h2 { "Who reads " (if t.title.is_empty() { name.clone() } else { t.title.clone() }) }
+                        p { "The world's owners and editors always do. Anybody else, one to a line: an address, " code { "domain:example.org" } " for everybody confirmed there, "
+                            code { "@zetlyn.com" } " for whoever that world vouches for, or " code { "signed-in" } " for anybody signed in. Somebody taken off is out at once." }
+                    }
+                    form.admin-form method="post" action=(serve::at(&format!("/settings/readers/{name}"))) {
+                        textarea.mono name="readers" rows="4" spellcheck="false" placeholder="anna@example.org" { (t.readers.join("\n")) }
+                        div.settings-actions {
+                            button.primary type="submit" { "Save" }
+                            @if self.hosted.is_none() { span.dim { "Nobody signs in here; it holds once this world runs for others." } }
+                        }
+                    }
+                }
+            }
             }
             @if part == "sources" && sources.is_empty() { p.dim { "No source here yet." } }
             @if part == "sources" && !sources.is_empty() {
                 section.settings-card {
                     header.settings-card-head {
                         h2 { "Sources" }
-                        p { "What a public page may show of each source, and who may propose rows and corrections to it. Whether a source may be shown in public is yours to know from its terms: making it public says you may." }
+                        p { "Whether each source's own page is open to anyone, how much of it a public tracker shows, and who may propose rows and corrections to it. "
+                            "A public tracker shows its values whatever its sources' pages are; a private source is named there, with where it reads, but its page stays closed." }
                     }
                     form method="post" action=(serve::at("/settings/sources")) {
                         table.admin-table {
-                            thead { tr { th { "Source" } th { "On public pages" } th { "Proposals from readers" } th { "Published" } } }
+                            thead { tr { th { "Source" } th { "Its page" } th { "In public trackers" } th { "Proposals from readers" } } }
                             tbody { @for (name, dir) in &sources {
                                 @if let Ok(d) = crate::sourcedecl::SourceDecl::load(dir) {
                                     @let slug = dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-                                    @let now = d.licence.republish.clone();
+                                    @let shows = crate::sourcedecl::shown(&d.licence.republish).to_string();
+                                    @let said = match crate::sourcedecl::page_said(&d) { Some(true) => "public", Some(false) => "private", None => "auto" };
                                     tr {
                                         td { strong { (if d.title.is_empty() { name.clone() } else { d.title.clone() }) } div.why.mono { (name) }
                                             @if !d.licence.terms.is_empty() { div.why { a href=(d.licence.terms) rel="noopener" { "its terms" } } } }
+                                        td { select name={"page." (slug)} {
+                                            option value="auto" selected[said == "auto"] { "As its trackers (" (if in_public(name) { "public" } else { "private" }) ")" }
+                                            option value="public" selected[said == "public"] { "Public" }
+                                            option value="private" selected[said == "private"] { "Private" }
+                                        } }
                                         td { select name={"licence." (slug)} {
-                                            @for (v, l) in [("no", "Not shown"), ("summary", "Titles, values, a link"), ("yes", "In full")] {
-                                                option value=(v) selected[now == v || (now.is_empty() && v == "no")] { (l) }
-                                            }
+                                            option value="yes" selected[shows == "yes"] { "Everything" }
+                                            option value="summary" selected[shows == "summary"] { "Titles, values, a link" }
                                         } }
                                         td {
                                             @if matches!(d.source, crate::sourcedecl::Fetch::Proposals { .. }) {
@@ -2280,12 +2370,11 @@ impl App {
                                                 }
                                             }
                                         }
-                                        td { @if in_public(name) && matches!(now.as_str(), "yes" | "summary") { span.status { span.dot.ok {} "with its trackers" } } @else { span.dim { "no" } } }
                                     }
                                 }
                             } }
                         }
-                        div.settings-actions { button.primary type="submit" { "Save" } span.dim { "A source only private trackers hold is never published." } }
+                        div.settings-actions { button.primary type="submit" { "Save" } span.dim { "Titles, values, a link: for a source whose terms allow its facts but not its text." } }
                     }
                 }
             }
@@ -2801,6 +2890,18 @@ impl App {
                         div.settings-actions { button.primary type="submit" { "Save" } span.dim { "Only an owner changes these. An owner the machine's members name stays one whatever these lists say." } }
                     }
                 }
+                // Where this world signs people in itself (not a cell, which signs in at zetlyn.com):
+                // a link its owner hands on, for somebody it sends no mail to.
+                @if self.hosted.is_some() && !crate::account::remote_identity() {
+                    section.settings-card #signin-link {
+                        header.settings-card-head { h2 { "A link to sign in" } p { "For somebody this world sends no mail to, in an office's network for one: a link that signs them in once, within seven days. "
+                            "Send it them yourself; what they may do here is what the lists above say of their address." } }
+                        form.bar method="post" action=(serve::at("/settings/signin-link")) {
+                            input.wide type="email" name="email" placeholder="anna@example.org" required;
+                            button type="submit" { "Make the link" }
+                        }
+                    }
+                }
                 section.settings-card {
                     header.settings-card-head { h2 { "What a line may say" } p { "One to a line, in any of the three lists." } }
                     table.admin-table.role-examples { tbody {
@@ -2977,10 +3078,10 @@ impl App {
                     form method="post" action=(serve::at("/settings/sync-key")) { button type="submit" { "Make a sync key" } }
                 }
             }
-            @if self.hosted.is_none() {
+            @if self.is_owner_here() {
                 @let last = crate::sync::last_peer(&self.root);
                 @let state = crate::transfer::sync_state(&self.root);
-                section.settings-card #sync {
+                section.settings-card #sync-with {
                     header.settings-card-head { h2 { "Sync with another world" } p { "This world and one elsewhere, on zetlyn.com or on a server of anybody's, kept as one: what changed on either side comes over, sources, trackers, proposals, and all the data with its history. "
                         "There, in Settings, Moving, " em { "Make a sync key" } ". Nobody is locked out meanwhile. " a href="https://zetlyn.com/hosting#sync" { "How it works" } } }
                     @match state.as_ref().and_then(|s| s["state"].as_str()) {
@@ -3006,8 +3107,17 @@ impl App {
                             div.admin-grid {
                                 label { "The other world's address" input type="url" name="url" value=(last.as_ref().map(|l| l.0.clone()).unwrap_or_default()) placeholder="https://zetlyn.com/your-org"; }
                                 label { "Its sync key" input type="password" name="key" autocomplete="off" placeholder=(if last.as_ref().is_some_and(|l| l.1) { "kept from the last sync" } else { "zk_…" }); }
+                                @let every = crate::sync::every(&self.root).unwrap_or_default();
+                                label { "By itself" select name="every" {
+                                    option value="" selected[every.is_empty()] { "Only when asked" }
+                                    @for (v, l) in crate::sync::RHYTHMS { option value=(v) selected[every == v] { (l) } }
+                                } }
                             }
-                            div.settings-actions { button.primary type="submit" { "Sync now" } span.dim { "The key is kept on this machine, readable by you alone, for the next sync." } }
+                            div.settings-actions {
+                                button.primary type="submit" { "Save and sync now" }
+                                span.dim { @if self.hosted.is_none() { "The key is kept on this machine, readable by you alone." } @else { "The key is kept with this world, for its owners alone." }
+                                    " Where both sides changed one thing, nothing is synced until you say which to keep, here." }
+                            }
                         }
                     }
                 }
@@ -4185,15 +4295,53 @@ impl Hosted {
 /// its root (FEDERATION.md, M11). Its owners, `owners:` in its workspace.yaml, sign in by a link to
 /// their address and run it; everybody else reads what it publishes. Kept current and published on
 /// its own clock, as `zetlyn run` would.
+/// This machine's address in its network: the one a packet to the outside would leave from. Nothing
+/// is sent; a datagram socket says which address it would use. None where only loopback is there.
+fn lan_address() -> Option<std::net::IpAddr> {
+    let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    s.connect("192.0.2.1:80").ok()?;
+    Some(s.local_addr().ok()?.ip()).filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
+}
+
 pub fn world_serve(args: &[String]) -> Result<(), String> {
     let root = crate::positional(args, 2).first().map(|s| PathBuf::from(s.as_str())).ok_or("which workspace?")?;
-    let addr = crate::flag(args, "--addr").unwrap_or("127.0.0.1:2500").to_string();
+    // In an office's network (`--lan`): on every address of this machine, and at the one the others
+    // in the network reach it by, over plain http; nothing outside the network is asked for.
+    let lan = args.iter().any(|a| a == "--lan");
+    let port = crate::flag(args, "--port").and_then(|p| p.parse::<u16>().ok()).unwrap_or(2500);
+    let addr = crate::flag(args, "--addr").map(str::to_string).unwrap_or_else(|| if lan { format!("0.0.0.0:{port}") } else { format!("127.0.0.1:{port}") });
+    let ws = root.join(crate::account::WORKSPACE);
+    if !ws.exists() {
+        return Err(format!("{}: not a workspace, there is no {}", root.display(), crate::account::WORKSPACE));
+    }
+    // An owner said on the command line where the workspace names none: whoever starts it.
+    if let Some(owner) = crate::flag(args, "--owner").map(|o| o.trim().to_lowercase()).filter(|o| o.contains('@')) {
+        let site = crate::account::Site::load(&root);
+        if site.all_owners().is_empty() {
+            let mut access = site.access.clone();
+            access.owners.push(owner);
+            crate::account::set_access(&root, &access)?;
+        }
+    }
+    let lan_url = lan.then(|| lan_address().map(|ip| format!("http://{ip}:{}", addr.rsplit(':').next().unwrap_or("2500")))).flatten();
+    if let Some(u) = &lan_url {
+        let said = crate::account::Site::load(&root).url;
+        if said.trim().is_empty() || said.starts_with("http://") {
+            crate::world::set_top(&ws, "url", Some(u))?;
+        }
+    }
     let owners = crate::account::Site::load(&root).all_owners();
     if owners.is_empty() {
         return Err(format!("{}: its workspace.yaml names no owners (`access: {{ owners: [...] }}`), so nobody could sign in to run it", root.display()));
     }
     let server = tiny_http::Server::http(&addr).map_err(|e| e.to_string())?;
     println!("{} on http://{addr}/, run by {}", root.display(), owners.join(", "));
+    if lan {
+        match &lan_url {
+            Some(u) => println!("In this network, open {u}/ . Sign in there; with no mailer named, the link is printed here, and an owner makes links for others in Settings, Who may do what."),
+            None => println!("No address in a network found for this machine; others reach it at its address, port {port}."),
+        }
+    }
     {
         let root = root.clone();
         std::thread::spawn(move || loop {
@@ -4423,7 +4571,11 @@ pub fn hosting(args: &[String]) -> Result<(), String> {
         // One pass and out, for a timer: the updates in a process of their own.
         Some("run") => {
             let dir = PathBuf::from(crate::positional(args, 2).first().ok_or("which hosting directory?")?.as_str());
-            hosting_pass(&dir);
+            let soonest = hosting_pass(&dir);
+            // For the process that started this one: when to start the next.
+            if let Some(to) = crate::flag(args, "--next-to") {
+                std::fs::write(to, soonest.map(|s| s.to_string()).unwrap_or_default()).map_err(|e| format!("{to}: {e}"))?;
+            }
             Ok(())
         }
         // A new organisation: its workspace, empty, beside the others.
@@ -5424,6 +5576,56 @@ fn hosting_pass(dir: &Path) -> Option<i64> {
     soonest
 }
 
+/// `; Secure` on a session cookie, except where the world says it is reached over plain http: a
+/// world in an office's network, `world serve --lan`, whose browsers would drop a secure cookie
+/// and so never sign anybody in.
+fn secure_flag(site: &crate::account::Site) -> &'static str {
+    if site.url.trim().starts_with("http://") { "" } else { "; Secure" }
+}
+
+/// How a run apart last went, for the server and its admin pages: `<dir>/last-run.json`.
+pub const LAST_RUN: &str = "last-run.json";
+/// Longer than this, a run apart is stopped: the next starts where the sources are due again.
+const RUN_APART_MAX: u64 = 50 * 60;
+
+/// One pass in a process of its own, `zetlyn hosting run`, at a lower priority where `nice` is
+/// there: waited for, stopped past fifty minutes, how it ended written down. When the next is due.
+fn run_apart(dir: &Path) -> Option<i64> {
+    let me = std::env::current_exe().ok()?;
+    let next = dir.join(".next-run");
+    let _ = std::fs::remove_file(&next);
+    let args: Vec<String> = vec!["hosting".into(), "run".into(), dir.display().to_string(), "--next-to".into(), next.display().to_string()];
+    let nice = Path::new("/usr/bin/nice").exists();
+    let mut command = if nice {
+        let mut c = std::process::Command::new("/usr/bin/nice");
+        c.arg("-n").arg("5").arg(&me).args(&args);
+        c
+    } else {
+        let mut c = std::process::Command::new(&me);
+        c.args(&args);
+        c
+    };
+    let started = crate::now();
+    let result = match command.stdin(std::process::Stdio::null()).spawn() {
+        Err(e) => format!("not started: {e}"),
+        Ok(mut child) => loop {
+            match child.try_wait() {
+                Ok(Some(status)) if status.success() => break "success".to_string(),
+                Ok(Some(status)) => break format!("ended: {status}"),
+                Ok(None) if (crate::now() - started) as u64 > RUN_APART_MAX => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break "stopped after fifty minutes".to_string();
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_secs(1)),
+                Err(e) => break format!("lost: {e}"),
+            }
+        },
+    };
+    let _ = std::fs::write(dir.join(LAST_RUN), json!({ "at": crate::iso_stamp(started), "seconds": crate::now() - started, "result": result }).to_string());
+    std::fs::read_to_string(&next).ok().and_then(|s| s.trim().parse().ok())
+}
+
 fn hosting_serve(args: &[String]) -> Result<(), String> {
     let dir = PathBuf::from(crate::positional(args, 2).first().ok_or("which hosting directory?")?.as_str());
     std::fs::create_dir_all(dir.join("orgs")).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -5443,16 +5645,31 @@ fn hosting_serve(args: &[String]) -> Result<(), String> {
     println!("{} organisations from {} on http://{addr}/", orgs_in(&dir).len(), dir.display());
 
     // Every organisation's sources, trackers and watches, one after another, as `zetlyn run`
-    // does them for one workspace. With --no-updates that is somebody else's: `zetlyn hosting run`,
-    // a process of its own on a timer, whose reading every source whole is gone from memory when
-    // it ends, rather than kept by the process that answers pages (2026-10-05).
-    if !args.iter().any(|a| a == "--no-updates") {
-        let dir = dir.clone();
-        std::thread::spawn(move || loop {
-            let soonest = hosting_pass(&dir);
-            let wait = soonest.map(|s| (s - crate::now()).clamp(60, 900)).unwrap_or(900);
-            std::thread::sleep(std::time::Duration::from_secs(wait as u64));
-        });
+    // does them for one workspace, when the next is due: the program wakes itself, no timer from
+    // outside (2026-10-09). `--updates apart` (a cell, the main server) reads in a process of its
+    // own, started from here, so what a run held in memory is gone when it ends rather than kept by
+    // the process that answers pages (2026-10-05); `in` (the default) reads in this one; `none`,
+    // or `--no-updates`, leaves it to somebody else.
+    let updates = crate::flag(args, "--updates").unwrap_or(if args.iter().any(|a| a == "--no-updates") { "none" } else { "in" }).to_string();
+    match updates.as_str() {
+        "in" => {
+            let dir = dir.clone();
+            std::thread::spawn(move || loop {
+                let soonest = hosting_pass(&dir);
+                let wait = soonest.map(|s| (s - crate::now()).clamp(60, 900)).unwrap_or(900);
+                std::thread::sleep(std::time::Duration::from_secs(wait as u64));
+            });
+        }
+        "apart" => {
+            let dir = dir.clone();
+            std::thread::spawn(move || loop {
+                let soonest = run_apart(&dir);
+                let wait = soonest.map(|s| (s - crate::now()).clamp(30, 900)).unwrap_or(900);
+                std::thread::sleep(std::time::Duration::from_secs(wait as u64));
+            });
+        }
+        "none" => {}
+        other => return Err(format!("--updates {other}: in, apart or none")),
     }
 
     // Several requests at once: a slow page (a tracker's filter over thousands of claims) holds up
@@ -6889,14 +7106,30 @@ struct Shown {
     holding: Vec<(String, String)>,
 }
 
-/// The sources a world shows anybody: one that said it may be shown, in a tracker that is not
-/// private. Every page a visitor sees lists them, so they are read off the declarations alone and
+/// The sources a world shows anybody: one its owner made public, or one that said nothing and is
+/// in a tracker that is not private. Every page a visitor sees lists them, so they are read off the declarations alone and
 /// kept a minute; opening each store for each page was seconds a page (2026-10-06).
+/// When the declarations of a world's sources and trackers last changed, and how many there are:
+/// a different number where any was written, added or taken away.
+fn declarations_stamp(root: &Path) -> u128 {
+    let mut stamp: u128 = 0;
+    for (folder, file) in [("sources", crate::sourcedecl::FILE), ("trackers", crate::trackerdecl::FILE)] {
+        for e in std::fs::read_dir(root.join(folder)).into_iter().flatten().flatten() {
+            let t = std::fs::metadata(e.path().join(file)).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
+            stamp = stamp.wrapping_mul(31).wrapping_add(t).wrapping_add(1);
+        }
+    }
+    stamp
+}
+
 fn shown_sources(root: &Path) -> Vec<Shown> {
-    static KEPT: std::sync::OnceLock<Mutex<BTreeMap<PathBuf, (i64, Vec<Shown>)>>> = std::sync::OnceLock::new();
+    // Kept until a declaration changes: a source said not to be shown is not shown from the next
+    // request on. The files' times are read each time; what they say only when one moved.
+    static KEPT: std::sync::OnceLock<Mutex<BTreeMap<PathBuf, (u128, Vec<Shown>)>>> = std::sync::OnceLock::new();
     let kept = KEPT.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let stamp = declarations_stamp(root);
     if let Some((at, list)) = kept.lock().unwrap_or_else(|e| e.into_inner()).get(root) {
-        if crate::now() - at < 60 {
+        if *at == stamp {
             return list.clone();
         }
     }
@@ -6911,7 +7144,8 @@ fn shown_sources(root: &Path) -> Vec<Shown> {
         .into_iter()
         .filter_map(|(name, dir)| {
             let d = crate::sourcedecl::SourceDecl::load(&dir).ok()?;
-            if !matches!(d.licence.republish.as_str(), "yes" | "summary") {
+            let said = crate::sourcedecl::page_said(&d);
+            if said == Some(false) {
                 return None;
             }
             let mut holding: Vec<(String, String)> = trackers
@@ -6922,10 +7156,11 @@ fn shown_sources(root: &Path) -> Vec<Shown> {
             holding.sort_by(|a, b| a.1.cmp(&b.1));
             let short = name.rsplit('/').next().unwrap_or(&name).to_string();
             let title = if d.title.is_empty() { short.clone() } else { d.title.clone() };
-            (!holding.is_empty()).then_some(Shown { short, dir, title, holding })
+            // Said public, it is; said nothing, it is as its trackers are.
+            (said == Some(true) || !holding.is_empty()).then_some(Shown { short, dir, title, holding })
         })
         .collect();
-    kept.lock().unwrap_or_else(|e| e.into_inner()).insert(root.to_path_buf(), (crate::now(), list.clone()));
+    kept.lock().unwrap_or_else(|e| e.into_inner()).insert(root.to_path_buf(), (stamp, list.clone()));
     list
 }
 
@@ -6966,7 +7201,7 @@ fn public_source_page(root: &Path, base: &str, dir_name: &str) -> Option<String>
         h2 { "Where it reads" }
         p { code { (d.source.address()) } }
         p.dim {
-            @match d.licence.republish.as_str() { "yes" => { "It may be republished." } _ => { "Its titles and values may be shown, not its text." } }
+            @match crate::sourcedecl::shown(&d.licence.republish) { "yes" => { "It may be republished." } _ => { "Its titles and values may be shown, not its text." } }
             @if !d.licence.terms.is_empty() { " " a href=(d.licence.terms) { "Its terms" } "." }
         }
         h2 { "In" }

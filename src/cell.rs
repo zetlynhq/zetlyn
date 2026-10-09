@@ -1,11 +1,12 @@
 //! One world, one cell, on whichever server it is placed: `zetlyn node`, run as root on a server
 //! that holds cells (CELLS.md in zetlyn-ops).
 //!
-//! A cell is a directory and two systemd units. The directory is a hosting directory with one
-//! world in it, under `/var/lib/private/zetlyn-cells/<name>`, owned by the cell's own dynamic user;
-//! `zetlyn-cell@<name>` serves it on a port of its own, `zetlyn-cell-run@<name>` reads its sources
-//! on a timer. What it may use is said in `/etc/zetlyn/cells/<name>.env` and a drop-in beside the
-//! unit. Nothing else on the server is the cell's.
+//! A cell is a directory and a systemd unit. The directory is a hosting directory with one world
+//! in it, under `/var/lib/private/zetlyn-cells/<name>`, owned by the cell's own dynamic user;
+//! `zetlyn-cell@<name>` serves it on a port of its own and reads its sources when they are due, each
+//! pass in a process of its own it starts (`--updates apart`; until 2026-10-09 a timer did). What
+//! it may use is said in `/etc/zetlyn/cells/<name>.env` and a drop-in beside the unit. Nothing else
+//! on the server is the cell's.
 //!
 //! What a cell is worth keeping is in S3, not on the server: `s3://<bucket>/cells/<name>/`, a
 //! snapshot a day and one before every move, upgrade or removal, encrypted with the key every
@@ -466,7 +467,7 @@ pub fn limit(name: &str, memory: &str, cpu: &str) -> Result<(), String> {
     if !ok(memory, &['K', 'M', 'G']) || !ok(cpu, &['%']) {
         return Err("--memory like 512M or 2G, --cpu like 100%".into());
     }
-    for unit in ["zetlyn-cell", "zetlyn-cell-run"] {
+    for unit in ["zetlyn-cell"] {
         let d = PathBuf::from(format!("/etc/systemd/system/{unit}@{name}.service.d"));
         std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
         std::fs::write(d.join("limits.conf"), format!("[Service]\nMemoryMax={memory}\nCPUQuota={cpu}\n")).map_err(|e| e.to_string())?;
@@ -478,11 +479,21 @@ pub fn limit(name: &str, memory: &str, cpu: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The timer that read a cell's sources until its own process did (2026-10-09): off, where it is
+/// still on, and its run stopped.
+fn retire_run_timer(name: &str) {
+    let timer = format!("zetlyn-cell-run@{name}.timer");
+    if show(&timer, "UnitFileState") == "enabled" || show(&timer, "ActiveState") == "active" {
+        let _ = systemctl(&["disable", "--now", &timer]);
+    }
+}
+
 pub fn start(name: &str) -> Result<(), String> {
     let mut env = read_env(name);
     env.insert("STATE".into(), "running".into());
     write_env(name, &env)?;
-    systemctl(&["enable", "--now", &format!("zetlyn-cell@{name}"), &format!("zetlyn-cell-run@{name}.timer")])?;
+    systemctl(&["enable", "--now", &format!("zetlyn-cell@{name}")])?;
+    retire_run_timer(name);
     Ok(())
 }
 
@@ -622,6 +633,7 @@ pub fn status() -> J {
         let env = read_env(&name);
         let unit = format!("zetlyn-cell@{name}");
         let run_unit = format!("zetlyn-cell-run@{name}.service");
+        let last_run: Option<J> = std::fs::read(dir_of(&name).join(crate::app::LAST_RUN)).ok().and_then(|b| serde_json::from_slice(&b).ok());
         let port = env.get("PORT").cloned().unwrap_or_default();
         let dir = dir_of(&name);
         let domain = crate::account::Site::load(&dir.join("orgs").join(&name)).domain.trim().to_lowercase();
@@ -637,8 +649,9 @@ pub fn status() -> J {
             "restarts": show(&unit, "NRestarts"),
             "memory": show(&unit, "MemoryCurrent").parse::<u64>().ok(),
             "memory_max": show(&unit, "MemoryMax").parse::<u64>().ok(),
-            "run_result": show(&run_unit, "Result"),
-            "run_finished": show(&run_unit, "ExecMainExitTimestamp"),
+            // How its last pass went, as the cell's own process wrote it; the timer's, before.
+            "run_result": last_run.as_ref().and_then(|r| r["result"].as_str().map(str::to_string)).unwrap_or_else(|| show(&run_unit, "Result")),
+            "run_finished": last_run.as_ref().and_then(|r| r["at"].as_str().map(str::to_string)).unwrap_or_else(|| show(&run_unit, "ExecMainExitTimestamp")),
             "answers": if env.get("STATE").map(String::as_str) == Some("running") { probe(&port, &name) } else { 0 },
             "bytes": bytes_under(&dir),
             "usage": json!({
@@ -722,8 +735,9 @@ pub fn sync() -> Result<(), String> {
             let _ = systemctl(&["restart", &format!("zetlyn-cell@{name}")]);
             continue;
         }
+        retire_run_timer(&name);
         if env.get("STATE").map(String::as_str) == Some("running") && show(&format!("zetlyn-cell@{name}"), "ActiveState") != "active" {
-            let _ = systemctl(&["start", &format!("zetlyn-cell@{name}"), &format!("zetlyn-cell-run@{name}.timer")]);
+            let _ = systemctl(&["start", &format!("zetlyn-cell@{name}")]);
         }
     }
     sync_routes()?;
@@ -917,7 +931,7 @@ fn import_into(name: &str) -> Result<usize, String> {
     let _ = std::fs::write(incoming.join(LAST_IMPORT), last.to_string());
     give_back(&dir);
     if running {
-        let _ = systemctl(&["start", &format!("zetlyn-cell@{name}"), &format!("zetlyn-cell-run@{name}.timer")]);
+        let _ = systemctl(&["start", &format!("zetlyn-cell@{name}")]);
     }
     if by.contains('@') {
         let url = node().map(|n| format!("{}/{name}/", n.url.trim_end_matches('/'))).unwrap_or_default();

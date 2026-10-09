@@ -44,7 +44,8 @@ impl Control {
             .expect("the binary runs");
         let c = Control { dir, port, child };
         for _ in 0..100 {
-            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            // This process answering, not one of a test beside it that took the port meanwhile.
+            if std::fs::read_to_string(c.dir.join("log")).is_ok_and(|l| l.contains(&format!("127.0.0.1:{port}"))) && TcpStream::connect(("127.0.0.1", port)).is_ok() {
                 return c;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -415,15 +416,17 @@ struct LocalApp {
     child: Child,
     port: u16,
     dir: PathBuf,
+    log: PathBuf,
 }
 
 impl LocalApp {
     fn start(dir: &Path) -> LocalApp {
         let port = (0..50).map(|i| 40_000 + (std::process::id() % 2_000) as u16 * 5 + i).find(|p| std::net::TcpListener::bind(("127.0.0.1", *p)).is_ok()).expect("a free port");
-        let child = Command::new(env!("CARGO_BIN_EXE_zetlyn")).args(["--port", &port.to_string(), "--no-open"]).current_dir(dir).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("the binary runs");
+        let log = std::env::temp_dir().join(format!("zetlyn-localapp-{}-{port}.log", std::process::id()));
+        let child = Command::new(env!("CARGO_BIN_EXE_zetlyn")).args(["--port", &port.to_string(), "--no-open"]).current_dir(dir).stdin(Stdio::null()).stdout(Stdio::from(std::fs::File::create(&log).unwrap())).stderr(Stdio::null()).spawn().expect("the binary runs");
         for _ in 0..100 {
-            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-                return LocalApp { child, port, dir: dir.to_path_buf() };
+            if std::fs::read_to_string(&log).is_ok_and(|l| l.contains(&format!("127.0.0.1:{port}"))) && TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                return LocalApp { child, port, dir: dir.to_path_buf(), log };
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
@@ -453,5 +456,6 @@ impl Drop for LocalApp {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        let _ = std::fs::remove_file(&self.log);
     }
 }

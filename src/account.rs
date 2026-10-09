@@ -252,11 +252,17 @@ impl Accounts {
 
     /// A link good for one sign-in and a quarter of an hour.
     pub fn new_link(&self, account: i64) -> Result<String, String> {
+        self.new_link_for(account, 900)
+    }
+
+    /// A link good once, for `seconds`: a quarter of an hour by mail, longer where an owner hands it
+    /// on themselves, to somebody a world sends no mail to.
+    pub fn new_link_for(&self, account: i64, seconds: i64) -> Result<String, String> {
         let raw = token();
         self.db
             .execute(
                 "insert into link(hash, account, expires) values(?1, ?2, ?3)",
-                rusqlite::params![digest(&raw), account, crate::iso_stamp(crate::now() + 900)],
+                rusqlite::params![digest(&raw), account, crate::iso_stamp(crate::now() + seconds)],
             )
             .map_err(|e| e.to_string())?;
         Ok(raw)

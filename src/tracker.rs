@@ -1974,12 +1974,12 @@ impl Tracker {
         self.decl.visibility == "private"
     }
 
-    /// Each source's word on being shown in public: `yes`, `summary`, `no`, or empty where it
-    /// has said nothing.
+    /// Each source's word on being shown in public: `yes`, `summary` or `no`; one that has said
+    /// nothing is `yes`, shown until its owner says otherwise.
     pub fn licences(&self) -> Vec<(String, String)> {
         self.members
             .iter()
-            .map(|m| (m.name().to_string(), m.described["licence"]["republish"].as_str().unwrap_or("").to_string()))
+            .map(|m| (m.name().to_string(), crate::sourcedecl::shown(m.described["licence"]["republish"].as_str().unwrap_or("")).to_string()))
             .collect()
     }
 
@@ -1989,7 +1989,7 @@ impl Tracker {
         self.licences()
             .into_iter()
             .filter(|(_, r)| !matches!(r.as_str(), "yes" | "summary"))
-            .map(|(s, r)| if r.is_empty() { format!("{s} has not said whether it may be republished") } else { format!("{s} may not be republished") })
+            .map(|(s, _)| format!("{s} may not be republished"))
             .collect()
     }
 

@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 const USAGE: &str = "zetlyn world init <dir> --domain <domain> --owner <address> [--title …]
 zetlyn world up <domain> --owner <address> [--from <archive>] [--title …] [--smtp host[:port] --smtp-user … --mail-from …]
                 [--port 2500] [--dry-run] [--root <prefix>] [--no-services]
-zetlyn world serve <workspace> [--addr 127.0.0.1:2500]
+zetlyn world serve <workspace> [--addr 127.0.0.1:2500 | --lan [--port 2500]] [--owner <address>]
 zetlyn world export <workspace> --to <file.tar.gz>
 zetlyn world import <file.tar.gz> --to <dir> [--url <address>] [--owner <address>]
 zetlyn world sync <address> [<workspace>] [--key zk_…] [--take ours|theirs] [--no-data]

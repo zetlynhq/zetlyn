@@ -1655,10 +1655,16 @@ impl TrackerSite {
         v.free = site.price.is_none();
         // A private tracker, or one a source forbids showing in public, is its accounts' alone:
         // everything but signing in and what it costs is a page saying so.
-        let closed = !*operator && (scope.private() || scope.licences().iter().any(|(_, r)| r == "no"));
+        // Whether it is private, and who reads it, as its file says now and not as it said when
+        // last read whole: made private or somebody taken off, it holds from this request on.
+        let now_decl = (!*operator).then(|| crate::trackerdecl::TrackerDecl::load(dir).ok()).flatten();
+        let private = now_decl.as_ref().map_or(scope.private(), |d| d.visibility == "private");
+        let readers = now_decl.map(|d| d.readers).unwrap_or_else(|| scope.decl.readers.clone());
+        let closed = !*operator && (private || scope.licences().iter().any(|(_, r)| r == "no"));
         let open_anyway = matches!(path.as_str(), "/style.css" | "/zetlyn.css" | "/signin" | "/signout" | "/pricing" | "/terms" | "/account")
             || path.starts_with("/signin/");
-        let path = if closed && !open_anyway && !v.entitled(&scope.decl.name) { "/private".to_string() } else { path };
+        let reads = v.account.as_ref().is_some_and(|a| crate::account::admits(&readers, &a.email, &accounts.issuers_of(a.id)));
+        let path = if closed && !open_anyway && !v.entitled(&scope.decl.name) && !reads { "/private".to_string() } else { path };
         let post = request.method() == &tiny_http::Method::Post;
         let mut form = String::new();
         if post {

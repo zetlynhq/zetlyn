@@ -78,7 +78,7 @@ impl Row {
         self.statement().is_some_and(|d| d.visibility == "private")
     }
     pub fn republish(&self) -> String {
-        self.manifest["licence"]["republish"].as_str().unwrap_or_default().to_string()
+        crate::sourcedecl::shown(self.manifest["licence"]["republish"].as_str().unwrap_or_default()).to_string()
     }
     pub fn is_tracker(&self) -> bool {
         self.tree != "sources"

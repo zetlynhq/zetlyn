@@ -284,24 +284,24 @@ fn carry(from: &Path, to: &Path, key: &str) -> Result<(), String> {
 
 /// The last sync asked from the page, or the one under way.
 pub fn sync_state(root: &Path) -> Option<J> {
-    read_json(&root.join(".zetlyn").join("sync").join("last.json"))
+    crate::sync::last(root)
 }
 
 /// A sync with the world at `url`, on a thread of its own; where both changed one thing and
-/// `take` does not decide, nothing is synced and the state names each.
+/// `take` does not decide, nothing is synced and the state names each (sync.rs).
 pub fn start_sync(root: &Path, url: &str, key: &str, take: Option<&str>) -> Result<(), String> {
     if sync_state(root).is_some_and(|s| s["state"] == "running") {
         return Err("A sync is under way already.".into());
     }
-    let state = root.join(".zetlyn").join("sync").join("last.json");
-    write_json(&state, &json!({ "state": "running", "at": crate::iso_stamp(crate::now()), "url": url }));
     let (root, url, key, take) = (root.to_path_buf(), url.to_string(), key.to_string(), take.map(str::to_string));
+    // Said as running before the page asks again, so it shows it.
+    let file = root.join(".zetlyn").join("sync").join("last.json");
+    if let Some(d) = file.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    crate::sync::write_whole(&file, &json!({ "state": "running", "at": crate::iso_stamp(crate::now()), "t": crate::now(), "url": url }));
     std::thread::spawn(move || {
-        let done = match crate::sync::run(&root, &url, &key, take.as_deref(), true, false) {
-            Ok(said) => json!({ "state": "ok", "at": crate::iso_stamp(crate::now()), "url": url, "said": said }),
-            Err(e) => json!({ "state": "failed", "at": crate::iso_stamp(crate::now()), "url": url, "error": e, "conflicts": e.starts_with("not synced: decide") }),
-        };
-        write_json(&state, &done);
+        crate::sync::run_recorded(&root, &url, &key, take.as_deref());
     });
     Ok(())
 }

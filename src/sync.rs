@@ -532,6 +532,88 @@ pub fn command(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Where how the last sync went is kept, for the page and for the next scheduled one.
+fn last_file(root: &Path) -> PathBuf {
+    root.join(".zetlyn").join("sync").join("last.json")
+}
+
+/// A small file written whole or not at all: beside it first, then in its place, so whoever reads
+/// it meanwhile reads the one before rather than half of this one.
+pub(crate) fn write_whole(file: &Path, value: &J) {
+    let beside = file.with_extension("writing");
+    if std::fs::write(&beside, value.to_string()).is_ok() {
+        let _ = std::fs::rename(&beside, file);
+    }
+}
+
+/// How the last sync went, or the one under way: `state` running, ok or failed.
+pub fn last(root: &Path) -> Option<J> {
+    std::fs::read(last_file(root)).ok().and_then(|b| serde_json::from_slice(&b).ok())
+}
+
+/// A sync asked of the world at `url`, from start to end, said in `last.json` as it goes: what the
+/// page shows, and when a scheduled one ran last. Where both sides changed one thing and `take`
+/// does not decide, nothing is synced and the state names each.
+pub fn run_recorded(root: &Path, url: &str, key: &str, take: Option<&str>) -> J {
+    let file = last_file(root);
+    if let Some(d) = file.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let started = crate::now();
+    write_whole(&file, &json!({ "state": "running", "at": crate::iso_stamp(started), "t": started, "url": url }));
+    let done = match run(root, url, key, take, true, false) {
+        Ok(said) => json!({ "state": "ok", "at": crate::iso_stamp(crate::now()), "t": started, "url": url, "said": said }),
+        Err(e) => json!({ "state": "failed", "at": crate::iso_stamp(crate::now()), "t": started, "url": url, "conflicts": e.starts_with("not synced: decide"), "error": e }),
+    };
+    write_whole(&file, &done);
+    done
+}
+
+/// How often this world syncs by itself with the one it last synced with: `.zetlyn/sync/every`,
+/// `15m`, `1h`, `6h` or `1d`; none, only when asked.
+pub const RHYTHMS: [(&str, &str); 4] = [("15m", "Every 15 minutes"), ("1h", "Every hour"), ("6h", "Every 6 hours"), ("1d", "Once a day")];
+
+pub fn every(root: &Path) -> Option<String> {
+    std::fs::read_to_string(root.join(".zetlyn").join("sync").join("every")).ok().map(|s| s.trim().to_string()).filter(|s| RHYTHMS.iter().any(|(r, _)| r == s))
+}
+
+pub fn set_every(root: &Path, every: Option<&str>) -> Result<(), String> {
+    let file = root.join(".zetlyn").join("sync").join("every");
+    match every.filter(|e| RHYTHMS.iter().any(|(r, _)| r == e)) {
+        Some(e) => {
+            std::fs::create_dir_all(file.parent().unwrap_or(root)).map_err(|e| e.to_string())?;
+            std::fs::write(&file, e).map_err(|e| e.to_string())
+        }
+        None => {
+            let _ = std::fs::remove_file(&file);
+            Ok(())
+        }
+    }
+}
+
+/// The sync this world does by itself, where one is set and due: done now, with the world it last
+/// synced with and the key kept from then. When the next is due, where one is set.
+pub fn scheduled(root: &Path) -> Option<i64> {
+    let every = crate::fetch::duration(&every(root)?)?;
+    let (url, has_key) = last_peer(root)?;
+    let key = std::fs::read_to_string(root.join(".zetlyn").join("sync").join("key")).ok().map(|k| k.trim().to_string()).filter(|k| has_key && k.starts_with("zk_"))?;
+    let last = last(root);
+    // One asked from the page meanwhile is that one's to finish.
+    if last.as_ref().is_some_and(|l| l["state"] == "running" && l["t"].as_i64().is_some_and(|t| crate::now() - t < 3600)) {
+        return Some(crate::now() + 60);
+    }
+    let due = last.as_ref().and_then(|l| l["t"].as_i64()).map_or(0, |t| t + every);
+    if due > crate::now() {
+        return Some(due);
+    }
+    let done = run_recorded(root, &url, &key, None);
+    match done["state"].as_str() {
+        Some("ok") => println!("sync: {}", done["said"].as_str().unwrap_or("")),
+        _ => eprintln!("sync with {url}: {}", done["error"].as_str().unwrap_or("")),
+    }
+    Some(crate::now() + every)
+}
+
 /// The address and key this workspace last synced with, kept after the first sync.
 pub fn last_peer(root: &Path) -> Option<(String, bool)> {
     let key = root.join(".zetlyn").join("sync").join("key");

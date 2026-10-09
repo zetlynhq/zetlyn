@@ -28,6 +28,11 @@ pub struct TrackerDecl {
     /// subscribers. `private`: every page for its accounts only, and no free edge.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub visibility: String,
+    /// Who reads it where it is private, beside the world's owners and editors: an address,
+    /// `domain:example.org`, `@zetlyn.com` for whoever that world vouches for, or `signed-in`.
+    /// Asked at every request, so somebody taken off is out at once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub readers: Vec<String>,
     #[serde(default, skip_serializing_if = "Views::is_empty")]
     pub view: Views,
     #[serde(default, skip_serializing_if = "Promise::is_empty")]
@@ -45,6 +50,33 @@ pub struct TrackerDecl {
     /// replaces it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package: Option<Packaged>,
+}
+
+/// Who reads a tracker, written into its file in place: the rest of the file, its comments
+/// included, as it was, and the file checked before it is written.
+pub fn set_readers(dir: &Path, readers: &[String]) -> Result<(), String> {
+    let file = dir.join(FILE);
+    let text = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let mut kept: Vec<&str> = Vec::new();
+    let mut skipping = false;
+    for l in text.lines() {
+        if l.starts_with("readers:") {
+            skipping = true;
+            continue;
+        }
+        if skipping && (l.starts_with(' ') || l.starts_with('-') || l.is_empty()) {
+            continue;
+        }
+        skipping = false;
+        kept.push(l);
+    }
+    let mut out = kept.join("\n").trim_end().to_string();
+    if !readers.is_empty() {
+        out.push_str("\nreaders:\n");
+        out.push_str(&readers.iter().map(|r| format!("- {}\n", serde_json::to_string(r).unwrap_or_default())).collect::<String>());
+    }
+    let _: TrackerDecl = crate::yaml::parse(&out)?;
+    std::fs::write(&file, format!("{}\n", out.trim_end())).map_err(|e| format!("{}: {e}", file.display()))
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

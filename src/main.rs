@@ -242,7 +242,8 @@ zetlyn
       SMTP_PASSWORD.
   zetlyn world serve <workspace> | export <workspace> --to <file> | backup <workspace> <dir> | upgrade
       One world at the root of its domain, run by the `owners:` its workspace.yaml names; all of
-      it in one archive; that archive kept daily; the next release, where there is one.
+      it in one archive; that archive kept daily; the next release, where there is one. With
+      --lan, in an office's network over plain http, at the address the others there reach it by.
   zetlyn world import <file> --to <dir> [--url …] [--owner …] | move <workspace> --to <address> | --back
   zetlyn world register <workspace> [--at <directory>]
       An archive made a world again; saying where it went, or that it did not; being listed.
@@ -1072,6 +1073,12 @@ pub fn schedule_pass(root: &Path, deliver: bool, limits: &Limits) -> Option<i64>
                 ),
                 Err(e) => eprintln!("{name}: {e}"),
             }
+        }
+
+        // The world this one syncs with by itself, where one is set and due (sync.rs): what came
+        // from there is in the trackers below like anything read here.
+        if let Some(next) = crate::sync::scheduled(&root) {
+            soonest = Some(soonest.map_or(next, |s: i64| s.min(next)));
         }
 
         // Every tracker whose sources moved looks again, so what changed is a signal before a

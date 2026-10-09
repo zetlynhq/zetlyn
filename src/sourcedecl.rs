@@ -44,11 +44,16 @@ pub struct SourceDecl {
     /// it. It is the claim a person makes and answers for, and it travels in the manifest.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub terms: String,
-    /// What these claims may be used for once fetched: whether a page anyone can open may show
-    /// them. Checked, unlike `terms`: a public tracker is refused while any source it names says
-    /// `no` or says nothing.
+    /// How much of these claims a public tracker shows: `yes`, all of them; `summary`, their
+    /// titles, values and a link, not their text. A public tracker shows its values whatever its
+    /// sources' own pages are (2026-10-09); `no`, from before, reads as `summary` and a private page.
     #[serde(default, skip_serializing_if = "Licence::is_empty")]
     pub licence: Licence,
+    /// Whether the source's own page is open to anyone: `public`, `private`, or unset, which is as
+    /// its trackers are: open while a public tracker holds it, closed where only private ones do.
+    /// Its owner's to say, whatever its trackers are.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub visibility: String,
     /// Proposals from readers, for a source that is read from somewhere else: new rows where the
     /// declaration reads fields, and corrections of what a claim says. Who may: as a proposals
     /// source's `readers` (`signed-in`, addresses, `domain:`…; empty, the world's own proposers).
@@ -805,7 +810,8 @@ fn is_true(b: &bool) -> bool {
 #[serde(deny_unknown_fields)]
 pub struct Licence {
     /// `yes`: its claims may be shown in full on a public page. `summary`: their titles, values
-    /// and a link, not their text. `no`: on no public page at all. Unset is `no`.
+    /// and a link, not their text. `no`: on no public page at all. Unset is `yes`: a source is
+    /// shown until its owner says otherwise (2026-10-09), and [`shown`] says it so.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub republish: String,
     /// Where the publisher says so.
@@ -813,6 +819,26 @@ pub struct Licence {
     pub terms: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
+}
+
+/// How much of a source a public tracker shows: `yes` (all) or `summary` (titles, values and a
+/// link); unset is `yes`, and `no` from before is `summary`.
+pub fn shown(republish: &str) -> &str {
+    match republish.trim() {
+        "summary" | "no" => "summary",
+        _ => "yes",
+    }
+}
+
+/// What the owner said of a source's own page: Some(true) public, Some(false) private, None as its
+/// trackers are. `no` from before, with nothing said since, is private.
+pub fn page_said(decl: &SourceDecl) -> Option<bool> {
+    match decl.visibility.as_str() {
+        "public" => Some(true),
+        "private" => Some(false),
+        _ if decl.licence.republish.trim() == "no" => Some(false),
+        _ => None,
+    }
 }
 
 impl Licence {

@@ -803,7 +803,7 @@ fn a_relation_is_what_a_claim_states_or_a_person_signs() {
 }
 
 #[test]
-fn a_public_tracker_needs_every_source_to_say_it_may_be() {
+fn a_public_tracker_is_published_whatever_its_sources_pages_are() {
     let ws = Workspace::new("licence");
     // Published at all, a tracker says what it covers; that check is not this test's.
     let promised = ws.root.join("trackers/cve/tracker.yaml");
@@ -813,8 +813,9 @@ fn a_public_tracker_needs_every_source_to_say_it_may_be() {
     let hub = hub.display().to_string();
     let scope = ws.scope();
     let publish = || run(&ws.root, &["tracker", "publish", &scope, "--to", &hub]);
+    // Sources that said nothing are shown until their owner says otherwise (2026-10-09).
     let (ok, said) = publish();
-    assert!(!ok && said.contains("test/kev has not said whether it may be republished"), "{said}");
+    assert!(ok, "{said}");
 
     // Private, it is its accounts' alone, and needs nobody's permission to be shown to them.
     let file = ws.root.join("trackers/cve/tracker.yaml");
@@ -835,9 +836,10 @@ fn a_public_tracker_needs_every_source_to_say_it_may_be() {
     }
     let (ok, said) = publish();
     assert!(ok, "{said}");
+    // A source whose own page is private still gives a public tracker its values (2026-10-09).
     declare("exploits", "no");
     let (ok, said) = publish();
-    assert!(!ok && said.contains("test/exploits may not be republished"), "{said}");
+    assert!(ok, "{said}");
 }
 
 #[test]

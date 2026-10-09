@@ -49,6 +49,7 @@ mod servetracker;
 mod rows;
 mod schemes;
 mod store;
+mod sync;
 mod teach;
 mod thingquery;
 mod thingstore;
@@ -244,6 +245,10 @@ zetlyn
   zetlyn world import <file> --to <dir> [--url …] [--owner …] | move <workspace> --to <address> | --back
   zetlyn world register <workspace> [--at <directory>]
       An archive made a world again; saying where it went, or that it did not; being listed.
+  zetlyn world sync <address> [<workspace>] [--key zk_…] [--take ours|theirs] [--no-data]
+      A copy on this machine and a hosted world kept in step both ways: definitions, proposals,
+      and every observation with its history. Nobody is locked out; a setting changed on both
+      sides is decided by --take, or asked.
 
   zetlyn hosting serve <dir> [--no-updates] | run <dir> | org <dir> <name> | member <dir> <org> <email> [--role owner|editor|reader]
       Many worlds on one machine, each at /<name> or a domain of its own, each signed in to at

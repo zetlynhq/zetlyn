@@ -321,3 +321,69 @@ fn the_activity_is_filtered_paged_and_one_line_a_job() {
     assert!(page("?tab=alarms").contains("No alarm in this window"));
     assert!(page("?from=2000-01-01&to=2000-01-02").contains("Nothing in this window"));
 }
+
+/// The binary, run as a person runs it: whether it went, and what it printed.
+fn z(args: &[&str]) -> (bool, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_zetlyn")).args(args).output().expect("the binary runs");
+    (out.status.success(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
+}
+
+#[test]
+fn a_world_and_a_copy_of_it_sync_both_ways() {
+    let c = Control::start("sync", None);
+    let world = c.dir.join("orgs/acme");
+    copy(&Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/workspace"), &world);
+    std::fs::write(world.join("workspace.yaml"), "title: Acme\n").unwrap();
+    std::fs::write(c.dir.join("members.yaml"), format!("acme:\n  - email: {OPERATOR}\n    role: owner\n")).unwrap();
+    let (ok, said) = z(&["source", "update", &world.join("sources/kev").display().to_string()]);
+    assert!(ok, "{said}");
+    let (ok, said) = z(&["source", "update", &world.join("sources/vendor-a").display().to_string()]);
+    assert!(ok, "{said}");
+
+    let url = format!("http://127.0.0.1:{}/acme", c.port);
+    assert_eq!(c.get("/acme/sync/state", None).0, 401, "nobody without a key");
+    let op = c.sign_in(OPERATOR);
+    let (s, _, page) = c.ask("POST", "/acme/settings/sync-key", Some(&op), "");
+    assert_eq!(s, 200, "{page}");
+    let key = page.split("--key ").nth(1).and_then(|k| k.split(|c: char| !c.is_ascii_alphanumeric() && c != '_').next()).expect("a key on the page").to_string();
+    assert!(key.starts_with("zk_"), "{key}");
+
+    // Into an empty folder: the whole world, data and all.
+    let copy_dir = std::env::temp_dir().join(format!("zetlyn-sync-copy-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&copy_dir);
+    let mine = copy_dir.display().to_string();
+    let (ok, said) = z(&["world", "sync", &url, &mine, "--key", &key]);
+    assert!(ok, "{said}");
+    assert!(copy_dir.join("sources/kev/source.yaml").exists(), "{said}");
+    assert!(copy_dir.join("sources/kev/db").exists() || std::fs::read_dir(copy_dir.join("sources/kev")).unwrap().count() > 1);
+
+    // A change on each side, to different things: both arrive on both, nobody waits for anybody.
+    let theirs = world.join("trackers/cve/tracker.yaml");
+    let t = std::fs::read_to_string(&theirs).unwrap();
+    std::fs::write(&theirs, t.replacen("title: CVE", "title: CVE there", 1)).unwrap();
+    let ours = copy_dir.join("sources/vendor-b/source.yaml");
+    let o = std::fs::read_to_string(&ours).unwrap();
+    std::fs::write(&ours, o.replacen("title:", "title: Mine,", 1)).unwrap();
+    let (ok, said) = z(&["world", "sync", &url, &mine]);
+    assert!(ok, "the key is kept after the first sync: {said}");
+    assert!(std::fs::read_to_string(world.join("sources/vendor-b/source.yaml")).unwrap().contains("Mine,"), "{said}");
+    assert!(std::fs::read_to_string(copy_dir.join("trackers/cve/tracker.yaml")).unwrap().contains("CVE there"), "{said}");
+
+    // A source updated there: its new values arrive here, and what it said before stays as history.
+    std::fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/update-2/vendor-a.csv"), world.join("sources/vendor-a/advisories.csv")).unwrap();
+    let (ok, said) = z(&["source", "update", &world.join("sources/vendor-a").display().to_string()]);
+    assert!(ok, "{said}");
+    let (ok, said) = z(&["world", "sync", &url, &mine]);
+    assert!(ok, "{said}");
+    let (ok, printed) = z(&["claim", &copy_dir.join("sources/vendor-a").display().to_string(), "CVE-2026-0001"]);
+    assert!(ok, "{printed}");
+    let claim: serde_json::Value = serde_json::from_str(printed.lines().find(|l| l.starts_with('{') || l.starts_with('[')).map(|_| &printed[printed.find(['{', '[']).unwrap()..]).unwrap_or("null")).unwrap_or_default();
+    let claim = if claim.is_array() { claim[0].clone() } else { claim };
+    assert_eq!(claim["excerpt"]["row"]["cvss"], "8.1", "{printed}");
+    assert_eq!(claim["versions"].as_array().map(Vec::len), Some(2), "{printed}");
+
+    // Nothing changed: a second sync changes nothing either.
+    let (ok, said) = z(&["world", "sync", &url, &mine]);
+    assert!(ok, "{said}");
+    let _ = std::fs::remove_dir_all(&copy_dir);
+}

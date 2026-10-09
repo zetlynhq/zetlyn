@@ -1623,9 +1623,252 @@ impl Store {
     }
 }
 
+// -- two copies of one source, brought together (sync.rs) ---------------------------------------
+//
+// A claim is what a source said at a time. Two copies of a world that each read the same source
+// hold two lists of such observations, and neither is wrong: brought together, every observation
+// stays, in the order it was made, and what the claim says now is what was observed last. So two
+// copies merge without anybody deciding anything, which is what lets a world be worked on in two
+// places at once with no lock (sync.rs).
+//
+// A copy's runs are numbered by it. The other's arrive as runs of this one, appended, each noting
+// where it came from (`merged from <instance> run <n>`), so it is not sent back, and the highest
+// of the other's taken is kept in `meta` (`sync.<instance>.run`), so it is not taken twice.
+
+/// What a merge brought: claims made current, versions kept in the history only, claims taken
+/// away, and the runs it added.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct Merged {
+    pub current: u64,
+    pub history: u64,
+    pub removed: u64,
+    pub runs: u64,
+}
+
+pub fn merged_note(peer: &str, run: i64) -> String {
+    format!("merged from {peer} run {run}")
+}
+
+impl Store {
+    /// The runs after `after`, and what they observed, as a store of its own in `to` (a
+    /// directory): the runs, the claims they made or saw, their versions, their removals and the
+    /// receipts those name. A run merged from `skip` is left out: it came from there. The highest
+    /// run here, for the next delta to start after.
+    pub fn delta(&self, after: i64, skip: &str, to: &Path) -> Result<i64, String> {
+        std::fs::create_dir_all(to).map_err(|e| e.to_string())?;
+        drop(Store::open(to)?);
+        let file = to.join("claims.db");
+        self.db.execute("attach database ?1 as d", rusqlite::params![file.to_string_lossy()]).map_err(|e| e.to_string())?;
+        let skip_like = format!("merged from {skip} run %");
+        let copied = (|| -> Result<(), String> {
+            let ex = |sql: &str, p: &[&dyn rusqlite::ToSql]| self.db.execute(sql, p).map(|_| ()).map_err(|e| format!("{e}: {sql}"));
+            ex("insert into d.run select * from main.run where id > ?1 and coalesce(note, '') not like ?2", &[&after, &skip_like])?;
+            ex("insert into d.record select * from main.record where last_run in (select id from d.run) or changed_run in (select id from d.run)", &[])?;
+            ex("insert into d.revision select * from main.revision where run in (select id from d.run)", &[])?;
+            ex("insert into d.removed select * from main.removed where run in (select id from d.run)", &[])?;
+            ex("insert or ignore into d.excerpt select * from main.excerpt where digest in (select excerpt from d.record union select excerpt from d.revision)", &[])?;
+            Ok(())
+        })();
+        let _ = self.db.execute("detach database d", []);
+        copied?;
+        Ok(self.last_run())
+    }
+
+    /// The time a run of this store observed what it did: when it finished, or began.
+    fn run_time(&self, run: i64) -> String {
+        self.db
+            .query_row("select coalesce(finished, started) from run where id = ?1", rusqlite::params![run], |r| r.get::<_, String>(0))
+            .unwrap_or_default()
+    }
+
+    fn run_note(&self, run: i64) -> String {
+        self.db.query_row("select coalesce(note, '') from run where id = ?1", rusqlite::params![run], |r| r.get::<_, String>(0)).unwrap_or_default()
+    }
+
+    /// Another copy's observations of this source (a delta, or a whole store), brought in: its
+    /// runs appended as this one's, each claim current here where it was observed later there,
+    /// every version of it in the history, a removal only where nothing here saw the claim since.
+    pub fn merge_from(&self, from: &Path, peer: &str, history: bool) -> Result<Merged, String> {
+        let other = Store::open(from)?;
+        let done: i64 = self.meta(&format!("sync.{peer}.run")).and_then(|v| v.parse().ok()).unwrap_or(0);
+        let base: i64 = self.meta(&format!("sync.{peer}.base")).and_then(|v| v.parse().ok()).unwrap_or(0);
+        let mut m = Merged::default();
+        // Their runs, as runs of this store.
+        let mut map: BTreeMap<i64, i64> = BTreeMap::new();
+        let runs: Vec<(i64, String, Option<String>, i64, i64, i64, i64, i64)> = {
+            let mut stmt = other
+                .db
+                .prepare("select id, started, finished, complete, coalesce(added,0), coalesce(changed,0), coalesce(removed,0), coalesce(unchanged,0) from run where id > ?1 order by id")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(rusqlite::params![done], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)))
+                .map_err(|e| e.to_string())?;
+            rows.flatten().collect()
+        };
+        if runs.is_empty() {
+            return Ok(m);
+        }
+        self.db.execute_batch("begin").map_err(|e| e.to_string())?;
+        let result = (|| -> Result<(), String> {
+            for (id, started, finished, complete, added, changed, removed, unchanged) in &runs {
+                let local = self.last_run() + 1;
+                self.db
+                    .execute(
+                        "insert into run(id, started, finished, complete, added, changed, removed, unchanged, note) values(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                        rusqlite::params![local, started, finished, complete, added, changed, removed, unchanged, merged_note(peer, *id)],
+                    )
+                    .map_err(|e| e.to_string())?;
+                map.insert(*id, local);
+                m.runs += 1;
+            }
+            let mapped = |run: i64| map.get(&run).copied();
+            // Every claim they observed in those runs.
+            let ids: Vec<(String, i64, Option<String>)> = {
+                let mut stmt = other.db.prepare("select record_id, last_run, excerpt from record").map_err(|e| e.to_string())?;
+                let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(|e| e.to_string())?;
+                rows.flatten().collect()
+            };
+            for (id, their_run, digest) in ids {
+                let Some(run) = mapped(their_run) else { continue };
+                let Some(mut claim) = other.get(&id) else { continue };
+                claim.excerpt = digest.as_deref().and_then(|d| other.excerpt(d));
+                let their_at = other.run_time(their_run);
+                let ours: Option<(i64, String)> = self.db.query_row("select last_run, hash from record where record_id = ?1", rusqlite::params![id], |r| Ok((r.get(0)?, r.get(1)?))).ok();
+                let our_at = ours.as_ref().map(|(r, _)| self.run_time(*r)).unwrap_or_default();
+                // In the same second, what came from them gives way to what they saw after it; two
+                // observations of their own each give way to the same one on both sides.
+                let tie_theirs = their_at == our_at
+                    && ours.as_ref().is_some_and(|(r, h)| *h != claim.hash && (*r <= base || self.run_note(*r).starts_with(&format!("merged from {peer} run ")) || claim.hash > *h));
+                if ours.is_none() || their_at > our_at || tie_theirs {
+                    self.put(&claim, run, &their_at, history)?;
+                    m.current += 1;
+                } else if history && ours.as_ref().is_some_and(|(_, h)| *h != claim.hash) {
+                    // Observed there before it was here: a version in the history, not what it says now.
+                    let excerpt = match &claim.excerpt { Some(e) => Some(self.keep_excerpt(e)?), None => None };
+                    self.db
+                        .execute(
+                            "insert or ignore into revision(record_id, run, at, hash, title, known, fields, excerpt) values(?1,?2,?3,?4,?5,?6,?7,?8)",
+                            rusqlite::params![id, run, their_at, claim.hash, claim.title, claim.known, claim.fields_json().to_string(), excerpt],
+                        )
+                        .map_err(|e| e.to_string())?;
+                    m.history += 1;
+                }
+            }
+            // Their earlier versions, where the history is kept.
+            if history {
+                let versions: Vec<(String, i64, String, String, String, String, String, Option<String>)> = {
+                    let mut stmt = other.db.prepare("select record_id, run, at, hash, title, known, fields, excerpt from revision").map_err(|e| e.to_string())?;
+                    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?))).map_err(|e| e.to_string())?;
+                    rows.flatten().collect()
+                };
+                for (id, run, at, hash, title, known, fields, digest) in versions {
+                    let Some(run) = mapped(run) else { continue };
+                    let excerpt = match digest.as_deref().and_then(|d| other.excerpt(d)) { Some(e) => Some(self.keep_excerpt(&e)?), None => None };
+                    let n = self
+                        .db
+                        .execute(
+                            "insert or ignore into revision(record_id, run, at, hash, title, known, fields, excerpt) values(?1,?2,?3,?4,?5,?6,?7,?8)",
+                            rusqlite::params![id, run, at, hash, title, known, fields, excerpt],
+                        )
+                        .map_err(|e| e.to_string())?;
+                    m.history += n as u64;
+                }
+            }
+            // Their removals, where nothing here has seen the claim since.
+            let removals: Vec<(String, i64, String, String)> = {
+                let mut stmt = other.db.prepare("select record_id, run, at, title from removed").map_err(|e| e.to_string())?;
+                let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).map_err(|e| e.to_string())?;
+                rows.flatten().collect()
+            };
+            for (id, run, at, title) in removals {
+                let Some(run) = mapped(run) else { continue };
+                let ours: Option<i64> = self.db.query_row("select last_run from record where record_id = ?1", rusqlite::params![id], |r| r.get(0)).ok();
+                let Some(our_run) = ours else { continue };
+                if self.run_time(our_run) >= at {
+                    continue;
+                }
+                for table in ["ident", "field", "fts"] {
+                    self.db.execute(&format!("delete from {table} where record_id = ?1"), rusqlite::params![id]).map_err(|e| e.to_string())?;
+                }
+                self.db.execute("delete from record where record_id = ?1", rusqlite::params![id]).map_err(|e| e.to_string())?;
+                self.db
+                    .execute("insert or replace into removed(record_id, run, at, title) values(?1,?2,?3,?4)", rusqlite::params![id, run, at, title])
+                    .map_err(|e| e.to_string())?;
+                m.removed += 1;
+            }
+            let highest = runs.last().map(|r| r.0).unwrap_or(done);
+            self.db
+                .execute("insert or replace into meta(key, value) values(?1, ?2)", rusqlite::params![format!("sync.{peer}.run"), highest.to_string()])
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.db.execute_batch("commit").map_err(|e| e.to_string())?;
+                Ok(m)
+            }
+            Err(e) => {
+                let _ = self.db.execute_batch("rollback");
+                Err(e)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn two_copies_of_a_source_merge_every_observation_and_the_latest_is_current() {
+        let base = std::env::temp_dir().join(format!("zetlyn-merge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let decl = "name: t/adv\nkind: vulnerability\nfetch:\n  type: csv\n  path: a.csv\nclaims:\n  id:\n    scheme: cve\n    from: field:cve\n  title: field:title\n  known: field:published\n  properties:\n    cvss:\n      type: number\n      from: field:cvss\nretention:\n  history: true\n";
+        let make = |name: &str, csv: &str| {
+            let d = base.join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("source.yaml"), decl).unwrap();
+            std::fs::write(d.join("a.csv"), csv).unwrap();
+            d
+        };
+        let rows = |first: &str, skip_two: bool| -> String { let mut s = format!("cve,title,cvss,published\nCVE-1,one,{first},2026-01-01\n"); for i in 2..=12 { if !(skip_two && i == 2) { s.push_str(&format!("CVE-{i},n{i},6.0,2026-01-01\n")); } } s };
+        let csv1 = rows("5.0", false);
+        // Two copies of one world, read once alike: here (a) and there (b).
+        let a = make("a", &csv1);
+        let b = make("b", &csv1);
+        let sa = crate::source::Source::open(&a).unwrap();
+        sa.run().unwrap();
+        let sb = crate::source::Source::open(&b).unwrap();
+        sb.run().unwrap();
+        let cvss = |s: &crate::source::Source, id: &str| {
+            let q = crate::source::Query { text: String::new(), pred: None, ids: vec![id.into()], seen_before: None, view: None, sort: None, limit: 1, offset: 0 };
+            let rec = s.search(&q).unwrap().1.into_iter().next().map(|h| h.record_id);
+            rec.and_then(|r| s.store.get(&r)).and_then(|c| c.fields.get("cvss").map(|v| v.display()))
+        };
+        // b starts from where a was: everything a had is b's already.
+        sb.store.db.execute("insert or replace into meta(key, value) values('sync.A.run', '1')", []).unwrap();
+        // Later, there, the source says otherwise, and CVE-2 is gone.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(b.join("a.csv"), rows("9.8", true)).unwrap();
+        sb.run().unwrap();
+        // Their delta, brought here.
+        let delta = base.join("delta");
+        sb.store.delta(1, "A", &delta).unwrap();
+        let m = sa.store.merge_from(&delta, "B", true).unwrap();
+        assert_eq!(m.runs, 1);
+        assert_eq!(cvss(&sa, "CVE-1").as_deref(), Some("9.8"), "observed later there: current here");
+        assert_eq!(cvss(&sa, "CVE-2"), None, "removed there after it was last seen here");
+        let versions: i64 = sa.store.db.query_row("select count(*) from revision where record_id = (select record_id from ident where value = 'CVE-1')", [], |r| r.get(0)).unwrap_or(0);
+        assert!(versions >= 2, "both values in the history: {versions}");
+        // Not taken twice.
+        assert_eq!(sa.store.merge_from(&delta, "B", true).unwrap().runs, 0);
+        // A delta for b from here leaves out what came from b.
+        let back = base.join("back");
+        sa.store.delta(1, "B", &back).unwrap();
+        let other = Store::open(&back).unwrap();
+        assert_eq!(other.last_run(), 0, "nothing of b's goes back to b");
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     fn store(name: &str) -> (Store, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("zetlyn-store-{}-{name}", std::process::id()));

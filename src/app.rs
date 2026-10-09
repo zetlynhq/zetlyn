@@ -624,6 +624,56 @@ impl App {
                 respond(request, status, "application/json", &answer);
                 None
             }
+            // A copy of this world on an owner's own machine, syncing (sync.rs): asked by a program
+            // with an API key of an owner of this world, never with a cookie.
+            ["sync", what] => {
+                let auth = request.headers().iter().find(|x| x.field.equiv("Authorization")).map(|x| x.value.as_str().to_string()).unwrap_or_default();
+                let owner_email = auth
+                    .strip_prefix("Bearer ")
+                    .and_then(|k| h.accounts.by_key(k.trim()))
+                    .map(|a| a.email)
+                    .filter(|e| h.is_owner(e));
+                if owner_email.is_none() {
+                    respond(request, 401, "application/json", &json!({ "error": "a key of an owner of this world: Settings, Moving, Make a sync key" }).to_string());
+                    return None;
+                }
+                let q = serve::params(url);
+                let bytes = |request: tiny_http::Request, r: Result<Vec<u8>, String>| match r {
+                    Ok(b) => {
+                        let mut response = tiny_http::Response::from_data(b);
+                        if let Ok(hd) = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/octet-stream"[..]) {
+                            response = response.with_header(hd);
+                        }
+                        let _ = request.respond(response);
+                    }
+                    Err(e) => respond(request, 400, "application/json", &json!({ "error": e }).to_string()),
+                };
+                match (post, *what) {
+                    (false, "state") => respond(request, 200, "application/json", &crate::sync::state(&self.root).to_string()),
+                    (false, "pull") => bytes(request, crate::sync::serve_pull(&self.root)),
+                    (false, "data") => {
+                        let after: i64 = q.get("after").and_then(|a| a.parse().ok()).unwrap_or(0);
+                        let r = crate::sync::serve_data(&self.root, q.get("source").map(String::as_str).unwrap_or(""), after, q.get("peer").map(String::as_str).unwrap_or(""));
+                        bytes(request, r)
+                    }
+                    (false, "export") => {
+                        let file = std::env::temp_dir().join(format!("zetlyn-sync-export-{}.tar.gz", crate::jwt::random()));
+                        let r = crate::world::export(&self.root, &file).and_then(|_| std::fs::read(&file).map_err(|e| e.to_string()));
+                        let _ = std::fs::remove_file(&file);
+                        bytes(request, r)
+                    }
+                    (true, "push") => {
+                        let r = crate::sync::take_push(&self.root, &mut std::io::Read::take(request.as_reader(), 4 << 30));
+                        open_trackers().lock().unwrap_or_else(|e| e.into_inner()).clear();
+                        match r {
+                            Ok(j) => respond(request, 200, "application/json", &j.to_string()),
+                            Err((code, j)) => respond(request, code, "application/json", &j.to_string()),
+                        }
+                    }
+                    _ => respond(request, 404, "application/json", &json!({ "error": "state, pull, data, export, or push" }).to_string()),
+                }
+                None
+            }
             // In a cell, signing in and out is the main server's, for everything on zetlyn.com at once:
             // the organisation sends people there and is sent back to.
             ["signin", ..] | ["signout"] if crate::account::remote_identity() => {
@@ -730,6 +780,11 @@ impl App {
                 Some(request)
             }
             // A source of the world, for anybody where it may be shown; the rest of it is its owners'.
+            // About the world, for anybody.
+            ["about"] | ["about", "licences"] if !owner && !post => {
+                self.visitor = true;
+                Some(request)
+            }
             ["sources", name] | ["sources", name, ""] if !owner && !post => {
                 if shown_source(&self.root, name).is_some() {
                     self.visitor = true;
@@ -740,7 +795,7 @@ impl App {
                 }
             }
             // What the world is, where it went, all of it at once: its owners', not every editor's.
-            ["export.tar.gz"] | ["settings", "moved"] | ["settings", "access"] | ["settings", "seen"] | ["settings", "licence", _] | ["settings", "proposals", _] | ["settings", "sources"] | ["publish", _] | ["assist"] if owner && (post || parts.len() == 1 && parts[0] == "export.tar.gz") && !self.who.as_deref().is_some_and(|e| h.is_owner(e)) => {
+            ["export.tar.gz"] | ["settings", "moved"] | ["settings", "access"] | ["settings", "seen"] | ["settings", "licence", _] | ["settings", "proposals", _] | ["settings", "sources"] | ["settings", "profile"] | ["settings", "sync-key"] | ["publish", _] | ["assist"] if owner && (post || parts.len() == 1 && parts[0] == "export.tar.gz") && !self.who.as_deref().is_some_and(|e| h.is_owner(e)) => {
                 respond(request, 403, html_kind, &page("Owners only", html! { h1 { "Only an owner of this world changes that" } p { a href=(serve::at("/")) { "Back" } } }));
                 None
             }
@@ -784,8 +839,10 @@ impl App {
         } else {
             vec![
                 ("Trackers".to_string(), home.clone()),
+                ("Sources".to_string(), format!("{}/sources", self.base)),
                 ("Proposals".to_string(), format!("{}/proposals", self.base)),
-                ("Assist".to_string(), format!("{}/assist", self.base)),
+                ("Settings".to_string(), format!("{}/settings", self.base)),
+                ("About".to_string(), format!("{}/about", self.base)),
                 ("Docs ↗".to_string(), "https://zetlyn.com/docs".to_string()),
             ]
         };
@@ -809,7 +866,7 @@ impl App {
             } else {
                 let here = match parts.first().map(String::as_str) {
                     Some("sources") => "Sources",
-                    Some("assist") => "Assist",
+                    Some("about") => "About",
                     Some("settings") => "Settings",
                     Some("proposals") => "Proposals",
                     None => "Trackers",
@@ -820,8 +877,8 @@ impl App {
                         ("Trackers".to_string(), home.clone()),
                         ("Sources".to_string(), format!("{}/sources", self.base)),
                         ("Proposals".to_string(), format!("{}/proposals", self.base)),
-                        ("Assist".to_string(), format!("{}/assist", self.base)),
                         ("Settings".to_string(), format!("{}/settings", self.base)),
+                        ("About".to_string(), format!("{}/about", self.base)),
                     ],
                     Some(here.to_string()).filter(|h| !h.is_empty()),
                 )
@@ -864,6 +921,15 @@ impl App {
             _ => None,
         });
         serve::frame_section(None, Vec::new());
+        // About this world and Zetlyn, for members and visitors alike.
+        if parts.first().map(String::as_str) == Some("about") {
+            match parts.get(1).map(String::as_str) {
+                None => respond(request, 200, "text/html; charset=utf-8", &self.about_page()),
+                Some("licences") => respond(request, 200, "text/plain; charset=utf-8", THIRD_PARTY),
+                _ => respond(request, 404, "text/html; charset=utf-8", &page("Not here", html! { h1 { "Not here" } })),
+            }
+            return;
+        }
         // A source's own page, for a visitor: under the world's sources, which is no page of its own.
         if self.visitor && parts.first().map(String::as_str) == Some("sources") && parts.len() >= 2 {
             serve::frame_group(Some(("Sources".to_string(), String::new())));
@@ -1073,7 +1139,9 @@ impl App {
                             let _ = ds.run();
                         }
                         crate::propose::tell_proposer(&self.root, &dir, name, *verb == "accept", why);
-                        return redirect(request, &serve::at(&format!("/proposals/{source}")));
+                        // Back to the inbox where it was decided there, else to the source's own list.
+                        let back = if form.get("back").map(String::as_str) == Some("inbox") { serve::at("/proposals") } else { serve::at(&format!("/proposals/{source}")) };
+                        return redirect(request, &back);
                     }
                     Err(e) => (400, html_kind, page("Not decided", html! { p { (e) } p { a href=(serve::at(&format!("/proposals/{source}"))) { "Back to the proposals" } } })),
                 }
@@ -1134,6 +1202,26 @@ impl App {
                     }
                 };
                 return redirect(request, &serve::at(&format!("/settings?saved={}#access", urlencode(&said))));
+            }
+            // A key for `zetlyn world sync`, shown once: what it is is never stored, only its hash.
+            (true, ["settings", "sync-key"]) => {
+                let made = match (self.hosted.as_ref(), self.who.as_deref()) {
+                    (Some(h), Some(email)) => h.accounts.ensure(email).and_then(|a| h.accounts.new_key(a.id, "sync")),
+                    _ => Err("Syncing is for a world on zetlyn.com, or one served with zetlyn host.".to_string()),
+                };
+                let body = match made {
+                    Ok(key) => html! {
+                        p.back { a href=(serve::at("/settings#moving")) { "← Settings" } }
+                        h1 { "Your sync key" }
+                        p { "Shown this once. On your machine, in the folder of your local world, or in an empty one to take this world there:" }
+                        pre #sync-cmd { "zetlyn world sync " span #sync-url { (serve::at("/")) } " --key " (key) }
+                        p.dim { "The key is kept on your machine after the first sync. It stops working when you are no longer an owner here." }
+                        script { (PreEscaped(format!("document.getElementById('sync-url').textContent=location.origin+{};", json!(serve::at("/"))))) }
+                    },
+                    Err(e) => html! { p.back { a href=(serve::at("/settings#moving")) { "← Settings" } } h1 { "No key made" } p { (e) } },
+                };
+                respond(request, 200, html_kind, &page("Sync key", body));
+                return;
             }
             (true, ["settings", "moved"]) => {
                 let to = form.get("to").cloned().unwrap_or_default();
@@ -1217,6 +1305,23 @@ impl App {
                 let said = said.map(|s| format!("{tracker}: {s}")).unwrap_or_else(|e| e);
                 return redirect(request, &serve::at(&format!("/settings?seen={}#seen", urlencode(&said))));
             }
+            // What the About page says of this world.
+            (true, ["settings", "profile"]) => {
+                let get = |k: &str| form.get(k).map(|v| v.trim().to_string()).unwrap_or_default();
+                let ws = self.root.join(crate::account::WORKSPACE);
+                let profile = crate::account::Profile { about: get("about"), operator: get("operator"), website: get("website"), privacy: get("privacy"), imprint: get("imprint") };
+                let said = (|| -> Result<(), String> {
+                    if !profile.website.is_empty() && !profile.website.starts_with("http") {
+                        return Err("The website is an address starting with https://.".into());
+                    }
+                    for (k, v) in [("title", get("title")), ("contact", get("contact"))] {
+                        crate::world::set_top(&ws, k, (!v.is_empty()).then_some(v.as_str()))?;
+                    }
+                    set_block(&ws, "profile", &profile)
+                })();
+                let said = match said { Ok(()) => "Saved: the About page says it now.".to_string(), Err(e) => e };
+                return redirect(request, &serve::at(&format!("/settings?saved={}#profile", urlencode(&said))));
+            }
             // Every source's place on public pages and who may propose to it, from one table.
             (true, ["settings", "sources"]) => {
                 let mut changed = 0;
@@ -1285,10 +1390,11 @@ impl App {
                 crate::autoupdate::forgive(&self.sources().join(slug));
                 return redirect(request, &serve::at(&format!("/settings?saved={}", urlencode("It will be asked again on the next pass."))));
             }
-            (false, ["assist"]) => (200, html_kind, self.assist_status_page(None)),
+            // The assist is set up in Settings now; its old address leads there.
+            (false, ["assist"]) => return redirect(request, &serve::at("/settings#assist")),
             (true, ["assist"]) => {
                 let said = self.keep_assist(&form).unwrap_or_else(|e| e);
-                (200, html_kind, self.assist_status_page(Some(&said)))
+                return redirect(request, &serve::at(&format!("/settings?saved={}#assist", urlencode(&said))));
             }
             (false, ["new", tracker]) => (200, html_kind, self.source_page(tracker, &query)),
             // A file from the person's machine, kept in the source's own directory.
@@ -1551,7 +1657,11 @@ impl App {
                     button.primary type="submit" { "Send it and read the API" }
                 }
             } @else {
-                div.note { "No model is set up to read it. " a href=(serve::at("/assist")) { "Set one up" } ": Claude with a key, or a model of your own. Then come back to this address." }
+                @if crate::usage::in_cell() {
+                    div.note { "A hosted world has no assist. Read this API with the one on your own machine: " code { "zetlyn world sync " (crate::account::Site::for_workspace(&self.root).url) } ", add the source there, and sync again; it is then read here." }
+                } @else {
+                    div.note { "No model is set up to read it. " a href=(serve::at("/settings#assist")) { "Set one up" } ": Claude with a key, or a model of your own. Then come back to this address." }
+                }
             }
             pre #log data-jobs=(serve::at("/job/")) hidden {}
             div #error .note hidden {}
@@ -1678,6 +1788,132 @@ impl App {
         page("Publish", body)
     }
 
+    /// About this world, for anybody: what it is, who runs it and how to reach them, its imprint,
+    /// what it makes public, how to take part and what its data may be used for; then about
+    /// Zetlyn itself: the version, whether a newer one is out, what is new, where the data lives,
+    /// the licences, where to get help.
+    fn about_page(&self) -> String {
+        let site = crate::account::Site::load(&self.root);
+        let p = &site.profile;
+        let title = if site.title.is_empty() { "This world".to_string() } else { site.title.clone() };
+        let member = !self.visitor;
+        let hosted_cell = crate::usage::in_cell();
+        let trackers: Vec<(String, TrackerDecl)> = crate::tracker::scope_registry(&self.trackers()).into_iter().filter_map(|(_, d)| TrackerDecl::load(&d).ok().map(|t| (d.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(), t))).filter(|(_, t)| member || t.visibility != "private").collect();
+        let sources: Vec<(String, crate::sourcedecl::SourceDecl)> = crate::tracker::registry(&self.sources()).into_iter().filter_map(|(_, d)| crate::sourcedecl::SourceDecl::load(&d).ok().map(|s| (d.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(), s))).filter(|(_, s)| member || matches!(s.licence.republish.as_str(), "yes" | "summary")).collect();
+        let taking: Vec<&(String, crate::sourcedecl::SourceDecl)> = sources.iter().filter(|(_, s)| matches!(s.source, crate::sourcedecl::Fetch::Proposals { .. }) || s.proposals.is_some()).collect();
+        let version = env!("CARGO_PKG_VERSION");
+        let platform = format!("{} {}", std::env::consts::OS, std::env::consts::ARCH);
+        let local = self.hosted.is_none();
+        let latest = local.then(|| release_info("latest")).flatten();
+        let newer = latest.as_ref().and_then(|l| l["tag_name"].as_str().map(str::to_string)).filter(|t| version_numbers(t) > version_numbers(version));
+        let notes = release_info(&format!("v{version}")).and_then(|r| r["body"].as_str().map(str::to_string)).unwrap_or_default();
+        let (bytes, more) = if local { size_under(&self.root) } else { (0, false) };
+        let runs_on = if hosted_cell { "Zetlyn Managed, on zetlyn.com".to_string() } else if local { "your own machine".to_string() } else { "a server its operator runs".to_string() };
+        let diag = format!("Zetlyn {version}\nPlatform: {platform}\nRuns on: {runs_on}\nTrackers: {}\nSources: {}{}", trackers.len(), sources.len(), if local { format!("\nWorkspace: {:.1} MB{}", bytes as f64 / 1_048_576.0, if more { "+" } else { "" }) } else { String::new() });
+        let issue = format!("https://github.com/zetlynhq/zetlyn/issues/new?body={}", urlencode(&format!("What happened:\n\nWhat I expected:\n\n---\n{diag}\n")));
+        let body = html! {
+            header.admin-head {
+                div {
+                    h1 { "About " (title) }
+                    @if !p.about.is_empty() { p.admin-sub { (p.about) } }
+                    @else if member { p.admin-sub { "Nothing said about it yet. " a href=(serve::at("/settings#profile")) { "Say what it is" } "." } }
+                }
+            }
+            div.admin-cards.two {
+                section.admin-card {
+                    h2 { "Who runs it" }
+                    dl.admin-kv {
+                        @if !p.operator.is_empty() { dt { "Run by" } dd { (p.operator) } }
+                        @if !p.website.is_empty() { dt { "Website" } dd { a href=(p.website) rel="noopener" { (p.website) } } }
+                        @if !site.contact.is_empty() { dt { "Write to" } dd { a href={"mailto:" (site.contact)} { (site.contact) } } }
+                        @if !p.privacy.is_empty() { dt { "Personal data" } dd { a href={"mailto:" (p.privacy)} { (p.privacy) } } }
+                        dt { "Runs on" } dd { (runs_on) }
+                    }
+                    @if p.operator.is_empty() && site.contact.is_empty() && !member { p.dim { "Its operator has not said more." } }
+                }
+                section.admin-card {
+                    h2 { "What it makes public" }
+                    @if trackers.is_empty() && sources.is_empty() { p.dim { "Nothing yet." } }
+                    @if !trackers.is_empty() {
+                        p.dim { "Trackers" }
+                        ul.admin-list { @for (folder, t) in &trackers { li { a href=(serve::at(&format!("/trackers/{folder}/"))) { (t.title) } @if t.visibility == "private" { " " span.chip { "private" } } } } }
+                    }
+                    @if !sources.is_empty() {
+                        p.dim { "Sources" }
+                        ul.admin-list { @for (slug, s) in &sources { li {
+                            a href=(serve::at(&format!("/sources/{slug}"))) { (if s.title.is_empty() { s.name.as_str() } else { s.title.as_str() }) }
+                            span.dim { " · " (match s.licence.republish.as_str() { "yes" => "may be republished", "summary" => "titles and values may be shown", _ => "not shown in public" }) }
+                            @if !s.licence.terms.is_empty() { " · " a href=(s.licence.terms) rel="noopener" { "its terms" } }
+                        } } }
+                    }
+                }
+            }
+            @if !taking.is_empty() {
+                section.admin-card {
+                    h2 { "Taking part" }
+                    p.dim { "These sources take proposals: a row, or a correction of what they say, from the page of any of their claims. Signed in, with a link by mail; the owner decides." }
+                    ul.admin-list { @for (slug, s) in &taking { li { a href=(serve::at(&format!("/sources/{slug}"))) { (if s.title.is_empty() { s.name.as_str() } else { s.title.as_str() }) } } } }
+                }
+            }
+            @if !p.imprint.is_empty() {
+                section.admin-card {
+                    h2 { "Imprint" }
+                    div.about-imprint { (p.imprint) }
+                }
+            }
+            h2.admin-section { "About Zetlyn" }
+            div.admin-cards.two {
+                section.admin-card {
+                    h2 { "Zetlyn " (version) }
+                    p.dim { "Zetlyn reads sources (APIs, feeds, tables, files), keeps what each says with a receipt and its history, and puts several together in a tracker: where they agree, where they disagree, and what changed. Open source, under the Apache License 2.0." }
+                    dl.admin-kv {
+                        dt { "Version" } dd { (version) }
+                        dt { "Platform" } dd { (platform) }
+                        dt { "Updates" } dd {
+                            @if hosted_cell { "kept current by Zetlyn" }
+                            @else if let Some(t) = &newer { span.status { span.dot.warn {} (t) " is out" } }
+                            @else if local && latest.is_some() { span.status { span.dot.ok {} "the newest" } }
+                            @else if local { span.dim { "could not ask GitHub" } }
+                            @else { "kept by its operator" }
+                        }
+                        dt { "Data" } dd {
+                            @if hosted_cell { "on Zetlyn's servers in Germany, copied every day, encrypted" }
+                            @else if local { code { (self.root.display()) } " · " (format!("{:.1} MB", bytes as f64 / 1_048_576.0)) @if more { "+" } }
+                            @else { "on its operator's server" }
+                            @if member { " · " a href=(serve::at("/export.tar.gz")) { "download all of it" } }
+                        }
+                    }
+                    @if newer.is_some() {
+                        p { "To update: " } pre { "curl -fsSL https://zetlyn.com/install.sh | sh" }
+                    }
+                }
+                section.admin-card {
+                    h2 { "Help" }
+                    ul.admin-list {
+                        li { a href="https://zetlyn.com/docs" rel="noopener" { "Documentation" } }
+                        li { a href="https://github.com/zetlynhq/zetlyn" rel="noopener" { "Source code on GitHub" } }
+                        li { a href=(issue) rel="noopener" { "Report a problem" } span.dim { ", with the version filled in" } }
+                        li { "Security: " a href="mailto:security@zetlyn.com" { "security@zetlyn.com" } }
+                        li { a href=(serve::at("/about/licences")) { "Licences of what it is built from" } }
+                    }
+                    @if member {
+                        p.dim { "For support: what is below, without anything personal." }
+                        pre #diag { (diag) }
+                        button #copy-diag type="button" { "Copy diagnostics" }
+                        script { (PreEscaped(DIAGNOSTICS_SCRIPT)) }
+                    }
+                }
+            }
+            @if !notes.trim().is_empty() {
+                section.admin-card {
+                    div.admin-card-head { h2 { "What is new in " (version) } a href="https://github.com/zetlynhq/zetlyn/releases" rel="noopener" { "Every release" } }
+                    div.about-notes { (notes) }
+                }
+            }
+        };
+        page(&format!("About {title}"), body)
+    }
+
     /// Every source this world reads, for its members: what it is, how much it holds, when it was
     /// last read and will be next, which trackers it feeds, whether it is shown in public, and what
     /// readers proposed to it.
@@ -1742,6 +1978,20 @@ impl App {
                             }
                         } }
                     }
+                }
+            }
+            // A source with no address: what people read and propose, row by row.
+            section.admin-card #new {
+                h2 { "New source made of proposals" }
+                p.dim { "For what nobody publishes as data but people can read: prices at a stall, a timetable on a wall. Name the fields a row has; those that identify a row together make its identifier (country, trim and week make " code { "DEU-rwd-2026-W40" } "). Field names are lowercase letters, digits and underscores." }
+                form.admin-form method="post" action=(serve::at("/proposals")) {
+                    div.admin-grid {
+                        label { "Title" input type="text" name="title" placeholder="Tesla Model Y prices" required; }
+                        label { "Identified by" input type="text" name="identify" placeholder="country, trim, week" required; }
+                        label { "Numbers" input type="text" name="numbers" placeholder="price"; }
+                        label { "Words" input type="text" name="words" placeholder="currency"; }
+                    }
+                    div.admin-submit { button.primary type="submit" { "Make it" } span.dim { "Not shown in public until you say so, in Settings." } }
                 }
             }
         };
@@ -2086,7 +2336,7 @@ impl App {
             h2 { "Where the data usually is" }
             ul {
                 li { "A link on the page that says " em { "RSS" } ", " em { "Atom" } ", " em { "export" } ", " em { "download" } " or " em { "CSV" } "." }
-                li { "An API: search for the site's name and " em { "API" } ". An address that answers JSON can be read with the assist (" a href=(serve::at("/assist")) { "is one set up?" } ")." }
+                li { "An API: search for the site's name and " em { "API" } ". An address that answers JSON can be read with the assist (" a href=(serve::at("/settings#assist")) { "is one set up?" } ")." }
                 li { "Somebody who already publishes the same data as a table or an API. For games on Steam, SteamSpy answers JSON by tag: " code { "https://steamspy.com/api.php?request=tag&tag=Indie" } "." }
                 li { "A file you have: upload it on the page before." }
             }
@@ -2096,11 +2346,13 @@ impl App {
 
     /// Whether a model is asked, which, for what, and how to set one up. Tables and feeds need
     /// none; this is where a person finds that out rather than guessing.
-    fn assist_status_page(&self, said: Option<&str>) -> String {
+    /// The assist, in the settings of a world on one's own machine: a hosted one has none, and
+    /// is worked on with one's own by `zetlyn world sync`.
+    fn assist_section(&self, said: Option<&str>) -> Markup {
         let a = crate::assist::Assist::configured(&self.root);
-        let body = html! {
-            h1 { "The assist" }
-            @if let Some(s) = said { div.note { (s) } }
+        html! { section.settings-card #assist {
+            header.settings-card-head { h2 { "Assist" } }
+            @if let Some(s) = said { div.settings-said { (s) } }
             @if a.available() {
                 p.state.current { "Set up: it asks " strong { (a.who()) } "." }
             } @else {
@@ -2133,8 +2385,7 @@ impl App {
                     button type="submit" { "Turn it off" }
                 }
             }
-        };
-        page("The assist", body)
+        } }
     }
 
     /// The choice made on the assist page, kept where the program reads it.
@@ -2356,9 +2607,11 @@ impl App {
             .collect();
         let jump: Vec<(&str, &str)> = [
             hosted_cell.then_some(("usage", "Plan and usage")),
+            owner.then_some(("profile", "Profile")),
             owner.then_some(("seen", "Who sees what")),
             self.hosted.is_some().then_some(("access", "Who may do what")),
             Some(("updates", "Updates")),
+            (!hosted_cell).then_some(("assist", "Assist")),
             Some(("moving", "Moving")),
         ]
         .into_iter()
@@ -2369,6 +2622,27 @@ impl App {
             nav.settings-jump { @for (id, label) in &jump { a href={"#" (id)} { (label) } } }
             @if let Some(s) = query.get("saved") { div.note { (s) } }
             @if hosted_cell { section.settings-card { (cell_usage_section(&sources)) } }
+            @if owner {
+                @let site = crate::account::Site::load(&self.root);
+                section.settings-card #profile {
+                    header.settings-card-head {
+                        h2 { "Profile" }
+                        p { "What " a href=(serve::at("/about")) { "the About page" } " says about this world, to anybody. Empty fields are left out." }
+                    }
+                    form.admin-form method="post" action=(serve::at("/settings/profile")) {
+                        div.admin-grid {
+                            label { "Name" input type="text" name="title" value=(site.title); }
+                            label { "Run by" input type="text" name="operator" value=(site.profile.operator) placeholder="A person or an organisation"; }
+                            label { "Website" input type="url" name="website" value=(site.profile.website) placeholder="https://"; }
+                            label { "Write to" input type="email" name="contact" value=(site.contact) placeholder="questions and corrections"; }
+                            label { "Personal data" input type="email" name="privacy" value=(site.profile.privacy) placeholder="if not the address above"; }
+                        }
+                        label { "What it is, in a few sentences" textarea name="about" rows="3" { (site.profile.about) } }
+                        label { "Imprint" textarea name="imprint" rows="5" placeholder="Name, address, and what else the law where you are asks of you" { (site.profile.imprint) } }
+                        div.settings-actions { button.primary type="submit" { "Save" } }
+                    }
+                }
+            }
             @if owner { (self.seen_section(query)) }
             @if self.hosted.is_some() {
                 @let access = crate::account::Site::load(&self.root).access;
@@ -2461,6 +2735,7 @@ impl App {
                 }
             }
             }
+            @if !hosted_cell { (self.assist_section(None)) }
             section.settings-card #moving {
             header.settings-card-head { h2 { "Moving" } p { "Taking it with you, bringing a world here, and saying where it went." } }
 
@@ -2490,6 +2765,12 @@ impl App {
                     p #import-said .dim {}
                     script { (PreEscaped(IMPORT_SCRIPT)) }
                 }
+            }
+            @if self.hosted.as_ref().zip(self.who.as_deref()).is_some_and(|(h, e)| h.is_owner(e)) {
+                h3 #sync { "Working on it from your machine too" }
+                p.dim { "A copy on your machine and this one stay one world: " code { "zetlyn world sync" } " brings over what changed on either side, sources, trackers and proposals, and all the data with its history. "
+                    "Nobody is locked out meanwhile; where both changed the same thing, it asks which to keep. Assist works in the copy on your machine." }
+                form.bar method="post" action=(serve::at("/settings/sync-key")) { button type="submit" { "Make a sync key" } }
             }
             h3 { "Where it went" }
             @let moved = crate::account::Site::load(&self.root).moved_to;
@@ -2561,29 +2842,78 @@ impl App {
     /// Every source here that people read for, and a form for another.
     fn proposal_sources_page(&self, query: &BTreeMap<String, String>) -> String {
         let all = self.proposal_sources();
+        let show = query.get("show").map(String::as_str).unwrap_or("pending");
+        // Every proposal of every source, as the filter asks, the newest first, by source.
+        let by_source: Vec<(String, String, Vec<crate::propose::Entry>)> = all
+            .iter()
+            .map(|(dir, title, _)| {
+                let mut list: Vec<crate::propose::Entry> = crate::propose::list(&self.sources().join(dir)).into_iter().filter(|e| show == "all" || e.status == show).collect();
+                list.reverse();
+                (dir.clone(), title.clone(), list)
+            })
+            .collect();
+        let count = |s: &str| all.iter().map(|(dir, _, _)| crate::propose::list(&self.sources().join(dir)).iter().filter(|e| s == "all" || e.status == s).count()).sum::<usize>();
         let body = html! {
-            h1 { "Proposals" }
-            p.lede { "What readers propose: rows for a source people read for, and corrections and rows for any source that takes them (Settings, Who sees what). Nothing reaches a source until you accept it; an accepted correction replaces what the source says, at every update, until you reject it." }
+            header.admin-head {
+                div {
+                    h1 { "Proposals" }
+                    p.admin-sub { "What readers proposed, source by source: rows, and corrections of what a source says. Nothing reaches a source until it is accepted; an accepted correction replaces the source's value at every update, until it is rejected." }
+                }
+            }
             @if let Some(s) = query.get("said") { div.note { (s) } }
-            @if all.is_empty() { p.dim { "No source here takes proposals yet." } }
-            table { tbody {
-                @for (dir, title, waiting) in &all {
-                    tr {
-                        td { a href=(serve::at(&format!("/proposals/{dir}"))) { strong { (title) } } div.why.mono { (dir) } }
-                        td.num { @if *waiting == 0 { span.dim { "nothing waiting" } } @else { a.chip.on href=(serve::at(&format!("/proposals/{dir}"))) { (waiting) " waiting" } } }
+            nav.admin-tabs {
+                @for (s, label) in [("pending", "Waiting"), ("accepted", "Accepted"), ("rejected", "Rejected"), ("all", "All")] {
+                    a href={(serve::at("/proposals")) "?show=" (s)} aria-current=[(show == s).then_some("page")] { (label) " " span.dim { (count(s)) } }
+                }
+            }
+            @if all.is_empty() {
+                p.dim { "No source here takes proposals. Which do, and from whom: " a href=(serve::at("/settings#seen")) { "Settings, Who sees what" } "." }
+            }
+            @for (dir, title, list) in &by_source {
+                @if !list.is_empty() {
+                    section.admin-card.flush {
+                        div.source-claims-head {
+                            div { a href=(serve::at(&format!("/sources/{dir}"))) { strong { (title) } } " " span.dim.mono { (dir) } }
+                            a href=(serve::at(&format!("/proposals/{dir}"))) { "Who may propose, and every one" }
+                        }
+                        table.admin-table { tbody {
+                            @for e in list {
+                                tr {
+                                    td {
+                                        @if e.correct.is_null() { span.chip { "row" } " " code { (e.row) } }
+                                        @else {
+                                            span.chip { "correction" } " "
+                                            @for (k, v) in e.correct["fields"].as_object().into_iter().flatten() {
+                                                strong { (k) } " → " @if v.as_str() == Some("") { em { "none" } } @else { (v.as_str().unwrap_or("")) } " "
+                                            }
+                                        }
+                                        div.why {
+                                            (if e.name.is_empty() { "a reader".to_string() } else { e.name.clone() }) " · " (stamp_words(&e.received))
+                                            @if e.read_from.starts_with("http") { " · " a href=(e.read_from) rel="noopener nofollow" { "where it was read" } }
+                                            @if !e.note.is_empty() { " · " (e.note) }
+                                            @if !e.verified { " · " strong { "its signature does not verify" } }
+                                        }
+                                    }
+                                    td.num.nowrap {
+                                        @if e.status == "pending" {
+                                            form.inline method="post" action=(serve::at(&format!("/proposals/{dir}/{}/accept", e.file))) { input type="hidden" name="back" value="inbox"; button.primary type="submit" disabled[!e.verified] { "Accept" } }
+                                            " "
+                                            form.inline method="post" action=(serve::at(&format!("/proposals/{dir}/{}/reject", e.file))) { input type="hidden" name="back" value="inbox"; button type="submit" { "Decline" } }
+                                        } @else if e.status == "accepted" {
+                                            span.status { span.dot.ok {} "accepted" } " "
+                                            form.inline method="post" action=(serve::at(&format!("/proposals/{dir}/{}/reject", e.file))) { input type="hidden" name="back" value="inbox"; button type="submit" { "Take back" } }
+                                        } @else {
+                                            span.dim { "declined" }
+                                        }
+                                    }
+                                }
+                            }
+                        } }
                     }
                 }
-            } }
-            h2 { "A new source people read for" }
-            p.dim { "Name the fields a row has. The ones that identify a row together make its identifier: country, trim and week make " code { "DEU-rwd-2026-W40" } ". Field names are lowercase letters, digits and underscores." }
-            form.settings method="post" action=(serve::at("/proposals")) {
-                p { label { "Title" br; input.wide type="text" name="title" placeholder="Tesla Model Y prices" required; } }
-                p { label { "Identified by" br; input.wide type="text" name="identify" placeholder="country, trim, week" required; } }
-                p { label { "Numbers" br; input.wide type="text" name="numbers" placeholder="price"; } }
-                p { label { "Words" br; input.wide type="text" name="words" placeholder="currency"; } }
-                p { button.primary type="submit" { "Make it" } }
             }
-            p.dim { "It is made with no licence, so no public page shows it until you decide what may be shown, in its " code { "source.yaml" } "." }
+            @if !all.is_empty() && by_source.iter().all(|(_, _, l)| l.is_empty()) { p.dim { "Nothing here." } }
+            p.dim { "A source made only of what people propose: " a href=(serve::at("/sources#new")) { "Sources, New source" } "." }
         };
         page("Proposals", body)
     }
@@ -2819,7 +3149,7 @@ impl App {
             (self.unfinished())
             // Run for somebody, where its files are is ours; on their own machine, it is theirs to know.
             @if self.hosted.is_some() { p.dim { "Your organisation runs for you on Zetlyn's servers. You can download all of it from " a href=(serve::at("/settings")) { "Settings" } "." } } @else {
-            p.dim { "The workspace is " code { (self.root.display()) } ". Everything here is a file in it. " a href=(serve::at("/assist")) { @if crate::assist::Assist::configured(&self.root).available() { "The assist asks " (crate::assist::Assist::configured(&self.root).who()) } @else { "No model is set up, and none is needed to begin" } } "." } }
+            p.dim { "The workspace is " code { (self.root.display()) } ". Everything here is a file in it. " a href=(serve::at("/settings#assist")) { @if crate::assist::Assist::configured(&self.root).available() { "The assist asks " (crate::assist::Assist::configured(&self.root).who()) } @else { "No model is set up, and none is needed to begin" } } "." } }
         };
         page("Zetlyn", body)
     }
@@ -3306,6 +3636,9 @@ table.account-usage td { padding: .15rem .4rem .15rem 0; border: 0; }
 .billing-failed { margin: .3rem 0 0; padding: .55rem .7rem; font-size: .9rem; border-left: 3px solid var(--accent); background: var(--bg); }
 form.billing-open { margin: 0; }
 p.trap { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
+form.inline { display: inline; margin: 0; }
+.about-imprint, .about-notes { white-space: pre-wrap; font-size: .92rem; line-height: 1.55; }
+pre#diag { font-size: .82rem; white-space: pre-wrap; margin: .4rem 0 .6rem; }
 .source-claims-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .8rem .9rem; border-bottom: 1px solid var(--line); }
 .source-claims-head form { display: flex; gap: .4rem; margin: 0; }
 .source-claims-head input[type=search] { flex: none; width: 18rem; height: auto; padding: .42rem .6rem; font: inherit; font-size: .9rem; background: var(--bg); color: var(--fg); border: 1px solid var(--line); }
@@ -6648,4 +6981,81 @@ fn cancel_allowed(billing: &Path, ip: &str, world: &str) -> bool {
     }
     let _ = std::fs::write(&path, serde_json::to_vec(&c).unwrap_or_default());
     allowed
+}
+
+/// The newest release on GitHub and the notes of one, asked at most once an hour: what the About
+/// page says of updates. Nothing when GitHub does not answer within a few seconds.
+fn release_info(tag: &str) -> Option<J> {
+    type Kept = BTreeMap<String, (i64, Option<J>)>;
+    static KEPT: std::sync::OnceLock<Mutex<Kept>> = std::sync::OnceLock::new();
+    let kept = KEPT.get_or_init(|| Mutex::new(Kept::new()));
+    if let Some((at, j)) = kept.lock().unwrap_or_else(|e| e.into_inner()).get(tag).cloned() {
+        if crate::now() - at < 3600 {
+            return j;
+        }
+    }
+    let url = if tag == "latest" { "https://api.github.com/repos/zetlynhq/zetlyn/releases/latest".to_string() } else { format!("https://api.github.com/repos/zetlynhq/zetlyn/releases/tags/{tag}") };
+    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(4))).user_agent(crate::sourcedecl::AGENT).build().into();
+    let j = agent.get(&url).header("Accept", "application/vnd.github+json").call().ok().and_then(|mut r| r.body_mut().read_json::<J>().ok());
+    kept.lock().unwrap_or_else(|e| e.into_inner()).insert(tag.to_string(), (crate::now(), j.clone()));
+    j
+}
+
+/// `0.3.89` as numbers, to say which of two is newer.
+fn version_numbers(v: &str) -> Vec<u64> {
+    v.trim_start_matches('v').split('.').map(|p| p.parse().unwrap_or(0)).collect()
+}
+
+/// Bytes under a directory, counted to a limit so a large one does not hold the page up.
+fn size_under(dir: &Path) -> (u64, bool) {
+    let (mut total, mut files) = (0u64, 0usize);
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            files += 1;
+            if files > 200_000 {
+                return (total, true);
+            }
+            match e.metadata() {
+                Ok(m) if m.is_dir() => stack.push(e.path()),
+                Ok(m) => total += m.len(),
+                Err(_) => {}
+            }
+        }
+    }
+    (total, false)
+}
+
+/// The licences of what Zetlyn is built from, as the release carries them.
+const THIRD_PARTY: &str = include_str!("../THIRD_PARTY_LICENSES");
+
+/// The About page's copy button: the diagnostics as text, onto the clipboard.
+const DIAGNOSTICS_SCRIPT: &str = r#"(function () {
+  var b = document.getElementById("copy-diag"), d = document.getElementById("diag");
+  if (!b || !d || !navigator.clipboard) return;
+  b.addEventListener("click", function () { navigator.clipboard.writeText(d.textContent).then(function () { b.textContent = "Copied"; }); });
+})();"#;
+
+/// One block of a workspace's file (`profile:`), written anew as YAML in place of the one there,
+/// the rest of the file as it was; an empty one taken out. Read back before it is kept.
+pub(crate) fn set_block<T: serde::Serialize>(file: &Path, key: &str, value: &T) -> Result<(), String> {
+    let text = std::fs::read_to_string(file).unwrap_or_default();
+    let mut kept: Vec<&str> = Vec::new();
+    let mut skipping = false;
+    for l in text.lines() {
+        if l.starts_with(&format!("{key}:")) {
+            skipping = true;
+            continue;
+        }
+        if skipping && (l.starts_with(' ') || l.starts_with('-') || l.is_empty()) {
+            continue;
+        }
+        skipping = false;
+        kept.push(l);
+    }
+    let yaml = crate::yaml::to_string(value)?;
+    let block = if yaml.trim().is_empty() || yaml.trim() == "{}" { String::new() } else { format!("{key}:\n{}", yaml.lines().map(|l| format!("  {l}\n")).collect::<String>()) };
+    let t = format!("{}\n{block}", kept.join("\n").trim_end());
+    let _: crate::account::Site = crate::yaml::parse(&t)?;
+    std::fs::write(file, format!("{}\n", t.trim())).map_err(|e| format!("{}: {e}", file.display()))
 }

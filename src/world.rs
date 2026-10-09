@@ -28,6 +28,7 @@ zetlyn world up <domain> --owner <address> [--from <archive>] [--title …] [--s
 zetlyn world serve <workspace> [--addr 127.0.0.1:2500]
 zetlyn world export <workspace> --to <file.tar.gz>
 zetlyn world import <file.tar.gz> --to <dir> [--url <address>] [--owner <address>]
+zetlyn world sync <address> [<workspace>] [--key zk_…] [--take ours|theirs] [--no-data]
 zetlyn world move <workspace> --to <address> [--unchecked] | --back
 zetlyn world register <workspace> [--at https://zetlyn.com/directory]
 zetlyn world backup <workspace> <dir> [--keep 14]
@@ -74,6 +75,7 @@ pub fn command(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         Some("upgrade") => upgrade(args.iter().any(|a| a == "--check"), args.iter().any(|a| a == "--restart")),
+        Some("sync") => crate::sync::command(args),
         Some("import") => {
             let rest = crate::positional(args, 2);
             let file = PathBuf::from(rest.first().ok_or("which archive? one `zetlyn world export` wrote")?.as_str());
@@ -1040,6 +1042,8 @@ pub fn import(file: &Path, dir: &Path, url: Option<&str>, owner: Option<&str>) -
         set_top(&ws, "url", Some(u.trim_end_matches('/')))?;
     }
     set_top(&ws, "moved_to", None)?;
+    // A copy is an instance of its own: what another copy keeps its bookkeeping under (sync.rs).
+    let _ = std::fs::remove_file(dir.join(".zetlyn").join("instance"));
     // A domain is a name a machine answers for, and not this machine's to claim because an archive
     // says so: it is said again here, where it is wanted.
     set_top(&ws, "domain", None)?;

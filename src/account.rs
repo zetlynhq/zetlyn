@@ -471,6 +471,28 @@ pub struct Site {
     /// written again: `publish: { to: s3://bucket/prefix, app: https://zetlyn.com }`.
     #[serde(default)]
     pub publish: Option<Publish>,
+    /// What the world says about itself on its About page: what it is, who runs it, where to
+    /// write, its imprint. `contact:` above is the address to write to.
+    #[serde(default)]
+    pub profile: Profile,
+}
+
+#[derive(Debug, Default, Clone, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Profile {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub about: String,
+    /// Who runs it: a person or an organisation.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub operator: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub website: String,
+    /// Where to write about personal data, where it is not `contact`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub privacy: String,
+    /// The legal notice its operator owes, as they write it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub imprint: String,
 }
 
 /// Where a world is signed in from when nobody said: zetlyn.com, as it is the hub when nobody said.

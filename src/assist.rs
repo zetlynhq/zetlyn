@@ -70,7 +70,8 @@ impl Assist {
         let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
         let replay = env("ZETLYN_ASSIST_REPLAY").map(PathBuf::from);
         let record = env("ZETLYN_ASSIST_RECORD").map(PathBuf::from);
-        if c.off {
+        // A hosted world asks no model: it is worked on with one's own, after `zetlyn world sync`.
+        if c.off || crate::usage::in_cell() {
             return Assist { provider: None, replay, record };
         }
         let url = env("ZETLYN_ASSIST_URL").unwrap_or(c.url.clone());

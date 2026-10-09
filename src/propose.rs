@@ -552,58 +552,65 @@ pub fn decide(dir: &Path, name: &str, accept: bool, by: &str, why: &str) -> Resu
     if by.trim().is_empty() {
         return Err("a decision is somebody's: say who with --by".into());
     }
-    let kept = load(dir, name)?;
-    let inbox = dir.join(crate::hook::INBOX);
     let at = crate::iso_stamp(crate::now());
-    let made_of_proposals = matches!(crate::sourcedecl::SourceDecl::load(dir)?.source, Fetch::Proposals { .. });
-    let who = || {
-        let via = if kept.issuer.is_empty() { String::new() } else { format!(", via {}", kept.issuer.split("://").nth(1).unwrap_or(&kept.issuer).trim_end_matches('/')) };
-        if kept.name.is_empty() { format!("{}{via}", kept.by) } else { format!("{} ({}{via})", kept.name, kept.by) }
-    };
-    // A correction, or a row for a source read from elsewhere: kept where its next update puts it
-    // over what it reads, and taken away again on a rejection.
-    let parked = |sub: &str, j: J| -> Result<(), String> {
-        let d = dir.join(sub);
-        std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
-        std::fs::write(d.join(name), j.to_string()).map_err(|e| e.to_string())
-    };
-    if !accept {
-        for sub in [CORRECTED, ADDED] {
-            let _ = std::fs::remove_file(dir.join(sub).join(name));
-        }
-    }
-    let j = check(kept.body.as_bytes())?;
-    if accept && j.get("correct").is_some() {
-        parked(CORRECTED, json!({
-            "record": j["correct"]["record"], "fields": j["correct"]["fields"], "proposal": name, "proposed_by": who(),
-            "read_from": j["read_from"], "read_at": j["read_at"], "note": j["note"], "accepted_by": by.trim(), "accepted_at": at,
-        }))?;
-    } else if accept && !made_of_proposals {
-        let mut row = j["row"].as_object().cloned().unwrap_or_default();
-        row.insert("proposed_by".into(), json!(who()));
-        row.insert("proposal".into(), json!(name));
-        row.insert("accepted_by".into(), json!(by.trim()));
-        row.insert("accepted_at".into(), json!(at));
-        parked(ADDED, J::Object(row))?;
-    } else if accept {
-        let mut row = j["row"].as_object().cloned().unwrap_or_default();
-        let via = if kept.issuer.is_empty() { String::new() } else { format!(", via {}", kept.issuer.split("://").nth(1).unwrap_or(&kept.issuer).trim_end_matches('/')) };
-        row.insert("proposed_by".into(), json!(if kept.name.is_empty() { format!("{}{via}", kept.by) } else { format!("{} ({}{via})", kept.name, kept.by) }));
-        row.insert("read_at".into(), j["read_at"].clone());
-        row.insert("read_from".into(), j["read_from"].clone());
-        row.insert("attest".into(), j["attest"].clone());
-        row.insert("proposal".into(), json!(name));
-        row.insert("accepted_by".into(), json!(by.trim()));
-        row.insert("accepted_at".into(), json!(at));
-        std::fs::create_dir_all(&inbox).map_err(|e| e.to_string())?;
-        std::fs::write(inbox.join(name), J::Object(row).to_string()).map_err(|e| e.to_string())?;
-    } else {
-        let _ = std::fs::remove_file(inbox.join(name));
-    }
+    park(dir, name, accept, by.trim(), &at)?;
     let d = Decision { at, by: by.trim().to_string(), proposal: name.to_string(), decision: if accept { "accept" } else { "reject" }.into(), why: why.trim().to_string() };
     let line = serde_json::to_string(&d).map_err(|e| e.to_string())?;
     let mut f = std::fs::OpenOptions::new().create(true).append(true).open(dir.join(DECISIONS)).map_err(|e| format!("{}: {e}", dir.join(DECISIONS).display()))?;
     writeln!(f, "{line}").map_err(|e| e.to_string())
+}
+
+/// What a decision means on disk: an accepted correction or row kept where the next update
+/// reads it, a rejected or undecided one taken away from there.
+fn park(dir: &Path, name: &str, accept: bool, by: &str, at: &str) -> Result<(), String> {
+    let kept = load(dir, name)?;
+    let inbox = dir.join(crate::hook::INBOX);
+    for sub in [CORRECTED, ADDED] {
+        let _ = std::fs::remove_file(dir.join(sub).join(name));
+    }
+    let _ = std::fs::remove_file(inbox.join(name));
+    if !accept {
+        return Ok(());
+    }
+    let made_of_proposals = matches!(crate::sourcedecl::SourceDecl::load(dir)?.source, Fetch::Proposals { .. });
+    let via = if kept.issuer.is_empty() { String::new() } else { format!(", via {}", kept.issuer.split("://").nth(1).unwrap_or(&kept.issuer).trim_end_matches('/')) };
+    let who = if kept.name.is_empty() { format!("{}{via}", kept.by) } else { format!("{} ({}{via})", kept.name, kept.by) };
+    let j = check(kept.body.as_bytes())?;
+    let put = |sub: &Path, value: J| -> Result<(), String> {
+        std::fs::create_dir_all(sub).map_err(|e| e.to_string())?;
+        std::fs::write(sub.join(name), value.to_string()).map_err(|e| e.to_string())
+    };
+    if j.get("correct").is_some() {
+        return put(&dir.join(CORRECTED), json!({
+            "record": j["correct"]["record"], "fields": j["correct"]["fields"], "proposal": name, "proposed_by": who,
+            "read_from": j["read_from"], "read_at": j["read_at"], "note": j["note"], "accepted_by": by, "accepted_at": at,
+        }));
+    }
+    let mut row = j["row"].as_object().cloned().unwrap_or_default();
+    row.insert("proposed_by".into(), json!(who));
+    row.insert("proposal".into(), json!(name));
+    row.insert("accepted_by".into(), json!(by));
+    row.insert("accepted_at".into(), json!(at));
+    if !made_of_proposals {
+        return put(&dir.join(ADDED), J::Object(row));
+    }
+    row.insert("read_at".into(), j["read_at"].clone());
+    row.insert("read_from".into(), j["read_from"].clone());
+    row.insert("attest".into(), j["attest"].clone());
+    put(&inbox, J::Object(row))
+}
+
+/// What the decisions on record mean, worked out again for every proposal: after a sync joined
+/// two copies' proposals and decisions, the last decision about each stands.
+pub fn rebuild(dir: &Path) -> Result<(), String> {
+    let decided = standing(dir);
+    for name in names(dir) {
+        match decided.get(&name) {
+            Some(d) => park(dir, &name, d.decision == "accept", &d.by, &d.at)?,
+            None => park(dir, &name, false, "", "")?,
+        }
+    }
+    Ok(())
 }
 
 /// The reader who proposed it, told what became of it, where a reader did. A key's proposer has

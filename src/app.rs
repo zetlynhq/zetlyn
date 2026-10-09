@@ -5158,6 +5158,13 @@ fn admin(dir: &Path, rest: &[&str], post: bool, form: &BTreeMap<String, String>,
                                 select name="to" { @for n in r.nodes.keys().filter(|n| **n != c.node) { option value=(n) { (n) } } }
                                 button type="submit" { "Move" }
                             }
+                            // Its server gone: back on another from the bucket, the lost one not asked.
+                            span.admin-label { "Its server lost" }
+                            form.bar method="post" action={(cell_home(cell)) "/recover"} title=(format!("Only where {} does not answer: restored from its newest snapshot, {} not asked; what changed since that snapshot is lost", c.node, c.node)) {
+                                select name="to" { @for n in r.nodes.keys().filter(|n| **n != c.node) { option value=(n) { (n) } } }
+                                input.short type="text" name="confirm" placeholder=(cell) required;
+                                button type="submit" { "Bring it back there" }
+                            }
                             span.admin-label { "Release" }
                             form.bar method="post" action={(cell_home(cell)) "/upgrade"} {
                                 input.short type="text" name="version" placeholder=(env!("CARGO_PKG_VERSION")) required;
@@ -7640,7 +7647,8 @@ fn release_info(tag: &str) -> Option<J> {
             return j;
         }
     }
-    let url = if tag == "latest" { "https://api.github.com/repos/zetlynhq/zetlyn/releases/latest".to_string() } else { format!("https://api.github.com/repos/zetlynhq/zetlyn/releases/tags/{tag}") };
+    let base = crate::world::releases();
+    let url = if tag == "latest" { format!("{base}/latest") } else { format!("{base}/tags/{tag}") };
     let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(4))).user_agent(crate::sourcedecl::AGENT).build().into();
     let j = agent.get(&url).header("Accept", "application/vnd.github+json").call().ok().and_then(|mut r| r.body_mut().read_json::<J>().ok());
     kept.lock().unwrap_or_else(|e| e.into_inner()).insert(tag.to_string(), (crate::now(), j.clone()));

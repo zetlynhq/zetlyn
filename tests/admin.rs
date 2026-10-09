@@ -201,6 +201,7 @@ fn every_form_asks_for_the_job_it_says() {
         ("/account/admin/cell/acme/restore", "stamp=20261008T030000Z&confirm=acme", "restore", "acme"),
         ("/account/admin/cell/acme/download", "stamp=20261008T030000Z", "download", "acme"),
         ("/account/admin/cell/acme/remove", "confirm=acme", "remove", "acme"),
+        ("/account/admin/cell/acme/recover", "to=n2&confirm=acme", "recover", "acme"),
         ("/account/admin/node/n2/undrain", "", "undrain", "n2"),
         ("/account/admin/nodes", "name=n3&host=203.0.113.3", "node-add", "n3"),
         ("/account/admin/upgrade-all", "version=0.3.80", "upgrade-all", "all"),

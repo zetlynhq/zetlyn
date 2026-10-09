@@ -1598,3 +1598,90 @@ fn a_worlds_about_page_says_who_runs_it_and_what_it_makes_public() {
         assert!(!page.contains("Exploits"), "{mode:?}: a private source is not listed");
     }
 }
+
+/// UC-H10: a world on somebody else's machine of many worlds (P) and one on zetlyn.com (M): what one
+/// exported the other takes in, and the two kept one by sync, asked from the first.
+#[test]
+fn a_world_from_another_hosting_and_one_on_zetlyn_com_move_and_stay_one() {
+    let p = World::start(Mode::P, "other-hosting");
+    let m = World::start(Mode::M, "other-hosting");
+    let (owner_p, owner_m) = (p.sign_in(OWNER), m.sign_in(OWNER));
+
+    // Its archive taken in on zetlyn.com, in pieces, handed to the cell's server.
+    let archive = p.tmp.join("p.tar.gz");
+    let (ok, said) = z(&["world", "export", &p.root.display().to_string(), "--to", &archive.display().to_string()]);
+    assert!(ok, "{said}");
+    let bytes = std::fs::read(&archive).unwrap();
+    let (s, begun) = m.post("/settings/upload", &owner_m, &format!("size={}&name=p.tar.gz", bytes.len()));
+    assert_eq!(s, 200, "{begun}");
+    let id = begun.split("\"id\":\"").nth(1).unwrap().split('"').next().unwrap().to_string();
+    assert_eq!(m.put(&format!("/settings/upload/{id}/0"), &owner_m, &bytes).0, 200);
+    let (s, b) = m.post(&format!("/settings/upload/{id}/done"), &owner_m, "");
+    assert_eq!(s, 200, "{b}");
+    assert!(m.host.join("incoming/import.json").exists());
+
+    // And the two kept one, asked from the other hosting.
+    let (s, _) = m.post("/settings/access", &owner_m, &format!("owners={}", enc(OWNER)));
+    assert_eq!(s, 303);
+    let (s, _) = p.post("/settings/access", &owner_p, &format!("owners={}", enc(OWNER)));
+    assert_eq!(s, 303);
+    let key = sync_key(&m, &owner_m);
+    let last = p.root.join(".zetlyn/sync/last.json");
+    let synced = |what: &str| {
+        wait_for(what, || std::fs::read_to_string(&last).is_ok_and(|s| !s.contains("\"running\"")));
+        let l: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&last).unwrap()).unwrap();
+        assert_eq!(l["state"], "ok", "{what}: {l}");
+    };
+    let (s, _) = p.post("/settings/sync", &owner_p, &format!("url={}&key={key}", enc(&m.url())));
+    assert_eq!(s, 303);
+    synced("the first sync");
+    edit(&m.root.join("trackers/cve/tracker.yaml"), "title: CVE", "title: CVE on zetlyn.com");
+    let (s, _) = p.post("/settings/sync", &owner_p, "");
+    assert_eq!(s, 303);
+    synced("the second sync");
+    assert!(std::fs::read_to_string(p.root.join("trackers/cve/tracker.yaml")).unwrap().contains("CVE on zetlyn.com"));
+}
+
+/// A place that says what Zetlyn's latest release is, as GitHub's releases do.
+fn a_release_feed(tag: &str) -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let body = format!(r#"{{"tag_name":"{tag}","body":"- something new"}}"#);
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut s = stream;
+            let mut buf = [0u8; 4096];
+            let _ = s.read(&mut buf);
+            let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes());
+        }
+    });
+    port
+}
+
+/// UC-A7: a newer release out: the app on one's machine says so on its About page, with how to
+/// take it, and so does `zetlyn world upgrade --check`; the newest, it says that.
+#[test]
+fn the_app_says_when_a_newer_release_is_out() {
+    let tmp = std::env::temp_dir().join(format!("zetlyn-modes-{}-releases", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let root = tmp.join("w");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("workspace.yaml"), "title: Mine\n").unwrap();
+    for (tag, newer) in [("v99.0.0", true), (concat!("v", env!("CARGO_PKG_VERSION")), false)] {
+        let feed = format!("http://127.0.0.1:{}", a_release_feed(tag));
+        let port = free_port();
+        let app = spawn(&[&root.display().to_string(), "--port", &port.to_string(), "--no-open"], &[("ZETLYN_RELEASES", feed.clone())], None, tmp.join("app.log"), port);
+        let (_, _, page) = http(app.port, "GET", "/about", "", "");
+        let out = Command::new(env!("CARGO_BIN_EXE_zetlyn")).args(["world", "upgrade", "--check"]).env("ZETLYN_RELEASES", &feed).output().unwrap();
+        let said = String::from_utf8_lossy(&out.stdout).into_owned();
+        if newer {
+            assert!(page.contains("v99.0.0") && page.contains("is out") && page.contains("install.sh"), "the page says it, and how");
+            assert!(said.contains("v99.0.0 is out"), "{said}");
+        } else {
+            assert!(page.contains("the newest"), "the newest, said");
+            assert!(said.contains("is current"), "{said}");
+        }
+        drop(app);
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+}

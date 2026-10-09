@@ -785,6 +785,48 @@ fn poll_one(control: &Path, node: &str) -> Result<(), String> {
 /// A cell from its server to another, through the bucket: stopped, snapshotted, restored there,
 /// answering there, routed there, and only then gone from where it was. Should anything before the
 /// route fail, it is started again where it was and nothing else changes.
+/// A cell whose server is lost, brought back on another from its newest snapshot in the bucket: the
+/// lost server is not asked anything. It answers there before anybody is sent there. What changed
+/// since that snapshot is lost with the server, at most a day. Should the lost server come back, its
+/// copy of the cell is no longer the one the routes lead to; `zetlyn node remove <cell>
+/// --no-snapshot` there takes it away.
+pub fn recover(control: &Path, cell: &str, to: &str) -> Result<String, String> {
+    let mut r = register(control)?;
+    let from_name = r.cells.get(cell).map(|c| c.node.clone()).ok_or_else(|| format!("{cell}: no such cell"))?;
+    if from_name == to {
+        return Err(format!("{cell} is on {to} already; on its own server, restore it from a snapshot instead"));
+    }
+    let target = r.nodes.get(to).ok_or_else(|| format!("{to}: no such server"))?.clone();
+    on(&target, &["status", "--json"], None).map_err(|e| format!("{to} does not answer: {e}"))?;
+    let restored = on(&target, &["restore", cell], None)?;
+    let c = r.cells.get(cell).cloned().unwrap_or_default();
+    let memory = if c.memory.is_empty() { if c.house { "2G".to_string() } else { "512M".to_string() } } else { c.memory.clone() };
+    let cpu = if c.cpu.is_empty() { if c.house { "150%".to_string() } else { "50%".to_string() } } else { c.cpu.clone() };
+    let _ = on(&target, &["limit", cell, "--memory", &memory, "--cpu", &cpu], None);
+    let mut answering = false;
+    for _ in 0..30 {
+        if let Ok(s) = on(&target, &["status", "--json"], None) {
+            let s: J = serde_json::from_str(&s).unwrap_or(J::Null);
+            if s["cells"].as_array().into_iter().flatten().any(|x| x["name"] == cell && matches!(x["answers"].as_u64(), Some(200..=399))) {
+                answering = true;
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(4));
+    }
+    if !answering {
+        let _ = on(&target, &["remove", cell, "--no-snapshot"], None);
+        return Err(format!("{cell} did not answer on {to}; the routes still lead to {from_name}"));
+    }
+    if let Some(e) = r.cells.get_mut(cell) {
+        e.node = to.to_string();
+    }
+    save_register(control, &r)?;
+    let _ = poll_one(control, to);
+    routes(control)?;
+    Ok(format!("{cell} back on {to} from the bucket ({}), {from_name} not asked", restored.trim()))
+}
+
 pub fn move_cell(control: &Path, cell: &str, to: &str) -> Result<String, String> {
     let mut r = register(control)?;
     let (from_name, from) = node_of(&r, cell)?;
@@ -1262,9 +1304,9 @@ fn mute(control: &Path, r: &Register, problems: BTreeMap<String, String>) -> BTr
 
 // -- jobs, from the admin pages -----------------------------------------------------------------
 
-pub const ACTIONS: [&str; 23] = [
+pub const ACTIONS: [&str; 24] = [
     "start", "stop", "restart", "snapshot", "move", "upgrade", "suspend", "resume", "logs", "create", "remove", "set", "limits", "snapshots", "restore", "download",
-    "keep", "unkeep", "node-add", "drain", "undrain", "upgrade-all", "purge",
+    "keep", "unkeep", "node-add", "drain", "undrain", "upgrade-all", "purge", "recover",
 ];
 
 /// A job for the root side, written by the admin pages. Its id.
@@ -1392,6 +1434,8 @@ pub fn work(control: &Path) {
                     Ok(cells.iter().map(|c| upgrade(control, c, &v).unwrap_or_else(|e| e)).collect::<Vec<_>>().join("\n"))
                 }
                 "move" => move_cell(control, &cell, &arg("to")),
+                "recover" if arg("confirm") == cell => recover(control, &cell, &arg("to")),
+                "recover" => Err(format!("{cell}: not brought back, its name was not typed to confirm")),
                 "remove" if arg("confirm") == cell => remove(control, &cell),
                 "remove" => Err(format!("{cell}: not removed, its name was not typed to confirm")),
                 "upgrade" => upgrade(control, &cell, &arg("version")),
@@ -1437,7 +1481,7 @@ pub fn work(control: &Path) {
 // -- the command --------------------------------------------------------------------------------
 
 pub const USAGE: &str = "zetlyn ops [--control <dir>] cells | nodes | poll | work | routes | terms | backup | restore-control [<stamp>|latest] --to <dir> \
-| create <cell> --title … --owner … [--node n] [--house] | move <cell> --to <node> | remove <cell> | upgrade <cell> --to <v> | upgrade --all --to <v> \
+| create <cell> --title … --owner … [--node n] [--house] | move <cell> --to <node> | recover <cell> --to <node> | remove <cell> | upgrade <cell> --to <v> | upgrade --all --to <v> \
 | release <v> [--current] | start|stop|restart|snapshot|logs <cell> | node-add <name> --host <address> | drain <node> [--off] | purge <cell> --confirm <cell>";
 
 pub fn command(args: &[String]) -> Result<(), String> {
@@ -1485,6 +1529,11 @@ pub fn command(args: &[String]) -> Result<(), String> {
         }
         Some("move") => {
             println!("{}", move_cell(&control, rest.first().ok_or("which cell?")?, flag("--to").ok_or("--to <node>")?)?);
+            Ok(())
+        }
+        // Its server lost: back on another from the bucket, the lost one not asked.
+        Some("recover") => {
+            println!("{}", recover(&control, rest.first().ok_or("which cell?")?, flag("--to").ok_or("--to <node>")?)?);
             Ok(())
         }
         Some("remove") => {

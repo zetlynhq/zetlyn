@@ -35,7 +35,10 @@ zetlyn world backup <workspace> <dir> [--keep 14]
 zetlyn world upgrade [--check] [--restart]";
 
 /// Where the releases are, for `world upgrade`.
-const RELEASES: &str = "https://api.github.com/repos/zetlynhq/zetlyn/releases/latest";
+/// Where Zetlyn's releases are said: GitHub's, or `ZETLYN_RELEASES` (a mirror, a test) in its place.
+pub fn releases() -> String {
+    std::env::var("ZETLYN_RELEASES").ok().filter(|r| !r.trim().is_empty()).unwrap_or_else(|| "https://api.github.com/repos/zetlynhq/zetlyn/releases".to_string()).trim_end_matches('/').to_string()
+}
 const DOWNLOAD: &str = "https://github.com/zetlynhq/zetlyn/releases/download";
 
 pub fn command(args: &[String]) -> Result<(), String> {
@@ -688,14 +691,15 @@ fn upgrade(check: bool, restart: bool) -> Result<(), String> {
         .timeout_global(Some(std::time::Duration::from_secs(120)))
         .build()
         .into();
+    let releases = format!("{}/latest", releases());
     let latest: serde_json::Value = agent
-        .get(RELEASES)
+        .get(&releases)
         .header("Accept", "application/vnd.github+json")
         .call()
-        .map_err(|e| format!("{RELEASES}: {e}"))?
+        .map_err(|e| format!("{releases}: {e}"))?
         .body_mut()
         .read_json()
-        .map_err(|e| format!("{RELEASES}: {e}"))?;
+        .map_err(|e| format!("{releases}: {e}"))?;
     let tag = latest["tag_name"].as_str().ok_or("the latest release names no tag")?.to_string();
     let (have, there) = (version(env!("CARGO_PKG_VERSION")), version(&tag));
     if there.is_none() || there <= have {

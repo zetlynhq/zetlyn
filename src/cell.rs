@@ -184,7 +184,11 @@ fn systemctl(args: &[&str]) -> Result<String, String> {
 fn load_s3_env() -> Result<(), String> {
     let text = std::fs::read_to_string(S3_ENV).map_err(|e| format!("{S3_ENV}: {e}"))?;
     for (k, v) in text.lines().filter_map(|l| l.trim().strip_prefix("export ").unwrap_or(l.trim()).split_once('=')) {
-        std::env::set_var(k.trim(), v.trim().trim_matches('"'));
+        // What the caller set wins: the selftest asks once with the bucket at an address that does
+        // not answer, to see nothing is half done when it is not there (CELLS.md).
+        if std::env::var_os(k.trim()).is_none() {
+            std::env::set_var(k.trim(), v.trim().trim_matches('"'));
+        }
     }
     Ok(())
 }

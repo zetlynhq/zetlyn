@@ -1325,6 +1325,7 @@ impl Store {
         read: u64,
         fields: &std::collections::BTreeSet<String>,
         whole: bool,
+        declared: Option<&std::collections::BTreeSet<String>>,
     ) -> Option<String> {
         let (before, had) = self.last_shape(run)?;
         if before == 0 {
@@ -1343,7 +1344,12 @@ impl Store {
         if read == 0 || !whole {
             return None;
         }
-        let lost: Vec<&String> = had.iter().filter(|f| !fields.contains(*f)).collect();
+        // A property the declaration no longer names was taken out on purpose, or renamed.
+        let lost: Vec<&String> = had
+            .iter()
+            .filter(|f| !fields.contains(*f))
+            .filter(|f| declared.is_none_or(|d| d.contains(*f)))
+            .collect();
         if !lost.is_empty() {
             return Some(format!(
                 "the last complete update carried {} and this one does not",
@@ -1918,11 +1924,16 @@ mod tests {
         s.db.execute("update run set records = 20 where id = ?1", [first]).unwrap();
         let second = s.begin_run().unwrap();
         let some: std::collections::BTreeSet<String> = ["cvss".to_string()].into_iter().collect();
-        assert_eq!(s.shape_refusal(second, 20, 9, &some, false), None);
+        assert_eq!(s.shape_refusal(second, 20, 9, &some, false, None), None);
         // Read whole, the same loss is the source dropping a property, and it is refused.
         assert!(s
-            .shape_refusal(second, 20, 20, &some, true)
+            .shape_refusal(second, 20, 20, &some, true, None)
             .is_some_and(|why| why.contains("packages")));
+        // Unless the declaration no longer names it: renamed or taken out on purpose.
+        let declared: std::collections::BTreeSet<String> = ["cvss", "severity"].iter().map(|s| s.to_string()).collect();
+        assert!(s
+            .shape_refusal(second, 20, 20, &some, true, Some(&declared))
+            .is_some_and(|why| why.contains("severity") && !why.contains("packages")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -171,7 +171,8 @@ pub fn eval(expr: &str, row: &Row) -> Vec<J> {
     if !expr.starts_with("text:") && expr.contains(" || ") {
         for alt in expr.split(" || ") {
             let got = eval(alt.trim(), row);
-            if !got.is_empty() {
+            // An empty cell says nothing either: a CSV gives every column, filled or not.
+            if got.iter().any(|v| !as_string(v).trim().is_empty()) {
                 return got;
             }
         }
@@ -631,11 +632,29 @@ thread_local! {
 
 /// A pattern compiled once per thread, not once per row: a list of 19,000 rows with three
 /// patterns each spent most of its read compiling them.
-fn compiled(pattern: &str) -> Option<regex::Regex> {
+pub(crate) fn compiled(pattern: &str) -> Option<regex::Regex> {
     PATTERNS.with(|p| {
         p.borrow_mut()
             .entry(pattern.to_string())
             .or_insert_with(|| regex::Regex::new(pattern).ok())
             .clone()
     })
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_cell_falls_through_to_the_next() {
+        let row = Row {
+            value: serde_json::json!({"name": "", "brand": "Eni"}),
+            meta: BTreeMap::new(),
+            file: None,
+            text: String::new(),
+            root: Path::new("."),
+        };
+        assert_eq!(eval("field:name || field:brand", &row), vec![J::from("Eni")]);
+        assert_eq!(eval("field:name || const:Fuel station", &row), vec![J::from("Fuel station")]);
+    }
 }

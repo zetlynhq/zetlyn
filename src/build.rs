@@ -35,12 +35,15 @@ fn values(spec: &Spec, row: &Row) -> Vec<String> {
         .map(expr::as_string)
         .collect();
     if let Some(sep) = &spec.separator {
+        // `/,\b/` is a pattern: a comma that is not the one inside `(Butane, Propane)`.
+        let pattern = (sep.len() > 2 && sep.starts_with('/') && sep.ends_with('/'))
+            .then(|| expr::compiled(&sep[1..sep.len() - 1]))
+            .flatten();
         out = out
             .into_iter()
-            .flat_map(|s| {
-                s.split(sep.as_str())
-                    .map(str::to_string)
-                    .collect::<Vec<_>>()
+            .flat_map(|s| match &pattern {
+                Some(re) => re.split(&s).map(str::to_string).collect::<Vec<_>>(),
+                None => s.split(sep.as_str()).map(str::to_string).collect::<Vec<_>>(),
             })
             .collect();
     }
@@ -191,8 +194,8 @@ pub fn as_number(raw: &str) -> Option<f64> {
 
 fn as_bool(raw: &str) -> Option<bool> {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "true" | "1" | "yes" | "y" | "ja" | "wahr" => Some(true),
-        "false" | "0" | "no" | "n" | "nein" | "falsch" | "" => Some(false),
+        "true" | "1" | "yes" | "y" | "ja" | "wahr" | "oui" => Some(true),
+        "false" | "0" | "no" | "n" | "nein" | "falsch" | "non" | "" => Some(false),
         _ => None,
     }
 }
@@ -509,6 +512,15 @@ mod date_tests {
         for not in ["Coming soon", "Q4 2026", "30 Foo 2026", "Sep 2026"] {
             assert_eq!(super::as_date(not), None, "{not}");
         }
+    }
+
+    #[test]
+    fn a_separator_between_slashes_is_a_pattern() {
+        let spec = crate::sourcedecl::Spec { from: "field:s".into(), matches: None, separator: Some("/,\\b/".into()), all: true, default: None };
+        let row = crate::expr::Row { value: serde_json::json!({"s": "Wifi,Vente de gaz (Butane, Propane),DAB"}), meta: Default::default(), file: None, text: String::new(), root: std::path::Path::new(".") };
+        assert_eq!(super::values(&spec, &row), ["Wifi", "Vente de gaz (Butane, Propane)", "DAB"]);
+        assert_eq!(super::as_bool("Oui"), Some(true));
+        assert_eq!(super::as_bool("Non"), Some(false));
     }
 
     #[test]

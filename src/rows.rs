@@ -296,7 +296,7 @@ pub fn each_row(
             // `local or at a URL`. A URL is fetched once into the source directory, so the
             // extraction reads a file either way.
             let file = if path.starts_with("http://") || path.starts_with("https://") {
-                let f = crate::fetch::Fetcher::new(crate::sourcedecl::AGENT, &BTreeMap::new(), 0)?;
+                let f = crate::fetch::Fetcher::new(crate::sourcedecl::AGENT, &BTreeMap::new(), 0)?.whole_file();
                 let body = f.get(path)?;
                 let cached = base.join("source.csv");
                 std::fs::write(&cached, body).map_err(|e| format!("{}: {e}", cached.display()))?;

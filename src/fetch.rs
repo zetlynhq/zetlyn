@@ -128,6 +128,18 @@ impl Fetcher {
 
     /// A 429 or a 503 is a source asking to be left alone. The run waits and retries, doubling the
     /// wait to a ceiling, and a run that exhausts its retries is partial rather than finished.
+    /// For one whole file in one answer rather than a page of many: a list of fifty megabytes,
+    /// or an Overpass query that takes two minutes to answer, is not a publisher throttling.
+    pub fn whole_file(mut self) -> Fetcher {
+        self.agent = ureq::Agent::config_builder()
+            .user_agent(crate::sourcedecl::AGENT)
+            .timeout_global(Some(Duration::from_secs(600)))
+            .max_redirects(5)
+            .build()
+            .new_agent();
+        self
+    }
+
     pub fn get(&self, url: &str) -> Result<String, String> {
         self.fetch(url).map(|(body, _)| body)
     }

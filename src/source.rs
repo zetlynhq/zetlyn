@@ -269,9 +269,11 @@ impl Source {
         // half the store. A run over a slice keeps the rest, so there it is the store's count.
         let read = added + changed + unchanged;
         let after = if whole { read } else { self.store.count() };
+        // What the declaration names now: a property it no longer names is no loss.
+        let declared: std::collections::BTreeSet<String> = self.decl.records.fields.keys().cloned().collect();
         let refusal = if complete {
             self.store
-                .shape_refusal(run, after, read, &seen_fields, whole)
+                .shape_refusal(run, after, read, &seen_fields, whole, Some(&declared).filter(|d| !d.is_empty()))
                 .or_else(|| self.naming_refusal(naming.as_deref(), named, read))
         } else {
             None

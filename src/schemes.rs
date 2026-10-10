@@ -409,7 +409,7 @@ mod tests {
 
 /// Schemes this program compares but never looks for in text: a value of them is not something to
 /// recognise in a page, only to meet another source's spelling of it.
-const COMPARED: &[(&str, fn(&str) -> String)] = &[("country-year", country_year), ("country", |c| country(c).to_lowercase())];
+const COMPARED: &[(&str, fn(&str) -> String)] = &[("country-year", country_year), ("country-quarter", country_year), ("country", |c| country(c).to_lowercase())];
 
 /// ISO 3166 two letters to three, as the World Bank lists its economies (2026-10-10), and the
 /// spellings of publishers that differ: Eurostat's EL and UK, the IMF's UVK and WBG.
@@ -445,9 +445,10 @@ pub fn country(code: &str) -> String {
     ISO3_ALIASES.iter().find(|(a, _)| *a == c).map(|(_, b)| b.to_string()).unwrap_or(c)
 }
 
-/// `DE-2024`, `EL-2024` and `DEU-2024` as one: Germany or Greece in that year.
+/// `DE-2024`, `EL-2024` and `DEU-2024` as one: Germany or Greece in that year, and
+/// `DE-2025-Q2` and `DEU-2025-Q2` in that quarter. The country is what comes before the first `-`.
 fn country_year(value: &str) -> String {
-    match value.trim().rsplit_once('-') {
+    match value.trim().split_once('-') {
         Some((c, year)) => format!("{}-{}", country(c), year.trim()).to_lowercase(),
         None => lower(value),
     }
@@ -464,6 +465,8 @@ mod country_tests {
         assert_eq!(key("country-year", "UVK-2020"), key("country-year", "XK-2020"));
         assert_eq!(key("country-year", "EU27_2020-2024"), "country-year:eu27_2020-2024");
         assert_eq!(super::canonical("country-year", "EL-2024").as_deref(), Some("GRC-2024"));
+        assert_eq!(key("country-quarter", "DE-2025-Q2"), key("country-quarter", "DEU-2025-q2"));
+        assert_eq!(super::canonical("country-quarter", "EL-2025-Q2").as_deref(), Some("GRC-2025-Q2"));
         assert_eq!(super::canonical("cve", "CVE-2024-1"), None);
     }
 }
@@ -472,7 +475,7 @@ mod country_tests {
 /// for every other scheme, whose values stay as their source wrote them.
 pub fn canonical(scheme: &str, value: &str) -> Option<String> {
     match scheme {
-        "country-year" => value.trim().rsplit_once('-').map(|(c, y)| format!("{}-{}", country(c), y.trim())),
+        "country-year" | "country-quarter" => value.trim().split_once('-').map(|(c, y)| format!("{}-{}", country(c), y.trim())),
         "country" => Some(country(value)),
         _ => None,
     }

@@ -309,10 +309,44 @@ fn workspace(args: &[String]) -> Result<PathBuf, String> {
     let here = std::env::current_dir().map_err(|e| e.to_string())?;
     let is_one = |p: &Path| p.join("workspace.yaml").exists() || p.join("sources").is_dir() || p.join("trackers").is_dir();
     if let Some(found) = here.ancestors().find(|p| is_one(p)) {
+        ignored(found);
         return Ok(found.to_path_buf());
     }
     let home = std::env::var_os("HOME").map(PathBuf::from).ok_or("no HOME to put ~/zetlyn in")?;
     made(home.join("zetlyn"))
+}
+
+/// What git leaves out of a workspace: what each copy reads for itself and keeps of its own. A clone
+/// is the declarations; `zetlyn source update` (or the app) reads its sources itself.
+pub(crate) const GITIGNORE: &str = "# Written by Zetlyn: a workspace in git shares what it is (its sources' and trackers'
+# declarations, its settings), not what one copy read, nor its keys. Each clone reads its
+# sources itself.
+
+# What was read and kept, every copy its own.
+*.db
+*.db-wal
+*.db-shm
+sources/*/source.csv
+sources/*/checkout/
+watches/*.state.json
+hub/
+
+# Keys, sessions and sync keys of this copy: never shared.
+*.key
+.zetlyn/
+
+# Marks of what this copy is doing.
+.reading
+.published
+";
+
+/// A workspace put in git shares what it is, not what one copy of it read or holds secret. One a
+/// person wrote is theirs, and left as it is; one that cannot be written changes nothing else.
+fn ignored(root: &Path) {
+    let ignore = root.join(".gitignore");
+    if !ignore.exists() {
+        let _ = std::fs::write(&ignore, GITIGNORE);
+    }
 }
 
 fn made(root: PathBuf) -> Result<PathBuf, String> {
@@ -323,6 +357,7 @@ fn made(root: PathBuf) -> Result<PathBuf, String> {
     if !file.exists() {
         std::fs::write(&file, "title: Zetlyn\n").map_err(|e| format!("{}: {e}", file.display()))?;
     }
+    ignored(&root);
     Ok(root.canonicalize().unwrap_or(root))
 }
 

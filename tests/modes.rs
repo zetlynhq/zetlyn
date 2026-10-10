@@ -1685,3 +1685,48 @@ fn the_app_says_when_a_newer_release_is_out() {
     }
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git").args(["-c", "user.email=t@example.org", "-c", "user.name=T", "-c", "init.defaultBranch=main"]).args(args).current_dir(dir).output().expect("git");
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// UC-A3: a workspace in git, shared by a team: what is committed is what it is, its
+/// declarations and settings, never what one copy read nor its keys; a clone reads its sources
+/// itself and holds what the first does.
+#[test]
+fn a_workspace_in_git_shares_what_it_is_and_never_its_keys() {
+    let tmp = std::env::temp_dir().join(format!("zetlyn-modes-{}-git", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let first = tmp.join("first");
+    acme(&first, "");
+    let l = World::start_in(Mode::L, tmp.join("app"), Some(first.clone()), false);
+    let (s, _) = l.post("/settings/keys", "", "name=x");
+    let _ = s;
+    std::fs::write(first.join("operator.key"), "secret").unwrap();
+    std::fs::create_dir_all(first.join(".zetlyn/sync")).unwrap();
+    std::fs::write(first.join(".zetlyn/sync/key"), "zk_secret").unwrap();
+    assert!(first.join(".gitignore").exists(), "written when the app made it a workspace");
+    drop(l);
+
+    git(&first, &["init", "-q"]);
+    git(&first, &["add", "-A"]);
+    git(&first, &["commit", "-q", "-m", "a world"]);
+    let committed = git(&first, &["ls-files"]);
+    for kept in ["workspace.yaml", "sources/kev/source.yaml", "sources/kev/kev.csv", "trackers/cve/tracker.yaml"] {
+        assert!(committed.lines().any(|l| l == kept), "{kept} is shared: {committed}");
+    }
+    for never in [".db", ".key", ".zetlyn/"] {
+        assert!(!committed.contains(never), "{never} is never shared: {committed}");
+    }
+
+    let second = tmp.join("second");
+    git(&tmp, &["clone", "-q", &first.display().to_string(), &second.display().to_string()]);
+    for m in MEMBERS {
+        let (ok, said) = z(&["source", "update", &second.join("sources").join(m).display().to_string()]);
+        assert!(ok, "the clone reads its sources itself: {said}");
+    }
+    assert_eq!(claim_of(&second, "vendor-a", "CVE-2026-0001", "cvss").0, claim_of(&first, "vendor-a", "CVE-2026-0001", "cvss").0, "and holds what the first does");
+    let _ = std::fs::remove_dir_all(&tmp);
+}

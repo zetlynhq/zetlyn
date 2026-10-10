@@ -106,6 +106,12 @@ pub enum Fetch {
         /// What the file writes for an empty cell, read as empty: OFAC writes `-0-`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         blank: Option<String>,
+        /// More files of the same kind, read after `path`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        paths: Vec<String>,
+        /// Sent with a file fetched from a URL: the IMF answers in XML unless asked for CSV.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        headers: BTreeMap<String, String>,
     },
     Xlsx {
         path: String,
@@ -574,6 +580,10 @@ impl PropertyType {
 pub struct PropertySpec {
     #[serde(rename = "type")]
     pub kind: PropertyType,
+    /// Only from the rows this holds for: a table that gives one row per country, year and
+    /// indicator says inflation in the rows of that indicator, and nothing in the others.
+    #[serde(rename = "where", skip_serializing_if = "Option::is_none")]
+    pub filter: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vocabulary: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]

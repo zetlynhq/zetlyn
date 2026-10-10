@@ -930,7 +930,18 @@ impl Tracker {
             // Collected into sets and read out in order, so a thing is the same whatever order
             // its claims arrived in. Keeping one value per source kept whichever arrived last,
             // and two stores holding the same claims answered differently.
-            let divergent = disagree(means.values());
+            // Numbers within the tracker's tolerance agree here as they do in its store: 3.39 and
+            // 3.4 are one unemployment rate where it allows 0.3.
+            let tolerance = n.map(|a| a.number_tolerance()).unwrap_or(0.0);
+            let numbers: Option<Vec<Vec<f64>>> = (tolerance > 0.0)
+                .then(|| means.values().map(|v| v.iter().map(|s| s.parse::<f64>().ok()).collect::<Option<Vec<f64>>>()).collect::<Option<Vec<_>>>())
+                .flatten();
+            let divergent = match numbers {
+                Some(sets) => sets.iter().enumerate().any(|(i, a)| {
+                    sets.iter().skip(i + 1).any(|b| a.iter().any(|x| b.iter().any(|y| (x - y).abs() > tolerance + f64::EPSILON)))
+                }),
+                None => disagree(means.values()),
+            };
             entry.fields.insert(
                 name,
                 PropertyView {

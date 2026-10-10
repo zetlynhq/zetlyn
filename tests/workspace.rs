@@ -1387,3 +1387,32 @@ fn two_lists_that_share_no_number_are_one_thing_only_where_a_person_confirms_it(
     assert_eq!(things(), (4, 0));
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn a_long_table_of_countries_years_and_indicators_is_one_claim_per_country_and_year() {
+    let root = std::env::temp_dir().join(format!("zetlyn-test-{}-long", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let at = root.join("sources/stats");
+    std::fs::create_dir_all(&at).unwrap();
+    // As Eurostat publishes: one dataset per indicator, a country in two letters, Greece as EL.
+    std::fs::write(at.join("prices.csv"), "unit,geo,TIME_PERIOD,OBS_VALUE\nRCH_A_AVG,DE,2024,2.5\nRCH_A_AVG,EL,2024,3.0\n").unwrap();
+    std::fs::write(at.join("jobs.csv"), "unit,geo,TIME_PERIOD,OBS_VALUE\nPC_ACT,DE,2024,3.5\n").unwrap();
+    std::fs::write(at.join("source.yaml"), "name: test/stats\nkind: figures\nfetch:\n  type: csv\n  path: prices.csv\n  paths: [jobs.csv]\n\
+        claims:\n  gather: true\n  id:\n  - { scheme: country-year, from: \"const:{field:geo}-{field:TIME_PERIOD}\" }\n  title: \"const:{field:geo} {field:TIME_PERIOD}\"\n\
+        \x20 properties:\n    inflation: { type: number, from: field:OBS_VALUE, where: unit=RCH_A_AVG }\n    unemployment: { type: number, from: field:OBS_VALUE, where: unit=PC_ACT }\n").unwrap();
+    let z = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_zetlyn")).args(args).current_dir(&root).env("ZETLYN_HOME", root.join("home")).output().unwrap();
+        (out.status.success(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
+    };
+    let (ok, said) = z(&["source", "update", "sources/stats"]);
+    assert!(ok && said.contains("+2 "), "{said}");
+    // Asked as the World Bank and the IMF write it, three letters.
+    let (ok, said) = z(&["claim", "sources/stats", "DEU-2024"]);
+    assert!(ok, "{said}");
+    let claim: serde_json::Value = serde_json::from_str(&said).unwrap();
+    assert_eq!(claim["properties"]["inflation"]["number"], 2.5, "{said}");
+    assert_eq!(claim["properties"]["unemployment"]["number"], 3.5, "{said}");
+    let (ok, said) = z(&["claim", "sources/stats", "GRC-2024"]);
+    assert!(ok && !said.contains("unemployment"), "{said}");
+    let _ = std::fs::remove_dir_all(&root);
+}

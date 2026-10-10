@@ -73,6 +73,8 @@ pub(crate) fn walk(value: &J, path: &str) -> Vec<J> {
             } else {
                 match v {
                     J::Object(o) => o.get(key).cloned(),
+                    // `1[]`: the World Bank answers [what the page is, the rows].
+                    J::Array(a) => key.parse::<usize>().ok().and_then(|i| a.get(i).cloned()),
                     _ => None,
                 }
             };
@@ -644,6 +646,13 @@ pub(crate) fn compiled(pattern: &str) -> Option<regex::Regex> {
 #[cfg(test)]
 mod fallback_tests {
     use super::*;
+
+    #[test]
+    fn a_number_in_a_path_is_a_place_in_a_list() {
+        let row = Row { value: serde_json::json!([{"page": 1}, [{"v": 1}, {"v": 2}]]), meta: BTreeMap::new(), file: None, text: String::new(), root: Path::new(".") };
+        assert_eq!(eval("field:1[].v", &row), vec![J::from(1), J::from(2)]);
+        assert_eq!(eval("field:0.page", &row), vec![J::from(1)]);
+    }
 
     #[test]
     fn an_empty_cell_falls_through_to_the_next() {

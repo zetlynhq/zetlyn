@@ -292,79 +292,85 @@ pub fn each_row(
             skip,
             columns,
             blank,
+            paths,
+            headers: asked_with,
         } => {
-            // `local or at a URL`. A URL is fetched once into the source directory, so the
-            // extraction reads a file either way.
-            let file = if path.starts_with("http://") || path.starts_with("https://") {
-                let f = crate::fetch::Fetcher::new(crate::sourcedecl::AGENT, &BTreeMap::new(), 0)?.whole_file();
-                let body = f.get(path)?;
-                let cached = base.join("source.csv");
-                std::fs::write(&cached, body).map_err(|e| format!("{}: {e}", cached.display()))?;
-                cached
-            } else {
-                base.join(path)
-            };
-            let info = file_info(&file, root);
-            let delim = delimiter.as_bytes().first().copied().unwrap_or(b',');
-            // `skip` is the lines before the header: a report date, a title, a licence line.
-            let whole = std::fs::read(&file).map_err(|e| format!("{}: {e}", file.display()))?;
-            let mut body: &[u8] = &whole;
-            for _ in 0..*skip {
-                match body.iter().position(|b| *b == b'\n') {
-                    Some(i) => body = &body[i + 1..],
-                    None => body = &[],
-                }
-            }
-            // The DOS end of file some lists still end with (OFAC's do) is no row.
-            if let Some(rest) = body.strip_suffix(b"\x1a") {
-                body = rest;
-            }
-            let mut rdr = csv::ReaderBuilder::new()
-                .delimiter(delim)
-                .flexible(true)
-                .has_headers(columns.is_empty())
-                .from_reader(body);
-            let headers = if columns.is_empty() {
-                rdr.headers()
-                    .map_err(|e| format!("{}: {e}", file.display()))?
-                    .clone()
-            } else {
-                csv::StringRecord::from(columns.clone())
-            };
-            for (n, result) in rdr.records().enumerate() {
-                // The line in the file: after the lines skipped, and the header where there is one.
-                let line = n + *skip + if columns.is_empty() { 2 } else { 1 };
-                let rec = result.map_err(|e| format!("{}: row {line}: {e}", file.display()))?;
-                let mut o = Map::new();
-                for (i, h) in headers.iter().enumerate() {
-                    o.insert(
-                        h.to_string(),
-                        J::String(match rec.get(i).unwrap_or("") {
-                            v if blank.as_deref().is_some_and(|b| v.trim() == b) => String::new(),
-                            v => v.to_string(),
-                        }),
-                    );
-                }
-                let text = rec.iter().collect::<Vec<_>>().join(" ");
-                let mut meta = BTreeMap::new();
-                meta.insert("file".into(), info.rel.clone());
-                meta.insert("row".into(), line.to_string());
-                let origin = Origin {
-                    file: Some(info.rel.clone()),
-                    row: Some(line as u64),
-                    ..Origin::default()
+            // One file or several of the same kind: Eurostat keeps each indicator in a dataset of
+            // its own, and a source of three indicators reads three.
+            for (k, path) in std::iter::once(path).chain(paths.iter()).filter(|p| !p.is_empty()).enumerate() {
+                // `local or at a URL`. A URL is fetched once into the source directory, so the
+                // extraction reads a file either way.
+                let file = if path.starts_with("http://") || path.starts_with("https://") {
+                    let f = crate::fetch::Fetcher::new(crate::sourcedecl::AGENT, asked_with, 0)?.whole_file();
+                    let body = f.get(path)?;
+                    let cached = base.join(if k == 0 { "source.csv".to_string() } else { format!("source-{}.csv", k + 1) });
+                    std::fs::write(&cached, body).map_err(|e| format!("{}: {e}", cached.display()))?;
+                    cached
+                } else {
+                    base.join(path)
                 };
-                on_row(Produced {
-                    expanded: false,
-                    row: Row {
-                        value: J::Object(o),
-                        meta,
-                        file: Some(file_info(&file, root)),
-                        text,
-                        root,
-                    },
-                    origin,
-                })?;
+                let info = file_info(&file, root);
+                let delim = delimiter.as_bytes().first().copied().unwrap_or(b',');
+                // `skip` is the lines before the header: a report date, a title, a licence line.
+                let whole = std::fs::read(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+                let mut body: &[u8] = &whole;
+                for _ in 0..*skip {
+                    match body.iter().position(|b| *b == b'\n') {
+                        Some(i) => body = &body[i + 1..],
+                        None => body = &[],
+                    }
+                }
+                // The DOS end of file some lists still end with (OFAC's do) is no row.
+                if let Some(rest) = body.strip_suffix(b"\x1a") {
+                    body = rest;
+                }
+                let mut rdr = csv::ReaderBuilder::new()
+                    .delimiter(delim)
+                    .flexible(true)
+                    .has_headers(columns.is_empty())
+                    .from_reader(body);
+                let headers = if columns.is_empty() {
+                    rdr.headers()
+                        .map_err(|e| format!("{}: {e}", file.display()))?
+                        .clone()
+                } else {
+                    csv::StringRecord::from(columns.clone())
+                };
+                for (n, result) in rdr.records().enumerate() {
+                    // The line in the file: after the lines skipped, and the header where there is one.
+                    let line = n + *skip + if columns.is_empty() { 2 } else { 1 };
+                    let rec = result.map_err(|e| format!("{}: row {line}: {e}", file.display()))?;
+                    let mut o = Map::new();
+                    for (i, h) in headers.iter().enumerate() {
+                        o.insert(
+                            h.to_string(),
+                            J::String(match rec.get(i).unwrap_or("") {
+                                v if blank.as_deref().is_some_and(|b| v.trim() == b) => String::new(),
+                                v => v.to_string(),
+                            }),
+                        );
+                    }
+                    let text = rec.iter().collect::<Vec<_>>().join(" ");
+                    let mut meta = BTreeMap::new();
+                    meta.insert("file".into(), info.rel.clone());
+                    meta.insert("row".into(), line.to_string());
+                    let origin = Origin {
+                        file: Some(info.rel.clone()),
+                        row: Some(line as u64),
+                        ..Origin::default()
+                    };
+                    on_row(Produced {
+                        expanded: false,
+                        row: Row {
+                            value: J::Object(o),
+                            meta,
+                            file: Some(file_info(&file, root)),
+                            text,
+                            root,
+                        },
+                        origin,
+                    })?;
+                }
             }
             Ok(None)
         }

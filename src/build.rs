@@ -383,8 +383,10 @@ pub fn build(
                     let id = Id {
                         scheme: scheme.clone(),
                         // As the source wrote it. Identity folds case when two are compared; the value does
-                        // not, because `Qwen/Qwen3` is a path and `cve-2021-44228` is not.
-                        value: v.clone(),
+                        // not, because `Qwen/Qwen3` is a path and `cve-2021-44228` is not. An identifier this
+                        // program composes (a country and year) is written one way, so a source asked for
+                        // `DEU-2024` finds what Eurostat calls `DE-2024`.
+                        value: crate::schemes::canonical(&scheme, &v).unwrap_or_else(|| v.clone()),
                     };
                     if !seen.contains(&id) {
                         seen.push(id);
@@ -425,6 +427,11 @@ pub fn build(
     // The raw words behind each property, and the expression that read them, for the receipt.
     let mut said = serde_json::Map::new();
     for (name, spec) in &decl.records.fields {
+        if let Some(filter) = &spec.filter {
+            if !expr::parse_pred(filter).is_some_and(|p| expr::holds(&p, &row)) {
+                continue;
+            }
+        }
         let raws = values(&spec.spec(), &row);
         said.insert(
             name.clone(),

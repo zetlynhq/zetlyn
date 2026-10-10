@@ -220,7 +220,10 @@ impl Scheme {
 pub fn key(scheme: &str, value: &str) -> String {
     let v = match named(scheme) {
         Some(s) => s.normalise(value),
-        None => lower(value),
+        None => match COMPARED.iter().find(|(n, _)| *n == scheme) {
+            Some((_, normalise)) => normalise(value),
+            None => lower(value),
+        },
     };
     format!("{scheme}:{v}")
 }
@@ -401,5 +404,76 @@ mod tests {
         let cve = named("cve").unwrap();
         assert_eq!(cve.find("see CVE-2021-44228 and cve-2021-45046."), ["CVE-2021-44228", "cve-2021-45046"]);
         assert!(named("arxiv").unwrap().find("version 2024.99999 of the tool").is_empty());
+    }
+}
+
+/// Schemes this program compares but never looks for in text: a value of them is not something to
+/// recognise in a page, only to meet another source's spelling of it.
+const COMPARED: &[(&str, fn(&str) -> String)] = &[("country-year", country_year), ("country", |c| country(c).to_lowercase())];
+
+/// ISO 3166 two letters to three, as the World Bank lists its economies (2026-10-10), and the
+/// spellings of publishers that differ: Eurostat's EL and UK, the IMF's UVK and WBG.
+const ISO2_ISO3: &str = "
+    ADAND AEARE AFAFG AGATG ALALB AMARM AOAGO ARARG ASASM ATAUT AUAUS AWABW AZAZE BABIH BBBRB BDBGD
+    BEBEL BFBFA BGBGR BHBHR BIBDI BJBEN BMBMU BNBRN BOBOL BRBRA BSBHS BTBTN BWBWA BYBLR BZBLZ CACAN
+    CDCOD CFCAF CGCOG CHCHE CICIV CLCHL CMCMR CNCHN COCOL CRCRI CUCUB CVCPV CWCUW CYCYP CZCZE DEDEU
+    DJDJI DKDNK DMDMA DODOM DZDZA ECECU EEEST EGEGY ERERI ESESP ETETH FIFIN FJFJI FMFSM FOFRO FRFRA
+    GAGAB GBGBR GDGRD GEGEO GHGHA GIGIB GLGRL GMGMB GNGIN GQGNQ GRGRC GTGTM GUGUM GWGNB GYGUY HKHKG
+    HNHND HRHRV HTHTI HUHUN IDIDN IEIRL ILISR IMIMN ININD IQIRQ IRIRN ISISL ITITA JGCHI JMJAM JOJOR
+    JPJPN KEKEN KGKGZ KHKHM KIKIR KMCOM KNKNA KPPRK KRKOR KWKWT KYCYM KZKAZ LALAO LBLBN LCLCA LILIE
+    LKLKA LRLBR LSLSO LTLTU LULUX LVLVA LYLBY MAMAR MCMCO MDMDA MEMNE MFMAF MGMDG MHMHL MKMKD MLMLI
+    MMMMR MNMNG MOMAC MPMNP MRMRT MTMLT MUMUS MVMDV MWMWI MXMEX MYMYS MZMOZ NANAM NCNCL NENER NGNGA
+    NINIC NLNLD NONOR NPNPL NRNRU NZNZL OMOMN PAPAN PEPER PFPYF PGPNG PHPHL PKPAK PLPOL PRPRI PSPSE
+    PTPRT PWPLW PYPRY QAQAT ROROU RSSRB RURUS RWRWA SASAU SBSLB SCSYC SDSDN SESWE SGSGP SISVN SKSVK
+    SLSLE SMSMR SNSEN SOSOM SRSUR SSSSD STSTP SVSLV SXSXM SYSYR SZSWZ TCTCA TDTCD TGTGO THTHA TJTJK
+    TLTLS TMTKM TNTUN TOTON TRTUR TTTTO TVTUV TZTZA UAUKR UGUGA USUSA UYURY UZUZB VCVCT VEVEN VGVGB
+    VIVIR VNVNM VUVUT WSWSM XKXKX YEYEM ZAZAF ZMZMB ZWZWE
+    ELGRC UKGBR TWTWN";
+const ISO3_ALIASES: &[(&str, &str)] = &[("UVK", "XKX"), ("WBG", "PSE")];
+
+/// A country as three letters, whichever way a publisher wrote it. Anything else (EU27_2020, an
+/// aggregate) is left as it was.
+pub fn country(code: &str) -> String {
+    static TABLE: OnceLock<std::collections::HashMap<String, String>> = OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        ISO2_ISO3.split_whitespace().filter(|p| p.len() == 5).map(|p| (p[..2].to_string(), p[2..].to_string())).collect()
+    });
+    let c = code.trim().to_uppercase();
+    if let Some(three) = table.get(&c) {
+        return three.clone();
+    }
+    ISO3_ALIASES.iter().find(|(a, _)| *a == c).map(|(_, b)| b.to_string()).unwrap_or(c)
+}
+
+/// `DE-2024`, `EL-2024` and `DEU-2024` as one: Germany or Greece in that year.
+fn country_year(value: &str) -> String {
+    match value.trim().rsplit_once('-') {
+        Some((c, year)) => format!("{}-{}", country(c), year.trim()).to_lowercase(),
+        None => lower(value),
+    }
+}
+
+#[cfg(test)]
+mod country_tests {
+    #[test]
+    fn a_country_and_year_is_one_key_whoever_spells_it() {
+        use super::key;
+        assert_eq!(key("country-year", "DE-2024"), key("country-year", "DEU-2024"));
+        assert_eq!(key("country-year", "EL-2024"), "country-year:grc-2024");
+        assert_eq!(key("country-year", "UK-2019"), "country-year:gbr-2019");
+        assert_eq!(key("country-year", "UVK-2020"), key("country-year", "XK-2020"));
+        assert_eq!(key("country-year", "EU27_2020-2024"), "country-year:eu27_2020-2024");
+        assert_eq!(super::canonical("country-year", "EL-2024").as_deref(), Some("GRC-2024"));
+        assert_eq!(super::canonical("cve", "CVE-2024-1"), None);
+    }
+}
+
+/// The one spelling of a value of a scheme this program composes: `DE-2024` as `DEU-2024`. None
+/// for every other scheme, whose values stay as their source wrote them.
+pub fn canonical(scheme: &str, value: &str) -> Option<String> {
+    match scheme {
+        "country-year" => value.trim().rsplit_once('-').map(|(c, y)| format!("{}-{}", country(c), y.trim())),
+        "country" => Some(country(value)),
+        _ => None,
     }
 }

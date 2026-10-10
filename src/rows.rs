@@ -290,6 +290,8 @@ pub fn each_row(
             path,
             delimiter,
             skip,
+            columns,
+            blank,
         } => {
             // `local or at a URL`. A URL is fetched once into the source directory, so the
             // extraction reads a file either way.
@@ -304,31 +306,52 @@ pub fn each_row(
             };
             let info = file_info(&file, root);
             let delim = delimiter.as_bytes().first().copied().unwrap_or(b',');
+            // `skip` is the lines before the header: a report date, a title, a licence line.
+            let whole = std::fs::read(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+            let mut body: &[u8] = &whole;
+            for _ in 0..*skip {
+                match body.iter().position(|b| *b == b'\n') {
+                    Some(i) => body = &body[i + 1..],
+                    None => body = &[],
+                }
+            }
+            // The DOS end of file some lists still end with (OFAC's do) is no row.
+            if let Some(rest) = body.strip_suffix(b"\x1a") {
+                body = rest;
+            }
             let mut rdr = csv::ReaderBuilder::new()
                 .delimiter(delim)
                 .flexible(true)
-                .from_path(&file)
-                .map_err(|e| format!("{}: {e}", file.display()))?;
-            let headers = rdr
-                .headers()
-                .map_err(|e| format!("{}: {e}", file.display()))?
-                .clone();
-            for (n, result) in rdr.records().enumerate().skip(*skip) {
-                let rec = result.map_err(|e| format!("{}: row {}: {e}", file.display(), n + 2))?;
+                .has_headers(columns.is_empty())
+                .from_reader(body);
+            let headers = if columns.is_empty() {
+                rdr.headers()
+                    .map_err(|e| format!("{}: {e}", file.display()))?
+                    .clone()
+            } else {
+                csv::StringRecord::from(columns.clone())
+            };
+            for (n, result) in rdr.records().enumerate() {
+                // The line in the file: after the lines skipped, and the header where there is one.
+                let line = n + *skip + if columns.is_empty() { 2 } else { 1 };
+                let rec = result.map_err(|e| format!("{}: row {line}: {e}", file.display()))?;
                 let mut o = Map::new();
                 for (i, h) in headers.iter().enumerate() {
                     o.insert(
                         h.to_string(),
-                        J::String(rec.get(i).unwrap_or("").to_string()),
+                        J::String(match rec.get(i).unwrap_or("") {
+                            v if blank.as_deref().is_some_and(|b| v.trim() == b) => String::new(),
+                            v => v.to_string(),
+                        }),
                     );
                 }
                 let text = rec.iter().collect::<Vec<_>>().join(" ");
                 let mut meta = BTreeMap::new();
                 meta.insert("file".into(), info.rel.clone());
-                meta.insert("row".into(), (n + 2).to_string());
+                meta.insert("row".into(), line.to_string());
                 let origin = Origin {
                     file: Some(info.rel.clone()),
-                    row: Some(n as u64 + 2),
+                    row: Some(line as u64),
                     ..Origin::default()
                 };
                 on_row(Produced {

@@ -253,6 +253,61 @@ impl Claim {
         h.update(names_it.as_bytes());
         hex(&h.finalize())
     }
+
+    /// Another row under the same key, taken into this claim: a list that gives one row per
+    /// name, address or birth date says one thing over several rows. Identifiers and values it
+    /// adds are kept beside the ones here, a text it adds goes after, and the latest date stands.
+    pub fn gather(&mut self, other: Claim) {
+        for id in other.ids {
+            if !self.ids.contains(&id) {
+                self.ids.push(id);
+            }
+        }
+        if self.title.is_empty() {
+            self.title = other.title;
+        }
+        if self.url.is_none() {
+            self.url = other.url;
+        }
+        let t = other.text.trim();
+        if !t.is_empty() && !self.text.contains(t) {
+            if !self.text.is_empty() {
+                self.text.push_str("\n\n");
+            }
+            self.text.push_str(t);
+        }
+        for (name, v) in other.fields {
+            let adds = match v {
+                Value::List(vs) => vs,
+                v => vec![v],
+            };
+            match self.fields.remove(&name) {
+                None => {
+                    let mut adds = adds;
+                    adds.dedup();
+                    let v = if adds.len() == 1 { adds.pop().unwrap() } else { Value::List(adds) };
+                    self.fields.insert(name, v);
+                }
+                Some(held) => {
+                    let mut all = match held {
+                        Value::List(vs) => vs,
+                        v => vec![v],
+                    };
+                    for a in adds {
+                        if !all.contains(&a) {
+                            all.push(a);
+                        }
+                    }
+                    let v = if all.len() == 1 { all.pop().unwrap() } else { Value::List(all) };
+                    self.fields.insert(name, v);
+                }
+            }
+        }
+        if other.known > self.known {
+            self.known = other.known;
+        }
+        self.hash = self.compute_hash();
+    }
     /// changed what it says.
     pub fn compute_hash(&self) -> String {
         let mut h = Sha256::new();

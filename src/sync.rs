@@ -655,6 +655,29 @@ pub fn run(root: &Path, url: &str, key: &str, take: Option<&str>, with_data: boo
     }
     let peer = theirs_state["instance"].as_str().filter(|p| p.len() == 16).ok_or("the world did not say who it is")?.to_string();
 
+    // A first sync into an empty directory with `--no-data`: what the world is, its declarations
+    // and settings and proposals, and none of what it read: a copy to work on what it is, which
+    // reads its sources itself where it is asked to.
+    if !root.join(crate::account::WORKSPACE).exists() && !with_data {
+        let pulled = remote.get("/sync/pull")?;
+        let work = std::env::temp_dir().join(format!("zetlyn-sync-{}", crate::jwt::random()));
+        let r = unpack(&mut pulled.as_slice(), &work);
+        let _ = std::fs::remove_dir_all(&work);
+        let (_, defs, props, _) = r?;
+        std::fs::create_dir_all(root.join("sources")).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(root.join("trackers")).map_err(|e| e.to_string())?;
+        for (rel, bytes) in &defs {
+            write(&root, rel, Some(bytes))?;
+        }
+        if !root.join(crate::account::WORKSPACE).exists() {
+            std::fs::write(root.join(crate::account::WORKSPACE), "title: Zetlyn\n").map_err(|e| e.to_string())?;
+        }
+        let came = take_proposals(&root, &props)?;
+        write_base(&root, &peer, &definitions(&root))?;
+        remember(&root, &peer, &url, &key)?;
+        log.push(format!("Taken without its data: what {url} is, {} files and {came} proposals, in {}. Sync again with --no-data to bring changes to what it is over; its sources are read where each copy reads them.", defs.len(), root.display()));
+        return Ok(log.join("\n"));
+    }
     // A first sync into an empty directory: the whole world, as it is there.
     if !root.join(crate::account::WORKSPACE).exists() {
         let archive = remote.get("/sync/export")?;

@@ -24,6 +24,11 @@ pub struct TrackerDecl {
     /// What a thing is to something else, where one claim states both identifiers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub relations: Vec<Relation>,
+    /// Where the sources share no identifier for what may be one thing: the properties whose
+    /// words, beside the title, suggest that two things from different sources are the same.
+    /// Only suggested; a person confirms, and what they confirm is one thing from then on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub same: Option<Same>,
     /// `public`, the default: its overview and thing pages are open to anyone, its claims to
     /// subscribers. `private`: every page for its accounts only, and no free edge.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -414,4 +419,46 @@ pub struct Inventory {
     /// What the page says first, about where the lists come from.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub about: String,
+}
+
+/// Things that may be one, said in words only: two sanctions lists that spell one person two ways
+/// and share no number for them.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Same {
+    /// The properties that name a thing besides its title: `names`, with every alias.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggest_from: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub about: String,
+}
+
+/// The relation a confirmed `same` is kept under in matches.jsonl: the thing it names is folded
+/// into the one the match is on.
+pub const SAME: &str = "same";
+
+/// A name as two lists are compared on: case, punctuation and the order of its words aside, so
+/// `ABBAS, Abu` and `Abu Abbas` are one spelling. Too short to tell anything apart, it is none.
+pub fn same_name(s: &str) -> Option<String> {
+    let lower = s.to_lowercase();
+    let mut words: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    words.sort_unstable();
+    words.dedup();
+    let joined = words.join(" ");
+    (words.len() >= 2 && joined.chars().count() >= 6).then_some(joined)
+}
+
+#[cfg(test)]
+mod same_tests {
+    #[test]
+    fn a_name_is_the_same_whatever_its_order_case_and_commas() {
+        use super::same_name;
+        assert_eq!(same_name("ABBAS, Abu"), same_name("Abu Abbas"));
+        assert_eq!(same_name("Banco Nacional de Cuba"), Some("banco cuba de nacional".into()));
+        assert_eq!(same_name("CIMEX"), None);
+        assert_eq!(same_name("Li Bo"), None);
+    }
 }

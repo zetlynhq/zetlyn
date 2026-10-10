@@ -719,6 +719,7 @@ fn entry_page(scope: &Tracker, scheme: &str, value: &str, operator: bool, said: 
         }
 
         (relations_section(scope, &key, scheme, value, operator, said))
+        (same_section(scope, &key, scheme, value, operator, said))
         @if shaped && !entry.fields.is_empty() {
             details.claims-all {
                 summary { "Every value, with what each source said and its receipt" }
@@ -2098,12 +2099,14 @@ impl TrackerSite {
                     why: form_field(&form, "why").trim().to_string(),
                     withdrawn: form_field(&form, "withdraw") == "1",
                 };
-                let known = scope.decl.relations.iter().any(|r| r.name == m.relation);
+                let known = scope.decl.relations.iter().any(|r| r.name == m.relation)
+                    || (m.relation == crate::trackerdecl::SAME && scope.decl.same.is_some());
                 let said = if !known {
                     format!("{}: this tracker has no such relation", m.relation)
                 } else {
                     match crate::matches::record(&scope.dir, &m).and_then(|_| scope.refresh(false).map(|_| ())) {
                         Ok(()) if m.withdrawn => format!("Withdrawn. The match and its withdrawal both stay in {}.", crate::matches::FILE),
+                        Ok(()) if m.relation == crate::trackerdecl::SAME => format!("Kept: {} is {} from now on, confirmed by {}.", m.target, parts[2], m.by),
                         Ok(()) => format!("Kept: {} {} {}, confirmed by {}.", parts[2], m.relation, m.target, m.by),
                         Err(e) => e,
                     }
@@ -3390,6 +3393,75 @@ fn relations_section(scope: &Tracker, key: &str, scheme: &str, value: &str, oper
                                     input type="text" name="by" placeholder="Your name" required;
                                     input type="text" name="why" placeholder="Why, in a few words";
                                     button type="submit" { "Confirm" }
+                                }
+                            }
+                        }
+                    }
+                }
+            } }
+        }
+    }
+}
+
+/// What else may be this thing, where the sources share no identifier for it: things of other
+/// sources that go by one of its names. Offered for a person to confirm and never joined on its
+/// own; what they confirm is one thing from then on, and listed here to take back.
+fn same_section(scope: &Tracker, key: &str, scheme: &str, value: &str, operator: bool, said: Option<&str>) -> Markup {
+    let Some(same) = &scope.decl.same else { return html! {} };
+    let Ok(store) = crate::thingstore::ThingStore::open(&scope.dir) else { return html! {} };
+    let confirmed: Vec<crate::matches::Match> = crate::matches::standing(&scope.dir)
+        .into_iter()
+        .filter(|m| m.relation == crate::trackerdecl::SAME && m.key == key)
+        .collect();
+    let maybe = store.maybe_same(key);
+    // The note after a confirmation, where no relations section shows it.
+    let note = said.filter(|_| scope.decl.relations.is_empty());
+    if confirmed.is_empty() && maybe.is_empty() && note.is_none() {
+        return html! {};
+    }
+    let action = format!("{}/{}/match", urlencode(scheme), urlencode(value));
+    let href = |k: &str| k.split_once(':').map(|(s, v)| format!("{}{}/{}", at("/thing/"), urlencode(s), urlencode(v)));
+    html! {
+        h2 { "The same, in other lists" }
+        @if let Some(s) = note { div.note { (s) } }
+        @if !same.about.is_empty() { p.dim { (same.about) } }
+        @if !confirmed.is_empty() {
+            table { tbody {
+                @for m in &confirmed {
+                    tr {
+                        td { "the same as" }
+                        td {
+                            code { (m.target) }
+                            div.why { "confirmed by " (m.by) ", " (m.at.get(..10).unwrap_or("")) @if !m.why.is_empty() { ": " (m.why) } }
+                            @if operator {
+                                form method="post" action={(at("/thing/")) (action)} {
+                                    input type="hidden" name="relation" value=(crate::trackerdecl::SAME);
+                                    input type="hidden" name="target" value=(m.target);
+                                    input type="hidden" name="by" value=(m.by);
+                                    input type="hidden" name="withdraw" value="1";
+                                    button type="submit" { "Take back" }
+                                }
+                            }
+                        }
+                    }
+                }
+            } }
+        }
+        @if !maybe.is_empty() {
+            p.dim { "By name only, so not one thing until a person confirms it:" }
+            table { tbody {
+                @for (other, name, title, sources) in &maybe {
+                    tr {
+                        td {
+                            @match href(other) { Some(h) => a href=(h) { (title) }, None => (title) }
+                            div.why { (sources.iter().map(|s| said_by(scope, s).0).collect::<Vec<_>>().join(", ")) " · shares the name “" (name) "”" }
+                            @if operator {
+                                form.bar method="post" action={(at("/thing/")) (action)} {
+                                    input type="hidden" name="relation" value=(crate::trackerdecl::SAME);
+                                    input type="hidden" name="target" value=(other);
+                                    input type="text" name="by" placeholder="Your name" required;
+                                    input type="text" name="why" placeholder="Why: a birth date, a number";
+                                    button type="submit" { "The same" }
                                 }
                             }
                         }

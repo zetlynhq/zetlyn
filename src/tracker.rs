@@ -68,6 +68,9 @@ pub struct Tracker {
     pub decl: TrackerDecl,
     pub members: Vec<Resolved>,
     pub missing: Vec<String>,
+    /// The things a person confirmed are one with another: the folded thing, the one it is now.
+    /// Read again at every refresh, so a match confirmed on a page counts in the refresh it asks for.
+    pub folds: std::sync::RwLock<BTreeMap<String, String>>,
 }
 
 #[derive(Default)]
@@ -219,6 +222,7 @@ impl Tracker {
         Ok(Tracker {
             dir: dir.to_path_buf(),
             root: datasets.parent().unwrap_or(datasets).to_path_buf(),
+            folds: std::sync::RwLock::new(folds(dir)),
             decl,
             members,
             missing,
@@ -631,6 +635,7 @@ impl Tracker {
             }
             // Into every thing it is about: an exploit for two CVEs is part of both.
             for k in about {
+                let k = &self.kept(k);
                 let token = crate::schemes::key(&k.scheme, &k.value);
                 let slot = match seen.get(&token) {
                     Some(i) => *i,
@@ -857,7 +862,10 @@ impl Tracker {
         if wanted.is_empty() {
             return;
         }
-        let values: Vec<String> = wanted.iter().map(|i| i.value.clone()).collect();
+        let mut values: Vec<String> = wanted.iter().map(|i| i.value.clone()).collect();
+        for w in &wanted {
+            values.extend(self.folded_into(w));
+        }
         for m in &self.members {
             if !m.can("ids") {
                 continue;
@@ -880,7 +888,7 @@ impl Tracker {
                     .ids
                     .iter()
                     .find(|id| keys.iter().any(|k| *k == id.scheme))
-                    .cloned()
+                    .map(|id| self.kept(id))
                 else {
                     continue;
                 };
@@ -980,7 +988,36 @@ impl Tracker {
     }
 
     /// One thing, and everything any source says about it.
+    /// The identifier of the thing this one is, where a person confirmed it is the same as another.
+    pub fn kept(&self, id: &Id) -> Id {
+        let own = crate::schemes::key(&id.scheme, &id.value);
+        match self.folds.read().ok().and_then(|f| f.get(&own).cloned()) {
+            Some(k) => match k.split_once(':') {
+                Some((s, v)) => Id { scheme: s.to_string(), value: v.to_string() },
+                None => id.clone(),
+            },
+            None => id.clone(),
+        }
+    }
+
+    /// The values of the things folded into this one, to ask the sources for as well.
+    fn folded_into(&self, id: &Id) -> Vec<String> {
+        let own = crate::schemes::key(&id.scheme, &id.value);
+        self.folds
+            .read()
+            .map(|f| f.iter().filter(|(_, kept)| **kept == own).filter_map(|(f, _)| f.split_once(':').map(|(_, v)| v.to_string())).collect())
+            .unwrap_or_default()
+    }
+
     pub fn entry(&self, scheme: &str, value: &str) -> Option<Thing> {
+        // A thing folded into another is that other, at its old address too.
+        let asked = Id { scheme: scheme.to_string(), value: value.to_string() };
+        let kept = self.kept(&asked);
+        if kept != asked && crate::schemes::key(&kept.scheme, &kept.value) != crate::schemes::key(scheme, value) {
+            return self.entry(&kept.scheme, &kept.value);
+        }
+        let mut values = vec![value.to_string()];
+        values.extend(self.folded_into(&asked));
         let key = Id {
             scheme: scheme.to_string(),
             // As asked for. The lookup folds case; the key a page shows does not.
@@ -1000,7 +1037,7 @@ impl Tracker {
                 pred: None,
                 view: None,
                 sort: None,
-                ids: vec![key.value.clone()],
+                ids: values.clone(),
                 seen_before: None,
                 limit: 64,
                 offset: 0,
@@ -1173,7 +1210,7 @@ impl Tracker {
                     // Under every thing the claim is about, or on its own where it is about none.
                     let about: Vec<Option<crate::claim::Id>> = match about(&keys, &ids) {
                         a if a.is_empty() => vec![None],
-                        a => a.into_iter().cloned().map(Some).collect(),
+                        a => a.into_iter().map(|k| Some(self.kept(k))).collect(),
                     };
                     for key in about {
                         let token = match &key {
@@ -1327,8 +1364,9 @@ impl Tracker {
                     // of one field is a measurement of the field somebody guessed.
                     // Compared with the case folded, as the thing is gathered: `cve-2021-44228`
                     // and `CVE-2021-44228` are one thing there and must be one here, and so is the scheme.
+                    let own = crate::schemes::key(&key.scheme, &key.value);
                     let said = subjects
-                        .entry(crate::schemes::key(&key.scheme, &key.value))
+                        .entry(self.folds.read().ok().and_then(|f| f.get(&own).cloned()).unwrap_or(own))
                         .or_default()
                         .entry(m.name().to_string())
                         .or_default();
@@ -1751,16 +1789,31 @@ impl Tracker {
         // carries: an exploit for two CVEs is about both. Other schemes it carries are
         // shown on the thing and make no thing of their own.
         for id in about(keys, ids) {
-        let key = crate::schemes::key(&id.scheme, &id.value);
+        let own = crate::schemes::key(&id.scheme, &id.value);
+        // A thing a person confirmed is one with another is that other.
+        let key = self.folds.read().ok().and_then(|f| f.get(&own).cloned()).unwrap_or_else(|| own.clone());
         if only.is_some_and(|o| !o.contains(&key)) {
             continue;
         }
+        let folded = key != own;
+        let (scheme, value) = match key.split_once(':') {
+            Some((s, v)) if folded => (s.to_string(), v.to_string()),
+            _ => (id.scheme.clone(), id.value.clone()),
+        };
         let thing = snap.things.entry(key).or_insert_with(|| Snap {
-            scheme: id.scheme.clone(),
-            value: id.value.clone(),
+            scheme,
+            value,
             title: title.to_string(),
+            named_by_fold: folded,
             ..Snap::default()
         });
+        // Named by its own claim where a folded one came first.
+        if !folded && thing.named_by_fold {
+            thing.scheme = id.scheme.clone();
+            thing.value = id.value.clone();
+            thing.title = title.to_string();
+            thing.named_by_fold = false;
+        }
         thing
             .claims
             .entry(m.name().to_string())
@@ -1822,6 +1875,9 @@ impl Tracker {
                 "{} is a sealed package, {}: it carries no recipe to build it with. `zetlyn tracker pull` takes a newer version",
                 self.decl.name, p.version
             ));
+        }
+        if let Ok(mut f) = self.folds.write() {
+            *f = folds(&self.dir);
         }
         let mut store = crate::thingstore::ThingStore::open(&self.dir)?;
         // Only the things a claim moved about since the last refresh, where that can be said;
@@ -1897,7 +1953,10 @@ impl Tracker {
                     .flatten()
                     .filter_map(|i| Some(Id { scheme: i["scheme"].as_str()?.to_string(), value: i["value"].as_str()?.to_string() }))
                     .collect();
-                things.extend(about(&keys, &ids).into_iter().map(|i| crate::schemes::key(&i.scheme, &i.value)));
+                things.extend(about(&keys, &ids).into_iter().map(|i| {
+                    let k = crate::schemes::key(&i.scheme, &i.value);
+                    self.folds.read().ok().and_then(|f| f.get(&k).cloned()).unwrap_or(k)
+                }));
             }
             moved.insert(m.name().to_string(), ids);
         }
@@ -1998,4 +2057,29 @@ impl Tracker {
     pub fn text_shown(&self, source: &str) -> bool {
         self.licences().iter().find(|(s, _)| s == source).map_or(true, |(_, r)| r != "summary")
     }
+}
+
+/// Every `same` a person confirmed and did not take back, followed to its end: where c was
+/// confirmed the same as b and b the same as a, both are a.
+fn folds(dir: &Path) -> BTreeMap<String, String> {
+    let direct: BTreeMap<String, String> = crate::matches::standing(dir)
+        .into_iter()
+        .filter(|m| m.relation == crate::trackerdecl::SAME && m.key != m.target)
+        .map(|m| (m.target, m.key))
+        .collect();
+    let mut out = BTreeMap::new();
+    for start in direct.keys() {
+        let mut at = start;
+        let mut seen = BTreeSet::new();
+        while let Some(next) = direct.get(at) {
+            if !seen.insert(next) {
+                break;
+            }
+            at = next;
+        }
+        if at != start {
+            out.insert(start.clone(), at.clone());
+        }
+    }
+    out
 }

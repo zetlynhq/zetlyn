@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Value as J};
 
-use crate::sourcedecl::{SourceDecl, PropertyType, Spec};
+use crate::sourcedecl::{Dates, SourceDecl, PropertyType, Spec};
 use crate::expr::{self, Row};
 use crate::claim::{Id, Origin, Claim, Value};
 
@@ -85,6 +85,11 @@ fn plain(from: &str) -> Spec {
 
 /// ISO 8601, or as close as the source gets. A timestamp keeps its date.
 pub fn as_date(raw: &str) -> Option<String> {
+    as_date_in(raw, Dates::MonthFirst)
+}
+
+/// A date, with slash dates read the way the source writes them.
+pub fn as_date_in(raw: &str, order: Dates) -> Option<String> {
     let s = raw.trim();
     let bytes = s.as_bytes();
     if bytes.len() >= 10
@@ -107,7 +112,8 @@ pub fn as_date(raw: &str) -> Option<String> {
             return Some(format!("{y:04}-{m:02}-{d:02}"));
         }
     }
-    if let Some((m, d, y)) = split('/') {
+    if let Some((a, b, y)) = split('/') {
+        let (d, m) = if order == Dates::DayFirst { (a, b) } else { (b, a) };
         if (1..=31).contains(&d) && (1..=12).contains(&m) && y > 1000 {
             return Some(format!("{y:04}-{m:02}-{d:02}"));
         }
@@ -116,7 +122,7 @@ pub fn as_date(raw: &str) -> Option<String> {
     // English and in German.
     // And after a label: `Released: 30 Sep, 2026`.
     if let Some((_, after)) = s.rsplit_once(": ") {
-        if let Some(d) = as_date(after) {
+        if let Some(d) = as_date_in(after, order) {
             return Some(d);
         }
     }
@@ -191,7 +197,7 @@ fn as_bool(raw: &str) -> Option<bool> {
     }
 }
 
-pub(crate) fn typed(kind: PropertyType, vocabulary: Option<&str>, raw: &str) -> Option<Value> {
+pub(crate) fn typed(kind: PropertyType, vocabulary: Option<&str>, raw: &str, order: Dates) -> Option<Value> {
     Some(match kind {
         PropertyType::Text => Value::Text(raw.to_string()),
         PropertyType::Code => Value::Code {
@@ -200,15 +206,15 @@ pub(crate) fn typed(kind: PropertyType, vocabulary: Option<&str>, raw: &str) -> 
         },
         PropertyType::Number => Value::Number(as_number(raw)?),
         PropertyType::Bool => Value::Bool(as_bool(raw)?),
-        PropertyType::Date => Value::Date(as_date(raw)?),
+        PropertyType::Date => Value::Date(as_date_in(raw, order)?),
         PropertyType::Interval => {
             let (a, b) = raw.split_once("..")?;
             Value::Interval {
-                from: as_date(a),
+                from: as_date_in(a, order),
                 to: if b.trim().is_empty() {
                     None
                 } else {
-                    as_date(b)
+                    as_date_in(b, order)
                 },
             }
         }
@@ -400,7 +406,7 @@ pub fn build(
         .known
         .as_ref()
         .and_then(|e| one(&plain(e), &row))
-        .and_then(|raw| as_date(&raw));
+        .and_then(|raw| as_date_in(&raw, decl.records.dates));
     let known = match known {
         Some(k) => k,
         None => {
@@ -423,7 +429,7 @@ pub fn build(
         );
         let mut vs = Vec::new();
         for raw in &raws {
-            match typed(spec.kind, spec.vocabulary.as_deref(), raw) {
+            match typed(spec.kind, spec.vocabulary.as_deref(), raw, decl.records.dates) {
                 Some(v) => vs.push(v),
                 None => notes.unparsed(name, raw, spec.kind),
             }
@@ -503,6 +509,15 @@ mod date_tests {
         for not in ["Coming soon", "Q4 2026", "30 Foo 2026", "Sep 2026"] {
             assert_eq!(super::as_date(not), None, "{not}");
         }
+    }
+
+    #[test]
+    fn a_slash_date_is_read_the_way_its_source_writes_it() {
+        use crate::sourcedecl::Dates;
+        assert_eq!(super::as_date_in("04/08/2026", Dates::DayFirst).as_deref(), Some("2026-08-04"));
+        assert_eq!(super::as_date_in("04/08/2026", Dates::MonthFirst).as_deref(), Some("2026-04-08"));
+        assert_eq!(super::as_date_in("29/06/2012", Dates::DayFirst).as_deref(), Some("2012-06-29"));
+        assert_eq!(super::as_date_in("29/06/2012", Dates::MonthFirst), None);
     }
 }
 

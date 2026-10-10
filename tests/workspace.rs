@@ -1301,3 +1301,89 @@ fn a_question_is_answered_from_the_store_as_from_every_thing_read_whole() {
         assert_eq!(from_store, whole(q).replace(&ws.root.display().to_string(), "WORKSPACE"), "{q}");
     }
 }
+
+#[test]
+fn a_list_that_gives_a_row_per_name_and_address_is_one_claim_per_entry() {
+    let root = std::env::temp_dir().join(format!("zetlyn-test-{}-gather", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let at = root.join("sources/list");
+    std::fs::create_dir_all(&at).unwrap();
+    // The way a sanctions list is published: a report line before the header, dates day first,
+    // and one entry over several rows.
+    std::fs::write(at.join("list.csv"), "Report Date: 08-Oct-2026\n\
+        Unique ID,Name,Name type,UN ref,Country,Designated\n\
+        AFG0001,HAJI SATTAR SARAFI,Alias,,Pakistan,04/08/2026\n\
+        AFG0001,HAJI SATTAR MONEY EXCHANGE,Primary Name,TAe.010,United Arab Emirates,04/08/2026\n\
+        AFG0001,HAJI SATTAR MONEY EXCHANGE,Primary name,,Afghanistan,04/08/2026\n\
+        RUS0002,IVAN PETROV,Primary Name,,Russia,29/06/2012\n").unwrap();
+    std::fs::write(at.join("source.yaml"), "name: test/list\nkind: listing\nfetch: { type: csv, path: list.csv, skip: 1 }\n\
+        claims:\n  lead: \"'Name type'='primary name'\"\n  gather: true\n  dates: day-first\n\
+        \x20 id:\n  - { scheme: list, from: field:Unique ID }\n  - { scheme: un, from: field:UN ref }\n\
+        \x20 title: field:Name\n  known: field:Designated\n  properties:\n    country: { type: text, from: field:Country }\n    names: { type: text, from: field:Name, all: true }\n").unwrap();
+    let z = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_zetlyn")).args(args).current_dir(&root).env("ZETLYN_HOME", root.join("home")).output().unwrap();
+        (out.status.success(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
+    };
+    let (ok, said) = z(&["source", "update", "sources/list"]);
+    assert!(ok && said.contains("+2 "), "{said}");
+    let (ok, said) = z(&["claim", "sources/list", "AFG0001"]);
+    assert!(ok, "{said}");
+    let claim: serde_json::Value = serde_json::from_str(&said).unwrap();
+    assert_eq!(claim["known"], "2026-08-04", "{said}");
+    assert_eq!(claim["title"], "HAJI SATTAR MONEY EXCHANGE");
+    let country = claim["properties"]["country"].to_string();
+    assert!(country.contains("United Arab Emirates") && country.contains("Afghanistan") && country.contains("Pakistan"), "{country}");
+    assert!(claim["properties"]["names"].to_string().contains("SARAFI"), "{said}");
+    assert!(claim["ids"].to_string().contains("TAe.010"), "{}", claim["ids"]);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn two_lists_that_share_no_number_are_one_thing_only_where_a_person_confirms_it() {
+    let root = std::env::temp_dir().join(format!("zetlyn-test-{}-same", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    for d in ["sources/a", "sources/b", "trackers/t"] {
+        std::fs::create_dir_all(root.join(d)).unwrap();
+    }
+    std::fs::write(root.join("sources/a/a.csv"), "id,name\nA1,\"ABBAS, Abu\"\nA2,CIMEX\n").unwrap();
+    std::fs::write(root.join("sources/b/b.csv"), "ref,name\nB7,Abu Abbas\nB8,Cimex\n").unwrap();
+    for (s, scheme, col) in [("a", "list-a", "id"), ("b", "list-b", "ref")] {
+        std::fs::write(root.join(format!("sources/{s}/source.yaml")), format!(
+            "name: test/{s}\nkind: listing\nfetch: {{ type: csv, path: {s}.csv }}\nclaims:\n  id:\n  - {{ scheme: {scheme}, from: field:{col} }}\n  title: field:name\n")).unwrap();
+    }
+    std::fs::write(root.join("trackers/t/tracker.yaml"), "name: test/t\nsources:\n- source: test/a\n  why: One list.\n- source: test/b\n  why: The other.\nidentified_by: [list-a, list-b]\nsame:\n  suggest_from: [names]\n").unwrap();
+    let z = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_zetlyn")).args(args).current_dir(&root).env("ZETLYN_HOME", root.join("home")).output().unwrap();
+        (out.status.success(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
+    };
+    for s in ["sources/a", "sources/b"] {
+        let (ok, said) = z(&["source", "update", s]);
+        assert!(ok, "{said}");
+    }
+    let things = || {
+        let (ok, said) = z(&["tracker", "measure", "trackers/t"]);
+        assert!(ok, "{said}");
+        let m: serde_json::Value = serde_json::from_str(&said).unwrap();
+        (m["by_sources"]["1"].as_u64().unwrap_or(0), m["by_sources"]["2"].as_u64().unwrap_or(0))
+    };
+    let (ok, said) = z(&["tracker", "refresh", "trackers/t"]);
+    assert!(ok, "{said}");
+    // A name in common joins nothing by itself. CIMEX is one word, too little to suggest anything.
+    assert_eq!(things(), (4, 0));
+    let db = rusqlite::Connection::open(root.join("trackers/t/tracker.db")).unwrap();
+    let suggested: Vec<(String, String)> = db.prepare("select w.key, o.key from word w join word o on o.property = w.property and o.word = w.word and o.key > w.key where w.property = '~same'").unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().flatten().collect();
+    assert_eq!(suggested, [("list-a:a1".to_string(), "list-b:b7".to_string())]);
+    drop(db);
+
+    let (ok, said) = z(&["tracker", "match", "trackers/t", "list-a:A1", "same", "list-b:B7", "--by", "Analyst", "--why", "same birth date"]);
+    assert!(ok, "{said}");
+    assert_eq!(things(), (2, 1));
+    // One thing when asked for, both lists in it.
+    let (ok, said) = z(&["tracker", "search", "trackers/t", "abbas"]);
+    assert!(ok && said.starts_with("1 thing") && said.contains("(test/a)") && said.contains("(test/b)"), "{said}");
+    let (ok, said) = z(&["tracker", "match", "trackers/t", "list-a:A1", "same", "list-b:B7", "--by", "Analyst", "--withdraw"]);
+    assert!(ok, "{said}");
+    assert_eq!(things(), (4, 0));
+    let _ = std::fs::remove_dir_all(&root);
+}

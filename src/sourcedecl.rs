@@ -99,6 +99,13 @@ pub enum Fetch {
         delimiter: String,
         #[serde(default, skip_serializing_if = "is_zero")]
         skip: usize,
+        /// The names of the columns, for a file that starts with its first row: OFAC's lists
+        /// have no header.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        columns: Vec<String>,
+        /// What the file writes for an empty cell, read as empty: OFAC writes `-0-`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blank: Option<String>,
     },
     Xlsx {
         path: String,
@@ -439,6 +446,20 @@ pub struct Schedule {
     pub every: Option<String>,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Dates {
+    #[default]
+    MonthFirst,
+    DayFirst,
+}
+
+impl Dates {
+    fn is_month_first(&self) -> bool {
+        *self == Dates::MonthFirst
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClaimsDecl {
@@ -458,6 +479,18 @@ pub struct ClaimsDecl {
     pub text: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub known: Option<String>,
+    /// How the source writes 04/08/2026: `day-first` for 4 August, as Britain and most of Europe
+    /// do. Without it a slash date is read month first.
+    #[serde(default, skip_serializing_if = "Dates::is_month_first")]
+    pub dates: Dates,
+    /// Rows under one key gathered into one claim, where a list gives one row per name, address
+    /// or birth date. Without it the first row under a key is the claim and the rest are counted.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub gather: bool,
+    /// Which of the gathered rows leads, where the first is not always the one: the row with
+    /// the primary name gives the claim its title, the aliases come after.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lead: Option<String>,
     #[serde(default, rename = "properties", skip_serializing_if = "BTreeMap::is_empty")]
     pub fields: BTreeMap<String, PropertySpec>,
 }

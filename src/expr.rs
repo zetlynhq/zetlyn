@@ -189,12 +189,31 @@ pub fn eval(expr: &str, row: &Row) -> Vec<J> {
             .get(rest)
             .map(|s| vec![J::String(s.clone())])
             .unwrap_or_default(),
-        "const" => vec![J::String(fill(rest, row))],
+        // A name put together from parts some rows leave empty: `{Name 1} {Name 2} {Name 6}`
+        // with no second name is not two spaces.
+        "const" => {
+            let filled = fill(rest, row);
+            let mut out = String::with_capacity(filled.len());
+            for c in filled.trim().chars() {
+                if !(c == ' ' && out.ends_with(' ')) {
+                    out.push(c);
+                }
+            }
+            vec![J::String(out)]
+        }
         "text" => {
             let pattern = rest.trim_matches('/');
-            let Ok(re) = regex::Regex::new(pattern) else {
+            let Some(re) = compiled(pattern) else {
                 return Vec::new();
             };
+            // A pattern with a group says which part it is after: `DOB (\d+ \w+ \d{4})`.
+            if re.captures_len() > 1 {
+                return re
+                    .captures_iter(&row.text)
+                    .filter_map(|c| c.get(1))
+                    .map(|m| J::String(m.as_str().to_string()))
+                    .collect();
+            }
             re.find_iter(&row.text)
                 .map(|m| J::String(m.as_str().to_string()))
                 .collect()
@@ -436,8 +455,9 @@ impl Parser {
             }
             return Some(inner);
         }
+        // A field whose name holds a space is written quoted: 'Name type' = x.
         let left = match self.peek()? {
-            Tok::Word(w) => w.clone(),
+            Tok::Word(w) | Tok::Str(w) => w.clone(),
             _ => return None,
         };
         self.at += 1;
@@ -565,4 +585,57 @@ mod path_tests {
         let got = eval("field:vulnerabilities[].{package.ecosystem} {package.name} {vulnerable_version_range}; fixed in {first_patched_version}", &advisory);
         assert_eq!(got, vec![serde_json::json!("npm payload < 3.90.0; fixed in 3.90.0"), serde_json::json!("npm other <= 1.0; fixed in ")]);
     }
+}
+
+#[cfg(test)]
+mod pred_tests {
+    use super::*;
+
+    #[test]
+    fn a_field_whose_name_holds_a_space_is_compared_quoted() {
+        let row = Row {
+            value: serde_json::json!({"Name type": "Primary Name"}),
+            meta: BTreeMap::new(),
+            file: None,
+            text: String::new(),
+            root: Path::new("."),
+        };
+        let p = parse_pred("'Name type'='primary name'").unwrap();
+        assert!(holds(&p, &row));
+        assert!(!holds(&parse_pred("'Name type'='Alias'").unwrap(), &row));
+    }
+}
+
+#[cfg(test)]
+mod text_tests {
+    use super::*;
+
+    #[test]
+    fn a_pattern_with_a_group_gives_the_group() {
+        let row = Row {
+            value: J::Null,
+            meta: BTreeMap::new(),
+            file: None,
+            text: "DOB 10 Dec 1948; a.k.a. 'ABU ABBAS'; a.k.a. 'ABBAS, Muhammad'; CVE-2024-1234".into(),
+            root: Path::new("."),
+        };
+        assert_eq!(eval(r"text:/DOB (\d{1,2} \w{3} \d{4})/", &row), vec![J::from("10 Dec 1948")]);
+        assert_eq!(eval(r"text:/a\.k\.a\. '([^']+)'/", &row), vec![J::from("ABU ABBAS"), J::from("ABBAS, Muhammad")]);
+        assert_eq!(eval(r"text:/CVE-\d{4}-\d+/", &row), vec![J::from("CVE-2024-1234")]);
+    }
+}
+
+thread_local! {
+    static PATTERNS: std::cell::RefCell<std::collections::HashMap<String, Option<regex::Regex>>> = Default::default();
+}
+
+/// A pattern compiled once per thread, not once per row: a list of 19,000 rows with three
+/// patterns each spent most of its read compiling them.
+fn compiled(pattern: &str) -> Option<regex::Regex> {
+    PATTERNS.with(|p| {
+        p.borrow_mut()
+            .entry(pattern.to_string())
+            .or_insert_with(|| regex::Regex::new(pattern).ok())
+            .clone()
+    })
 }

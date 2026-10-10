@@ -71,7 +71,7 @@ impl Source {
                 }
                 let spec = self.decl.records.fields.get(property);
                 let kind = spec.map(|s| s.kind).unwrap_or(PropertyType::Text);
-                if let Some(v) = build::typed(kind, spec.and_then(|s| s.vocabulary.as_deref()), raw) {
+                if let Some(v) = build::typed(kind, spec.and_then(|s| s.vocabulary.as_deref()), raw, self.decl.records.dates) {
                     rec.fields.insert(property.clone(), v);
                 }
             }
@@ -159,15 +159,36 @@ impl Source {
         // read, so the correction stands until the source says the same itself (propose.rs).
         let corrections = crate::propose::corrections(&self.dir);
         let made_of_proposals = matches!(self.decl.source, crate::sourcedecl::Fetch::Proposals { .. });
+        // Rows under one key, gathered whole before any is written (`claims.gather`).
+        let gathering = self.decl.records.gather;
+        let mut gathered: std::collections::BTreeMap<String, crate::claim::Claim> = Default::default();
+        // The row that leads an entry, where one is named: its title, whatever row came first.
+        let lead = self.decl.records.lead.as_deref().and_then(crate::expr::parse_pred);
+        let mut led: std::collections::BTreeSet<String> = Default::default();
         let mut handle = |produced: crate::rows::Produced| -> Result<(), String> {
                 for (sub, origin) in
                     build::expand(&self.decl, produced.row, produced.origin, produced.expanded)
                 {
+                    let leads = lead.as_ref().is_some_and(|p| crate::expr::holds(p, &sub));
                     let Some(mut rec) = build::build(&self.decl, sub, origin, &mut notes) else {
                         continue;
                     };
                     if let Some(list) = corrections.get(&rec.record_id) {
                         self.correct(&mut rec, list);
+                    }
+                    if gathering {
+                        let first_lead = leads && led.insert(rec.record_id.clone());
+                        match gathered.get_mut(&rec.record_id) {
+                            Some(held) if first_lead => {
+                                let earlier = std::mem::replace(held, rec);
+                                held.gather(earlier);
+                            }
+                            Some(held) => held.gather(rec),
+                            None => {
+                                gathered.insert(rec.record_id.clone(), rec);
+                            }
+                        }
+                        continue;
                     }
                     // A claim id seen twice in one run is the source repeating itself
                     // under one key, not a change. Written through, each pair would
@@ -207,6 +228,22 @@ impl Source {
                     outcome = Err(e);
                     break;
                 }
+            }
+        }
+        drop(handle);
+        for rec in std::mem::take(&mut gathered).into_values() {
+            if outcome.is_err() {
+                break;
+            }
+            seen_fields.extend(rec.fields.keys().cloned());
+            if naming.as_deref().is_some_and(|s| rec.ids.iter().any(|i| i.scheme == s)) {
+                named += 1;
+            }
+            match self.store.put(&rec, run, &at, history) {
+                Ok("added") => added += 1,
+                Ok("changed") => changed += 1,
+                Ok(_) => unchanged += 1,
+                Err(e) => outcome = Err(e),
             }
         }
         let mut high: Option<String> = None;

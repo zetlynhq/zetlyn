@@ -1846,3 +1846,24 @@ fn another_world_is_brought_in_beside_this_one() {
     let asked = std::fs::read_to_string(m.host.join("incoming/import.json")).unwrap();
     assert!(asked.contains("\"beside\":true"), "{asked}");
 }
+
+/// A copy to work on what a world is, without what it read: the first sync with `--no-data` takes
+/// its declarations and settings, no database; what changes in them goes back the same way.
+#[test]
+fn a_copy_without_data_takes_what_a_world_is_and_gives_back_its_changes() {
+    let w = World::start(Mode::S, "no-data");
+    let owner = w.sign_in(OWNER);
+    let key = sync_key(&w, &owner);
+    let mine = w.tmp.join("mine");
+    let (url, dir) = (w.url(), mine.display().to_string());
+    let (ok, said) = z(&["world", "sync", &url, &dir, "--key", &key, "--no-data"]);
+    assert!(ok, "{said}");
+    assert!(mine.join("sources/kev/source.yaml").exists() && mine.join("trackers/cve/tracker.yaml").exists(), "{said}");
+    let dbs: Vec<_> = std::fs::read_dir(mine.join("sources/kev")).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".db")).collect();
+    assert!(dbs.is_empty(), "nothing it read");
+    edit(&mine.join("trackers/cve/tracker.yaml"), "title: CVE", "title: CVE edited here");
+    let (ok, said) = z(&["world", "sync", &url, &dir, "--no-data"]);
+    assert!(ok, "{said}");
+    assert!(std::fs::read_to_string(w.root.join("trackers/cve/tracker.yaml")).unwrap().contains("CVE edited here"), "{said}");
+    assert_eq!(claim_of(&w.root, "kev", "CVE-2026-0001", "vendorProject").0.is_empty(), false, "its data there as it was");
+}

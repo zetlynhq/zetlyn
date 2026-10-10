@@ -42,6 +42,8 @@ pub struct Snap {
     pub claims: BTreeMap<String, BTreeSet<String>>,
     /// Relation, the other side, and who says so: a source, or `person:<who>` for a match.
     pub related: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
+    /// Named by a thing folded into it, until a claim of its own names it.
+    pub named_by_fold: bool,
 }
 
 /// Every thing a tracker knows, by `scheme:value` with the value's case folded.
@@ -188,6 +190,10 @@ pub fn kind_of(v: &Value) -> &'static str {
         other => other.type_name(),
     }
 }
+
+/// The property a thing's names are indexed under in `word`, for the things that may be one. Not
+/// a property any source says, so no filter meets it.
+pub const SAME_WORD: &str = "~same";
 
 const SCHEMA: &str = "
 create table if not exists thing(
@@ -651,6 +657,20 @@ impl ThingStore {
                         for w in words {
                             put_word.execute(rusqlite::params![property, w, key]).map_err(|e| e.to_string())?;
                         }
+                    }
+                }
+                // Its names as two lists are compared on, for what may be the same thing.
+                if let Some(same) = &decl.same {
+                    let mut names: BTreeSet<String> = crate::trackerdecl::same_name(&snap.title).into_iter().collect();
+                    for props in snap.by.values() {
+                        for p in &same.suggest_from {
+                            if let Some(said) = props.get(p) {
+                                names.extend(said.raw.iter().filter_map(|w| crate::trackerdecl::same_name(w)));
+                            }
+                        }
+                    }
+                    for n in names {
+                        put_word.execute(rusqlite::params![SAME_WORD, n, key]).map_err(|e| e.to_string())?;
                     }
                 }
                 for (name, targets) in &snap.related {
@@ -1169,6 +1189,28 @@ impl ThingStore {
         stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64)))
             .map(|rows| rows.flatten().collect())
             .unwrap_or_default()
+    }
+
+    /// The things that may be this one: one of its names is one of theirs, and no source speaks
+    /// of both, since a list that names two entries means two. With the name they share, its
+    /// title, and the sources that speak of it.
+    pub fn maybe_same(&self, key: &str) -> Vec<(String, String, String, Vec<String>)> {
+        let Ok(mut stmt) = self.db.prepare(
+            "select o.key, min(o.word), t.title, (select group_concat(source, char(31)) from speaks s where s.key = o.key)
+             from word w join word o on o.property = w.property and o.word = w.word and o.key != w.key
+             join thing t on t.key = o.key
+             where w.property = ?1 and w.key = ?2
+             and not exists (select 1 from speaks a join speaks b on a.source = b.source where a.key = w.key and b.key = o.key)
+             group by o.key order by t.title limit 20",
+        ) else {
+            return Vec::new();
+        };
+        stmt.query_map(rusqlite::params![SAME_WORD, key], |r| {
+            let sources: String = r.get::<_, Option<String>>(3)?.unwrap_or_default();
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, sources.split('\u{1f}').filter(|s| !s.is_empty()).map(str::to_string).collect()))
+        })
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
     }
 
     /// What one thing is to other things: relation, the other side, and who says so.

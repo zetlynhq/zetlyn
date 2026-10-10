@@ -479,7 +479,8 @@ fn run(args: &[String]) -> Result<(), String> {
                     _ => return Err("tracker match <tracker> <thing> <relation> <target> --by <who> [--why …] [--withdraw]".into()),
                 };
                 let scope = tracker::Tracker::open(&dir, &datasets)?;
-                if !scope.decl.relations.iter().any(|r| r.name == relation) {
+                let same = relation == crate::trackerdecl::SAME && scope.decl.same.is_some();
+                if !same && !scope.decl.relations.iter().any(|r| r.name == relation) {
                     let names: Vec<&str> = scope.decl.relations.iter().map(|r| r.name.as_str()).collect();
                     return Err(format!("{relation}: this tracker's relations are {}", if names.is_empty() { "none".to_string() } else { names.join(", ") }));
                 }

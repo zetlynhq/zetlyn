@@ -803,10 +803,14 @@ pub fn upload_limit() -> u64 {
 
 /// An upload, whole in `incoming/`, asked of the server: it goes to the bucket first and is
 /// brought in within a minute. What to tell the owner.
-pub fn ask_import(by: &str, files: usize, bytes: u64) -> Result<String, String> {
+pub fn ask_import(by: &str, files: usize, bytes: u64, beside: bool) -> Result<String, String> {
     let incoming = incoming().ok_or("Only a world on Zetlyn Managed hands an import to its server.")?;
-    std::fs::write(incoming.join(ASKED), json!({ "by": by, "at": crate::iso_stamp(crate::now()), "files": files, "bytes": bytes }).to_string()).map_err(|e| e.to_string())?;
-    Ok(format!("Received, {files} files. Within a minute it is kept safe and then takes this world's place; a snapshot of this world is taken first, and a mail says when it is done."))
+    std::fs::write(incoming.join(ASKED), json!({ "by": by, "at": crate::iso_stamp(crate::now()), "files": files, "bytes": bytes, "beside": beside }).to_string()).map_err(|e| e.to_string())?;
+    Ok(if beside {
+        format!("Received, {files} files. Within a minute it is kept safe and then added beside what is here; a snapshot of this world is taken first, and a mail says when it is done.")
+    } else {
+        format!("Received, {files} files. Within a minute it is kept safe and then takes this world's place; a snapshot of this world is taken first, and a mail says when it is done.")
+    })
 }
 
 /// Whether an import waits, and what the last one came to: for the settings page.
@@ -901,6 +905,8 @@ fn import_into(name: &str) -> Result<usize, String> {
     let by = asked["by"].as_str().unwrap_or("").to_string();
     let world = dir.join("orgs").join(name);
     let running = read_env(name).get("STATE").map(String::as_str) == Some("running");
+    let beside = asked["beside"].as_bool() == Some(true);
+    let beside_said = std::cell::RefCell::new(String::new());
     let result = (|| {
         // The upload kept safe first, sealed, where the snapshots are: an import that goes wrong
         // halfway has it still.
@@ -912,6 +918,13 @@ fn import_into(name: &str) -> Result<usize, String> {
         kept?;
         snapshot(name, "before import")?;
         let _ = systemctl(&["stop", &format!("zetlyn-cell-run@{name}.timer"), &format!("zetlyn-cell-run@{name}.service"), &format!("zetlyn-cell@{name}")]);
+        // Beside what is there: added to it, nothing of it replaced (USECASES H9).
+        if beside {
+            let said = crate::world::import_beside(&incoming.join(ARCHIVE), &world)?;
+            println!("{name}: {said}");
+            *beside_said.borrow_mut() = said;
+            return Ok(0);
+        }
         let aside = dir.join(format!("replaced-{}", stamp()));
         std::fs::rename(&world, &aside).map_err(|e| format!("{}: {e}", world.display()))?;
         match crate::world::import_hosted(&incoming.join(ARCHIVE), &world) {
@@ -929,6 +942,7 @@ fn import_into(name: &str) -> Result<usize, String> {
     let _ = std::fs::remove_file(incoming.join(ARCHIVE));
     let _ = std::fs::remove_file(incoming.join(ASKED));
     let last = match &result {
+        Ok(_) if beside => json!({ "at": crate::iso_stamp(crate::now()), "by": by, "ok": true, "beside": beside_said.borrow().clone() }),
         Ok(n) => json!({ "at": crate::iso_stamp(crate::now()), "by": by, "ok": true, "files": n }),
         Err(e) => json!({ "at": crate::iso_stamp(crate::now()), "by": by, "ok": false, "error": e }),
     };
@@ -940,6 +954,7 @@ fn import_into(name: &str) -> Result<usize, String> {
     if by.contains('@') {
         let url = node().map(|n| format!("{}/{name}/", n.url.trim_end_matches('/'))).unwrap_or_default();
         let text = match &result {
+            Ok(_) if beside => format!("Hello,\n\nthe world you uploaded is now part of the one at {url}: {}.\n\nWhat was there before is all still there, and kept as a snapshot too; write to hello@zetlyn.com within fourteen days if you want it back as it was.\n\nBest regards,\nThe Zetlyn team\n\n--\nZetlyn · https://zetlyn.com · hello@zetlyn.com\n", beside_said.borrow()),
             Ok(n) => format!("Hello,\n\nthe world you uploaded is now the one at {url}: {n} files, its sources, trackers and their history.\n\nWhat was there before is kept as a snapshot; write to hello@zetlyn.com within fourteen days if you want it back.\n\nBest regards,\nThe Zetlyn team\n\n--\nZetlyn · https://zetlyn.com · hello@zetlyn.com\n"),
             Err(e) => format!("Hello,\n\nthe world you uploaded for {url} could not be brought in:\n\n  {e}\n\nNothing changed there; it runs as before. Write to hello@zetlyn.com if you need a hand.\n\nBest regards,\nThe Zetlyn team\n\n--\nZetlyn · https://zetlyn.com · hello@zetlyn.com\n"),
         };
@@ -952,7 +967,7 @@ fn import_into(name: &str) -> Result<usize, String> {
 }
 
 /// An export the main server sends on standard input, brought in as an owner's upload would be.
-fn import_from_stdin(name: &str, by: &str) -> Result<usize, String> {
+fn import_from_stdin(name: &str, by: &str, beside: bool) -> Result<usize, String> {
     let dir = dir_of(name);
     if !dir.is_dir() {
         return Err(format!("{name}: no such cell on this server"));
@@ -966,7 +981,7 @@ fn import_from_stdin(name: &str, by: &str) -> Result<usize, String> {
         let _ = std::fs::remove_file(&file);
         return Err(e);
     }
-    std::fs::write(incoming.join(ASKED), json!({ "by": by, "at": crate::iso_stamp(crate::now()) }).to_string()).map_err(|e| e.to_string())?;
+    std::fs::write(incoming.join(ASKED), json!({ "by": by, "at": crate::iso_stamp(crate::now()), "beside": beside }).to_string()).map_err(|e| e.to_string())?;
     import_into(name)
 }
 
@@ -1151,7 +1166,7 @@ pub fn relay_mail(to: &str, subject: &str, body: &str) -> Result<(), String> {
 pub const USAGE: &str = "zetlyn node status [--json] | sync | create <cell> --title … --owner … [--version v] | start|stop|restart <cell> \
 | snapshot <cell> [--why …] | restore <cell> [--from <stamp>|latest] [--port p] [--version v] | remove <cell> [--no-snapshot] \
 | terms <cell> --active yes|no [--sources n] [--every 1h] [--mails n] [--reads n] [--domain yes|no] \
-[--plan <title> --plan-storage-gb n --plan-reads n --plan-mails n --plan-cap n --mb-days n] | mail | import <cell> [--by e] \
+[--plan <title> --plan-storage-gb n --plan-reads n --plan-mails n --plan-cap n --mb-days n] | mail | import <cell> [--by e] [--beside] \
 | set <cell> [--title t] [--domain d|-] [--owner e]… [--not-owner e]… | maintenance <cell> --set <hex>|--clear | limit <cell> --memory 512M --cpu 100% \
 | version <cell> <v> | install <v> --sha256 <hash> [--current] | logs <cell> [--lines n] | key-check | ca";
 
@@ -1179,8 +1194,8 @@ pub fn command(args: &[String]) -> Result<(), String> {
         Some("mail") => serve_mail(),
         Some("import") => {
             let n = cell()?;
-            let files = import_from_stdin(&n, flag("--by").unwrap_or(""))?;
-            println!("imported, {files} files");
+            let files = import_from_stdin(&n, flag("--by").unwrap_or(""), args.iter().any(|a| a == "--beside"))?;
+            if args.iter().any(|a| a == "--beside") { println!("added beside"); } else { println!("imported, {files} files"); }
             Ok(())
         }
         Some("set") => {

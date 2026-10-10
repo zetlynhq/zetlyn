@@ -1730,3 +1730,119 @@ fn a_workspace_in_git_shares_what_it_is_and_never_its_keys() {
     assert_eq!(claim_of(&second, "vendor-a", "CVE-2026-0001", "cvss").0, claim_of(&first, "vendor-a", "CVE-2026-0001", "cvss").0, "and holds what the first does");
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// UC-K4: two copies whose clocks are apart: a few minutes, the sync goes and says so; an hour or
+/// more, nothing is synced until the clock is right.
+#[test]
+fn a_sync_says_when_the_clocks_are_apart_and_stops_when_far() {
+    for (skew, goes) in [("600", true), ("7200", false)] {
+        let tmp = std::env::temp_dir().join(format!("zetlyn-modes-{}-clocks-{skew}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let root = tmp.join("w");
+        let port = free_port();
+        acme(&root, &format!("url: http://127.0.0.1:{port}\naccess:\n  owners: [{OWNER}]\n"));
+        let web = spawn(&["world", "serve", &root.display().to_string(), "--addr", &format!("127.0.0.1:{port}")], &[("ZETLYN_CLOCK_SKEW", skew.to_string())], None, tmp.join("web.log"), port);
+        let (_, _, _) = http(web.port, "POST", "/signin", "", &format!("email={}", enc(OWNER)));
+        let link = last_link(&web.log);
+        let (_, h, _) = http(web.port, "GET", &format!("/{link}"), "", "");
+        let owner = cookies_of(&h).join("; ");
+        let (_, _, page) = http(web.port, "POST", "/settings/sync-key", &owner, "");
+        let key = page.split("--key ").nth(1).and_then(|k| k.split(|c: char| !c.is_ascii_alphanumeric() && c != '_').next()).unwrap().to_string();
+        let mine = tmp.join("mine");
+        let (ok, said) = z(&["world", "sync", &format!("http://127.0.0.1:{}", web.port), &mine.display().to_string(), "--key", &key]);
+        if goes {
+            assert!(ok && said.contains("apart"), "goes, and says the clocks are apart: {said}");
+        } else {
+            assert!(!ok && said.contains("apart") && !mine.join("workspace.yaml").exists(), "stops, nothing synced: {said}");
+        }
+        drop(web);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
+
+/// UC-D13: somebody who edits one source and nothing else of the world: its page as its members see
+/// it, its proposals and deciding them; no other source's, no settings; taken off, out at once.
+#[test]
+fn an_editor_of_one_source_edits_that_one_and_nothing_else() {
+    for mode in SERVED {
+        let w = World::start(mode, "source-editors");
+        let owner = w.sign_in(OWNER);
+        let (s, _) = w.post("/settings/source-editors/kev", &owner, &format!("editors={}", enc("anna@example.org")));
+        assert_eq!(s, 303, "{mode:?}");
+        let (s, _) = w.post("/settings/sources", &owner, "proposals.kev=world&proposals.vendor-a=world");
+        assert_eq!(s, 303, "{mode:?}");
+        assert!(std::fs::read_to_string(w.root.join("sources/kev/source.yaml")).unwrap().contains("anna@example.org"), "{mode:?}");
+        let anna = w.sign_in("anna@example.org");
+
+        let (s, page) = w.get("/sources/kev", &anna);
+        assert_eq!(s, 200, "{mode:?}");
+        assert!(page.contains("How often"), "{mode:?}: the page its members see");
+        let (_, other) = w.get("/sources/vendor-a", &anna);
+        assert!(!other.contains("How often"), "{mode:?}: another source as anybody sees it, if at all");
+        assert_eq!(w.get("/proposals/kev", &anna).0, 200, "{mode:?}");
+        assert_ne!(w.get("/proposals/vendor-a", &anna).0, 200, "{mode:?}");
+        assert_eq!(w.get("/proposals", &anna).0, 200, "{mode:?}: the inbox, of hers");
+        let (s, _) = w.post("/proposals/kev/nothing.json/accept", &anna, "");
+        assert_eq!(s, 400, "{mode:?}: let through to decide, and told there is no such proposal");
+        let (s, _) = w.post("/proposals/vendor-a/nothing.json/accept", &anna, "");
+        assert_eq!(s, 303, "{mode:?}: sent to sign in, not let through");
+        assert_ne!(w.get("/settings", &anna).0, 200, "{mode:?}: no settings");
+        let _ = w.post("/settings/source-editors/kev", &anna, "editors=bob%40x.org");
+        assert!(!std::fs::read_to_string(w.root.join("sources/kev/source.yaml")).unwrap().contains("bob@"), "{mode:?}: names nobody");
+
+        let (s, _) = w.post("/settings/source-editors/kev", &owner, "editors=");
+        assert_eq!(s, 303, "{mode:?}");
+        assert_ne!(w.get("/proposals/kev", &anna).0, 200, "{mode:?}: taken off, out at once");
+    }
+}
+
+/// UC-H9: another world brought in beside this one, not in its place: its sources and trackers
+/// added with their history, renamed where a name is taken, its trackers naming them so; nothing
+/// here changed. And a cell's server is told it is beside.
+#[test]
+fn another_world_is_brought_in_beside_this_one() {
+    let l = World::start(Mode::L, "beside");
+    // The other world: the same names, and vendor A read again since.
+    let other = l.tmp.join("other");
+    acme(&other, "");
+    std::fs::copy(fixture("update-2/vendor-a.csv"), other.join("sources/vendor-a/advisories.csv")).unwrap();
+    let (ok, said) = z(&["source", "update", &other.join("sources/vendor-a").display().to_string()]);
+    assert!(ok, "{said}");
+    let archive = l.tmp.join("other.tar.gz");
+    let (ok, said) = z(&["world", "export", &other.display().to_string(), "--to", &archive.display().to_string()]);
+    assert!(ok, "{said}");
+    let bytes = std::fs::read(&archive).unwrap();
+
+    let (s, begun) = l.post("/settings/upload", "", &format!("size={}&name=other.tar.gz", bytes.len()));
+    assert_eq!(s, 200, "{begun}");
+    let id = begun.split("\"id\":\"").nth(1).unwrap().split('"').next().unwrap().to_string();
+    assert_eq!(l.put(&format!("/settings/upload/{id}/0"), "", &bytes).0, 200);
+    let (s, b) = l.post(&format!("/settings/upload/{id}/done"), "", "mode=beside");
+    assert_eq!(s, 200, "{b}");
+    let last = l.root.join(".zetlyn/incoming/last-import.json");
+    wait_for("the import", || std::fs::read_to_string(&last).is_ok());
+    let said = std::fs::read_to_string(&last).unwrap();
+    assert!(said.contains("\"ok\":true") && said.contains("beside"), "{said}");
+
+    // Both there: what was here as it was, the other renamed and whole.
+    assert_eq!(claim_of(&l.root, "vendor-a", "CVE-2026-0001", "cvss").0, "9.8", "here as it was");
+    assert_eq!(claim_of(&l.root, "vendor-a-2", "CVE-2026-0001", "cvss").0, "8.1", "the other, with what it read");
+    assert!(std::fs::read_to_string(l.root.join("sources/kev-2/source.yaml")).unwrap().contains("test/kev-2"), "renamed where the name was taken");
+    let tracker = std::fs::read_to_string(l.root.join("trackers/cve-2/tracker.yaml")).unwrap();
+    assert!(tracker.contains("test/cve-2") && tracker.contains("test/kev-2") && !tracker.contains("test/kev\n"), "its tracker names its sources so: {tracker}");
+    let (s, page) = l.get("/trackers/cve-2/", "");
+    assert_eq!(s, 200, "{page}");
+    assert_eq!(l.get("/trackers/cve/", "").0, 200, "and the one here answers as before");
+
+    // In a cell, its server is told it goes beside.
+    let m = World::start(Mode::M, "beside");
+    let owner = m.sign_in(OWNER);
+    let (s, begun) = m.post("/settings/upload", &owner, &format!("size={}&name=other.tar.gz", bytes.len()));
+    assert_eq!(s, 200, "{begun}");
+    let id = begun.split("\"id\":\"").nth(1).unwrap().split('"').next().unwrap().to_string();
+    assert_eq!(m.put(&format!("/settings/upload/{id}/0"), &owner, &bytes).0, 200);
+    let (s, b) = m.post(&format!("/settings/upload/{id}/done"), &owner, "mode=beside");
+    assert_eq!(s, 200, "{b}");
+    let asked = std::fs::read_to_string(m.host.join("incoming/import.json")).unwrap();
+    assert!(asked.contains("\"beside\":true"), "{asked}");
+}

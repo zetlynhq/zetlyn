@@ -493,6 +493,29 @@ impl App {
         }
     }
 
+    /// The sources somebody signed in edits who is not one of the world's members: those whose
+    /// `editors:` name them. None where they are a member (they edit everything) or nobody is
+    /// signed in; read from the files at each request, so somebody taken off is out at once.
+    fn edits_only(&self) -> Option<BTreeSet<String>> {
+        self.edits_only_of(self.who.as_deref()?)
+    }
+
+    fn edits_only_of(&self, who: &str) -> Option<BTreeSet<String>> {
+        let h = self.hosted.as_ref()?;
+        if h.is_member(who) {
+            return None;
+        }
+        let issuers = h.accounts.ensure(who).ok().map(|a| h.accounts.issuers_of(a.id)).unwrap_or_default();
+        let mine: BTreeSet<String> = crate::tracker::registry(&self.sources())
+            .into_values()
+            .filter_map(|dir| {
+                let d = crate::sourcedecl::SourceDecl::load(&dir).ok()?;
+                crate::account::admits(&d.editors, who, &issuers).then(|| dir.file_name().map(|f| f.to_string_lossy().into_owned())).flatten()
+            })
+            .collect();
+        (!mine.is_empty()).then_some(mine)
+    }
+
     /// Where an upload's pieces wait: the cell's `incoming/`, or the workspace's own.
     fn upload_base(&self) -> PathBuf {
         crate::cell::incoming().unwrap_or_else(|| crate::transfer::local_incoming(&self.root))
@@ -644,10 +667,40 @@ impl App {
             .map(|a| a.email)
             .filter(|e| h.is_member(e));
         let owner = signed_in.as_deref().is_some_and(|e| h.is_member(e)) || keyed.is_some();
+        // Somebody signed in as a reader (no member's session): what they may edit, if anything,
+        // which is the sources whose `editors:` name them.
+        let reader = signed_in.is_none().then(|| header("Cookie")).flatten().and_then(|c| {
+            let s = c.split(';').filter_map(|p| p.trim().split_once('=')).find(|(k, _)| *k == crate::account::READER_COOKIE).map(|(_, v)| v.to_string())?;
+            crate::account::Accounts::open(&self.root).ok()?.by_session(&s, crate::account::Kind::Reader).map(|a| a.email)
+        });
+        let person = signed_in.clone().or(reader);
+        let edits: BTreeSet<String> = if owner { BTreeSet::new() } else { person.as_deref().and_then(|p| self.edits_only_of(p)).unwrap_or_default() };
         self.who = signed_in;
         let html_kind = "text/html; charset=utf-8";
         match parts.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
             ["style.css" | "zetlyn.css"] => Some(request),
+            // Who edits a source and nothing else of the world (its `editors:`): its page, its
+            // proposals and deciding them, and the inbox of those. All else as for anybody.
+            ["sources", slug] | ["sources", slug, ""] if !post && edits.contains(*slug) => {
+                self.visitor = false;
+                self.who = person;
+                Some(request)
+            }
+            ["proposals"] if !post && !edits.is_empty() => {
+                self.visitor = false;
+                self.who = person;
+                Some(request)
+            }
+            ["proposals", slug] if !post && edits.contains(*slug) => {
+                self.visitor = false;
+                self.who = person;
+                Some(request)
+            }
+            ["proposals", slug, _, "accept" | "reject"] if post && edits.contains(*slug) => {
+                self.visitor = false;
+                self.who = person;
+                Some(request)
+            }
             // Signed by its sender, so nobody signs in to push to a source.
             ["hook", source] if post => {
                 let sig = signature;
@@ -853,7 +906,7 @@ impl App {
                 }
             }
             // What the world is, where it went, all of it at once: its owners', not every editor's.
-            ["export.tar.gz"] | ["settings", "moved"] | ["settings", "access"] | ["settings", "seen"] | ["settings", "licence", _] | ["settings", "proposals", _] | ["settings", "sources"] | ["settings", "profile"] | ["settings", "sync-key"] | ["settings", "export"] | ["settings", "upload", ..] | ["settings", "sync"] | ["settings", "readers", _] | ["settings", "signin-link"] | ["publish", _] | ["assist"] if owner && (post || parts.len() == 1 && parts[0] == "export.tar.gz") && !self.who.as_deref().is_some_and(|e| h.is_owner(e)) => {
+            ["export.tar.gz"] | ["settings", "moved"] | ["settings", "access"] | ["settings", "seen"] | ["settings", "licence", _] | ["settings", "proposals", _] | ["settings", "sources"] | ["settings", "profile"] | ["settings", "sync-key"] | ["settings", "export"] | ["settings", "upload", ..] | ["settings", "sync"] | ["settings", "readers", _] | ["settings", "source-editors", _] | ["settings", "signin-link"] | ["publish", _] | ["assist"] if owner && (post || parts.len() == 1 && parts[0] == "export.tar.gz") && !self.who.as_deref().is_some_and(|e| h.is_owner(e)) => {
                 respond(request, 403, html_kind, &page("Owners only", html! { h1 { "Only an owner of this world changes that" } p { a href=(serve::at("/")) { "Back" } } }));
                 None
             }
@@ -1251,17 +1304,19 @@ impl App {
             // Every piece here: the archive whole, checked, and handed on. In a cell to its server,
             // which keeps it in the bucket and then brings it in; elsewhere brought in here.
             (true, ["settings", "upload", id, "done"]) => {
+                // Beside what is here, or in its place (USECASES H9).
+                let beside = form.get("mode").map(String::as_str) == Some("beside");
                 let said = (|| -> Result<String, String> {
                     if crate::usage::in_cell() {
                         let to = crate::cell::incoming().ok_or("no cell")?.join("world.tar.gz");
                         let (by, files, bytes) = crate::transfer::finish(&self.upload_base(), id, &to)?;
-                        crate::cell::ask_import(&by, files, bytes)
+                        crate::cell::ask_import(&by, files, bytes, beside)
                     } else {
                         let to = crate::transfer::local_incoming(&self.root).join("world.tar.gz");
                         let (by, _, _) = crate::transfer::finish(&self.upload_base(), id, &to)?;
                         // On a server of one's own, who owns it and where it answers stay as they are.
                         let keep: &[&str] = if self.hosted.is_some() { &["owners", "url"] } else { &[] };
-                        crate::transfer::start_import(&self.root, to, keep, &by)
+                        crate::transfer::start_import(&self.root, to, keep, &by, beside)
                     }
                 })();
                 return match said {
@@ -1486,6 +1541,27 @@ impl App {
                 return redirect(request, &serve::at(&format!("/settings/updates?saved={}", urlencode(&said.join(" ")))));
             }
             // A tracker public or private, from Who sees what.
+            // Who edits one source, one to a line, each checked as the world's lists are.
+            (true, ["settings", "source-editors", slug]) => {
+                let dir = self.sources().join(slug);
+                let editors: Vec<String> = form.get("editors").map(|t| t.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect()).unwrap_or_default();
+                let wrong: Vec<String> = editors.iter().filter_map(|p| crate::account::pattern_problem(p)).collect();
+                let said = if slug.contains(['/', '.']) || !dir.join(crate::sourcedecl::FILE).exists() {
+                    format!("{slug}: no such source here.")
+                } else if !wrong.is_empty() {
+                    format!("Not saved. {}", wrong.join("; "))
+                } else {
+                    (|| -> Result<String, String> {
+                        let mut decl = crate::sourcedecl::SourceDecl::load(&dir)?;
+                        decl.editors = editors.clone();
+                        let path = dir.join(crate::sourcedecl::FILE);
+                        std::fs::write(&path, crate::yaml::to_string(&decl)?).map_err(|e| format!("{}: {e}", path.display()))?;
+                        Ok(format!("Saved. {} edit it besides the world's owners and editors.", match editors.len() { 0 => "Nobody else".to_string(), 1 => "One more".to_string(), n => format!("{n} more") }))
+                    })()
+                    .unwrap_or_else(|e| e)
+                };
+                return redirect(request, &serve::at(&format!("/sources/{slug}?said={}#editors", urlencode(&said))));
+            }
             // Who reads a private tracker, one to a line, each checked as the world's lists are.
             (true, ["settings", "readers", tracker]) => {
                 let dir = self.trackers().join(tracker);
@@ -2275,6 +2351,17 @@ impl App {
                         dt { "Its page" } dd { (if shown_source(&self.root, slug).is_some() { "public" } else { "private" }) " · " a href=(serve::at("/settings/seen/sources")) { "change" } }
                         dt { "In public trackers" } dd { (match crate::sourcedecl::shown(&d.licence.republish) { "yes" => "everything", _ => "titles, values and a link" }) }
                         dt { "Feeds" } dd { @for (folder, t) in &trackers { a href=(serve::at(&format!("/trackers/{folder}/"))) { (if t.title.is_empty() { folder.as_str() } else { t.title.as_str() }) } " " } @if trackers.is_empty() { span.dim { "no tracker" } } }
+                    }
+                }
+                // Who edits this source beside the world's owners and editors: its page, its proposals.
+                @if self.is_owner_here() {
+                    section.admin-card #editors {
+                        h2 { "Its editors" }
+                        p.dim { "Besides the world's owners and editors, who opens this source's page, sees its proposals and decides them, and nothing else of the world. One to a line: an address, " code { "domain:example.org" } ", " code { "@zetlyn.com" } " or " code { "signed-in" } "." }
+                        form.admin-form method="post" action=(serve::at(&format!("/settings/source-editors/{slug}"))) {
+                            textarea.mono name="editors" rows="3" spellcheck="false" placeholder="anna@example.org" { (d.editors.join("\n")) }
+                            div.settings-actions { button.primary type="submit" { "Save" } @if self.hosted.is_none() { span.dim { "Nobody signs in here; it holds once this world runs for others." } } }
+                        }
                     }
                 }
                 section.admin-card {
@@ -3139,7 +3226,9 @@ impl App {
                         @else { "It is uploaded in pieces; what is here now is kept whole beside it, as a folder of its own." } } }
                     @if let Some(l) = &last {
                         div.note {
-                            @if l["ok"].as_bool() == Some(true) {
+                            @if l["ok"].as_bool() == Some(true) && l["beside"].is_string() {
+                                "Added " (stamp_words(l["at"].as_str().unwrap_or(""))) ": " (l["beside"].as_str().unwrap_or("")) "."
+                            } @else if l["ok"].as_bool() == Some(true) {
                                 "Imported " (stamp_words(l["at"].as_str().unwrap_or(""))) ", " (l["files"]) " files."
                                 @if let Some(b) = l["before"].as_str() { " What was here before is in " code { (b) } "." }
                             }
@@ -3153,9 +3242,13 @@ impl App {
                             p.dim { "An upload of " code { (name) } " stopped at " (have) " of " (of) " pieces. Choose the same file to go on from there." }
                         }
                         form #import-form data-to=(serve::at("/settings/upload")) {
+                            div.choices {
+                                label.choice { input type="radio" name="mode" value="replace" checked; span { strong { "In this world's place" } " · what is here now is kept first, then replaced" } }
+                                label.choice { input type="radio" name="mode" value="beside"; span { strong { "Beside what is here" } " · its sources and trackers added, renamed where a name is taken; nothing here changes" } }
+                            }
                             div.upload-row {
                                 input #import-file type="file" accept=".gz,.tgz,application/gzip" required;
-                                button.primary type="submit" { "Upload and replace this world" }
+                                button.primary type="submit" { "Upload" }
                             }
                             div.upload-progress hidden { progress #import-bar max="100" value="0" {} span #import-said .dim {} }
                         }
@@ -3291,7 +3384,11 @@ impl App {
 
     /// Every source here that people read for, and a form for another.
     fn proposal_sources_page(&self, query: &BTreeMap<String, String>) -> String {
-        let all = self.proposal_sources();
+        // Somebody who edits some sources only sees theirs.
+        let all = match self.edits_only() {
+            Some(mine) => self.proposal_sources().into_iter().filter(|(dir, _, _)| mine.contains(dir)).collect(),
+            None => self.proposal_sources(),
+        };
         let show = query.get("show").map(String::as_str).unwrap_or("pending");
         // Every proposal of every source, as the filter asks, the newest first, by source.
         let by_source: Vec<(String, String, Vec<crate::propose::Entry>)> = all
@@ -7510,7 +7607,8 @@ const IMPORT_SCRIPT: &str = r#"(function () {
     e.preventDefault();
     var f = file.files && file.files[0];
     if (!f) return;
-    if (!confirm("Replace this world with " + f.name + "? What is here now is kept first.")) return;
+    var mode = (form.querySelector("input[name=mode]:checked") || {}).value || "replace";
+    if (!confirm(mode === "beside" ? "Add " + f.name + " beside what is here?" : "Replace this world with " + f.name + "? What is here now is kept first.")) return;
     button.disabled = true;
     form.querySelector(".upload-progress").hidden = false;
     said.textContent = "Beginning…";
@@ -7528,7 +7626,7 @@ const IMPORT_SCRIPT: &str = r#"(function () {
       }
       return chain.then(function () {
         said.textContent = "Uploaded; checking it…";
-        return fetch(to + "/" + up.id + "/done", { method: "POST", credentials: "same-origin" }).then(json);
+        return fetch(to + "/" + up.id + "/done", { method: "POST", credentials: "same-origin", body: "mode=" + mode, headers: { "Content-Type": "application/x-www-form-urlencoded" } }).then(json);
       });
     }).then(function (r) {
       bar.value = 100;

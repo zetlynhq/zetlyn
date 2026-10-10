@@ -54,6 +54,11 @@ pub struct SourceDecl {
     /// Its owner's to say, whatever its trackers are.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub visibility: String,
+    /// Who edits this source and nothing else of the world, beside its owners and editors: they
+    /// open its page, see its proposals and decide them. An address, `domain:example.org`,
+    /// `@zetlyn.com` or `signed-in`, as the world's lists say them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub editors: Vec<String>,
     /// Proposals from readers, for a source that is read from somewhere else: new rows where the
     /// declaration reads fields, and corrections of what a claim says. Who may: as a proposals
     /// source's `readers` (`signed-in`, addresses, `domain:`…; empty, the world's own proposers).

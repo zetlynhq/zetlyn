@@ -318,7 +318,11 @@ pub fn state(root: &Path) -> J {
             Some((slug, json!(ds.store.last_run())))
         })
         .collect();
-    json!({ "instance": instance(root), "files": files, "sources": sources })
+    // Its clock, for the other side to see how far apart the two are (USECASES K4).
+    // `ZETLYN_CLOCK_SKEW` (seconds) says it off by that much, and nothing else: how a test makes a
+    // machine whose clock is wrong.
+    let skew: i64 = std::env::var("ZETLYN_CLOCK_SKEW").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    json!({ "instance": instance(root), "files": files, "sources": sources, "now": crate::now() + skew })
 }
 
 /// A set of files as a tar.gz: `defs/…` and `props/…`, and a manifest.
@@ -569,6 +573,10 @@ pub fn run_recorded(root: &Path, url: &str, key: &str, take: Option<&str>) -> J 
     done
 }
 
+/// Clocks this far apart (seconds) are said at a sync, and this far apart stop it.
+pub const CLOCKS_SAID: i64 = 120;
+pub const CLOCKS_REFUSED: i64 = 3600;
+
 /// How often this world syncs by itself with the one it last synced with: `.zetlyn/sync/every`,
 /// `15m`, `1h`, `6h` or `1d`; none, only when asked.
 pub const RHYTHMS: [(&str, &str); 4] = [("15m", "Every 15 minutes"), ("1h", "Every hour"), ("6h", "Every 6 hours"), ("1d", "Once a day")];
@@ -630,7 +638,21 @@ pub fn run(root: &Path, url: &str, key: &str, take: Option<&str>, with_data: boo
     let mut log: Vec<String> = Vec::new();
     let agent = ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(600))).http_status_as_error(false).user_agent(crate::sourcedecl::AGENT).build().new_agent();
     let remote = Remote { url: url.clone(), key: key.clone(), agent };
+    let asked = crate::now();
     let theirs_state = remote.state()?;
+    // How far apart the two clocks are, the time the asking took halved: within the same second
+    // what each side saw decides which observation is current, beyond it the clocks do, so a clock
+    // far off is said, and one very far off stops the sync until it is right.
+    if let Some(theirs) = theirs_state["now"].as_i64() {
+        let here = (asked + crate::now()) / 2;
+        let apart = (theirs - here).abs();
+        if apart > CLOCKS_REFUSED {
+            return Err(format!("the clocks here and at {url} are {} apart: set the one that is wrong (NTP), then sync again. Nothing was synced", crate::web::duration(apart as f64)));
+        }
+        if apart > CLOCKS_SAID {
+            log.push(format!("The clocks here and at {url} are {} apart; which observation is current goes by them, so set the one that is wrong.", crate::web::duration(apart as f64)));
+        }
+    }
     let peer = theirs_state["instance"].as_str().filter(|p| p.len() == 16).ok_or("the world did not say who it is")?.to_string();
 
     // A first sync into an empty directory: the whole world, as it is there.
@@ -654,7 +676,8 @@ pub fn run(root: &Path, url: &str, key: &str, take: Option<&str>, with_data: boo
             }
         }
         remember(&root, &peer, &url, &key)?;
-        return Ok(format!("Taken: {url} is here, in {}. Work on it, then sync again to bring both together.", root.display()));
+        log.push(format!("Taken: {url} is here, in {}. Work on it, then sync again to bring both together.", root.display()));
+        return Ok(log.join("\n"));
     }
     let me = instance(&root);
     for attempt in 1..=3 {

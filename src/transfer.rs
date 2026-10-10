@@ -209,7 +209,7 @@ pub fn import_state(root: &Path) -> (bool, Option<J>) {
 /// then the two swapped, so the workspace as it was stays whole beside it as
 /// `<name>.before-import-<stamp>`. What `keep` names of this workspace.yaml stays as it is: on a
 /// server of one's own, who owns it and where it answers.
-pub fn start_import(root: &Path, archive: PathBuf, keep: &[&str], by: &str) -> Result<String, String> {
+pub fn start_import(root: &Path, archive: PathBuf, keep: &[&str], by: &str, beside: bool) -> Result<String, String> {
     let incoming = local_incoming(root);
     if incoming.join("importing.json").exists() {
         return Err("An import is under way already.".into());
@@ -218,17 +218,24 @@ pub fn start_import(root: &Path, archive: PathBuf, keep: &[&str], by: &str) -> R
     let (root, keep) = (root.to_path_buf(), keep.iter().map(|k| k.to_string()).collect::<Vec<_>>());
     let by = by.to_string();
     std::thread::spawn(move || {
-        let result = import_local(&root, &archive, &keep);
-        let _ = std::fs::remove_file(&archive);
-        let last = match &result {
-            Ok((n, before)) => json!({ "at": crate::iso_stamp(crate::now()), "by": by, "ok": true, "files": n, "before": before.display().to_string() }),
-            Err(e) => json!({ "at": crate::iso_stamp(crate::now()), "by": by, "ok": false, "error": e }),
+        let last = if beside {
+            // Beside what is here: added to it, nothing here replaced (world.rs).
+            match crate::world::import_beside(&archive, &root) {
+                Ok(said) => json!({ "at": crate::iso_stamp(crate::now()), "by": by, "ok": true, "beside": said }),
+                Err(e) => json!({ "at": crate::iso_stamp(crate::now()), "by": by, "ok": false, "error": e }),
+            }
+        } else {
+            match import_local(&root, &archive, &keep) {
+                Ok((n, before)) => json!({ "at": crate::iso_stamp(crate::now()), "by": by, "ok": true, "files": n, "before": before.display().to_string() }),
+                Err(e) => json!({ "at": crate::iso_stamp(crate::now()), "by": by, "ok": false, "error": e }),
+            }
         };
+        let _ = std::fs::remove_file(&archive);
         // Into whichever workspace is here now: the new one, or the one that stayed.
         write_json(&local_incoming(&root).join("last-import.json"), &last);
         let _ = std::fs::remove_file(local_incoming(&root).join("importing.json"));
     });
-    Ok("Received. It takes this world's place in a moment; what is here now is kept beside it.".into())
+    Ok(if beside { "Received. It is added beside what is here in a moment.".into() } else { "Received. It takes this world's place in a moment; what is here now is kept beside it.".into() })
 }
 
 fn import_local(root: &Path, archive: &Path, keep: &[String]) -> Result<(usize, PathBuf), String> {

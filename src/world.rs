@@ -19,6 +19,7 @@
 //! /etc/systemd/system/zetlyn-world.service, zetlyn-backup.{service,timer}, zetlyn-upgrade.{service,timer}
 //! ```
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -1104,6 +1105,80 @@ pub fn import_hosted(file: &Path, dir: &Path) -> Result<usize, String> {
     let ws = dir.join(crate::account::WORKSPACE);
     set_top(&ws, "url", None)?;
     Ok(n)
+}
+
+/// Another world brought in beside this one rather than in its place (USECASES H9): its sources and
+/// trackers added, with their history and proposals; one whose folder or name is taken here gets
+/// `-2` (`-3`, …) to both, and its trackers name it so. What is here stays as it is. What came.
+pub fn import_beside(file: &Path, dir: &Path) -> Result<String, String> {
+    let parent = dir.parent().ok_or("the workspace has no folder around it")?;
+    let other = parent.join(format!(".beside-{}", crate::cell::stamp()));
+    let result = (|| {
+        import(file, &other, None, None)?;
+        let free = |taken: &BTreeSet<String>, want: &str| -> String {
+            if !taken.contains(want) {
+                return want.to_string();
+            }
+            (2..).map(|n| format!("{want}-{n}")).find(|c| !taken.contains(c)).unwrap_or_default()
+        };
+        let folders = |d: &Path| -> BTreeSet<String> { std::fs::read_dir(d).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect() };
+
+        // Sources: a free folder and a free name each; what was renamed, remembered for the trackers.
+        let mut names: BTreeSet<String> = crate::tracker::registry(&dir.join("sources")).into_keys().collect();
+        let mut taken_folders = folders(&dir.join("sources"));
+        let mut renamed: BTreeMap<String, String> = BTreeMap::new();
+        let mut sources = 0;
+        std::fs::create_dir_all(dir.join("sources")).map_err(|e| e.to_string())?;
+        for (name, from) in crate::tracker::registry(&other.join("sources")) {
+            let folder = from.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+            let (new_name, new_folder) = (free(&names, &name), free(&taken_folders, &folder));
+            if new_name != name {
+                let mut decl = crate::sourcedecl::SourceDecl::load(&from)?;
+                decl.name = new_name.clone();
+                std::fs::write(from.join(crate::sourcedecl::FILE), crate::yaml::to_string(&decl)?).map_err(|e| e.to_string())?;
+                renamed.insert(name.clone(), new_name.clone());
+            }
+            std::fs::rename(&from, dir.join("sources").join(&new_folder)).map_err(|e| format!("{}: {e}", from.display()))?;
+            names.insert(new_name);
+            taken_folders.insert(new_folder);
+            sources += 1;
+        }
+
+        // Trackers: the same, and each naming its sources as they are called here now.
+        let mut tnames: BTreeSet<String> = crate::tracker::scope_registry(&dir.join("trackers")).into_keys().collect();
+        let mut tfolders = folders(&dir.join("trackers"));
+        let mut trackers = 0;
+        std::fs::create_dir_all(dir.join("trackers")).map_err(|e| e.to_string())?;
+        for (name, from) in crate::tracker::scope_registry(&other.join("trackers")) {
+            let folder = from.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+            let (new_name, new_folder) = (free(&tnames, &name), free(&tfolders, &folder));
+            let mut decl = crate::trackerdecl::TrackerDecl::load(&from)?;
+            let names_moved = decl.members.iter().any(|m| renamed.contains_key(&m.dataset));
+            if new_name != name || names_moved {
+                decl.name = new_name.clone();
+                for m in decl.members.iter_mut() {
+                    if let Some(n) = renamed.get(&m.dataset) {
+                        m.dataset = n.clone();
+                    }
+                }
+                std::fs::write(from.join(crate::trackerdecl::FILE), crate::yaml::to_string(&decl)?).map_err(|e| e.to_string())?;
+                // What it built from the names before is built again from the ones now.
+                for e in std::fs::read_dir(&from).into_iter().flatten().flatten() {
+                    if e.file_name().to_string_lossy().ends_with(".db") {
+                        let _ = std::fs::remove_file(e.path());
+                    }
+                }
+            }
+            std::fs::rename(&from, dir.join("trackers").join(&new_folder)).map_err(|e| format!("{}: {e}", from.display()))?;
+            tnames.insert(new_name);
+            tfolders.insert(new_folder);
+            trackers += 1;
+        }
+        let said_renamed = if renamed.is_empty() { String::new() } else { format!("; renamed where taken: {}", renamed.iter().map(|(a, b)| format!("{a} → {b}")).collect::<Vec<_>>().join(", ")) };
+        Ok(format!("{sources} sources and {trackers} trackers added beside what was here{said_renamed}"))
+    })();
+    let _ = std::fs::remove_dir_all(&other);
+    result
 }
 
 /// The world at `dir` says it is at `to` now. Only once `to` answers as this same world, signed

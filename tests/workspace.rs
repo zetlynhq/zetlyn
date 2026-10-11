@@ -1611,3 +1611,21 @@ fn facet_counts_are_made_after_a_refresh_and_made_again_when_a_source_moves() {
     assert_eq!(marks.len(), 1, "counts kept under an old mark: {after:?}");
     assert_ne!(before.iter().map(|(_, _, c)| c).collect::<Vec<_>>(), after.iter().map(|(_, _, c)| c).collect::<Vec<_>>(), "the counts did not follow the source");
 }
+
+#[test]
+fn a_world_is_exported_beside_its_archive_and_not_in_a_small_tmp() {
+    let ws = Workspace::new("export-beside");
+    std::fs::write(ws.root.join("workspace.yaml"), "title: Export\n").unwrap();
+    ws.z(&["tracker", "refresh", &ws.scope()]);
+    let to = ws.root.join("out/world.tar.gz");
+    // A /tmp that cannot take the copies, as a server's memory-backed /tmp could not.
+    let out = Command::new(env!("CARGO_BIN_EXE_zetlyn"))
+        .args(["world", "export", &ws.root.display().to_string(), "--to", &to.display().to_string()])
+        .env("TMPDIR", ws.root.join("no-such-dir"))
+        .output()
+        .unwrap();
+    let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success() && to.exists(), "{said}");
+    let left: Vec<_> = std::fs::read_dir(ws.root.join("out")).unwrap().flatten().map(|e| e.file_name()).collect();
+    assert_eq!(left, [std::ffi::OsString::from("world.tar.gz")], "scratch left behind");
+}

@@ -582,7 +582,10 @@ pub fn export(dir: &Path, to: &Path) -> Result<usize, String> {
     if let Some(d) = to.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
     }
-    let scratch = std::env::temp_dir().join(format!("zetlyn-export-{}", crate::jwt::random()));
+    // Beside the archive, on the disk it is written to: a server's /tmp is often memory, and a
+    // copy of a 3.4 GB store did not fit in n2's 1.9 GB (2026-10-11).
+    let beside = to.parent().filter(|d| !d.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(std::env::temp_dir);
+    let scratch = beside.join(format!(".zetlyn-export-{}", crate::jwt::random()));
     std::fs::create_dir(&scratch).map_err(|e| e.to_string())?;
     let partial = to.with_extension("partial");
     let result = (|| {

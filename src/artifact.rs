@@ -318,12 +318,26 @@ fn take_history(store: &Store, body: &[u8], replace: bool) -> Result<u64, String
 }
 
 /// Write `claims.jsonl`, the manifest and the tag. Returns the version.
+/// The most claims a source version is made of: a few hundred megabytes in memory. Exploit-DB,
+/// the largest published source but NVD, has 46,698.
+pub const PUBLISH_MAX: u64 = 100_000;
+
 pub fn publish(
     ds: &Source,
     place: &dyn Place,
     tag: &str,
     expect: Option<&str>,
 ) -> Result<String, String> {
+    // A version is made in memory, its claims, its history and their packings at once: NVD's
+    // 404,000 claims took a cell of two gigabytes past its limit at every pass, and it was
+    // killed every ten minutes (2026-10-11). Past this, it is not published until a version can
+    // be made a piece at a time.
+    let held = ds.store.count();
+    // `ZETLYN_PUBLISH_MAX` small, and nothing else: how a test makes a source of five claims too large.
+    let most = std::env::var("ZETLYN_PUBLISH_MAX").ok().and_then(|s| s.parse().ok()).unwrap_or(PUBLISH_MAX);
+    if held > most {
+        return Err(format!("{held} claims, more than the {most} a version is made of in memory; not published"));
+    }
     let mut body = Vec::new();
     ds.store.for_each_record(|r| {
         let line = serde_json::to_string(&r.to_json()).map_err(|e| e.to_string())?;

@@ -1629,3 +1629,22 @@ fn a_world_is_exported_beside_its_archive_and_not_in_a_small_tmp() {
     let left: Vec<_> = std::fs::read_dir(ws.root.join("out")).unwrap().flatten().map(|e| e.file_name()).collect();
     assert_eq!(left, [std::ffi::OsString::from("world.tar.gz")], "scratch left behind");
 }
+
+#[test]
+fn a_source_too_large_to_make_a_version_of_in_memory_is_not_published() {
+    let ws = Workspace::new("publish-max");
+    let hub = ws.root.join("hub");
+    std::fs::create_dir_all(&hub).unwrap();
+    let source = ws.root.join(ws.dataset("vendor-a"));
+    let run = |max: &str| {
+        let out = Command::new(env!("CARGO_BIN_EXE_zetlyn"))
+            .args(["source", "publish", &source.display().to_string(), "--to", &hub.display().to_string()])
+            .env("ZETLYN_HOME", ws.root.join(".home")).env("ZETLYN_PUBLISH_MAX", max)
+            .output().unwrap();
+        (out.status.success(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
+    };
+    let (ok, said) = run("1");
+    assert!(!ok && said.contains("not published") && said.contains("in memory"), "{said}");
+    let (ok, said) = run("1000");
+    assert!(ok, "{said}");
+}

@@ -517,6 +517,7 @@ pub fn each_row(
                 since_default,
                 limit: if *limit > 0 { *limit } else { *top },
                 each: decl.records.each.as_deref(),
+                dir: Some(base),
             };
             // What is kept about each row says where it was read as the declaration writes it:
             // `apikey=${KEY}`, never the key, since a receipt is published with its claim.

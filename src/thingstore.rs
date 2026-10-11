@@ -42,8 +42,10 @@ pub struct Snap {
     pub claims: BTreeMap<String, BTreeSet<String>>,
     /// Relation, the other side, and who says so: a source, or `person:<who>` for a match.
     pub related: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
-    /// Named by a thing folded into it, until a claim of its own names it.
-    pub named_by_fold: bool,
+    /// Which claim gives the title, the least of: folded into it or its own (its own first), the
+    /// source's place in the tracker, the claim's id. The same title whatever order the claims
+    /// arrive in, read in one piece or in parts.
+    pub named_by: Option<(bool, usize, String)>,
 }
 
 /// Every thing a tracker knows, by `scheme:value` with the value's case folded.
@@ -406,10 +408,13 @@ impl ThingStore {
         now: &Snapshot,
         rebuild: bool,
         only: Option<&BTreeSet<String>>,
+        quiet: bool,
     ) -> Result<Refreshed, String> {
         let at = crate::iso_stamp(crate::now());
         let first = rebuild || self.meta("refreshed").is_none();
-        let only = if first { None } else { only };
+        // `quiet`: one part of a store made in parts (`clear_for_parts` before the first). It writes
+        // only its things, and as a first look says nothing of them.
+        let only = if first && !quiet { None } else { only };
         if let Some(keys) = only {
             self.db
                 .execute_batch("create temp table if not exists only_keys(key text primary key); delete from temp.only_keys;")
@@ -419,8 +424,8 @@ impl ThingStore {
                 put.execute([k]).map_err(|e| e.to_string())?;
             }
         }
-        let before = if first { Snapshot::default() } else { self.held(only.is_some())? };
-        let held_conflicts: BTreeMap<(String, String), String> = if rebuild {
+        let before = if first && only.is_none() { Snapshot::default() } else { self.held(only.is_some())? };
+        let held_conflicts: BTreeMap<(String, String), String> = if rebuild || quiet {
             BTreeMap::new()
         } else if only.is_some() {
             let mut stmt = self
@@ -448,7 +453,7 @@ impl ThingStore {
 
         let mut signals: Vec<J> = Vec::new();
         let mut signal = |kind: &str, key: Option<&str>, property: Option<&str>, source: Option<&str>, was: J, is: J| {
-            if !first {
+            if !first && !quiet {
                 signals.push(json!({ "kind": kind, "key": key, "property": property,
                                      "source": source, "was": was, "is": is }));
             }
@@ -599,7 +604,7 @@ impl ThingStore {
         // Said once the words are written in this same transaction: a store from before they were
         // kept is not asked by them.
         tx.execute("insert or replace into meta(key, value) values('words', '1')", []).map_err(|e| e.to_string())?;
-        if rebuild {
+        if rebuild && !quiet {
             // A rebuild starts the log again but not its numbering: a watch or a reader holds the
             // last signal it saw by number, and one reused would hide what comes after it.
             tx.execute(
@@ -774,6 +779,30 @@ impl ThingStore {
             signals: signals.len() as u64,
             first,
         })
+    }
+
+    /// Before a store made again in parts: everything it held goes, as a rebuild in one piece
+    /// clears it, and each part then writes its own things quietly. The signals start again but
+    /// not their numbering, which watches and readers hold.
+    pub fn clear_for_parts(&mut self) -> Result<(), String> {
+        let tx = self.db.transaction().map_err(|e| e.to_string())?;
+        tx.execute(&format!("insert or replace into meta(key, value) values('signals_before', ({NEXT}) - 1)"), [])
+            .map_err(|e| e.to_string())?;
+        tx.execute_batch(
+            "delete from thing; delete from signal; delete from said; delete from word; delete from speaks;
+             delete from conflict; delete from related; delete from claim;
+             insert or replace into meta(key, value) values('wording', '0');
+             insert or replace into meta(key, value) values('claims', '1');",
+        )
+        .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())
+    }
+
+    /// Every thing the store holds, by key: in a refresh in parts, a thing no claim names any
+    /// more is in its part too, and goes.
+    pub fn keys(&self) -> Vec<String> {
+        let Ok(mut stmt) = self.db.prepare("select key from thing") else { return Vec::new() };
+        stmt.query_map([], |r| r.get::<_, String>(0)).map(|rows| rows.flatten().collect()).unwrap_or_default()
     }
 
     /// Every open conflict, newest first, with the reader's own state where there is a reader.

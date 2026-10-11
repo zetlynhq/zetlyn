@@ -1416,3 +1416,153 @@ fn a_long_table_of_countries_years_and_indicators_is_one_claim_per_country_and_y
     assert!(ok && !said.contains("unemployment"), "{said}");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn a_lean_receipt_keeps_the_words_and_not_the_row() {
+    let root = std::env::temp_dir().join(format!("zetlyn-test-{}-receipt", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let at = root.join("sources/lean");
+    std::fs::create_dir_all(&at).unwrap();
+    std::fs::write(at.join("rows.csv"), "id,score,long\nCVE-2026-1,9.8,a field nobody reads\n").unwrap();
+    std::fs::write(at.join("source.yaml"), "name: test/lean\nfetch: { type: csv, path: rows.csv }\nclaims:\n  id:\n  - { scheme: cve, from: field:id }\n  title: field:id\n\
+        \x20 properties:\n    cvss: { type: number, from: field:score }\nretention:\n  receipt: words\n").unwrap();
+    let z = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_zetlyn")).args(args).current_dir(&root).env("ZETLYN_HOME", root.join("home")).output().unwrap();
+        (out.status.success(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
+    };
+    let (ok, said) = z(&["source", "update", "sources/lean"]);
+    assert!(ok, "{said}");
+    let (ok, said) = z(&["claim", "sources/lean", "CVE-2026-1"]);
+    assert!(ok, "{said}");
+    let claim: serde_json::Value = serde_json::from_str(&said).unwrap();
+    assert_eq!(claim["excerpt"]["properties"]["cvss"]["raw"][0], "9.8", "{said}");
+    assert!(claim["excerpt"].get("row").is_none() && !claim["excerpt"].to_string().contains("nobody reads"), "{said}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A JSON API read in windows of time and pages (NVD's shape), whose second page fails once.
+fn a_paged_api_that_fails_once(healed: std::sync::Arc<std::sync::atomic::AtomicBool>) -> u16 {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut s = stream;
+            let mut buf = [0u8; 4096];
+            let n = s.read(&mut buf).unwrap_or(0);
+            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            let second = request.contains("startIndex=2");
+            let (status, body) = if second && !healed.load(std::sync::atomic::Ordering::SeqCst) {
+                ("500 Internal Server Error", String::from("{}"))
+            } else {
+                let ids = if second { [3, 4] } else { [1, 2] };
+                let items: Vec<String> = ids.iter().map(|i| format!("{{\"id\":\"CVE-2026-{i}\",\"modified\":\"2026-01-0{i}T00:00:00\"}}")).collect();
+                ("200 OK", format!("{{\"total\":4,\"items\":[{}]}}", items.join(",")))
+            };
+            let _ = s.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes());
+        }
+    });
+    port
+}
+
+#[test]
+fn a_read_in_windows_that_stops_keeps_what_it_read_and_goes_on_where_it_stopped() {
+    let root = std::env::temp_dir().join(format!("zetlyn-test-{}-goes-on", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let at = root.join("sources/api");
+    std::fs::create_dir_all(&at).unwrap();
+    let healed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let port = a_paged_api_that_fails_once(healed.clone());
+    std::fs::write(at.join("source.yaml"), format!(
+        "name: test/api\nfetch:\n  type: http\n  list: http://127.0.0.1:{port}/list?from={{since}}&to={{until}}\n\
+        \x20 page: {{ offset: startIndex, size: resultsPerPage, total: field:total, max: 2 }}\n  window: 20000d\n\
+        \x20 since: field:modified\n  since_default: \"2020-01-01\"\nschedule:\n  every: 6h\n\
+        claims:\n  each: field:items[]\n  id:\n  - {{ scheme: cve, from: field:id }}\n  title: field:id\n")).unwrap();
+    let z = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_zetlyn")).args(args).current_dir(&root).env("ZETLYN_HOME", root.join("home")).output().unwrap();
+        (out.status.success(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
+    };
+    // The second page fails: the first is kept, and where it stopped is written down.
+    let (_, said) = z(&["source", "update", "sources/api"]);
+    assert!(said.contains("partial") && said.contains("+2 "), "{said}");
+    let resume: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(at.join("resume.json")).unwrap()).unwrap();
+    assert_eq!((resume["page"].as_u64(), resume["goes_on"].as_bool()), (Some(2), Some(true)), "{resume}");
+    // The next update goes on from the second page, and nothing is left to go on with after it.
+    healed.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (ok, said) = z(&["source", "update", "sources/api"]);
+    assert!(ok && said.contains("+2 "), "{said}");
+    assert!(!at.join("resume.json").exists());
+    for id in ["CVE-2026-1", "CVE-2026-4"] {
+        let (ok, said) = z(&["claim", "sources/api", id]);
+        assert!(ok, "{id}: {said}");
+    }
+    // A time limit already past stops before the first request, and is no failure of the source.
+    std::fs::remove_dir_all(at.join("..").join("..").join("home")).ok();
+    let out = Command::new(env!("CARGO_BIN_EXE_zetlyn")).args(["source", "update", "sources/api", "--from-start", "--for", "0m"]).current_dir(&root).env("ZETLYN_HOME", root.join("home")).output().unwrap();
+    let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(said.contains("time limit") && at.join("resume.json").exists(), "{said}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// What a store holds, table by table, to compare two refreshes of it.
+fn store_held(dir: &Path) -> Vec<String> {
+    let c = rusqlite::Connection::open(dir.join("tracker.db")).unwrap();
+    let mut out = Vec::new();
+    for q in [
+        "select key, scheme, value, title from thing order by 1",
+        "select key, source, property, raw, means, kind, understood from said order by 1, 2, 3",
+        "select property, word, key from word order by 1, 2, 3",
+        "select key, source, claims, kind from speaks order by 1, 2",
+        "select key, property, sources from conflict order by 1, 2",
+        "select key, name, target, sources from related order by 1, 2, 3",
+        "select source, record_id, key from claim order by 1, 2, 3",
+        "select value from meta where key = 'wording'",
+        "select kind, key, property, source, was, is_now from signal order by 1, 2, 3, 4",
+    ] {
+        let mut stmt = c.prepare(q).unwrap();
+        let n = stmt.column_count();
+        let rows = stmt
+            .query_map([], |r| Ok((0..n).map(|i| format!("{:?}", r.get::<_, rusqlite::types::Value>(i).unwrap())).collect::<Vec<_>>().join(" | ")))
+            .unwrap();
+        out.push(q.to_string());
+        out.extend(rows.flatten());
+    }
+    out
+}
+
+#[test]
+fn a_tracker_made_in_parts_holds_what_one_made_in_one_piece_holds() {
+    let ws = Workspace::new("parts");
+    let parts = ws.root.join("trackers/cve-parts");
+    let in_parts = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_zetlyn")).args(args).current_dir(&ws.root)
+            .env("ZETLYN_HOME", ws.root.join(".home")).env("ZETLYN_IN_PARTS_FROM", "1").env("ZETLYN_PART_THINGS", "2").env("ZETLYN_REFRESH_WHOLE", "1")
+            .output().expect("the binary runs");
+        let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "{said}");
+        said
+    };
+    // Made from nothing, in one piece and in slices of two things.
+    ws.z(&["tracker", "refresh", &ws.scope(), "--rebuild"]);
+    copy(&ws.root.join("trackers/cve"), &parts);
+    in_parts(&["tracker", "refresh", &parts.display().to_string(), "--rebuild"]);
+    assert_eq!(store_held(&ws.root.join("trackers/cve")), store_held(&parts));
+
+    // Then a source moves, and both are read whole again: the same things, conflicts and signals.
+    std::fs::write(
+        ws.root.join("sources/vendor-a/advisories.csv"),
+        "cve,title,severity,cvss,published\n\
+         CVE-2026-0001,foo: remote code execution,important,8.1,2026-08-30\n\
+         CVE-2026-0004,baz: authentication bypass,critical,9.1,2026-09-02\n\
+         CVE-2026-0009,qux: path traversal,moderate,5.3,2026-09-04\n",
+    )
+    .unwrap();
+    ws.z(&["source", "update", &ws.dataset("vendor-a")]);
+    let whole = Command::new(env!("CARGO_BIN_EXE_zetlyn")).args(["tracker", "refresh", &ws.scope()]).current_dir(&ws.root)
+        .env("ZETLYN_HOME", ws.root.join(".home")).env("ZETLYN_REFRESH_WHOLE", "1").output().unwrap();
+    assert!(whole.status.success());
+    let said = in_parts(&["tracker", "refresh", &parts.display().to_string()]);
+    let held = store_held(&ws.root.join("trackers/cve"));
+    assert!(held.iter().any(|r| r.starts_with("Text(\"new_thing\")")) && !said.contains("read again"), "{said}");
+    assert_eq!(held, store_held(&parts));
+}

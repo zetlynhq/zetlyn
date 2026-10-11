@@ -149,10 +149,12 @@ zetlyn
   zetlyn assist score <proposed dir> <reference dir>
       A proposal against a declaration a person wrote: identifier, title, date, typed properties.
 
-  zetlyn source update <dir> [--reread | --from-start]
+  zetlyn source update <dir> [--reread | --from-start] [--for 2h]
       Fills the store. Says what was added, changed, removed and unchanged. `--reread` reads the
       source even where it says nothing changed, once, to take the receipts of claims held before.
       `--from-start` also reads from the beginning of what it covers, as the first update did.
+      `--for 2h` stops a read of hours before its next request once the time is up, keeping what
+      it read; the next update goes on where it stopped.
 
   zetlyn source describe <dir>
       What this source is, what it holds, what it can be asked. JSON.
@@ -818,6 +820,12 @@ fn dataset_run(args: &[String]) -> Result<(), String> {
         } else {
             eprintln!("a read was stopped at page {} and waits; this update reads only what is new. --go-on goes on with it.", r.page);
         }
+    }
+    // `--for 100m`: a read of hours in parts. It stops before its next request once the time is
+    // up, keeps what it read, and the next update goes on from there.
+    if let Some(d) = flag(args, "--for") {
+        let secs = crate::fetch::duration(d).ok_or_else(|| format!("--for {d}: a duration such as 50m or 2h"))?;
+        std::env::set_var("ZETLYN_STOP_AT", (crate::now() + secs).to_string());
     }
     let started = std::time::Instant::now();
     let r = ds.run_with(

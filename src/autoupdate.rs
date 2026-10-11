@@ -127,7 +127,9 @@ pub fn held(ds: &Source, dir: &Path) -> Option<String> {
     if ds.decl.source.truncating() {
         return Some("still a trial: choose how much of it to read first".into());
     }
-    if let Some(r) = crate::web::resume_of(dir) {
+    // A read that stopped at its time limit, or at an answer that failed, goes on by itself; one a
+    // person stopped, or a web read that failed, waits for them.
+    if let Some(r) = crate::web::resume_of(dir).filter(|r| !r.goes_on) {
         return Some(format!("a read of it is not finished ({}): go on with it first", r.why));
     }
     if !ever_complete(ds) {
@@ -158,6 +160,8 @@ pub fn record(ds: &Source, outcome: &Result<crate::store::RunReport, String>) {
     match failed {
         // Read by another process meanwhile: that one's to count, not this one.
         Some(e) if e.contains(crate::source::BUSY) => {}
+        // Stopped at its time limit: it read what it could, and goes on next time.
+        Some(e) if e.contains(crate::web::TIME_LIMIT) => {}
         None => {
             let _ = ds.store.set_meta("auto_failures", "0");
         }
@@ -202,6 +206,10 @@ pub fn due(root: &Path, now: i64) -> Vec<(String, String, PathBuf)> {
 /// When this source is next updated by itself, if it is.
 pub fn next_at(ds: &Source, workspace: Option<i64>) -> Option<i64> {
     let every = source_every(ds, workspace)?;
+    // A read that stopped part way is due again at once: what it has not read yet is not new.
+    if crate::web::resume_of(&ds.dir).is_some_and(|r| r.goes_on) {
+        return Some(0);
+    }
     Some(last_finished(ds).map(|f| f + every).unwrap_or(0))
 }
 

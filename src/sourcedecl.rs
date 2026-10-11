@@ -653,6 +653,25 @@ pub struct Search {
 pub struct Retention {
     #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub history: bool,
+    /// What a claim keeps of the row it was read from: `whole` (the default, up to 256 KB), or
+    /// `words`, only the words each property was read from and the expression that read them. A
+    /// source of 300,000 records whose every record is at a link of its own keeps the link.
+    #[serde(default, skip_serializing_if = "Receipt::is_whole")]
+    pub receipt: Receipt,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Receipt {
+    #[default]
+    Whole,
+    Words,
+}
+
+impl Receipt {
+    fn is_whole(&self) -> bool {
+        *self == Receipt::Whole
+    }
 }
 
 impl Schedule {
@@ -672,7 +691,7 @@ impl Search {
 
 impl Retention {
     fn is_empty(&self) -> bool {
-        self.history
+        self.history && self.receipt == Receipt::Whole
     }
 }
 
@@ -841,7 +860,7 @@ impl Fetch {
 
 impl Default for Retention {
     fn default() -> Self {
-        Retention { history: true }
+        Retention { history: true, receipt: Receipt::Whole }
     }
 }
 

@@ -188,15 +188,19 @@ impl Fetcher {
                 // A 4xx is the source's answer. Anything else (a timeout, a connection that dropped)
                 // is the way there, and an hour of pages is not lost to one that timed out.
                 Err(e @ ureq::Error::StatusCode(_)) => return Err(format!("{url}: {e}")),
-                Err(_) if lost < 3 => {
+                Err(e) if lost < 3 => {
                     lost += 1;
-                    std::thread::sleep(Duration::from_secs([2, 5, 15][lost - 1]));
+                    let wait = [2, 5, 15][lost - 1];
+                    // Said, so a read that takes hours says why: the answer that did not come.
+                    eprintln!("  {}: {e}; asked again in {wait} s", without_query(url));
+                    std::thread::sleep(Duration::from_secs(wait));
                     false
                 }
                 Err(e) => return Err(format!("{url}: {e}, and again after three retries")),
             };
             if throttled {
                 self.harder();
+                eprintln!("  {}: the source asks for less; {:.1} s between requests now", without_query(url), self.pause.get().as_secs_f64());
             }
         }
         Err(format!("{url}: throttled, and the retries ran out"))
@@ -314,6 +318,8 @@ pub struct Http<'a> {
     pub limit: usize,
     /// When `detail` is set, what splits the list response into items.
     pub each: Option<&'a str>,
+    /// The source's directory, where a read in windows that stopped says where it goes on.
+    pub dir: Option<&'a std::path::Path>,
 }
 
 /// A paged JSON API, over as many windows as the source will accept at once.
@@ -336,6 +342,24 @@ pub fn http_rows(
     let mut high = start.clone();
     let mut taken = 0usize;
     let mut from = start_secs;
+    // A read that stopped goes on from the window and the page it stopped at. A trial does not:
+    // it reads its few things from the top.
+    let resumable = spec.window.is_some() && spec.limit == 0;
+    let resumed = spec
+        .dir
+        .filter(|_| resumable)
+        .and_then(crate::web::resume_of)
+        .filter(|r| r.goes_on && !r.paused)
+        .and_then(|r| Some((day_seconds(r.window_from.as_deref()?), r.page, r.high)));
+    let mut first_offset = 0usize;
+    if let Some((window_from, page, was_high)) = resumed {
+        from = window_from;
+        first_offset = page;
+        if let Some(h) = was_high.filter(|h| *h > high) {
+            high = h;
+        }
+    }
+    let stop_at = crate::web::stop_at();
     while from <= now {
         let until = (from + step).min(now);
         let (offset_key, size_key, total_key, max, by) = match spec.page {
@@ -351,8 +375,28 @@ pub fn http_rows(
         let filtering = spec.list.contains("{since}");
         let mut next_url: Option<String> = None;
         let by_cursor = spec.page.and_then(|p| p.cursor.as_deref()) == Some("link");
-        let mut offset = 0usize;
+        let mut offset = std::mem::take(&mut first_offset);
         loop {
+            // Where it stopped, kept for the next update to go on from: the rows read so far are
+            // kept by this one.
+            let stopped = |why: String, offset: usize, high: &str, taken: usize| -> String {
+                if let Some(dir) = spec.dir.filter(|_| resumable) {
+                    let r = crate::web::Resume {
+                        page: offset,
+                        items: taken,
+                        high: Some(high.to_string()),
+                        why: why.clone(),
+                        window_from: Some(stamp(from)),
+                        goes_on: true,
+                        ..Default::default()
+                    };
+                    let _ = std::fs::write(dir.join(crate::web::RESUME), serde_json::to_string(&r).unwrap_or_default());
+                }
+                why
+            };
+            if stop_at.is_some_and(|t| crate::now() >= t) {
+                return Err(stopped(format!("{} in the window from {}, at {offset}", crate::web::TIME_LIMIT, &stamp(from)[..10]), offset, &high, taken));
+            }
             let mut url = match &next_url {
                 Some(u) => u.clone(),
                 None => spec
@@ -379,9 +423,9 @@ pub fn http_rows(
                     }
                 }
             }
-            let (body, next) = f.fetch(&url)?;
-            let value: J =
-                serde_json::from_str(&body).map_err(|e| format!("{url}: not JSON: {e}"))?;
+            let (body, next) = f.fetch(&url).map_err(|e| stopped(e, offset, &high, taken))?;
+            let value: J = serde_json::from_str(&body)
+                .map_err(|e| stopped(format!("{url}: not JSON: {e}"), offset, &high, taken))?;
 
             let total = total_key
                 .as_deref()
@@ -502,6 +546,12 @@ pub fn http_rows(
             break;
         }
         from = until;
+    }
+    // Read to the end: nothing left to go on with.
+    if let Some(dir) = spec.dir.filter(|_| resumable) {
+        if crate::web::resume_of(dir).is_some_and(|r| r.goes_on) {
+            let _ = std::fs::remove_file(dir.join(crate::web::RESUME));
+        }
     }
     // Only a complete pass advances the mark, and this returns it for the caller to store.
     Ok(Some(if high > start {
@@ -767,4 +817,9 @@ mod tests {
         assert_eq!(redact(resolved, &s), "https://example.org/list?lang=de&apikey=${ZETLYN_TEST_KEY_A}");
         assert_eq!(redact("https://example.org/list?apikey=s3cr3t-0000-key: http status: 403", &s), "https://example.org/list?apikey=${ZETLYN_TEST_KEY_A}: http status: 403");
     }
+}
+
+/// An address without what follows `?`, where a key would be: what a message about it may say.
+fn without_query(url: &str) -> &str {
+    url.split('?').next().unwrap_or(url)
 }

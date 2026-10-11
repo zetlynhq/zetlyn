@@ -2880,7 +2880,7 @@ impl App {
             std::fs::write(&path, crate::yaml::to_string(&decl)?).map_err(|e| format!("{}: {e}", path.display()))?;
             let ds = Source::open(&dir)?;
             if let Some(until) = further {
-                let r = crate::web::Resume { page: held / per, items: held, high: mark, why: "reading further back".into(), until: Some(until), paused: false };
+                let r = crate::web::Resume { page: held / per, items: held, high: mark, why: "reading further back".into(), until: Some(until), paused: false, ..Default::default() };
                 let _ = std::fs::write(dir.join(crate::web::RESUME), serde_json::to_string(&r).unwrap_or_default());
             }
             // Whoever stopped it says go on.
@@ -5802,6 +5802,9 @@ fn run_apart(dir: &Path) -> Option<i64> {
         c
     };
     let started = crate::now();
+    // A read that would run past the limit stops itself five minutes before it, keeping what it
+    // read; the next run goes on with it. Killed, it would lose all of it.
+    command.env("ZETLYN_STOP_AT", (started + RUN_APART_MAX as i64 - 300).to_string());
     let result = match command.stdin(std::process::Stdio::null()).spawn() {
         Err(e) => format!("not started: {e}"),
         Ok(mut child) => loop {

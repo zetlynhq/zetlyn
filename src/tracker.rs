@@ -1811,19 +1811,23 @@ impl Tracker {
             Some((s, v)) if folded => (s.to_string(), v.to_string()),
             _ => (id.scheme.clone(), id.value.clone()),
         };
+        let rank = self.members.iter().position(|x| x.name() == m.name()).unwrap_or(usize::MAX);
+        let by = (folded, rank, record_id.to_string());
         let thing = snap.things.entry(key).or_insert_with(|| Snap {
             scheme,
             value,
             title: title.to_string(),
-            named_by_fold: folded,
+            named_by: Some(by.clone()),
             ..Snap::default()
         });
-        // Named by its own claim where a folded one came first.
-        if !folded && thing.named_by_fold {
-            thing.scheme = id.scheme.clone();
-            thing.value = id.value.clone();
+        // Named by its own claim before a folded one, by the higher source, then by the least id.
+        if thing.named_by.as_ref().is_some_and(|held| by < *held) {
+            if !folded {
+                thing.scheme = id.scheme.clone();
+                thing.value = id.value.clone();
+            }
             thing.title = title.to_string();
-            thing.named_by_fold = false;
+            thing.named_by = Some(by);
         }
         thing
             .claims
@@ -1895,8 +1899,9 @@ impl Tracker {
         // every thing otherwise.
         let piecemeal = if rebuild || std::env::var_os("ZETLYN_REFRESH_WHOLE").is_some() { None } else { self.moved(&store) };
         let r = match &piecemeal {
-            Some(p) => store.refresh(&self.decl, &self.snapshot_of(Some(p)), false, Some(&p.keys))?,
-            None => store.refresh(&self.decl, &self.snapshot(), rebuild, None)?,
+            Some(p) => store.refresh(&self.decl, &self.snapshot_of(Some(p)), false, Some(&p.keys), false)?,
+            None if self.records() > in_parts_from() => self.refresh_in_parts(&mut store, rebuild)?,
+            None => store.refresh(&self.decl, &self.snapshot(), rebuild, None, false)?,
         };
         store.set_meta("mark", &self.mark())?;
         store.set_meta("stated", &self.stated())?;
@@ -2093,4 +2098,83 @@ fn folds(dir: &Path) -> BTreeMap<String, String> {
         }
     }
     out
+}
+
+/// From this many claims on, a refresh of every thing is made in parts: a CVE tracker of 400,000
+/// NVD records in one piece needed 5.3 GB (2026-10-11), and its cell may use two.
+const IN_PARTS_FROM: u64 = 60_000;
+/// Things per part: a few hundred megabytes at most, whatever the tracker holds.
+const PART_THINGS: usize = 20_000;
+
+// `ZETLYN_IN_PARTS_FROM` and `ZETLYN_PART_THINGS` set both small, and nothing else: how a test makes
+// a tracker of fifty things in slices of seven.
+fn in_parts_from() -> u64 {
+    std::env::var("ZETLYN_IN_PARTS_FROM").ok().and_then(|s| s.parse().ok()).unwrap_or(IN_PARTS_FROM)
+}
+fn part_things() -> usize {
+    std::env::var("ZETLYN_PART_THINGS").ok().and_then(|s| s.parse().ok()).filter(|n| *n > 0).unwrap_or(PART_THINGS)
+}
+
+impl Tracker {
+    /// Every thing again, a slice at a time. One pass over the sources says which claims each thing
+    /// is made of, and holds only that; each slice then reads its claims, as a refresh in part does,
+    /// and writes its things. A rebuild, or the first look, clears the store before the first slice
+    /// and says nothing of what it writes, as it would in one piece.
+    fn refresh_in_parts(&self, store: &mut crate::thingstore::ThingStore, rebuild: bool) -> Result<crate::thingstore::Refreshed, String> {
+        let keys = self.decl.keys();
+        let quiet = rebuild || store.meta("refreshed").is_none();
+        let mut made_of: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new();
+        for m in &self.members {
+            let mut offset = 0usize;
+            loop {
+                let q = Query { text: String::new(), pred: None, view: None, ids: Vec::new(), seen_before: None, sort: None, limit: 5000, offset };
+                let Ok((_, hits, _)) = m.member.search(&q) else { break };
+                if hits.is_empty() {
+                    break;
+                }
+                for hit in &hits {
+                    for id in about(&keys, &hit.ids) {
+                        let key = crate::schemes::key(&self.kept(id).scheme, &self.kept(id).value);
+                        made_of.entry(key).or_default().entry(m.name().to_string()).or_default().insert(hit.record_id.clone());
+                    }
+                }
+                offset += hits.len();
+                if hits.len() < 5000 {
+                    break;
+                }
+            }
+        }
+        if quiet {
+            store.clear_for_parts()?;
+        } else {
+            // What the store holds and no claim names any more goes in its slice, with a signal.
+            for k in store.keys() {
+                made_of.entry(k).or_default();
+            }
+        }
+        let all: Vec<(String, BTreeMap<String, BTreeSet<String>>)> = made_of.into_iter().collect();
+        let mut total = crate::thingstore::Refreshed { first: quiet, ..Default::default() };
+        // Each part asks whether a source was read again under a new declaration, and each is to
+        // hear the same answer: the first part writes the new shapes, and the rest would otherwise
+        // take everything that source says for news.
+        let shapes_before = store.meta("shapes");
+        for part in all.chunks(part_things()) {
+            if let Some(s) = &shapes_before {
+                store.set_meta("shapes", s)?;
+            }
+            let mut p = Piecemeal { keys: BTreeSet::new(), claims: BTreeMap::new() };
+            for (key, by_source) in part {
+                p.keys.insert(key.clone());
+                for (source, ids) in by_source {
+                    p.claims.entry(source.clone()).or_default().extend(ids.iter().cloned());
+                }
+            }
+            let r = store.refresh(&self.decl, &self.snapshot_of(Some(&p)), false, Some(&p.keys), quiet)?;
+            total.signals += r.signals;
+            total.things = r.things;
+            total.conflicts = r.conflicts;
+            total.wording = r.wording;
+        }
+        Ok(total)
+    }
 }

@@ -158,7 +158,25 @@ pub struct Resume {
     /// what is new.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub paused: bool,
+    /// For a source read in windows of time (NVD): the start of the window to go on with, and
+    /// `page` is the offset within it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_from: Option<String>,
+    /// Stopped at its time limit, or by an answer that failed, and taken up again by the next
+    /// update without anybody saying so: a read of four hours on a machine that gives a run fifty
+    /// minutes is several runs.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub goes_on: bool,
 }
+
+/// Where a read stops when it has used its time: `ZETLYN_STOP_AT`, seconds since 1970. It stops
+/// before its next request, keeps what it read and says where it was.
+pub fn stop_at() -> Option<i64> {
+    std::env::var("ZETLYN_STOP_AT").ok().and_then(|s| s.trim().parse().ok())
+}
+
+/// What a read that stopped at its time limit says, and what is no failure of the source.
+pub const TIME_LIMIT: &str = "stopped at its time limit";
 
 pub fn resume_of(dir: &Path) -> Option<Resume> {
     std::fs::read_to_string(dir.join(RESUME)).ok().and_then(|t| serde_json::from_str(&t).ok())
@@ -196,7 +214,7 @@ pub fn rows(spec: &Spec, mark: Option<String>, dir: &Path, root: &Path, on_row: 
         let url = page_url(spec.url, spec.page, n, size);
         let stopped = |why: String, high: &Option<String>, taken: usize| -> String {
             if !keep {
-                let r = Resume { page: n, items: taken, high: high.clone(), why: why.clone(), until: until.clone(), paused: false };
+                let r = Resume { page: n, items: taken, high: high.clone(), why: why.clone(), until: until.clone(), paused: false, ..Default::default() };
                 let _ = std::fs::write(dir.join(RESUME), serde_json::to_string(&r).unwrap_or_default());
             }
             why
@@ -233,7 +251,7 @@ pub fn rows(spec: &Spec, mark: Option<String>, dir: &Path, root: &Path, on_row: 
         if !tell(&Step { page: n + 1, items: taken, reached }) {
             // The next page is where it goes on.
             let why = format!("stopped by you at page {}", n + 1);
-            let r = Resume { page: n + 1, items: taken, high: high.clone(), why: why.clone(), until: until.clone(), paused: true };
+            let r = Resume { page: n + 1, items: taken, high: high.clone(), why: why.clone(), until: until.clone(), paused: true, ..Default::default() };
             if !keep {
                 let _ = std::fs::write(dir.join(RESUME), serde_json::to_string(&r).unwrap_or_default());
             }

@@ -53,8 +53,17 @@ fn values(spec: &Spec, row: &Row) -> Vec<String> {
         .filter(|s| !s.is_empty())
         .collect();
     if let Some(pattern) = &spec.matches {
-        if let Ok(re) = regex::Regex::new(pattern.trim_matches('/')) {
-            out.retain(|s| re.is_match(s));
+        if let Some(re) = expr::compiled(pattern.trim_matches('/')) {
+            // With a group, the value is what the group holds: `^(cpe:2\.3:[aho]:[^:]+:[^:]+)`
+            // keeps a CPE's vendor and product and leaves its hundred versions out.
+            if re.captures_len() > 1 {
+                out = out
+                    .iter()
+                    .filter_map(|s| re.captures(s).and_then(|c| c.get(1)).map(|m| m.as_str().to_string()))
+                    .collect();
+            } else {
+                out.retain(|s| re.is_match(s));
+            }
         }
     }
     if spec.all {
@@ -483,7 +492,11 @@ pub fn build(
         from: origin,
         attachments: Vec::new(),
         hash: String::new(),
-        excerpt: Some(excerpt(&row.value, said)),
+        excerpt: Some(match decl.retention.receipt {
+            crate::sourcedecl::Receipt::Whole => excerpt(&row.value, said),
+            // The words each property was read from, and the expression; the row is at the claim's link.
+            crate::sourcedecl::Receipt::Words => excerpt(&J::Null, said),
+        }),
         versions: Vec::new(),
     };
     rec.hash = rec.compute_hash();
@@ -519,6 +532,19 @@ mod date_tests {
         for not in ["Coming soon", "Q4 2026", "30 Foo 2026", "Sep 2026"] {
             assert_eq!(super::as_date(not), None, "{not}");
         }
+    }
+
+    #[test]
+    fn a_match_with_a_group_keeps_the_group() {
+        let spec = crate::sourcedecl::Spec { from: "field:c[]".into(), matches: Some(r"/^(cpe:2\.3:[aho]:[^:]+:[^:]+)/".into()), separator: None, all: true, default: None };
+        let row = crate::expr::Row {
+            value: serde_json::json!({"c": ["cpe:2.3:a:apache:log4j:2.0:*:*:*:*:*:*:*", "cpe:2.3:a:apache:log4j:2.1:*:*:*:*:*:*:*", "not a cpe"]}),
+            meta: Default::default(), file: None, text: String::new(), root: std::path::Path::new("."),
+        };
+        assert_eq!(super::values(&spec, &row), ["cpe:2.3:a:apache:log4j"]);
+        let plain = crate::sourcedecl::Spec { matches: Some(r"/^CWE-\d+$/".into()), ..spec };
+        let row = crate::expr::Row { value: serde_json::json!({"c": ["CWE-79", "NVD-CWE-noinfo"]}), ..row };
+        assert_eq!(super::values(&plain, &row), ["CWE-79"]);
     }
 
     #[test]

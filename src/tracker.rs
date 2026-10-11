@@ -958,7 +958,43 @@ impl Tracker {
     }
 
     /// Counted per value across every source, on the scale this tracker declares where it has one.
+    /// A facet's counts for a question, kept in the tracker's store while its sources stand where
+    /// they stood: the same counts for every page of a list, and counted once after each refresh.
     pub fn facet(&self, q: &TrackerQuery, field: &str, limit: usize) -> (Vec<(String, u64)>, u64) {
+        let question = format!(
+            "{field}|{limit}|{}|{:?}|{}|{}|{}",
+            q.text,
+            q.pred,
+            q.named.as_deref().unwrap_or(""),
+            q.kind.as_deref().unwrap_or(""),
+            q.seen_before.as_deref().unwrap_or("")
+        );
+        // The sources where they stand, and the statement and matches the counts were made under.
+        let mark = format!("{}|{}", self.mark(), self.stated());
+        let store = crate::thingstore::ThingStore::open(&self.dir).ok();
+        if let Some(kept) = store.as_ref().and_then(|s| s.facet_cached(&question, &mark)) {
+            return kept;
+        }
+        let counts = self.facet_counted(q, field, limit);
+        if let Some(s) = &store {
+            s.keep_facet(&question, &mark, &counts);
+        }
+        counts
+    }
+
+    /// The overview's facets and those of each named view, counted ahead of the first visitor.
+    fn count_facets_ahead(&self) {
+        let mut views: Vec<Option<String>> = vec![None];
+        views.extend(self.decl.view.named.iter().map(|n| Some(n.name.clone())));
+        for named in views {
+            let q = TrackerQuery { named, limit: 25, ..TrackerQuery::default() };
+            for f in self.facets(&q) {
+                let _ = self.facet(&q, &f, 8);
+            }
+        }
+    }
+
+    fn facet_counted(&self, q: &TrackerQuery, field: &str, limit: usize) -> (Vec<(String, u64)>, u64) {
         let mut tally: BTreeMap<String, u64> = BTreeMap::new();
         let mut coverage = 0u64;
         for m in &self.members {
@@ -1885,11 +1921,36 @@ impl Tracker {
 
     /// The tracker's own store, made to hold what the sources say now.
     pub fn refresh(&self, rebuild: bool) -> Result<crate::thingstore::Refreshed, String> {
+        self.refresh_holding(rebuild, false)
+    }
+
+    /// As `refresh`, waiting for a refresh another process is making rather than leaving it to
+    /// that one: what a person asks for at the command line.
+    pub fn refresh_waiting(&self, rebuild: bool) -> Result<crate::thingstore::Refreshed, String> {
+        self.refresh_holding(rebuild, true)
+    }
+
+    /// One refresh of a tracker's store at a time, whoever asks: the server after a page, a cell's
+    /// pass, a person. A refresh of 400,000 things takes minutes, and two at once each found the
+    /// store locked by the other and neither was made (2026-10-11). The lock is the system's, held
+    /// while this refresh is, so one that dies leaves none behind.
+    fn refresh_holding(&self, rebuild: bool, wait: bool) -> Result<crate::thingstore::Refreshed, String> {
         if let Some(p) = self.decl.package.as_ref().filter(|p| p.sealed) {
             return Err(format!(
                 "{} is a sealed package, {}: it carries no recipe to build it with. `zetlyn tracker pull` takes a newer version",
                 self.decl.name, p.version
             ));
+        }
+        let lock_path = self.dir.join(".refreshing");
+        let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&lock_path).map_err(|e| format!("{}: {e}", lock_path.display()))?;
+        match lock.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) if wait => {
+                eprintln!("{}: another refresh is being made; this one waits for it", self.decl.name);
+                lock.lock().map_err(|e| format!("{}: {e}", lock_path.display()))?;
+            }
+            Err(std::fs::TryLockError::WouldBlock) => return Err(format!("{}: {REFRESHING}", self.decl.name)),
+            Err(std::fs::TryLockError::Error(e)) => return Err(format!("{}: {e}", lock_path.display())),
         }
         if let Ok(mut f) = self.folds.write() {
             *f = folds(&self.dir);
@@ -1905,6 +1966,9 @@ impl Tracker {
         };
         store.set_meta("mark", &self.mark())?;
         store.set_meta("stated", &self.stated())?;
+        drop(store);
+        // While the lock is still held: the first visitor after an update finds the counts made.
+        self.count_facets_ahead();
         Ok(r)
     }
 
@@ -2099,6 +2163,9 @@ fn folds(dir: &Path) -> BTreeMap<String, String> {
     }
     out
 }
+
+/// What a refresh says that found another one being made: no failure, that one makes it.
+pub const REFRESHING: &str = "being refreshed already by another process";
 
 /// From this many claims on, a refresh of every thing is made in parts: a CVE tracker of 400,000
 /// NVD records in one piece needed 5.3 GB (2026-10-11), and its cell may use two.

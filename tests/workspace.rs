@@ -1566,3 +1566,48 @@ fn a_tracker_made_in_parts_holds_what_one_made_in_one_piece_holds() {
     assert!(held.iter().any(|r| r.starts_with("Text(\"new_thing\")")) && !said.contains("read again"), "{said}");
     assert_eq!(held, store_held(&parts));
 }
+
+#[test]
+fn a_refresh_asked_for_while_another_is_made_waits_for_it_and_then_is_made() {
+    let ws = Workspace::new("refreshing");
+    ws.z(&["tracker", "refresh", &ws.scope()]);
+    // Another process making the store: the lock held for two seconds.
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true)
+        .open(ws.root.join("trackers/cve/.refreshing")).unwrap();
+    lock.lock().unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        drop(lock);
+    });
+    let started = std::time::Instant::now();
+    let said = ws.z(&["tracker", "refresh", &ws.scope(), "--rebuild"]);
+    release.join().unwrap();
+    assert!(said.contains("things"), "{said}");
+    assert!(started.elapsed() >= std::time::Duration::from_secs(2), "it did not wait");
+}
+
+#[test]
+fn facet_counts_are_made_after_a_refresh_and_made_again_when_a_source_moves() {
+    let ws = Workspace::new("facet-cache");
+    ws.z(&["tracker", "refresh", &ws.scope()]);
+    let kept = || -> Vec<(String, String, String)> {
+        let c = rusqlite::Connection::open(ws.root.join("trackers/cve/tracker.db")).unwrap();
+        let mut stmt = c.prepare("select question, mark, counts from facet_cache order by 1").unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap().flatten().collect()
+    };
+    let before = kept();
+    assert!(!before.is_empty(), "no counts made ahead of the first page");
+    std::fs::write(
+        ws.root.join("sources/vendor-a/advisories.csv"),
+        "cve,title,severity,cvss,published\n\
+         CVE-2026-0001,foo: remote code execution,critical,9.8,2026-08-30\n\
+         CVE-2026-0009,qux: path traversal,critical,9.3,2026-09-04\n",
+    )
+    .unwrap();
+    ws.z(&["source", "update", &ws.dataset("vendor-a")]);
+    ws.z(&["tracker", "refresh", &ws.scope()]);
+    let after = kept();
+    let marks: std::collections::BTreeSet<&String> = after.iter().map(|(_, m, _)| m).collect();
+    assert_eq!(marks.len(), 1, "counts kept under an old mark: {after:?}");
+    assert_ne!(before.iter().map(|(_, _, c)| c).collect::<Vec<_>>(), after.iter().map(|(_, _, c)| c).collect::<Vec<_>>(), "the counts did not follow the source");
+}

@@ -512,7 +512,7 @@ fn run(args: &[String]) -> Result<(), String> {
                 let (dir, sources) = scope_at(args, 2)?;
                 let t = tracker::Tracker::open(&dir, &sources)?;
                 let started = std::time::Instant::now();
-                let r = t.refresh(args.iter().any(|a| a == "--rebuild"))?;
+                let r = t.refresh_waiting(args.iter().any(|a| a == "--rebuild"))?;
                 println!(
                     "{} things, {} conflicts, {} that differ only in wording, {} signals{}{} in {:.1}s",
                     r.things,

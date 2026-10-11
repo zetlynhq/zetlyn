@@ -1557,7 +1557,9 @@ impl TrackerSite {
         let scope = scope;
         // A tracker whose store is behind its sources, or has none, refreshes before it answers.
         if let Err(e) = scope.refresh_if_moved() {
-            eprintln!("{}: the tracker store was not refreshed: {e}", dir.display());
+            if !e.contains(crate::tracker::REFRESHING) {
+                eprintln!("{}: the tracker store was not refreshed: {e}", dir.display());
+            }
         }
         let mut pages = Pages::default();
         pages.still(&scope);
@@ -1625,7 +1627,9 @@ impl TrackerSite {
                     *scope = fresh;
                     // What changed since the last look becomes signals, once per update.
                     if let Err(e) = scope.refresh_if_moved() {
-                        eprintln!("{}: the tracker store was not refreshed: {e}", dir.display());
+                        if !e.contains(crate::tracker::REFRESHING) {
+                            eprintln!("{}: the tracker store was not refreshed: {e}", dir.display());
+                        }
                     }
                 }
                 Err(e) => eprintln!("{}: read again failed, serving the last one: {e}", dir.display()),

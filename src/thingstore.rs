@@ -236,6 +236,9 @@ create index if not exists claim_at on claim(source, record_id);
 create index if not exists claim_key on claim(key);
 -- And the words found by thing, for the same refresh to take out what it writes again.
 create index if not exists word_key on word(key);
+-- Facet counts as a page asked them, kept while the sources stand where they stood: counting a
+-- facet over 400,000 things takes seconds, and every page of a list asks the same counts.
+create table if not exists facet_cache(question text primary key, mark text not null, counts text not null);
 ";
 
 pub struct ThingStore {
@@ -803,6 +806,24 @@ impl ThingStore {
     pub fn keys(&self) -> Vec<String> {
         let Ok(mut stmt) = self.db.prepare("select key from thing") else { return Vec::new() };
         stmt.query_map([], |r| r.get::<_, String>(0)).map(|rows| rows.flatten().collect()).unwrap_or_default()
+    }
+
+    /// Facet counts kept for a question, where the sources still stand at `mark`.
+    pub fn facet_cached(&self, question: &str, mark: &str) -> Option<(Vec<(String, u64)>, u64)> {
+        let counts: String = self
+            .db
+            .query_row("select counts from facet_cache where question = ?1 and mark = ?2", rusqlite::params![question, mark], |r| r.get(0))
+            .ok()?;
+        serde_json::from_str(&counts).ok()
+    }
+
+    pub fn keep_facet(&self, question: &str, mark: &str, counts: &(Vec<(String, u64)>, u64)) {
+        if let Ok(text) = serde_json::to_string(counts) {
+            let _ = self.db.execute(
+                "insert or replace into facet_cache(question, mark, counts) values(?1, ?2, ?3)",
+                rusqlite::params![question, mark, text],
+            );
+        }
     }
 
     /// Every open conflict, newest first, with the reader's own state where there is a reader.

@@ -491,6 +491,31 @@ struct Remote {
 }
 
 impl Remote {
+    /// A whole world, into a file as it arrives: gigabytes are not held in memory, and making them
+    /// on the other side takes minutes, so this asks with two hours where the rest asks with ten
+    /// minutes (a first sync of zetlyn.com with NVD whole, 2026-10-12).
+    fn get_to_file(&self, path: &str, file: &Path) -> Result<u64, String> {
+        let long = ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_secs(2 * 3600)))
+            .http_status_as_error(false)
+            .user_agent(crate::sourcedecl::AGENT)
+            .build()
+            .new_agent();
+        let mut r = long
+            .get(&format!("{}{path}", self.url))
+            .header("Authorization", &format!("Bearer {}", self.key))
+            .call()
+            .map_err(|e| format!("{}{path}: {e}", self.url))?;
+        let code = r.status().as_u16();
+        if code != 200 {
+            let mut body = String::new();
+            let _ = r.body_mut().as_reader().take(64 * 1024).read_to_string(&mut body);
+            return Err(format!("{}{path}: {code} {body}", self.url));
+        }
+        let mut out = std::fs::File::create(file).map_err(|e| format!("{}: {e}", file.display()))?;
+        std::io::copy(&mut r.body_mut().with_config().limit(u64::MAX).reader(), &mut out).map_err(|e| format!("{}{path}: {e}", self.url))
+    }
+
     fn get(&self, path: &str) -> Result<Vec<u8>, String> {
         let mut r = self
             .agent
@@ -680,9 +705,14 @@ pub fn run(root: &Path, url: &str, key: &str, take: Option<&str>, with_data: boo
     }
     // A first sync into an empty directory: the whole world, as it is there.
     if !root.join(crate::account::WORKSPACE).exists() {
-        let archive = remote.get("/sync/export")?;
-        let file = std::env::temp_dir().join(format!("zetlyn-sync-{}.tar.gz", crate::jwt::random()));
-        std::fs::write(&file, archive).map_err(|e| e.to_string())?;
+        // Beside where the copy will be, on its disk, not in a /tmp that may be memory.
+        let parent = root.parent().filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(std::env::temp_dir);
+        std::fs::create_dir_all(&parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        let file = parent.join(format!(".zetlyn-sync-{}.tar.gz", crate::jwt::random()));
+        if let Err(e) = remote.get_to_file("/sync/export", &file) {
+            let _ = std::fs::remove_file(&file);
+            return Err(e);
+        }
         let r = crate::world::import(&file, &root, None, None);
         let _ = std::fs::remove_file(&file);
         r?;

@@ -768,10 +768,26 @@ impl App {
                         bytes(request, r)
                     }
                     (false, "export") => {
-                        let file = std::env::temp_dir().join(format!("zetlyn-sync-export-{}.tar.gz", crate::jwt::random()));
-                        let r = crate::world::export(&self.root, &file).and_then(|_| std::fs::read(&file).map_err(|e| e.to_string()));
+                        // Made on the world's own disk, where an export leaves its exports out, and sent
+                        // as it is read: a world of 8 GB was to be read whole into the memory of a cell
+                        // of 3 (2026-10-12). Taken out of the directory once open; it is gone when sent.
+                        let dir = self.root.join(".zetlyn").join("exports");
+                        let file = dir.join(format!("sync-{}.tar.gz", crate::jwt::random()));
+                        let made = std::fs::create_dir_all(&dir)
+                            .map_err(|e| e.to_string())
+                            .and_then(|_| crate::world::export(&self.root, &file))
+                            .and_then(|_| std::fs::File::open(&file).map_err(|e| e.to_string()));
                         let _ = std::fs::remove_file(&file);
-                        bytes(request, r)
+                        match made {
+                            Ok(f) => {
+                                let mut response = tiny_http::Response::from_file(f);
+                                if let Ok(h) = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/gzip"[..]) {
+                                    response = response.with_header(h);
+                                }
+                                let _ = request.respond(response);
+                            }
+                            Err(e) => bytes(request, Err(e)),
+                        }
                     }
                     (true, "push") => {
                         let r = crate::sync::take_push(&self.root, &mut std::io::Read::take(request.as_reader(), 4 << 30));

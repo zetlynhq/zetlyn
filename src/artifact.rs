@@ -208,30 +208,6 @@ fn differs(held: &[u8], built: &J) -> bool {
     old != new
 }
 
-/// Every version the source kept, one line each: the claim it belongs to, and the version as the
-/// source holds it. With `held`, only the versions a subscriber at the previous version does not
-/// have yet, which is what a delta carries.
-fn history_of(ds: &Source, held: Option<&std::collections::BTreeSet<String>>) -> Result<Vec<u8>, String> {
-    let mut out = Vec::new();
-    ds.store.for_each_version(|id, v| {
-        if let Some(held) = held {
-            if held.contains(&version_key(id, v.update, &v.hash)) {
-                return Ok(());
-            }
-        }
-        let mut line = v.to_json();
-        line["claim_id"] = json!(id);
-        out.extend_from_slice(serde_json::to_string(&line).map_err(|e| e.to_string())?.as_bytes());
-        out.push(b'\n');
-        Ok(())
-    })?;
-    Ok(out)
-}
-
-fn version_key(id: &str, update: i64, hash: &str) -> String {
-    format!("{id}\t{update}\t{hash}")
-}
-
 /// Whether an artifact built against `spec` can be read here: the same major version, and a minor
 /// one this build knows. 2.1 added receipts and history and took nothing away, so a 2.0 artifact
 /// is a 2.1 one with neither.
@@ -244,15 +220,6 @@ pub fn readable(spec: &str) -> bool {
         (Some((ma, mi)), Some((oa, oi))) => ma == oa && mi <= oi,
         _ => false,
     }
-}
-
-/// A payload as it is written: gzip, under its name with `.gz`. The claims of NVD with their
-/// receipts and history are 170 MB as JSON and 25 MB compressed, and a hub keeps every version.
-fn packed(name: &str, body: &[u8]) -> Result<(String, Vec<u8>), String> {
-    use std::io::Write;
-    let mut z = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(6));
-    z.write_all(body).map_err(|e| e.to_string())?;
-    Ok((format!("{name}.gz"), z.finish().map_err(|e| e.to_string())?))
 }
 
 /// A payload as it is read: under whichever of its two names the manifest lists, held against
@@ -318,51 +285,89 @@ fn take_history(store: &Store, body: &[u8], replace: bool) -> Result<u64, String
 }
 
 /// Write `claims.jsonl`, the manifest and the tag. Returns the version.
-/// The most claims a source version is made of: a few hundred megabytes in memory. Exploit-DB,
-/// the largest published source but NVD, has 46,698.
-pub const PUBLISH_MAX: u64 = 100_000;
-
 pub fn publish(
     ds: &Source,
     place: &dyn Place,
     tag: &str,
     expect: Option<&str>,
 ) -> Result<String, String> {
-    // A version is made in memory, its claims, its history and their packings at once: NVD's
-    // 404,000 claims took a cell of two gigabytes past its limit at every pass, and it was
-    // killed every ten minutes (2026-10-11). Past this, it is not published until a version can
-    // be made a piece at a time.
-    let held = ds.store.count();
-    // `ZETLYN_PUBLISH_MAX` small, and nothing else: how a test makes a source of five claims too large.
-    let most = std::env::var("ZETLYN_PUBLISH_MAX").ok().and_then(|s| s.parse().ok()).unwrap_or(PUBLISH_MAX);
-    if held > most {
-        return Err(format!("{held} claims, more than the {most} a version is made of in memory; not published"));
-    }
-    let mut body = Vec::new();
+    // Its turn among the world's heavy work, waited for: a refresh of a tracker is not made beside
+    // it. The world is the directory above `sources/`; a source on its own is its own.
+    let world = ds
+        .dir
+        .parent()
+        .filter(|p| p.file_name().is_some_and(|n| n == "sources"))
+        .and_then(Path::parent)
+        .unwrap_or(&ds.dir);
+    let _turn = crate::source::heavy_turn(world, true)?;
+    // Made on disk, a claim at a time, beside the source: a version made in memory took NVD's
+    // 404,000 claims, their history and their packings at once, and a cell of two gigabytes was
+    // killed every ten minutes (2026-10-11). The delta from the version this store published last
+    // is made in the same pass, from what it wrote down then, not by reading that version back.
+    let spool = ds.dir.join(".publishing");
+    let _ = std::fs::remove_dir_all(&spool);
+    std::fs::create_dir_all(&spool).map_err(|e| format!("{}: {e}", spool.display()))?;
+    let made = (|| -> Result<String, String> {
+    let last_published = ds.store.meta("published_version");
+    let history_from: i64 = ds.store.meta("published_history_run").and_then(|r| r.parse().ok()).unwrap_or(0);
+    let mut claims = Spool::new(spool.join("claims.jsonl.gz"))?;
+    let mut delta_claims = Spool::new(spool.join("delta-claims.jsonl.gz"))?;
+    let mut changes = std::io::BufWriter::new(
+        std::fs::File::create(spool.join("changes.tsv")).map_err(|e| e.to_string())?,
+    );
+    let (mut added, mut changed) = (0u64, 0u64);
     ds.store.for_each_record(|r| {
+        use std::io::Write;
         let line = serde_json::to_string(&r.to_json()).map_err(|e| e.to_string())?;
-        body.extend_from_slice(line.as_bytes());
-        body.push(b'\n');
+        claims.line(line.as_bytes())?;
+        // The line as it was served, and not only its hash: a claim that did not change can still
+        // have gained its receipt, and the receipt is what a subscriber would otherwise never get.
+        let digest = sha256(line.as_bytes());
+        match ds.store.published_as(&r.record_id) {
+            Some((was, _)) if was == digest => return Ok(()),
+            Some((_, hash)) if hash != r.hash => changed += 1,
+            Some(_) => {}
+            None => added += 1,
+        }
+        delta_claims.line(line.as_bytes())?;
+        writeln!(changes, "{}\t{digest}\t{}", r.record_id, r.hash).map_err(|e| e.to_string())
+    })?;
+    {
+        use std::io::Write;
+        changes.flush().map_err(|e| e.to_string())?;
+    }
+    let claims = claims.finish()?;
+    let delta_claims = delta_claims.finish()?;
+    let mut history = Spool::new(spool.join("history.jsonl.gz"))?;
+    let mut delta_history = Spool::new(spool.join("delta-history.jsonl.gz"))?;
+    ds.store.for_each_version(|id, v| {
+        let newer = v.update > history_from;
+        let mut line = v.to_json();
+        line["claim_id"] = json!(id);
+        let line = serde_json::to_string(&line).map_err(|e| e.to_string())?;
+        history.line(line.as_bytes())?;
+        if newer {
+            delta_history.line(line.as_bytes())?;
+        }
         Ok(())
     })?;
-
-    let history = history_of(ds, None)?;
+    let history = history.finish()?;
+    let delta_history = delta_history.finish()?;
+    let gone = ds.store.published_gone()?;
 
     // What the version is, by content, and what is served, packed. A source that keeps no
     // history ships none, and the manifest does not name a payload that is not there.
     let mut content = BTreeMap::new();
-    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
-    for (name, plain) in [("claims.jsonl", &body), ("history.jsonl", &history)] {
-        if name == "history.jsonl" && plain.is_empty() {
+    let mut files: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let mut payloads: BTreeMap<String, (u64, String)> = BTreeMap::new();
+    for (name, s) in [("claims.jsonl", &claims), ("history.jsonl", &history)] {
+        if name == "history.jsonl" && s.plain_len == 0 {
             continue;
         }
-        content.insert(name.to_string(), (plain.len() as u64, sha256(plain)));
-        files.push(packed(name, plain)?);
+        content.insert(name.to_string(), (s.plain_len, s.plain_sha.clone()));
+        payloads.insert(format!("{name}.gz"), (s.packed_len, s.packed_sha.clone()));
+        files.push((format!("{name}.gz"), s.path.clone()));
     }
-    let payloads: BTreeMap<String, (u64, String)> = files
-        .iter()
-        .map(|(n, b)| (n.clone(), (b.len() as u64, sha256(b))))
-        .collect();
     let manifest = manifest_of(ds, &content, &payloads);
     let version = manifest["version"].as_str().unwrap_or_default().to_string();
     let reference = Reference::parse(&format!("{}@{tag}", ds.decl.name))?;
@@ -384,8 +389,8 @@ pub fn publish(
         .and_then(|b| serde_json::from_slice::<J>(b).ok())
         .map(|m| m["payloads"].clone());
     if listed.as_ref() != Some(&manifest["payloads"]) {
-        for (name, bytes) in &files {
-            place.put(&reference.version_path("sources", &version, name), bytes)?;
+        for (name, file) in &files {
+            place.put_file(&reference.version_path("sources", &version, name), file)?;
         }
     }
     if held.as_deref().map(|b| differs(b, &manifest)).unwrap_or(true) {
@@ -414,110 +419,73 @@ pub fn publish(
         .map(|b| String::from_utf8_lossy(&b).trim().to_string())
         .filter(|p| !p.is_empty() && *p != version);
     if let Some(previous) = held {
-        if let Err(e) = write_delta(ds, place, &reference, &previous, &version, &manifest) {
-            eprintln!("no delta from {previous}: {e}");
+        // Only from the version this store published last: what it wrote down then is what that
+        // version holds. A tag another publisher moved since has no delta from here, only the whole.
+        if last_published.as_deref() != Some(previous.as_str()) {
+            eprintln!("no delta from {previous}: this store did not publish it");
+        } else {
+            let parts = DeltaParts { claims: &delta_claims, history: &delta_history, gone: &gone, added, changed };
+            if let Err(e) = write_delta(place, &reference, &previous, &version, &manifest, &parts) {
+                eprintln!("no delta from {previous}: {e}");
+            }
         }
     }
 
     move_tag(place, &reference.tag_path("sources"), &version, expect)?;
+    // What the hub now holds, written down for the next delta.
+    ds.store.mark_published(&spool.join("changes.tsv"), &gone)?;
+    ds.store.set_meta("published_version", &version)?;
+    ds.store.set_meta("published_history_run", &ds.store.last_run().to_string())?;
     Ok(version)
+    })();
+    let _ = std::fs::remove_dir_all(&spool);
+    made
+}
+
+/// What a delta is made of, spooled beside the whole in the same pass.
+struct DeltaParts<'a> {
+    claims: &'a Spooled,
+    history: &'a Spooled,
+    gone: &'a [String],
+    added: u64,
+    changed: u64,
 }
 
 /// What changed between the version on the hub and the one in this store, written so a subscriber
-/// holding the first can reach the second without the whole of it.
-///
-/// The publisher reads their own last publication back rather than keeping a copy: the hub is
-/// what subscribers hold, so it is the thing to compute against.
+/// holding the first can reach the second without the whole of it: the claims whose line changed,
+/// the versions newer than the last publication, and the claims gone, all spooled already.
 fn write_delta(
-    ds: &Source,
     place: &dyn Place,
     reference: &Reference,
     previous: &str,
     version: &str,
     full: &J,
+    parts: &DeltaParts,
 ) -> Result<(), String> {
-    let prev_path = |n: &str| reference.version_path("sources", previous, n);
-    let prev: J = serde_json::from_slice(&place.get(&prev_path("manifest.json"))?)
-        .map_err(|e| format!("{previous}: {e}"))?;
-    let before = unpacked(place, prev_path, &prev, "claims.jsonl")?
-        .ok_or_else(|| format!("{previous}: its manifest names no claims"))?;
-    // The line as it was served, and not only its hash: a claim that did not change can still
-    // have gained its receipt, and the receipt is what a subscriber would otherwise never get.
-    let mut held: BTreeMap<String, (String, String)> = BTreeMap::new();
-    for line in String::from_utf8_lossy(&before).lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let j: J = serde_json::from_str(line).map_err(|e| e.to_string())?;
-        let (Some(id), Some(hash)) = (j["claim_id"].as_str(), j["hash"].as_str()) else {
-            continue;
-        };
-        held.insert(id.to_string(), (hash.to_string(), line.to_string()));
+    let removed_body: Vec<u8> = parts
+        .gone
+        .iter()
+        .map(|id| format!("{}\n", serde_json::json!({ "claim_id": id })))
+        .collect::<String>()
+        .into_bytes();
+    let mut payloads: BTreeMap<String, (u64, String)> = BTreeMap::new();
+    payloads.insert("claims.jsonl.gz".into(), (parts.claims.packed_len, parts.claims.packed_sha.clone()));
+    payloads.insert("removed.jsonl".into(), (removed_body.len() as u64, sha256(&removed_body)));
+    if parts.history.plain_len > 0 {
+        payloads.insert("history.jsonl.gz".into(), (parts.history.packed_len, parts.history.packed_sha.clone()));
     }
-    // The versions a subscriber at the previous version already holds. A previous version with
-    // no history, which every 2.0 artifact is, holds none, and the delta carries all of it.
-    let mut had = std::collections::BTreeSet::new();
-    if let Ok(Some(old)) = unpacked(place, prev_path, &prev, "history.jsonl") {
-        for line in String::from_utf8_lossy(&old).lines() {
-            let Ok(j) = serde_json::from_str::<J>(line) else {
-                continue;
-            };
-            had.insert(version_key(
-                j["claim_id"].as_str().unwrap_or_default(),
-                j["update"].as_i64().unwrap_or(0),
-                j["hash"].as_str().unwrap_or_default(),
-            ));
-        }
-    }
-    let history = history_of(ds, Some(&had))?;
-
-    let mut body = Vec::new();
-    let mut added = 0u64;
-    let mut changed = 0u64;
-    let mut seen = std::collections::BTreeSet::new();
-    ds.store.for_each_record(|r| {
-        seen.insert(r.record_id.clone());
-        let line = serde_json::to_string(&r.to_json()).map_err(|e| e.to_string())?;
-        match held.get(&r.record_id) {
-            Some((_, was)) if *was == line => return Ok(()),
-            Some((hash, _)) if *hash != r.hash => changed += 1,
-            Some(_) => {}
-            None => added += 1,
-        }
-        body.extend_from_slice(line.as_bytes());
-        body.push(b'\n');
-        Ok(())
-    })?;
-
-    let mut gone = Vec::new();
-    for id in held.keys() {
-        if !seen.contains(id) {
-            gone.push(format!("{}\n", serde_json::json!({ "claim_id": id })));
-        }
-    }
-    let removed_body = gone.concat().into_bytes();
-
-    // Packed as the whole is, and compared packed, since that is what a subscriber fetches.
-    let mut files: Vec<(String, Vec<u8>)> = vec![packed("claims.jsonl", &body)?];
-    files.push(("removed.jsonl".to_string(), removed_body));
-    if !history.is_empty() {
-        files.push(packed("history.jsonl", &history)?);
-    }
-    let cost: u64 = files.iter().map(|(_, b)| b.len() as u64).sum();
+    // Packed as the whole is, and compared packed, since that is what a subscriber fetches. A delta
+    // nobody gains from is not written: the whole is one fetch and the delta is two.
+    let cost: u64 = payloads.values().map(|(b, _)| *b).sum();
     let whole = declared_bytes(full, "claims.jsonl")
         .unwrap_or(u64::MAX)
         .saturating_add(declared_bytes(full, "history.jsonl").unwrap_or(0));
-    // A delta nobody gains from is not written. The whole is one fetch and the delta is two.
     if cost >= whole {
         return Err(format!(
             "{cost} bytes against {whole} for the whole, so the whole is the cheaper fetch"
         ));
     }
 
-    let payloads: BTreeMap<String, (u64, String)> = files
-        .iter()
-        .map(|(n, b)| (n.clone(), (b.len() as u64, sha256(b))))
-        .collect();
     let manifest = serde_json::json!({
         "spec_version": SPEC_VERSION,
         "built_by": concat!("zetlyn ", env!("CARGO_PKG_VERSION")),
@@ -525,17 +493,19 @@ fn write_delta(
         "version": version,
         "applies_to": previous,
         "built_at": crate::now(),
-        "added": added,
-        "changed": changed,
-        "removed": gone.len(),
+        "added": parts.added,
+        "changed": parts.changed,
+        "removed": parts.gone.len(),
         "claims": full["claims"],
         "payloads": J::Object(payloads.iter()
             .map(|(n, (bytes, hash))| (n.clone(), serde_json::json!({ "bytes": bytes, "sha256": hash })))
             .collect()),
     });
 
-    for (name, bytes) in &files {
-        place.put(&reference.delta_path("sources", version, previous, name), bytes)?;
+    place.put_file(&reference.delta_path("sources", version, previous, "claims.jsonl.gz"), &parts.claims.path)?;
+    place.put(&reference.delta_path("sources", version, previous, "removed.jsonl"), &removed_body)?;
+    if parts.history.plain_len > 0 {
+        place.put_file(&reference.delta_path("sources", version, previous, "history.jsonl.gz"), &parts.history.path)?;
     }
     place.put(
         &reference.delta_path("sources", version, previous, "manifest.json"),
@@ -1119,4 +1089,74 @@ pub fn take_statement(dir: &Path, manifest: &J) -> Result<bool, String> {
     );
     std::fs::write(dir.join(crate::sourcedecl::FILE), text).map_err(|e| e.to_string())?;
     Ok(true)
+}
+
+/// A payload made on disk as it is written: its lines packed into a file, and counted and hashed
+/// both plain and packed on the way, so a source of 400,000 claims is never whole in memory.
+struct Spool {
+    path: std::path::PathBuf,
+    gz: flate2::write::GzEncoder<Counted<std::io::BufWriter<std::fs::File>>>,
+    plain: sha2::Sha256,
+    plain_len: u64,
+}
+
+/// A writer that counts and hashes what passes through it.
+struct Counted<W: std::io::Write> {
+    inner: W,
+    hash: sha2::Sha256,
+    len: u64,
+}
+
+impl<W: std::io::Write> std::io::Write for Counted<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        use sha2::Digest;
+        let n = self.inner.write(buf)?;
+        self.hash.update(&buf[..n]);
+        self.len += n as u64;
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// What a spool made: where it is, and its plain and packed length and hash.
+struct Spooled {
+    path: std::path::PathBuf,
+    plain_len: u64,
+    plain_sha: String,
+    packed_len: u64,
+    packed_sha: String,
+}
+
+fn hex_of(h: sha2::Sha256) -> String {
+    use sha2::Digest;
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+impl Spool {
+    fn new(path: std::path::PathBuf) -> Result<Spool, String> {
+        use sha2::Digest;
+        let file = std::fs::File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let counted = Counted { inner: std::io::BufWriter::new(file), hash: sha2::Sha256::new(), len: 0 };
+        Ok(Spool { path, gz: flate2::write::GzEncoder::new(counted, flate2::Compression::new(6)), plain: sha2::Sha256::new(), plain_len: 0 })
+    }
+
+    fn line(&mut self, line: &[u8]) -> Result<(), String> {
+        use sha2::Digest;
+        use std::io::Write;
+        for part in [line, b"\n"] {
+            self.gz.write_all(part).map_err(|e| e.to_string())?;
+            self.plain.update(part);
+            self.plain_len += part.len() as u64;
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<Spooled, String> {
+        use std::io::Write;
+        let mut counted = self.gz.finish().map_err(|e| e.to_string())?;
+        counted.flush().map_err(|e| e.to_string())?;
+        Ok(Spooled { path: self.path, plain_len: self.plain_len, plain_sha: hex_of(self.plain), packed_len: counted.len, packed_sha: hex_of(counted.hash) })
+    }
 }

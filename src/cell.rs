@@ -653,6 +653,10 @@ pub fn status() -> J {
             "restarts": show(&unit, "NRestarts"),
             "memory": show(&unit, "MemoryCurrent").parse::<u64>().ok(),
             "memory_max": show(&unit, "MemoryMax").parse::<u64>().ok(),
+            // What it cannot give back: what the memory alarm counts.
+            "memory_held": memory_held(&unit),
+            // And how often the kernel ended it for memory in the last hour, which is what hurts.
+            "oom_kills": oom_kills(&unit),
             // How its last pass went, as the cell's own process wrote it; the timer's, before.
             "run_result": last_run.as_ref().and_then(|r| r["result"].as_str().map(str::to_string)).unwrap_or_else(|| show(&run_unit, "Result")),
             "run_finished": last_run.as_ref().and_then(|r| r["at"].as_str().map(str::to_string)).unwrap_or_else(|| show(&run_unit, "ExecMainExitTimestamp")),
@@ -1348,5 +1352,55 @@ mod tests {
     fn a_name_is_one_systemd_can_make_a_user_of() {
         assert!(name_ok("acme") && name_ok("reading-circle") && name_ok("a1"));
         assert!(!name_ok("") && !name_ok("-a") && !name_ok("a-") && !name_ok("Acme") && !name_ok("a/b") && !name_ok(&"a".repeat(29)));
+    }
+}
+
+/// What a cell holds of its memory: all it uses, less the files the kernel has read into memory
+/// and already has on disk, which it takes back the moment anything needs room. A cell whose stores
+/// are larger than its limit fills the rest with them and shows 97 % used while its processes hold
+/// 150 MB; it is what cannot be taken back that kills it (2026-10-11).
+fn memory_held(unit: &str) -> Option<u64> {
+    let cgroup = show(unit, "ControlGroup");
+    if cgroup.is_empty() {
+        return None;
+    }
+    let stat = std::fs::read_to_string(format!("/sys/fs/cgroup{cgroup}/memory.stat")).ok()?;
+    let current: u64 = std::fs::read_to_string(format!("/sys/fs/cgroup{cgroup}/memory.current")).ok()?.trim().parse().ok()?;
+    Some(held_of(current, &stat))
+}
+
+/// From a cgroup's `memory.current` and `memory.stat`: the file pages it holds, less those dirty
+/// or being written, are what may be taken back.
+fn held_of(current: u64, stat: &str) -> u64 {
+    let get = |name: &str| -> u64 {
+        stat.lines().find_map(|l| l.strip_prefix(name).and_then(|r| r.strip_prefix(' ')).and_then(|v| v.trim().parse().ok())).unwrap_or(0)
+    };
+    let reclaimable = (get("active_file") + get("inactive_file")).saturating_sub(get("file_dirty") + get("file_writeback"));
+    current.saturating_sub(reclaimable)
+}
+
+#[cfg(test)]
+mod held_tests {
+    #[test]
+    fn cache_already_on_disk_is_not_held() {
+        // The zetlyn cell on 2026-10-11: 1,980 MB used, 154 MB of it its processes'.
+        let stat = "anon 161480704\nfile 1907359744\nactive_file 1015808\ninactive_file 1979707392\nfile_dirty 0\nfile_writeback 0\n";
+        let held = super::held_of(2076180480, stat);
+        assert!(held < 200 * 1024 * 1024, "{held}");
+        // What is waiting to be written is held until it is.
+        let dirty = "active_file 0\ninactive_file 1000\nfile_dirty 600\nfile_writeback 100\n";
+        assert_eq!(super::held_of(1500, dirty), 1500 - 300);
+    }
+}
+
+/// How often the kernel ended a cell's unit for its memory in the last hour, from the journal: the
+/// unit is started again at once and its counters with it, so the journal is what remembers.
+fn oom_kills(unit: &str) -> u64 {
+    let out = std::process::Command::new("journalctl")
+        .args(["-u", &format!("{unit}.service"), "--since", "-1h", "--no-pager", "-q", "-o", "cat", "-g", "Failed with result 'oom-kill'"])
+        .output();
+    match out {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).lines().filter(|l| !l.trim().is_empty()).count() as u64,
+        Err(_) => 0,
     }
 }

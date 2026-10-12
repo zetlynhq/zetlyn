@@ -21,6 +21,12 @@ pub trait Place {
     /// `Err` where the place cannot be written to, which is a fact about the place and not a
     /// failure of the call.
     fn put(&self, path: &str, bytes: &[u8]) -> Result<(), String>;
+    /// A file into the place, as a file: a payload of gigabytes is never whole in memory where the
+    /// place can take it in parts or by copying. Elsewhere it is read and put.
+    fn put_file(&self, path: &str, file: &std::path::Path) -> Result<(), String> {
+        let bytes = std::fs::read(file).map_err(|e| format!("{}: {e}", file.display()))?;
+        self.put(path, &bytes)
+    }
     fn exists(&self, path: &str) -> bool {
         self.get(path).is_ok()
     }
@@ -106,6 +112,13 @@ impl Place for Folder {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         }
         std::fs::write(&p, bytes).map_err(|e| format!("{}: {e}", p.display()))
+    }
+    fn put_file(&self, path: &str, file: &std::path::Path) -> Result<(), String> {
+        let p = self.resolve(path)?;
+        if let Some(dir) = p.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
+        std::fs::copy(file, &p).map(|_| ()).map_err(|e| format!("{}: {e}", p.display()))
     }
     fn exists(&self, path: &str) -> bool {
         self.resolve(path).map(|p| p.exists()).unwrap_or(false)
@@ -409,6 +422,10 @@ impl S3 {
     /// A file, private: whole where it is small, in parts of 64 MB where it is not, so no more
     /// than one part is ever held in memory. A multipart upload that fails is aborted.
     pub fn upload_private(&self, path: &str, file: &std::path::Path) -> Result<u64, String> {
+        self.upload(path, file, Some("private"))
+    }
+
+    fn upload(&self, path: &str, file: &std::path::Path, acl: Option<&str>) -> Result<u64, String> {
         if self.key.is_empty() || self.secret.is_empty() {
             return Err("ZETLYN_S3_KEY and ZETLYN_S3_SECRET are not set".into());
         }
@@ -417,10 +434,10 @@ impl S3 {
         if size as usize <= Self::PART {
             let mut bytes = Vec::new();
             f.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-            self.call("PUT", path, "", &bytes, Some("private"))?;
+            self.call("PUT", path, "", &bytes, acl)?;
             return Ok(size);
         }
-        let (_, started) = self.call("POST", path, "uploads=", b"", Some("private"))?;
+        let (_, started) = self.call("POST", path, "uploads=", b"", acl)?;
         let id = between(&started, "<UploadId>", "</UploadId>").into_iter().next().ok_or("the storage gave no upload id")?;
         let id = unescape(&id);
         let result = (|| {
@@ -586,6 +603,15 @@ impl Place for S3 {
             .send(bytes)
             .map(|_| ())
             .map_err(|e| format!("{url}: {e}"))
+    }
+    /// Small, as `put` does it, with its content type; large, in parts of 64 MB.
+    fn put_file(&self, path: &str, file: &std::path::Path) -> Result<(), String> {
+        let size = std::fs::metadata(file).map_err(|e| format!("{}: {e}", file.display()))?.len();
+        if size as usize <= Self::PART {
+            let bytes = std::fs::read(file).map_err(|e| format!("{}: {e}", file.display()))?;
+            return self.put(path, &bytes);
+        }
+        self.upload(path, file, None).map(|_| ())
     }
     /// ListObjectsV2, a thousand keys a page, following the continuation until there is none.
     fn list(&self, prefix: &str) -> Result<Vec<String>, String> {

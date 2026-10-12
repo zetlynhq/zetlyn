@@ -1952,6 +1952,11 @@ impl Tracker {
             Err(std::fs::TryLockError::WouldBlock) => return Err(format!("{}: {REFRESHING}", self.decl.name)),
             Err(std::fs::TryLockError::Error(e)) => return Err(format!("{}: {e}", lock_path.display())),
         }
+        // And the world's turn for heavy work: another tracker's refresh or a version for the hub
+        // is not made beside this one.
+        let Some(_turn) = crate::source::heavy_turn(&self.root, wait)? else {
+            return Err(format!("{}: {REFRESHING}", self.decl.name));
+        };
         if let Ok(mut f) = self.folds.write() {
             *f = folds(&self.dir);
         }
@@ -2179,7 +2184,23 @@ fn in_parts_from() -> u64 {
     std::env::var("ZETLYN_IN_PARTS_FROM").ok().and_then(|s| s.parse().ok()).unwrap_or(IN_PARTS_FROM)
 }
 fn part_things() -> usize {
-    std::env::var("ZETLYN_PART_THINGS").ok().and_then(|s| s.parse().ok()).filter(|n| *n > 0).unwrap_or(PART_THINGS)
+    if let Some(n) = std::env::var("ZETLYN_PART_THINGS").ok().and_then(|s| s.parse().ok()).filter(|n| *n > 0) {
+        return n;
+    }
+    // Ten things a megabyte of what the process may use: a part of 20,000 took some 750 MB in all,
+    // so a cell of 1 GB makes parts of 10,000 and one of 512 MB parts of 5,000.
+    match memory_limit() {
+        Some(bytes) => ((bytes >> 20) as usize * 10).clamp(2_000, PART_THINGS),
+        None => PART_THINGS,
+    }
+}
+
+/// The memory this process may use, where a cgroup says so: a cell's `MemoryMax`. None on a
+/// machine that sets none, or says `max`.
+fn memory_limit() -> Option<u64> {
+    let cgroup = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    let path = cgroup.lines().find_map(|l| l.strip_prefix("0::"))?;
+    std::fs::read_to_string(format!("/sys/fs/cgroup{}/memory.max", path.trim())).ok()?.trim().parse().ok()
 }
 
 impl Tracker {
@@ -2188,10 +2209,23 @@ impl Tracker {
     /// and writes its things. A rebuild, or the first look, clears the store before the first slice
     /// and says nothing of what it writes, as it would in one piece.
     fn refresh_in_parts(&self, store: &mut crate::thingstore::ThingStore, rebuild: bool) -> Result<crate::thingstore::Refreshed, String> {
+        use std::hash::{Hash, Hasher};
         let keys = self.decl.keys();
         let quiet = rebuild || store.meta("refreshed").is_none();
-        let mut made_of: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new();
-        for m in &self.members {
+        // Each thing into one of `n` slices by its key, and each slice holding only its keys and a
+        // flat list of its claims: the plan of a refresh of 400,000 things in tens of megabytes,
+        // where nested maps of every key took hundreds. There are at least as many claims as
+        // things, so a slice holds at most a part's worth.
+        let size = part_things();
+        let n = (self.records() as usize).div_ceil(size).max(1);
+        let slice_of = |key: &str| -> usize {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            key.hash(&mut h);
+            (h.finish() % n as u64) as usize
+        };
+        let mut keys_in: Vec<BTreeSet<String>> = vec![BTreeSet::new(); n];
+        let mut claims_in: Vec<Vec<(usize, String)>> = vec![Vec::new(); n];
+        for (mi, m) in self.members.iter().enumerate() {
             let mut offset = 0usize;
             loop {
                 let q = Query { text: String::new(), pred: None, view: None, ids: Vec::new(), seen_before: None, sort: None, limit: 5000, offset };
@@ -2200,9 +2234,16 @@ impl Tracker {
                     break;
                 }
                 for hit in &hits {
+                    let mut slices: Vec<usize> = Vec::new();
                     for id in about(&keys, &hit.ids) {
-                        let key = crate::schemes::key(&self.kept(id).scheme, &self.kept(id).value);
-                        made_of.entry(key).or_default().entry(m.name().to_string()).or_default().insert(hit.record_id.clone());
+                        let kept = self.kept(id);
+                        let key = crate::schemes::key(&kept.scheme, &kept.value);
+                        let s = slice_of(&key);
+                        keys_in[s].insert(key);
+                        if !slices.contains(&s) {
+                            slices.push(s);
+                            claims_in[s].push((mi, hit.record_id.clone()));
+                        }
                     }
                 }
                 offset += hits.len();
@@ -2216,25 +2257,25 @@ impl Tracker {
         } else {
             // What the store holds and no claim names any more goes in its slice, with a signal.
             for k in store.keys() {
-                made_of.entry(k).or_default();
+                let s = slice_of(&k);
+                keys_in[s].insert(k);
             }
         }
-        let all: Vec<(String, BTreeMap<String, BTreeSet<String>>)> = made_of.into_iter().collect();
         let mut total = crate::thingstore::Refreshed { first: quiet, ..Default::default() };
         // Each part asks whether a source was read again under a new declaration, and each is to
         // hear the same answer: the first part writes the new shapes, and the rest would otherwise
         // take everything that source says for news.
         let shapes_before = store.meta("shapes");
-        for part in all.chunks(part_things()) {
+        for (part_keys, part_claims) in keys_in.into_iter().zip(claims_in) {
+            if part_keys.is_empty() {
+                continue;
+            }
             if let Some(s) = &shapes_before {
                 store.set_meta("shapes", s)?;
             }
-            let mut p = Piecemeal { keys: BTreeSet::new(), claims: BTreeMap::new() };
-            for (key, by_source) in part {
-                p.keys.insert(key.clone());
-                for (source, ids) in by_source {
-                    p.claims.entry(source.clone()).or_default().extend(ids.iter().cloned());
-                }
+            let mut p = Piecemeal { keys: part_keys, claims: BTreeMap::new() };
+            for (mi, id) in part_claims {
+                p.claims.entry(self.members[mi].name().to_string()).or_default().insert(id);
             }
             let r = store.refresh(&self.decl, &self.snapshot_of(Some(&p)), false, Some(&p.keys), quiet)?;
             total.signals += r.signals;

@@ -5272,7 +5272,12 @@ fn admin(dir: &Path, rest: &[&str], post: bool, form: &BTreeMap<String, String>,
                         dl.admin-kv {
                             dt { "Running" } dd { (field("active")) @if !field("since").is_empty() { span.dim { " since " (field("since")) } } }
                             dt { "Restarts" } dd { (s["restarts"].as_str().unwrap_or("0")) }
-                            dt { "RAM" } dd { (mb(&s["memory"])) " of " (mb(&s["memory_max"])) (meter_of(s["memory"].as_f64(), s["memory_max"].as_f64())) }
+                            // What it holds, as the alarm counts it; the file cache it fills the rest with beside it.
+                            @let held = if s["memory_held"].is_null() { &s["memory"] } else { &s["memory_held"] };
+                            dt { "RAM" } dd {
+                                (mb(held)) " of " (mb(&s["memory_max"])) (meter_of(held.as_f64(), s["memory_max"].as_f64()))
+                                @if !s["memory_held"].is_null() { span.dim { " · " (mb(&s["memory"])) " with the files it keeps in memory, which it gives back when it needs room" } }
+                            }
                             dt { "Storage used" } dd { (mb(&s["bytes"])) }
                             dt { "Last reading" } dd { (if field("run_result").is_empty() { "—".to_string() } else { field("run_result") }) span.dim { " " (field("run_finished")) } }
                             dt { "Last snapshot" } dd { (stamp_words(&field("snapshot"))) }
@@ -5507,7 +5512,7 @@ fn admin(dir: &Path, rest: &[&str], post: bool, form: &BTreeMap<String, String>,
                                 td.dim { (c.owner) }
                                 td { (c.node) }
                                 td { (s["version"].as_str().unwrap_or("—")) }
-                                td.num { (mb(&s["memory"])) }
+                                td.num { (mb(if s["memory_held"].is_null() { &s["memory"] } else { &s["memory_held"] })) }
                                 td.dim.nowrap { (stamp_words(s["snapshot"].as_str().unwrap_or(""))) }
                                 td {
                                     @if c.house { span.chip { "house" } }

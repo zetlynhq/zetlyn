@@ -14,6 +14,9 @@ use crate::store::{Filter, Hit, RunReport, Store, Unanswered};
 /// What a source says while another process reads it: not a failure, a read left to that one.
 pub const BUSY: &str = "being read already by another process";
 
+/// Gathered claims held in memory before more are put aside in the store (`claims.gather`).
+const GATHER_IN_MEMORY: usize = 20_000;
+
 pub struct Source {
     pub dir: PathBuf,
     pub decl: SourceDecl,
@@ -162,6 +165,14 @@ impl Source {
         // Rows under one key, gathered whole before any is written (`claims.gather`).
         let gathering = self.decl.records.gather;
         let mut gathered: std::collections::BTreeMap<String, crate::claim::Claim> = Default::default();
+        // Past this many, gathered claims are put aside in the store: a source of a million rows
+        // gathered into 300,000 claims is not held in memory at once.
+        let gather_in_memory = std::env::var("ZETLYN_GATHER_IN_MEMORY").ok().and_then(|s| s.parse().ok()).unwrap_or(GATHER_IN_MEMORY);
+        let mut aside = false;
+        if gathering {
+            // What a read that died put aside is no part of this one.
+            let _ = self.store.db.execute_batch("drop table if exists gathering");
+        }
         // The row that leads an entry, where one is named: its title, whatever row came first.
         let lead = self.decl.records.lead.as_deref().and_then(crate::expr::parse_pred);
         let mut led: std::collections::BTreeSet<String> = Default::default();
@@ -178,15 +189,29 @@ impl Source {
                     }
                     if gathering {
                         let first_lead = leads && led.insert(rec.record_id.clone());
-                        match gathered.get_mut(&rec.record_id) {
-                            Some(held) if first_lead => {
-                                let earlier = std::mem::replace(held, rec);
-                                held.gather(earlier);
+                        // Held in memory, or put aside on disk where there were too many to hold.
+                        let held = match gathered.remove(&rec.record_id) {
+                            Some(h) => Some(h),
+                            None if aside => self.store.take_aside(&rec.record_id, &self.decl.name)?,
+                            None => None,
+                        };
+                        let rec = match held {
+                            Some(earlier) if first_lead => {
+                                let mut rec = rec;
+                                rec.gather(earlier);
+                                rec
                             }
-                            Some(held) => held.gather(rec),
-                            None => {
-                                gathered.insert(rec.record_id.clone(), rec);
+                            Some(mut held) => {
+                                held.gather(rec);
+                                held
                             }
+                            None => rec,
+                        };
+                        if gathered.len() >= gather_in_memory {
+                            self.store.set_aside(&rec)?;
+                            aside = true;
+                        } else {
+                            gathered.insert(rec.record_id.clone(), rec);
                         }
                         continue;
                     }
@@ -231,9 +256,9 @@ impl Source {
             }
         }
         drop(handle);
-        for rec in std::mem::take(&mut gathered).into_values() {
+        let mut write = |rec: crate::claim::Claim, outcome: &mut Result<Option<String>, String>| {
             if outcome.is_err() {
-                break;
+                return;
             }
             seen_fields.extend(rec.fields.keys().cloned());
             if naming.as_deref().is_some_and(|s| rec.ids.iter().any(|i| i.scheme == s)) {
@@ -243,7 +268,19 @@ impl Source {
                 Ok("added") => added += 1,
                 Ok("changed") => changed += 1,
                 Ok(_) => unchanged += 1,
-                Err(e) => outcome = Err(e),
+                Err(e) => *outcome = Err(e),
+            }
+        };
+        for rec in std::mem::take(&mut gathered).into_values() {
+            write(rec, &mut outcome);
+        }
+        if aside {
+            let drained = self.store.drain_aside(&self.decl.name, |rec| {
+                write(rec, &mut outcome);
+                Ok(())
+            });
+            if let Err(e) = drained {
+                outcome = Err(e);
             }
         }
         let mut high: Option<String> = None;
@@ -899,5 +936,24 @@ impl Source {
                 Ok((self.store.run_report(run), None))
             }
         }
+    }
+}
+
+/// The world's one heavy job at a time: a tracker's refresh, a version for the hub. Each holds a few
+/// hundred megabytes at most, and two at once on a cell of one gigabyte is how it is ended (the
+/// zetlyn cell, 2026-10-11, when a refresh and a publication met). The lock is the system's, held
+/// while the returned file is, so a process that dies leaves none behind. With `wait`, it waits
+/// its turn; without, it is `None` where another holds it, and the caller leaves the work to that one.
+pub fn heavy_turn(world: &Path, wait: bool) -> Result<Option<std::fs::File>, String> {
+    let path = world.join(".heavy");
+    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) if wait => {
+            file.lock().map_err(|e| format!("{}: {e}", path.display()))?;
+            Ok(Some(file))
+        }
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => Err(format!("{}: {e}", path.display())),
     }
 }

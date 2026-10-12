@@ -91,6 +91,10 @@ create table if not exists run(
 -- a version that did not change what the source said costs nothing more.
 create table if not exists excerpt(digest text primary key, body blob not null);
 
+-- Each claim as it was last published to the hub, by the hash of its line: what the next version
+-- leaves out of its delta, worked out a claim at a time rather than by reading the last one back.
+create table if not exists published(record_id text primary key, digest text not null, hash text not null);
+
 create virtual table if not exists fts using fts5(record_id unindexed, title, text);
 ";
 
@@ -1935,5 +1939,98 @@ mod tests {
             .shape_refusal(second, 20, 20, &some, true, Some(&declared))
             .is_some_and(|why| why.contains("severity") && !why.contains("packages")));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+impl Store {
+    /// How a claim's line looked when it was last published, and its hash then.
+    pub fn published_as(&self, record_id: &str) -> Option<(String, String)> {
+        let mut stmt = self.db.prepare_cached("select digest, hash from published where record_id = ?1").ok()?;
+        stmt.query_row([record_id], |r| Ok((r.get(0)?, r.get(1)?))).ok()
+    }
+
+    /// The claims published before that the store no longer holds.
+    pub fn published_gone(&self) -> Result<Vec<String>, String> {
+        let mut stmt = self
+            .db
+            .prepare("select record_id from published where record_id not in (select record_id from record) order by record_id")
+            .map_err(|e| e.to_string())?;
+        let ids = stmt.query_map([], |r| r.get(0)).map_err(|e| e.to_string())?.flatten().collect();
+        Ok(ids)
+    }
+
+    /// What was published now, written once the hub holds it: each changed claim from `changes`
+    /// (a file of `record_id \t digest \t hash` lines), and the claims gone taken out.
+    pub fn mark_published(&self, changes: &std::path::Path, gone: &[String]) -> Result<(), String> {
+        use std::io::BufRead;
+        let file = std::fs::File::open(changes).map_err(|e| format!("{}: {e}", changes.display()))?;
+        self.db.execute_batch("begin").map_err(|e| e.to_string())?;
+        let result = (|| {
+            let mut put = self
+                .db
+                .prepare_cached("insert or replace into published(record_id, digest, hash) values(?1, ?2, ?3)")
+                .map_err(|e| e.to_string())?;
+            for line in std::io::BufReader::new(file).lines() {
+                let line = line.map_err(|e| e.to_string())?;
+                let mut parts = line.splitn(3, '\t');
+                if let (Some(id), Some(digest), Some(hash)) = (parts.next(), parts.next(), parts.next()) {
+                    put.execute(rusqlite::params![id, digest, hash]).map_err(|e| e.to_string())?;
+                }
+            }
+            let mut drop = self.db.prepare_cached("delete from published where record_id = ?1").map_err(|e| e.to_string())?;
+            for id in gone {
+                drop.execute([id]).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => self.db.execute_batch("commit").map_err(|e| e.to_string()),
+            Err(e) => {
+                let _ = self.db.execute_batch("rollback");
+                Err(e)
+            }
+        }
+    }
+}
+
+impl Store {
+    /// A gathered claim put aside on disk, where too many are being gathered to hold them all:
+    /// a table of this store, not a temporary one, since a server's temporary files may be memory.
+    pub fn set_aside(&self, rec: &Claim) -> Result<(), String> {
+        self.db
+            .execute_batch("create table if not exists gathering(record_id text primary key, claim text not null)")
+            .map_err(|e| e.to_string())?;
+        let mut stmt = self
+            .db
+            .prepare_cached("insert or replace into gathering(record_id, claim) values(?1, ?2)")
+            .map_err(|e| e.to_string())?;
+        stmt.execute(rusqlite::params![rec.record_id, rec.to_json().to_string()]).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// A claim put aside, taken back: it is no longer there afterwards.
+    pub fn take_aside(&self, record_id: &str, dataset: &str) -> Result<Option<Claim>, String> {
+        let held: Option<String> = self
+            .db
+            .query_row("select claim from gathering where record_id = ?1", [record_id], |r| r.get(0))
+            .ok();
+        let Some(text) = held else { return Ok(None) };
+        self.db.execute("delete from gathering where record_id = ?1", [record_id]).map_err(|e| e.to_string())?;
+        let j: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+        Claim::from_json(dataset, &j).map(Some)
+    }
+
+    /// Every claim put aside, one at a time, and the table gone after.
+    pub fn drain_aside(&self, dataset: &str, mut each: impl FnMut(Claim) -> Result<(), String>) -> Result<(), String> {
+        let ids: Vec<String> = match self.db.prepare("select record_id from gathering order by record_id") {
+            Ok(mut stmt) => stmt.query_map([], |r| r.get(0)).map_err(|e| e.to_string())?.flatten().collect(),
+            Err(_) => return Ok(()),
+        };
+        for id in ids {
+            if let Some(rec) = self.take_aside(&id, dataset)? {
+                each(rec)?;
+            }
+        }
+        self.db.execute_batch("drop table if exists gathering").map_err(|e| e.to_string())
     }
 }

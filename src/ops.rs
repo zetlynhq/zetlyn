@@ -399,10 +399,16 @@ fn judge(node: &str, s: &J, r: &Register) -> BTreeMap<String, String> {
         if c["snapshot"].as_str().unwrap_or("") < day_ago.as_str() {
             out.insert(format!("cell:{name}:snapshot"), format!("{name}: no snapshot since {}", c["snapshot"].as_str().unwrap_or("ever")));
         }
-        if let (Some(m), Some(max)) = (c["memory"].as_f64(), c["memory_max"].as_f64()) {
+        // What it holds and cannot give back: a cell whose stores are larger than its limit fills
+        // the rest with them, and counting that rang this every day at 97 % while its processes held
+        // a tenth (2026-10-12). A server that does not say what it holds yet is counted as before.
+        if let (Some(m), Some(max)) = (c["memory_held"].as_f64().or_else(|| c["memory"].as_f64()), c["memory_max"].as_f64()) {
             if max > 0.0 && m / max > 0.9 {
-                out.insert(format!("cell:{name}:memory"), format!("{name} uses {:.0} % of its memory", 100.0 * m / max));
+                out.insert(format!("cell:{name}:memory"), format!("{name} holds {:.0} % of its memory", 100.0 * m / max));
             }
+        }
+        if let Some(n) = c["oom_kills"].as_u64().filter(|n| *n > 0) {
+            out.insert(format!("cell:{name}:killed"), format!("{name} was ended for its memory {n} times in the last hour"));
         }
     }
     out
@@ -1801,4 +1807,28 @@ pub fn reconcile(control: &Path) {
 /// Every alarm raised and cleared, for the admin pages' history.
 fn history(control: &Path, what: &str, key: &str, text: &str) {
     append_log(control, "alarms", &json!({ "at": crate::iso_stamp(crate::now()), "what": what, "key": key, "text": text }));
+}
+
+#[cfg(test)]
+mod memory_alarm_tests {
+    use serde_json::json;
+
+    fn judged(cell: serde_json::Value) -> std::collections::BTreeMap<String, String> {
+        let status = json!({ "disk_free": 50.0, "disk_size": 100.0, "memory_available": 50.0, "memory_total": 100.0, "cells": [cell] });
+        let mut r = super::Register::default();
+        r.cells.insert("zetlyn".into(), super::CellEntry { node: "n2".into(), ..Default::default() });
+        super::judge("n2", &status, &r)
+    }
+
+    #[test]
+    fn a_cell_full_of_cache_is_no_alarm_and_one_killed_for_memory_is() {
+        let snap = crate::iso_stamp(crate::now()).replace([':', '-'], "");
+        // 97 % used, a tenth of it held: the zetlyn cell every day after NVD.
+        let cached = judged(json!({ "name": "zetlyn", "state": "running", "active": "active", "answers": 200, "snapshot": snap, "memory": 2076180480u64, "memory_held": 160000000u64, "memory_max": 2147483648u64, "oom_kills": 0 }));
+        assert!(!cached.contains_key("cell:zetlyn:memory"), "{cached:?}");
+        let held = judged(json!({ "name": "zetlyn", "state": "running", "active": "active", "answers": 200, "snapshot": snap, "memory": 2076180480u64, "memory_held": 2000000000u64, "memory_max": 2147483648u64 }));
+        assert!(held.get("cell:zetlyn:memory").is_some_and(|s| s.contains("holds 93 %")), "{held:?}");
+        let killed = judged(json!({ "name": "zetlyn", "state": "running", "active": "active", "answers": 200, "snapshot": snap, "memory_max": 2147483648u64, "oom_kills": 3 }));
+        assert!(killed.get("cell:zetlyn:killed").is_some_and(|s| s.contains("3 times")), "{killed:?}");
+    }
 }

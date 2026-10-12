@@ -1631,20 +1631,38 @@ fn a_world_is_exported_beside_its_archive_and_not_in_a_small_tmp() {
 }
 
 #[test]
-fn a_source_too_large_to_make_a_version_of_in_memory_is_not_published() {
-    let ws = Workspace::new("publish-max");
-    let hub = ws.root.join("hub");
-    std::fs::create_dir_all(&hub).unwrap();
-    let source = ws.root.join(ws.dataset("vendor-a"));
-    let run = |max: &str| {
-        let out = Command::new(env!("CARGO_BIN_EXE_zetlyn"))
-            .args(["source", "publish", &source.display().to_string(), "--to", &hub.display().to_string()])
-            .env("ZETLYN_HOME", ws.root.join(".home")).env("ZETLYN_PUBLISH_MAX", max)
-            .output().unwrap();
-        (out.status.success(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
+fn gathered_claims_put_aside_on_disk_are_the_claims_gathered_in_memory() {
+    let claims_of = |aside: &str| -> String {
+        let root = std::env::temp_dir().join(format!("zetlyn-test-{}-aside-{aside}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let at = root.join("sources/list");
+        std::fs::create_dir_all(&at).unwrap();
+        // One entry over several rows, the rows of two entries in between one another.
+        std::fs::write(at.join("list.csv"), "id,name,kind,country\n\
+            A1,Abu Sattar,Alias,Pakistan\nB2,Ivan Petrov,Primary,Russia\nA1,Haji Sattar Exchange,Primary,Afghanistan\n\
+            C3,Office 39,Primary,North Korea\nB2,I. Petrov,Alias,Belarus\nA1,Sattar Sarafi,Alias,UAE\n").unwrap();
+        std::fs::write(at.join("source.yaml"), "name: test/list\nfetch: { type: csv, path: list.csv }\n\
+            claims:\n  lead: \"kind=primary\"\n  gather: true\n  id:\n  - { scheme: list, from: field:id }\n  title: field:name\n\
+            \x20 properties:\n    country: { type: text, from: field:country }\n    names: { type: text, from: field:name, all: true }\n").unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_zetlyn")).args(["source", "update", "sources/list"]).current_dir(&root)
+            .env("ZETLYN_HOME", root.join("home")).env("ZETLYN_GATHER_IN_MEMORY", aside).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let said = String::from_utf8_lossy(&out.stdout).to_string();
+        assert!(said.contains("+3 "), "{said}");
+        let mut all = String::new();
+        for id in ["A1", "B2", "C3"] {
+            let out = Command::new(env!("CARGO_BIN_EXE_zetlyn")).args(["claim", "sources/list", id]).current_dir(&root)
+                .env("ZETLYN_HOME", root.join("home")).output().unwrap();
+            let j: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+            all.push_str(&format!("{} {} {}\n", j["title"], j["properties"], j["hash"]));
+        }
+        let left = rusqlite::Connection::open(at.join("claims.db")).unwrap()
+            .query_row("select count(*) from sqlite_master where name = 'gathering'", [], |r| r.get::<_, i64>(0)).unwrap();
+        assert_eq!(left, 0, "the table put aside was left behind");
+        let _ = std::fs::remove_dir_all(&root);
+        all
     };
-    let (ok, said) = run("1");
-    assert!(!ok && said.contains("not published") && said.contains("in memory"), "{said}");
-    let (ok, said) = run("1000");
-    assert!(ok, "{said}");
+    let in_memory = claims_of("20000");
+    assert!(in_memory.contains("Haji Sattar Exchange") && in_memory.contains("Pakistan"), "{in_memory}");
+    assert_eq!(in_memory, claims_of("1"));
 }

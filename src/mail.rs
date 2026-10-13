@@ -99,6 +99,13 @@ pub fn send(s: &Smtp, to: &str, subject: &str, body: &str) -> Result<(), String>
     if to.contains(['\r', '\n', '<', '>']) || !to.contains('@') {
         return Err(format!("{to}: not an address to send to"));
     }
+    // An address at a domain that cannot exist (RFC 2606) is one nobody reads: the release's
+    // selftest is the owner of its worlds there, and every export, import and relay it checks
+    // mailed a person a dozen times a release. Said in the log, as if sent, and sent nowhere.
+    if invalid(to) {
+        eprintln!("mail to {to} ({subject}): not sent, the address is .invalid");
+        return Ok(());
+    }
     let tcp = TcpStream::connect((s.host.as_str(), port)).map_err(|e| format!("{}:{port}: {e}", s.host))?;
     tcp.set_read_timeout(Some(Duration::from_secs(60))).ok();
     tcp.set_write_timeout(Some(Duration::from_secs(60))).ok();
@@ -243,4 +250,23 @@ pub fn welcome_letter(title: &str, home: &str, account: &str, email: &str) -> (S
              Best regards,\nThe Zetlyn team\n\n--\nZetlyn · https://zetlyn.com · hello@zetlyn.com\n"
         ),
     )
+}
+
+/// An address at the reserved `.invalid` domain: never anybody's mailbox.
+pub fn invalid(to: &str) -> bool {
+    to.rsplit('@').next().is_some_and(|d| d.trim_end_matches('.').to_lowercase().ends_with(".invalid"))
+}
+
+#[cfg(test)]
+mod invalid_tests {
+    #[test]
+    fn a_mail_to_an_address_that_cannot_exist_is_sent_nowhere() {
+        assert!(super::invalid("selftest@zetlyn.invalid"));
+        assert!(super::invalid("x@Zetlyn.INVALID."));
+        assert!(!super::invalid("alarm@zetlyn.com"));
+        assert!(!super::invalid("invalid@zetlyn.com"));
+        // Sent nowhere, so no server is asked: this would fail to connect if it were.
+        let smtp = super::Smtp { host: "127.0.0.1".into(), port: 1, ..Default::default() };
+        assert!(super::send(&smtp, "selftest@zetlyn.invalid", "s", "b").is_ok());
+    }
 }

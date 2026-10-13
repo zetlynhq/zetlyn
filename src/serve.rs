@@ -917,6 +917,30 @@ fn take_preview() -> Option<Preview> {
     PREVIEW.with(|x| x.borrow_mut().take())
 }
 
+/// What a shared link to the page says, in a chat, a post, a search result: in the head of every
+/// frame a page is drawn in, the website's and the app's.
+fn preview_tags() -> Markup {
+    html! {
+        @if let Some(p) = take_preview() {
+            meta name="description" content=(p.description);
+            meta property="og:type" content="website";
+            meta property="og:site_name" content="Zetlyn";
+            meta property="og:title" content=(p.title);
+            meta property="og:description" content=(p.description);
+            @if !p.url.is_empty() { meta property="og:url" content=(p.url); link rel="canonical" href=(p.url); }
+            @if !p.image.is_empty() {
+                meta property="og:image" content=(p.image);
+                meta property="og:image:width" content="1200";
+                meta property="og:image:height" content="630";
+                meta name="twitter:image" content=(p.image);
+            }
+            meta name="twitter:card" content=(if p.image.is_empty() { "summary" } else { "summary_large_image" });
+            meta name="twitter:title" content=(p.title);
+            meta name="twitter:description" content=(p.description);
+        }
+    }
+}
+
 const MARK: &str = include_str!("mark.b64");
 const FAVICON: &str = include_str!("favicon.b64");
 
@@ -1005,24 +1029,7 @@ pub fn shell(title: &str, body: Markup) -> String {
                 // As the website does: a theme already chosen is applied before the first paint.
                 script { (maud::PreEscaped(THEME_EARLY)) }
                 title { (title) @if title != "Zetlyn" { " · Zetlyn" } }
-                // What a shared link to it says: in a chat, a post, a search result.
-                @if let Some(p) = take_preview() {
-                    meta name="description" content=(p.description);
-                    meta property="og:type" content="website";
-                    meta property="og:site_name" content="Zetlyn";
-                    meta property="og:title" content=(p.title);
-                    meta property="og:description" content=(p.description);
-                    @if !p.url.is_empty() { meta property="og:url" content=(p.url); link rel="canonical" href=(p.url); }
-                    @if !p.image.is_empty() {
-                        meta property="og:image" content=(p.image);
-                        meta property="og:image:width" content="1200";
-                        meta property="og:image:height" content="630";
-                        meta name="twitter:image" content=(p.image);
-                    }
-                    meta name="twitter:card" content=(if p.image.is_empty() { "summary" } else { "summary_large_image" });
-                    meta name="twitter:title" content=(p.title);
-                    meta name="twitter:description" content=(p.description);
-                }
+                (preview_tags())
                 link rel="icon" type="image/png" href={"data:image/png;base64," (FAVICON)};
                 link rel="stylesheet" href={(at("/zetlyn.css")) "?v=" (env!("CARGO_PKG_VERSION"))};
             }
@@ -1122,6 +1129,7 @@ fn dashboard(title: &str, body: Markup, f: &Frame, crumbs: &[(String, Option<Str
                 meta name="theme-color" content="#f2efe7";
                 script { (maud::PreEscaped(THEME_EARLY)) }
                 title { @if title == "Zetlyn" { "Zetlyn" } @else { (title) " · Zetlyn" } }
+                (preview_tags())
                 link rel="icon" type="image/png" href={"data:image/png;base64," (FAVICON)};
                 link rel="stylesheet" href={(at("/zetlyn.css")) "?v=" (env!("CARGO_PKG_VERSION"))};
             }

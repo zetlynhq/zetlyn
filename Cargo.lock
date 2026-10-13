@@ -2813,7 +2813,7 @@ dependencies = [
 
 [[package]]
 name = "zetlyn"
-version = "0.3.113"
+version = "0.3.114"
 dependencies = [
  "base64 0.22.1",
  "calamine",

@@ -15,3 +15,6 @@ take another name.
 This file is here because LICENSE is the licence and nothing else. A word of preamble in front of
 it is enough to stop the tools that read licences from recognising one, and a project whose whole
 argument for being copied is its licence should not be a project whose licence goes unread.
+
+The country shapes in src/geo/countries.json.gz are Natural Earth's Admin 0 countries at 1:50m
+(naturalearthdata.com), in the public domain, cut down to their codes, names and outlines.

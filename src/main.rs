@@ -18,6 +18,11 @@ mod stripe;
 mod web;
 mod sourcedecl;
 mod expr;
+mod charts;
+mod display;
+mod warm;
+mod memory;
+mod geo;
 mod fetch;
 mod grant;
 pub mod guess;
@@ -242,7 +247,7 @@ zetlyn
       Caddy with a certificate, the mail sign-in links go out by, a daily backup and a daily
       upgrade. Run again, it changes only what is missing. The mailer's password is read from
       SMTP_PASSWORD.
-  zetlyn world serve <workspace> | export <workspace> --to <file> | backup <workspace> <dir> | upgrade
+  zetlyn world serve <workspace> [--lan] [--no-updates] | export <workspace> --to <file> | backup <workspace> <dir> | upgrade
       One world at the root of its domain, run by the `owners:` its workspace.yaml names; all of
       it in one archive; that archive kept daily; the next release, where there is one. With
       --lan, in an office's network over plain http, at the address the others there reach it by.

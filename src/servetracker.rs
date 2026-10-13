@@ -50,7 +50,16 @@ fn entry_link(e: &Thing) -> Option<String> {
     ))
 }
 
-fn cell(e: &Thing, name: &str) -> Markup {
+/// What a picture needs from the tracker around the store: its statement, and each source's title.
+fn chart_context<'a>(scope: &'a Tracker, store: &'a crate::thingstore::ThingStore) -> crate::charts::Ctx<'a> {
+    let mut ctx = crate::charts::Ctx::new(store, &scope.decl);
+    ctx.sources = scope.members.iter().map(|m| (m.name().to_string(), m.title())).collect();
+    ctx.standing = scope.standing();
+    ctx.warming = crate::warm::pending(&scope.dir);
+    ctx
+}
+
+fn cell(d: &crate::trackerdecl::TrackerDecl, e: &Thing, name: &str) -> Markup {
     match name {
         "kind" => html! {
             @for (kind, parts) in e.by_kind() {
@@ -70,10 +79,11 @@ fn cell(e: &Thing, name: &str) -> Markup {
                     v.dedup();
                     v
                 };
+                let shown = |s: &str| crate::display::shown(d, name, yes_no(s));
                 html! {
-                    @if f.divergent { span.chip.on { (distinct.iter().map(|s| yes_no(s.as_str()))
+                    @if f.divergent { span.chip.on { (distinct.iter().map(|s| shown(s.as_str()))
                         .collect::<Vec<_>>().join(" / ")) } }
-                    @else { (distinct.first().map(|s| yes_no(s.as_str())).unwrap_or("")) }
+                    @else { (distinct.first().map(|s| shown(s.as_str())).unwrap_or_default()) }
                 }
             }
             None => html! { span.dim { "—" } },
@@ -246,7 +256,7 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
     let coverage = crate::thingstore::ThingStore::open(&scope.dir)
         .ok()
         .filter(|s| s.meta("refreshed").is_some())
-        .map(|s| s.coverage());
+        .map(|s| s.coverage_kept(&scope.standing()));
 
     let one_kind = scope.kinds().len() <= 1;
     let columns: Vec<String> = columns.into_iter().filter(|c| !(one_kind && c == "kind")).collect();
@@ -340,6 +350,12 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
         @if !d.promise.covers.is_empty() {
             div.note { strong { "Covers. " } (d.promise.covers)
                 @if !d.promise.excludes.is_empty() { " " strong { "Excludes. " } (d.promise.excludes) } }
+        }
+        // What the statement says to show of every thing, on the overview as it opens.
+        @if !d.view.show.is_empty() && q.is_empty() && view.is_empty() && page == 1 {
+            @if let Ok(store) = crate::thingstore::ThingStore::open(&scope.dir) {
+                (crate::charts::overview(&chart_context(scope, &store), &d.view.show, &p))
+            }
         }
 
         @let compared = compared(scope);
@@ -441,8 +457,8 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
                         tr {
                             td.thing {
                                 @match entry_link(e) {
-                                    Some(href) => a href=(href) { (e.title) },
-                                    None => span { (e.title) },
+                                    Some(href) => a href=(href) { (scope.title_of(e)) },
+                                    None => span { (scope.title_of(e)) },
                                 }
                                 div.why {
                                     @if let Some(k) = &e.key { span.mono { (k.value) } }
@@ -450,7 +466,7 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
                                     @if !e.why.is_empty() { " · matched " (e.why.join(", ")) }
                                 }
                             }
-                            @for c in &columns { td { (cell(e, c)) } }
+                            @for c in &columns { td { (cell(d, e, c)) } }
                         }
                     }
                 }
@@ -520,7 +536,7 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
     shell(&d.title, body)
 }
 
-fn entry_page(scope: &Tracker, scheme: &str, value: &str, operator: bool, said: Option<&str>) -> Option<String> {
+fn entry_page(scope: &Tracker, scheme: &str, value: &str, operator: bool, said: Option<&str>, asked: &BTreeMap<String, String>) -> Option<String> {
     let entry = scope.entry(scheme, value)?;
     // What the tracker store judges, which is what the lists and the signals judge too. A thing
     // page that decided for itself could call a conflict what the conflicts page calls wording.
@@ -595,8 +611,75 @@ fn entry_page(scope: &Tracker, scheme: &str, value: &str, operator: bool, said: 
         })
         .collect();
     // A source that has no title of its own gives its description as one: shown whole further down.
-    let long = entry.title.chars().count() > 140;
-    let heading: String = if long { format!("{}…", entry.title.chars().take(140).collect::<String>().trim_end()) } else { entry.title.clone() };
+    let title = scope.title_of(&entry);
+    let long = title.chars().count() > 140;
+    let heading: String = if long { format!("{}…", title.chars().take(140).collect::<String>().trim_end()) } else { title.clone() };
+    let badges: Vec<&crate::trackerdecl::Badge> = view.badges.iter().filter(|b| step_holds(&entry, &b.when).is_some()).collect();
+    // A time past the last one a source counts as measured: its projection, and said so first.
+    let projected: Vec<(String, i64)> = d
+        .entity
+        .as_ref()
+        .and_then(|e| {
+            let until = entry.fields.get(e.actual_until.as_ref()?)?;
+            let t = crate::charts::year_in(entry.fields.get(&e.time)?.means.values().flatten().next()?)?;
+            Some(until.by.iter().filter_map(|(m, w)| w.iter().filter_map(|x| crate::charts::year_in(x)).max().filter(|u| t > *u).map(|u| (title_of(scope, m), u))).collect())
+        })
+        .unwrap_or_default();
+    // How a value reads beside it: how old it is, whether it is outside what a real one is.
+    let now = crate::now();
+    let age_of = |name: &str, member: &str| -> Option<(String, bool)> {
+        let vd = d.values.get(name)?;
+        let at = entry.fields.get(vd.at.as_deref()?)?.by.get(member)?.iter().filter_map(|s| crate::thingquery::seconds(s)).max()?;
+        Some((crate::tracker::human(now - at), vd.fresh_secs().is_some_and(|f| now - at > f)))
+    };
+    let odd = |name: &str, w: &str| -> bool { d.values.get(name).zip(w.trim().parse::<f64>().ok()).is_some_and(|(vd, v)| !vd.plausible(v)) };
+    // A summary value no source says, where a property says why: out of diesel since a day.
+    let why_missing: Vec<(&String, String, Vec<(String, Vec<String>)>)> = view
+        .summary
+        .iter()
+        .filter(|p| !entry.fields.contains_key(*p))
+        .filter_map(|p| {
+            let because = d.values.get(p)?.missing.clone()?;
+            let f = entry.fields.get(&because)?;
+            Some((p, because, f.by.iter().map(|(m, w)| (m.clone(), w.clone())).collect()))
+        })
+        .collect();
+    // Every property the tracker compares and two sources or more say, side by side: where they
+    // differ is the row marked.
+    let side_members: Vec<String> = scope.members.iter().map(|m| m.name().to_string()).filter(|m| entry.members().iter().any(|x| x == m)).collect();
+    let side_rows: Vec<(&String, &crate::tracker::PropertyView)> = entry.fields.iter().filter(|(n, f)| d.normalise.contains_key(*n) && f.by.len() > 1).collect();
+    // Where a thing is one entity at one time, the entity's own page.
+    let entity_link = d.entity.as_ref().and_then(|e| {
+        let w = entry.fields.get(&e.property)?.means.values().flatten().next()?.clone();
+        let code = crate::geo::iso3_of(&w).filter(|_| d.values.get(&e.property).is_none_or(|v| v.is == "country" || v.is.is_empty())).unwrap_or(w);
+        let name = crate::display::shown(d, &e.property, &code);
+        Some((at(&format!("/entity/{}", urlencode(&code))), name))
+    });
+    // A value as each source said it over time, for the pictures that draw it.
+    let wanted: BTreeSet<String> = d.thing.show.iter().filter_map(|s| match s { crate::charts::Show::History(h) => Some(h.value.clone()), _ => None }).flatten().collect();
+    let mut history: BTreeMap<String, Vec<(String, i64, f64)>> = BTreeMap::new();
+    if !wanted.is_empty() {
+        for ((member, _), c) in &held {
+            for v in &c.versions {
+                let Some(obj) = v.properties.as_object() else { continue };
+                let t = crate::thingquery::seconds(&v.at).unwrap_or(0);
+                for (name, val) in obj {
+                    let p = scope.field_out(member, name);
+                    if !wanted.contains(&p) {
+                        continue;
+                    }
+                    let Some(n) = crate::claim::Value::from_json(val).and_then(|x| x.display().trim().parse::<f64>().ok()) else { continue };
+                    let list = history.entry(p).or_default();
+                    if list.iter().rev().find(|x| x.0 == *member).map(|x| x.2) != Some(n) {
+                        list.push((member.clone(), t, n));
+                    }
+                }
+            }
+        }
+        for list in history.values_mut() {
+            list.sort_by_key(|x| x.1);
+        }
+    }
     let values_table = html! {
     table {
         thead { tr { th { "Property" } th { "Source" } th { "Said" } th { "Means here" } } }
@@ -657,7 +740,14 @@ fn entry_page(scope: &Tracker, scheme: &str, value: &str, operator: bool, said: 
         h1 { (heading) }
         p.state { span.chip { (scheme) " " (value) } " "
             span.dim { (plural(entry.members().len(), "source")) ", " (plural(entry.parts.len(), "claim")) " · " }
-            a href={(at("/thing/")) (urlencode(scheme)) "/" (urlencode(value)) ".atom"} { "Watch" } }
+            a href={(at("/thing/")) (urlencode(scheme)) "/" (urlencode(value)) ".atom"} { "Watch" }
+            @if let Some((href, name)) = &entity_link { " · " a href=(href) { "All of " (name) " →" } } }
+        @if !badges.is_empty() || !projected.is_empty() {
+            p.badges {
+                @for (who, until) in &projected { span.thing-badge.hot { "Projected by " (who) " · measured until " (until) } " " }
+                @for b in &badges { span.thing-badge.(b.tone) { (b.name) } " " }
+            }
+        }
         @if let Some((source, c)) = &summary {
             div.note {
                 span.dim { (source) " writes:" } br;
@@ -672,10 +762,79 @@ fn entry_page(scope: &Tracker, scheme: &str, value: &str, operator: bool, said: 
                 dl.thing-summary {
                     @for (name, f) in &summary_rows {
                         div.(if conflicted(name) { "hot" } else { "" }) {
-                            dt { (label(name)) @if conflicted(name) { " " span.chip.on { "they disagree" } } }
+                            dt { (crate::display::label(d, name)) @if conflicted(name) { " " span.chip.on { "they disagree" } } }
                             dd { @for (member, said) in &f.by {
-                                div { strong { (said.join(", ")) } " " span.src { (title_of(scope, member)) } }
+                                @let shown: Vec<String> = f.means.get(member).unwrap_or(said).iter().map(|w| crate::display::shown(d, name, yes_no(w))).collect();
+                                div { strong { (shown.join(", ")) } " " span.src { (title_of(scope, member)) }
+                                    @if let Some((age, stale)) = age_of(name, member) { " " span.(if stale { "chip on" } else { "dim" }) { (age) " old" } }
+                                    @if said.iter().any(|w| odd(name, w)) { " " span.chip.on { "outside the range of a real value" } } }
                             } }
+                        }
+                    }
+                    @for (name, because, by) in &why_missing {
+                        div.hot {
+                            dt { (crate::display::label(d, name)) }
+                            dd { @for (member, w) in by { div { strong { "none · " (crate::display::label(d, because).to_lowercase()) " " (w.join(", ")) } " " span.src { (title_of(scope, member)) } } } }
+                        }
+                    }
+                }
+            }
+            @for pv in &view.parts {
+                @let mut rows: Vec<&crate::tracker::ClaimRef> = entry.parts.iter().filter(|p| pv.kind.as_ref().is_none_or(|k| *k == p.kind)).collect();
+                @let _ = if let Some(s) = &pv.sort {
+                    let (col, least) = (s.trim_start_matches('-'), s.starts_with('-'));
+                    let num = |p: &crate::tracker::ClaimRef| match col { "known" => None, _ => p.fields.get(col).and_then(|v| v.trim().parse::<f64>().ok()) };
+                    rows.sort_by(|a, b| {
+                        let o = match (num(a), num(b)) {
+                            (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+                            (Some(_), None) => std::cmp::Ordering::Greater,
+                            (None, Some(_)) => std::cmp::Ordering::Less,
+                            _ => if col == "known" { a.known.cmp(&b.known) } else { a.fields.get(col).cmp(&b.fields.get(col)) },
+                        };
+                        if least { o } else { o.reverse() }
+                    });
+                };
+                @if !rows.is_empty() {
+                    h2 { (if pv.title.is_empty() { pv.kind.clone().unwrap_or_else(|| "Claims".into()) } else { pv.title.clone() }) " " span.dim { (rows.len()) } }
+                    div.scroll {
+                        table.parts {
+                            thead { tr { th { "" } @for c in &pv.columns { th.(if c != "known" && c != "source" && rows.iter().all(|r| r.fields.get(c).is_none_or(|v| v.trim().parse::<f64>().is_ok())) { "num" } else { "" }) { (if c == "known" { "Since".to_string() } else { crate::display::label(d, c) }) } } } }
+                            tbody {
+                                @for p in rows.iter().take(pv.limit) {
+                                    tr {
+                                        td { @match &p.url { Some(u) => a href=(u) { (p.title) }, None => a href={(at("/claim/")) (urlencode(&p.member)) "/" (p.record_id)} { (p.title) } } }
+                                        @for c in &pv.columns {
+                                            @match c.as_str() {
+                                                "known" => { td.dim { (p.known.get(..10).unwrap_or(&p.known)) } }
+                                                "source" => { td.dim { (title_of(scope, &p.member)) } }
+                                                _ => { td.(if rows.iter().all(|r| r.fields.get(c).is_none_or(|v| v.trim().parse::<f64>().is_ok())) { "num" } else { "" }) { (p.fields.get(c).map(|v| crate::display::shown(d, c, yes_no(v))).unwrap_or_default()) } }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    @if rows.len() > pv.limit { p.dim { "And " (rows.len() - pv.limit) " more, under every claim below." } }
+                }
+            }
+            @if side_members.len() > 1 && !side_rows.is_empty() {
+                h2 { "Side by side" }
+                div.scroll {
+                    table.side {
+                        thead { tr { th {} @for m in &side_members { th { (title_of(scope, m)) } } } }
+                        tbody {
+                            @for (name, f) in &side_rows {
+                                tr.(if conflicted(name) { "hot" } else { "" }) {
+                                    th { (crate::display::label(d, name)) @if conflicted(name) { " " span.chip.on.small { "differ" } } }
+                                    @for m in &side_members {
+                                        td { @match f.means.get(m).or_else(|| f.by.get(m)) {
+                                            Some(w) => (w.iter().map(|x| crate::display::shown(d, name, yes_no(x))).collect::<Vec<_>>().join(", ")),
+                                            None => span.dim { "—" },
+                                        } }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -718,6 +877,13 @@ fn entry_page(scope: &Tracker, scheme: &str, value: &str, operator: bool, said: 
             @if long { p.dim { (entry.title) } }
         }
 
+        @if !d.thing.show.is_empty() {
+            @if let Ok(store) = crate::thingstore::ThingStore::open(&scope.dir) {
+                @let mut ctx = chart_context(scope, &store);
+                @let _ = { ctx.history = history.clone(); };
+                (crate::charts::thing(&ctx, &d.thing.show, &key, &asked, &at(&format!("/thing/{}/{}", urlencode(scheme), urlencode(value)))))
+            }
+        }
         (relations_section(scope, &key, scheme, value, operator, said))
         (same_section(scope, &key, scheme, value, operator, said))
         @if shaped && !entry.fields.is_empty() {
@@ -734,7 +900,7 @@ fn entry_page(scope: &Tracker, scheme: &str, value: &str, operator: bool, said: 
         @if shaped { details.claims-all { summary { "Every claim, by kind" } (claims_by_kind) } }
         @if !shaped { (claims_by_kind) }
     };
-    Some(shell(&entry.title, body))
+    Some(shell(&title, body))
 }
 
 /// The source's own definition of its own word, which arrived with its `describe`.
@@ -1490,11 +1656,46 @@ pub struct TrackerSite {
     /// The pages drawn for somebody who carries no cookie and no key, by address, while the
     /// store and its statement stand as they were when the first was drawn.
     pages: Pages,
+    /// The tracker read again, by a thread of its own, for the next request to take: reading a
+    /// tracker and its every source took seconds, and it was read every minute inside whichever
+    /// request came then. `true` while a reading is under way.
+    fresh: std::sync::Arc<std::sync::Mutex<(Option<Tracker>, bool)>>,
 }
 
-/// What a page drawn for nobody in particular is kept as: its body, its content type and the
-/// one header beside it, and when it was drawn.
-type Page = (String, String, Option<(String, String)>, i64);
+/// What a page drawn for nobody in particular is kept as: its body gzipped, its content type and
+/// the one header beside it, and when it was drawn. Gzipped, a page is a tenth of the memory it
+/// was, and it is sent as it is kept to every browser that takes gzip, which is every browser.
+type Page = (Vec<u8>, String, Option<(String, String)>, i64);
+
+fn gzip(body: &str) -> Vec<u8> {
+    use std::io::Write;
+    let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    let _ = e.write_all(body.as_bytes());
+    e.finish().unwrap_or_default()
+}
+
+fn gunzip(body: &[u8]) -> String {
+    use std::io::Read;
+    let mut out = String::new();
+    let _ = flate2::read::GzDecoder::new(body).read_to_string(&mut out);
+    out
+}
+
+/// A kept page, gzipped where the browser takes it.
+fn respond_kept(request: tiny_http::Request, page: Page, gzipped: bool) {
+    let (body, kind, extra, _) = page;
+    if !gzipped {
+        return respond(request, 200, gunzip(&body), &kind, extra, "kept");
+    }
+    let mut response = tiny_http::Response::from_data(body).with_status_code(200);
+    let headers = [Some(("Content-Type".to_string(), kind)), Some(("Content-Encoding".to_string(), "gzip".to_string())), Some(("Vary".to_string(), "Accept-Encoding".to_string())), extra, Some(("X-Zetlyn-Page".to_string(), "kept".to_string()))];
+    for (name, value) in headers.into_iter().flatten() {
+        if let Ok(h) = tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes()) {
+            response = response.with_header(h);
+        }
+    }
+    let _ = request.respond(response);
+}
 
 /// The pages kept for anonymous readers. A reading that finds the store or the statement moved
 /// empties it; so does every form sent, and an hour, for the "five minutes ago" a page says.
@@ -1505,8 +1706,9 @@ struct Pages {
     kept: BTreeMap<String, Page>,
 }
 
-/// At most this much is kept per tracker, and no page larger than an eighth of it.
-const PAGES_BYTES: usize = 32 << 20;
+/// At most this much is kept per tracker, gzipped, and no page larger than an eighth of it: some
+/// hundreds of pages, where a page gzipped is tens of kilobytes.
+const PAGES_BYTES: usize = 8 << 20;
 const PAGE_AGE: i64 = 3600;
 
 impl Pages {
@@ -1533,17 +1735,13 @@ impl Pages {
         self.bytes = 0;
     }
 
-    /// Empties itself when what the pages are drawn from has moved: a source run (the mark), or
-    /// anything written in the tracker's directory, its statement and its store among them.
+    /// Empties itself when what the pages are drawn from has moved: what the store holds, and the
+    /// statement and matches. A source run that found nothing new keeps every page. New data whose
+    /// pictures are still being drawn ahead keeps them too, until they are: a reader meanwhile sees
+    /// the pages of the data before, at once, rather than waiting while they are drawn for them.
     fn still(&mut self, scope: &Tracker) {
-        let written = std::fs::read_dir(&scope.dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|e| e.metadata().ok()?.modified().ok())
-            .max();
-        let stamp = format!("{}|{:?}", scope.mark(), written);
-        if stamp != self.stamp {
+        let stamp = scope.standing();
+        if stamp != self.stamp && !crate::warm::pending(&scope.dir) {
             self.forget();
             self.stamp = stamp;
         }
@@ -1573,6 +1771,7 @@ impl TrackerSite {
             addr: addr.to_string(),
             operator,
             pages,
+            fresh: Default::default(),
         })
     }
 
@@ -1596,6 +1795,12 @@ impl TrackerSite {
         ];
         // Published, it has versions anybody can take, and that is a page of the tracker too.
         let mut tabs = tabs;
+        // Where each thing is an entity at a time, the entities, each with a page: Countries.
+        if let Some(e) = &self.scope.decl.entity {
+            let called = if e.called.is_empty() { crate::display::label(&self.scope.decl, &e.property).to_lowercase() } else { e.called.clone() };
+            let plural = crate::display::plural(&called);
+            tabs.insert(1, (format!("{}{}", plural.get(..1).unwrap_or("").to_uppercase(), plural.get(1..).unwrap_or("")), at("/entity/")));
+        }
         // What its things are related to, each a tab: Vendors, Products.
         for r in &self.scope.decl.relations {
             if let Some(part) = r.part.as_deref().filter(|p| !p.is_empty()) {
@@ -1617,25 +1822,43 @@ impl TrackerSite {
     }
 
     fn answer_or_fail(&mut self, mut request: tiny_http::Request) -> Result<(), String> {
-        let TrackerSite { scope, dir, datasets, accounts, site, read_at, addr: site_addr, operator, pages } = self;
+        let TrackerSite { scope, dir, datasets, accounts, site, read_at, addr: site_addr, operator, pages, fresh } = self;
         let (dir, datasets) = (dir.as_path(), datasets.as_path());
-        // Before anything is read off it, and only between requests, so no page is drawn from
-        // two readings.
-        if crate::now() - *read_at >= REREAD {
-            match Tracker::open(dir, datasets) {
-                Ok(fresh) => {
-                    *scope = fresh;
-                    // What changed since the last look becomes signals, once per update.
-                    if let Err(e) = scope.refresh_if_moved() {
-                        if !e.contains(crate::tracker::REFRESHING) {
-                            eprintln!("{}: the tracker store was not refreshed: {e}", dir.display());
-                        }
-                    }
-                }
-                Err(e) => eprintln!("{}: read again failed, serving the last one: {e}", dir.display()),
-            }
-            *read_at = crate::now();
+        // A reading made since the last request, taken before anything is read off it, and only
+        // between requests, so no page is drawn from two readings.
+        let taken = fresh.lock().ok().and_then(|mut f| f.0.take());
+        if let Some(t) = taken {
+            *scope = t;
             pages.still(scope);
+        }
+        // And the next one started on a thread of its own once a minute has passed: this request
+        // is answered from the reading it has, at once.
+        if crate::now() - *read_at >= REREAD {
+            *read_at = crate::now();
+            let started = fresh.lock().map(|mut f| !std::mem::replace(&mut f.1, true)).unwrap_or(false);
+            if started {
+                let (fresh, dir, datasets) = (fresh.clone(), dir.to_path_buf(), datasets.to_path_buf());
+                std::thread::spawn(move || {
+                    let read = match Tracker::open(&dir, &datasets) {
+                        Ok(t) => {
+                            // What changed since the last look becomes signals, once per update.
+                            if let Err(e) = t.refresh_if_moved() {
+                                if !e.contains(crate::tracker::REFRESHING) {
+                                    eprintln!("{}: the tracker store was not refreshed: {e}", dir.display());
+                                }
+                            }
+                            Some(t)
+                        }
+                        Err(e) => {
+                            eprintln!("{}: read again failed, serving the last one: {e}", dir.display());
+                            None
+                        }
+                    };
+                    if let Ok(mut f) = fresh.lock() {
+                        *f = (read, false);
+                    }
+                });
+            }
         }
         let url = unmount(request.url());
         let path = url.split('?').next().unwrap_or("/").to_string();
@@ -1652,6 +1875,7 @@ impl TrackerSite {
                 .map(|h| h.value.as_str().to_string())
         };
         let cookie = header("Cookie");
+        let takes_gzip = header("Accept-Encoding").is_some_and(|a| a.contains("gzip"));
         let authorization = header("Authorization");
         let mut v = if *operator {
             Viewer::operator()
@@ -1691,8 +1915,8 @@ impl TrackerSite {
             && authorization.is_none()
             && !["/signin", "/signout", "/account", "/watch"].iter().any(|p| path.starts_with(p));
         if anonymous {
-            if let Some((body, kind, extra, _)) = pages.get(&url).cloned() {
-                respond(request, 200, body, &kind, extra, "kept");
+            if let Some(page) = pages.get(&url).cloned() {
+                respond_kept(request, page, takes_gzip);
                 return Ok(());
             }
         }
@@ -2115,13 +2339,13 @@ impl TrackerSite {
                         Err(e) => e,
                     }
                 };
-                match entry_page(&scope, &parts[1], &parts[2], true, Some(&said)) {
+                match entry_page(&scope, &parts[1], &parts[2], true, Some(&said), &BTreeMap::new()) {
                     Some(html) => (html, "text/html; charset=utf-8", None),
                     None => (shell("Not here", html! { h1 { "No such thing" } }), "text/html; charset=utf-8", None),
                 }
             }
             _ if parts.len() == 3 && parts[0] == "thing" => {
-                match entry_page(&scope, &parts[1], &parts[2], *operator, None) {
+                match entry_page(&scope, &parts[1], &parts[2], *operator, None, &params(&url)) {
                     Some(html) => (html, "text/html; charset=utf-8", None),
                     None => {
                         missing = true;
@@ -2177,6 +2401,25 @@ impl TrackerSite {
                             }
                         };
                         (page, "text/html; charset=utf-8", None)
+                    }
+                }
+            }
+            // An entity's own page, over every time, and the page they are found from.
+            _ if !parts.is_empty() && parts[0] == "entity" && scope.decl.entity.is_some() => {
+                let page = crate::thingstore::ThingStore::open(&scope.dir).ok().and_then(|store| {
+                    let ctx = chart_context(scope, &store);
+                    let p = params(&url);
+                    if parts.len() == 1 {
+                        crate::charts::entity_index(&ctx, &p, &at(&url)).map(|body| shell(&scope.decl.title, body))
+                    } else {
+                        crate::charts::entity_page(&ctx, &parts[1], &p, &at(&url)).map(|(name, body)| shell(&format!("{name} · {}", scope.decl.title), body))
+                    }
+                });
+                match page {
+                    Some(html) => (html, "text/html; charset=utf-8", url.contains('?').then(|| ("X-Robots-Tag".to_string(), "noindex, nofollow".to_string()))),
+                    None => {
+                        missing = true;
+                        (shell("Not here", html! { h1 { "Nothing here by that name" } }), "text/html; charset=utf-8", None)
                     }
                 }
             }
@@ -2254,7 +2497,7 @@ impl TrackerSite {
         // Kept only as anybody would see it: answered in full, and setting nobody's cookie.
         let kind = kind.to_string();
         if anonymous && status == 200 && !extra.as_ref().is_some_and(|(n, _)| n == "Set-Cookie") {
-            pages.keep(&url, (body.clone(), kind.clone(), extra.clone(), crate::now()));
+            pages.keep(&url, (gzip(&body), kind.clone(), extra.clone(), crate::now()));
         }
         respond(request, status, body, &kind, extra, "drawn");
         Ok(())
@@ -2665,7 +2908,13 @@ fn things_page(scope: &Tracker, url: &str, operator: bool) -> String {
         examples.push(format!("changed:{p}<24h"));
     }
     examples.push(format!("appeared:{kind}<7d"));
-    if let Some(s) = sources.first() {
+    // `only:` with the source that alone knows most things, so the example finds some: every CVE
+    // in CISA's catalogue is in NVD too, and `only:cve-kev` found none.
+    let alone = store
+        .as_ref()
+        .map(|s| s.coverage_kept(&scope.standing()))
+        .and_then(|c| c["only"].as_object().and_then(|o| o.iter().max_by_key(|(_, n)| n.as_i64().unwrap_or(0)).map(|(s, _)| short(s))));
+    if let Some(s) = alone.as_ref().or(sources.first()) {
         examples.push(if sources.len() > 1 { format!("only:{s}") } else { format!("has:{s}") });
     }
     if let (Some(a), Some(b)) = (sources.first(), sources.get(1)) {
@@ -2713,11 +2962,13 @@ fn things_page(scope: &Tracker, url: &str, operator: bool) -> String {
             }
         }
         @match &answer {
+            // No question: every thing, a page at a time, as the overview orders them.
             None => {
                 p.dim { "A question about things, asked of what this tracker holds: "
                     code { "conflict:" } " a property, " code { "has:" } " and " code { "only:" }
                     " a source, " code { "source.property=value" } ", " code { "appeared:kind<7d" }
                     ", " code { "changed:property<24h" } ", joined with and, or, not and parentheses." }
+                (every_thing(scope, &p))
             }
             Some(Err(e)) => { div.note { (e) } }
             Some(Ok((keys, _))) => {
@@ -2758,6 +3009,68 @@ fn things_page(scope: &Tracker, url: &str, operator: bool) -> String {
         }
     };
     shell("Things", body)
+}
+
+/// Every thing the tracker holds, fifty a page, the last changed first, with the columns its
+/// overview has: read from its own store, a row a thing, and not gathered from every source's
+/// claims, whose pages are pages of claims and count one thing as often as it has sources.
+fn every_thing(scope: &Tracker, p: &BTreeMap<String, String>) -> Markup {
+    const LIMIT: usize = 50;
+    let Ok(store) = crate::thingstore::ThingStore::open(&scope.dir) else { return html! {} };
+    let total = store.things_count() as usize;
+    let pages = total.div_ceil(LIMIT).max(1);
+    let page: usize = p.get("page").and_then(|s| s.parse().ok()).unwrap_or(1).clamp(1, pages);
+    let rows = store.things_page(LIMIT, (page - 1) * LIMIT);
+    let columns: Vec<String> = scope.columns(&TrackerQuery::default()).into_iter().filter(|c| c != "kind" && c != "known").collect();
+    let several = scope.members.len() > 1;
+    let to = |n: usize| at(&format!("/things?page={n}"));
+    let first = (page - 1) * LIMIT + 1;
+    html! {
+        div.list-head {
+            h2 { "Every thing" }
+            span.dim { @if rows.is_empty() { "none" } @else { (thousands(first as i64)) "–" (thousands((first + rows.len() - 1) as i64)) " of " (thousands(total as i64)) ", the last changed first" } }
+        }
+        div.scroll {
+            table.things {
+                thead { tr { th { "Thing" } @for c in &columns { th { (crate::display::label(&scope.decl, c)) } } } }
+                tbody {
+                    @for (key, title, scheme, value) in &rows {
+                        @let said = store.said_of_thing(key);
+                        @let conflicts = store.conflicts_of(key);
+                        tr {
+                            td.thing {
+                                a href={(at("/thing/")) (urlencode(scheme)) "/" (urlencode(value))} { (clipped(title, 140)) }
+                                div.why { span.mono { (value) }
+                                    @if several { " · " (store.speakers(key).iter().map(|m| title_of(scope, m)).collect::<Vec<_>>().join(", ")) } }
+                            }
+                            @for c in &columns {
+                                @let words: Vec<String> = said.get(c).map(|by| {
+                                    let mut w: Vec<String> = by.iter().flat_map(|(_, m)| m.iter().map(|x| crate::display::shown(&scope.decl, c, yes_no(x)))).collect();
+                                    w.dedup();
+                                    w
+                                }).unwrap_or_default();
+                                // Marked where the sources disagree; side by side where they differ
+                                // within what the tracker lets them.
+                                td {
+                                    @if words.is_empty() { span.dim { "—" } }
+                                    @else if words.len() > 1 && conflicts.contains(c) { span.chip.on title="The sources disagree" { (words.join(" / ")) } }
+                                    @else if words.len() > 1 { span title="Within what the tracker lets them differ" { (words.join(" / ")) } }
+                                    @else { (words[0]) }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        @if pages > 1 {
+            div.pager {
+                @if page > 1 { a rel="nofollow" href=(to(page - 1)) { "← Previous" } } @else { span.off { "← Previous" } }
+                span.dim { "Page " (page) " of " (thousands(pages as i64)) }
+                @if page < pages { a rel="nofollow" href=(to(page + 1)) { "Next →" } } @else { span.off { "Next →" } }
+            }
+        }
+    }
 }
 
 /// A relation with `as:` has pages of its own, at the plural of what it is about: `/vendors/`
@@ -2838,7 +3151,7 @@ fn related_index(scope: &Tracker, r: &crate::trackerdecl::Relation, url: &str) -
     let heading = format!("{}{}", plural.get(..1).unwrap_or("").to_uppercase(), plural.get(1..).unwrap_or(""));
     let filter = params(url).get("q").cloned().unwrap_or_default();
     let wanted = crate::trackerdecl::Relation::spell(&[filter.as_str()]);
-    let all = crate::thingstore::ThingStore::open(&scope.dir).map(|s| s.targets(&r.name)).unwrap_or_default();
+    let all = crate::thingstore::ThingStore::open(&scope.dir).map(|s| s.targets_kept(&r.name, &scope.standing())).unwrap_or_default();
     let shown: Vec<&(String, u64)> = all.iter().filter(|(t, _)| wanted.is_empty() || t.contains(&wanted)).collect();
     const AT_MOST: usize = 300;
     let body = html! {
@@ -2902,7 +3215,7 @@ fn related_page(scope: &Tracker, r: &crate::trackerdecl::Relation, target: &str,
     let products_of = if part == "vendor" { sibling("product") } else { None };
     let products: Vec<(String, u64)> = products_of
         .as_ref()
-        .map(|o| store.targets(o).into_iter().filter(|(t, _)| t.starts_with(&format!("{target}/"))).collect())
+        .map(|o| store.targets_kept(o, &scope.standing()).into_iter().filter(|(t, _)| t.starts_with(&format!("{target}/"))).collect())
         .unwrap_or_default();
     // A product's vendor, the part before the slash, and the product by its own name.
     let vendor = match (part.as_str(), target.split_once('/')) {
@@ -4199,6 +4512,11 @@ fn step_holds(entry: &crate::tracker::Thing, when: &str) -> Option<Vec<String>> 
                 return None;
             }
             who.extend(found);
+            continue;
+        }
+        // `said:<property>`: any source says it at all, as a station out of a fuel says since when.
+        if let Some(property) = term.strip_prefix("said:") {
+            who.extend(entry.fields.get(property.trim())?.by.keys().cloned());
             continue;
         }
         let (lhs, value) = term.split_once('=')?;

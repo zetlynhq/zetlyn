@@ -46,6 +46,8 @@ pub struct Snap {
     /// source's place in the tracker, the claim's id. The same title whatever order the claims
     /// arrive in, read in one piece or in parts.
     pub named_by: Option<(bool, usize, String)>,
+    /// Source, its own date for the thing: the earliest its claims give.
+    pub known: BTreeMap<String, String>,
 }
 
 /// Every thing a tracker knows, by `scheme:value` with the value's case folded.
@@ -239,6 +241,13 @@ create index if not exists word_key on word(key);
 -- Facet counts as a page asked them, kept while the sources stand where they stood: counting a
 -- facet over 400,000 things takes seconds, and every page of a list asks the same counts.
 create table if not exists facet_cache(question text primary key, mark text not null, counts text not null);
+-- What a chart asks: every value of one property, across every thing. Covering, so a chart reads
+-- one run of the index and not a row of the table for each thing: the CVSS of 287,000 CVEs took
+-- 3.4 seconds through an index on the property alone, its rows scattered over 1.7 GB (2026-10-13).
+create index if not exists said_property_values on said(property, key, source, means);
+-- Every thing a page at a time, the last changed first, without sorting them all for each page.
+create index if not exists thing_changed on thing(changed desc, key);
+drop index if exists said_property;
 ";
 
 pub struct ThingStore {
@@ -267,6 +276,7 @@ impl ThingStore {
         for statement in [
             "alter table speaks add column first_seen text",
             "alter table speaks add column kind text",
+            "alter table speaks add column said_on text",
         ] {
             let _ = db.execute_batch(statement);
         }
@@ -639,7 +649,7 @@ impl ThingStore {
                 .prepare("insert into related(key, name, target, sources) values(?1, ?2, ?3, ?4)")
                 .map_err(|e| e.to_string())?;
             let mut put_speaks = tx
-                .prepare("insert into speaks(key, source, claims, first_seen, kind) values(?1, ?2, ?3, ?4, ?5)")
+                .prepare("insert into speaks(key, source, claims, first_seen, kind, said_on) values(?1, ?2, ?3, ?4, ?5, ?6)")
                 .map_err(|e| e.to_string())?;
             let mut put_claim = tx
                 .prepare("insert into claim(source, record_id, key) values(?1, ?2, ?3)")
@@ -696,6 +706,7 @@ impl ThingStore {
                             json!(claims).to_string(),
                             spoke.get(&(key.clone(), source.clone())).cloned().unwrap_or_else(|| at.clone()),
                             now.kinds.get(source).cloned().unwrap_or_default(),
+                            snap.known.get(source),
                         ])
                         .map_err(|e| e.to_string())?;
                     for record_id in claims {
@@ -1276,6 +1287,18 @@ impl ThingStore {
         out
     }
     /// Every other side of one relation, with how many things are related to it, most first.
+    /// The targets of a relation and how many things each has, kept while the store holds the
+    /// same: what a page of vendors or of products lists, counted over every relation once.
+    pub fn targets_kept(&self, name: &str, standing: &str) -> Vec<(String, u64)> {
+        let question = format!("targets|{name}");
+        if let Some(kept) = self.drawn(&question, standing).and_then(|s| serde_json::from_str::<Vec<(String, u64)>>(&s).ok()) {
+            return kept;
+        }
+        let counted = self.targets(name);
+        self.keep_drawn(&question, standing, &serde_json::to_string(&counted).unwrap_or_default());
+        counted
+    }
+
     pub fn targets(&self, name: &str) -> Vec<(String, u64)> {
         let Ok(mut stmt) = self.db.prepare("select target, count(*) from related where name = ?1 group by target order by 2 desc, 1") else {
             return Vec::new();
@@ -1413,3 +1436,149 @@ pub fn say(s: &J) -> String {
 /// The number the next signal takes: past every signal held, and past every one a rebuild let go.
 const NEXT: &str = "select max(coalesce((select max(id) from signal), 0),
     coalesce((select cast(value as integer) from meta where key = 'signals_before'), 0)) + 1";
+
+impl ThingStore {
+    /// Every value one property has, per thing and source, in the tracker's words: what a chart
+    /// is drawn from.
+    pub fn said_of_property(&self, property: &str) -> Vec<(String, String, Vec<String>)> {
+        let Ok(mut stmt) = self.db.prepare("select key, source, means from said where property = ?1") else {
+            return Vec::new();
+        };
+        stmt.query_map([property], |r| {
+            let means: String = r.get(2)?;
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, serde_json::from_str::<Vec<String>>(&means).unwrap_or_default()))
+        })
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+    }
+
+    /// What the store holds, counted, kept while it holds the same: counting which sources speak
+    /// of 400,000 things took most of a second on every page that says it.
+    pub fn coverage_kept(&self, standing: &str) -> J {
+        let question = "coverage";
+        if let Some(kept) = self.drawn(question, standing).and_then(|s| serde_json::from_str::<J>(&s).ok()) {
+            return kept;
+        }
+        let counted = self.coverage();
+        self.keep_drawn(question, standing, &counted.to_string());
+        counted
+    }
+
+    /// How many things the store holds.
+    pub fn things_count(&self) -> u64 {
+        self.db.query_row("select count(*) from thing", [], |r| r.get::<_, i64>(0)).unwrap_or(0) as u64
+    }
+
+    /// A page of every thing, the last changed first: key, title, scheme, value.
+    pub fn things_page(&self, limit: usize, offset: usize) -> Vec<(String, String, String, String)> {
+        let Ok(mut stmt) = self.db.prepare("select key, title, scheme, value from thing order by changed desc, key limit ?1 offset ?2") else {
+            return Vec::new();
+        };
+        stmt.query_map(rusqlite::params![limit as i64, offset as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    }
+
+    /// Everything the sources say of one thing: per property, each source's words in the tracker's.
+    pub fn said_of_thing(&self, key: &str) -> BTreeMap<String, Vec<(String, Vec<String>)>> {
+        let mut out: BTreeMap<String, Vec<(String, Vec<String>)>> = BTreeMap::new();
+        let Ok(mut stmt) = self.db.prepare("select property, source, means from said where key = ?1") else {
+            return out;
+        };
+        if let Ok(rows) = stmt.query_map([key], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))) {
+            for (p, s, m) in rows.flatten() {
+                out.entry(p).or_default().push((s, serde_json::from_str(&m).unwrap_or_default()));
+            }
+        }
+        out
+    }
+
+    /// What each source says of one property of one thing, in the tracker's words: a thing's own
+    /// value, asked by its key and not found among every thing's.
+    pub fn said_by_key(&self, key: &str, property: &str) -> Vec<(String, Vec<String>)> {
+        let Ok(mut stmt) = self.db.prepare("select source, means from said where key = ?1 and property = ?2") else {
+            return Vec::new();
+        };
+        stmt.query_map([key, property], |r| {
+            let means: String = r.get(1)?;
+            Ok((r.get::<_, String>(0)?, serde_json::from_str::<Vec<String>>(&means).unwrap_or_default()))
+        })
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+    }
+
+    /// Something drawn under any standing, the last kept: what a page shows while the pictures of
+    /// new data are being drawn.
+    pub fn drawn_any(&self, question: &str) -> Option<String> {
+        self.db
+            .query_row("select counts from facet_cache where question = ?1", [format!("drawn|{question}")], |r| r.get(0))
+            .ok()
+    }
+
+    /// The day one source first spoke of each thing, by its own date: when NVD published a CVE,
+    /// when CISA added it to its catalogue.
+    pub fn first_said_by(&self, source: &str) -> Vec<(String, String)> {
+        let Ok(mut stmt) = self.db.prepare("select key, coalesce(said_on, first_seen) from speaks where source = ?1 and coalesce(said_on, first_seen) is not null") else {
+            return Vec::new();
+        };
+        stmt.query_map([source], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).map(|rows| rows.flatten().collect()).unwrap_or_default()
+    }
+
+    /// Which sources speak of each thing, as how many things each set of them has in common.
+    pub fn source_sets(&self) -> Vec<(Vec<String>, u64)> {
+        let Ok(mut stmt) = self.db.prepare(
+            "select s, count(*) from (select key, group_concat(source, char(31)) as s from (select key, source from speaks order by key, source) group by key) group by s order by 2 desc",
+        ) else {
+            return Vec::new();
+        };
+        stmt.query_map([], |r| {
+            let s: String = r.get(0)?;
+            Ok((s.split('\u{1f}').map(str::to_string).collect(), r.get::<_, i64>(1)? as u64))
+        })
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+    }
+
+    /// What a property was, for each thing whose value changed after `since`: the words the
+    /// first change after it replaced, none where nothing was said then. With what the store
+    /// holds now, what every thing said at that moment.
+    pub fn was_at(&self, property: &str, since: &str) -> BTreeMap<String, Option<Vec<String>>> {
+        let Ok(mut stmt) = self.db.prepare("select key, was from signal where kind = 'changed' and property = ?1 and at > ?2 order by id") else {
+            return BTreeMap::new();
+        };
+        let mut out: BTreeMap<String, Option<Vec<String>>> = BTreeMap::new();
+        if let Ok(rows) = stmt.query_map(rusqlite::params![property, since], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))) {
+            for (key, was) in rows.flatten() {
+                out.entry(key).or_insert_with(|| was.and_then(|w| serde_json::from_str::<Vec<String>>(&w).ok()));
+            }
+        }
+        out
+    }
+
+    /// The first change the store holds, which is how far back it can say what was.
+    pub fn signals_since(&self) -> Option<String> {
+        self.db.query_row("select min(at) from signal where kind = 'changed'", [], |r| r.get(0)).ok().flatten()
+    }
+
+    /// How many things no source speaks of any longer, by the month they went.
+    pub fn withdrawn_by_month(&self) -> BTreeMap<String, u64> {
+        let Ok(mut stmt) = self.db.prepare("select substr(at, 1, 7), count(*) from signal where kind = 'withdrawn' and (source is null or source = '') group by 1") else {
+            return BTreeMap::new();
+        };
+        stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))).map(|rows| rows.flatten().collect()).unwrap_or_default()
+    }
+
+    /// Something drawn, kept while the sources stand where they stood, as the facet counts are.
+    pub fn drawn(&self, question: &str, mark: &str) -> Option<String> {
+        self.db
+            .query_row("select counts from facet_cache where question = ?1 and mark = ?2", rusqlite::params![format!("drawn|{question}"), mark], |r| r.get(0))
+            .ok()
+    }
+
+    pub fn keep_drawn(&self, question: &str, mark: &str, drawn: &str) {
+        let _ = self.db.execute(
+            "insert or replace into facet_cache(question, mark, counts) values(?1, ?2, ?3)",
+            rusqlite::params![format!("drawn|{question}"), mark, drawn],
+        );
+    }
+}

@@ -46,6 +46,15 @@ pub struct TrackerDecl {
     /// has got, and which dates make its timeline. Without it, the page is the claims.
     #[serde(default, skip_serializing_if = "ThingView::is_empty")]
     pub thing: ThingView,
+    /// What a property's values are, for showing them: their unit and precision, which way is
+    /// better, the range a real one falls in, how long one stays true. Nothing here changes what
+    /// a source said; it says how to read it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub values: BTreeMap<String, ValueDecl>,
+    /// Where each thing is one entity at one time, a country in a year: the entity, which gets a
+    /// page of its own over every time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity: Option<EntityDecl>,
     /// What a list of what somebody runs is checked against: an SBOM, `rpm -qa`, CPEs. Each
     /// names a property, or the relation, that says which packages or products a thing is in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -201,6 +210,9 @@ pub struct Views {
     /// Views the curator wrote, across every source.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub named: Vec<NamedView>,
+    /// Pictures of every thing, drawn above the list: a map, a series, how sources differ.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub show: Vec<crate::charts::Show>,
     /// One per kind. Everything else in this table is a kind.
     #[serde(flatten)]
     pub kinds: BTreeMap<String, KindView>,
@@ -254,6 +266,7 @@ impl Views {
             && self.facets.is_empty()
             && self.sort.is_none()
             && self.named.is_empty()
+            && self.show.is_empty()
             && self.kinds.is_empty()
     }
 }
@@ -361,6 +374,94 @@ impl Relation {
     }
 }
 
+/// How one property's values read. Every field may be left out.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValueDecl {
+    /// What it is called on a page, where its name says it badly: `GDP growth`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
+    /// Written after the number: `%`, `€`, `GB`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub unit: String,
+    /// Places after the point. Absent, as many as the number needs, up to three.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decimals: Option<usize>,
+    /// Shown as so many of this: `1e9` with unit `GB` shows bytes as gigabytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per: Option<f64>,
+    /// `higher` or `lower` is better, which colours it green; `middle`, nearest `centre` is.
+    /// Absent, neither: a count, coloured in one hue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub better: Option<String>,
+    /// The value colours turn at: 0 for growth, 2 for inflation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub centre: Option<f64>,
+    /// The range a real value falls in. One outside it is shown where it is said, marked, and left
+    /// out of every map, ranking and average: a diesel at €0.38 is a typing error, not a bargain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plausible: Option<(f64, f64)>,
+    /// What its words are: `country` (any spelling, shown by name), `year`, `quarter`, `date`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub is: String,
+    /// The property saying when this value was said, and how long it stays current: a price
+    /// older than that is shown grey and counted nowhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fresh: Option<String>,
+    /// A property that, where said, is why there is no value: out of diesel since a date.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missing: Option<String>,
+    /// Spread over orders of magnitude: downloads.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub log: bool,
+    /// Values far from all the others are left out as the implausible are: further from the middle
+    /// than this many times the middle distance to it. A diesel at €1.38 where the middle is €2.35
+    /// and most are within a few cents of it. Where a fixed range would be out of date by the
+    /// next crisis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outliers: Option<f64>,
+    /// An entity's page says how far it is below its highest, and when that was: an index, which
+    /// is ranked against no other entity's, each being its own.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub peak: bool,
+    /// An entity's page says how far it is from its own average over every time: a ratio that
+    /// means something only against itself, as price to income does.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub own_average: bool,
+}
+
+impl ValueDecl {
+    pub fn plausible(&self, v: f64) -> bool {
+        self.plausible.is_none_or(|(lo, hi)| v >= lo && v <= hi)
+    }
+    /// How long a value stays current, in seconds.
+    pub fn fresh_secs(&self) -> Option<i64> {
+        self.fresh.as_deref().and_then(crate::fetch::duration)
+    }
+}
+
+/// The entity things are one time of.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EntityDecl {
+    /// The property naming the entity: `country`.
+    pub property: String,
+    /// The property naming the time: `year`, `quarter`.
+    pub time: String,
+    /// The values its page leads with, each with its latest, the one before and its rank.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<String>,
+    /// A property a source gives with its figures: the last time that source counts as measured,
+    /// every later one a projection. The IMF's latest actual year.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_until: Option<String>,
+    /// What one is called: `country`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub called: String,
+}
+
 /// What a thing's page says first, declared by the tracker, since only it knows which of its
 /// properties answer the first question somebody asks of one of its things. Every line still
 /// names the source that said it: this orders what the sources say, and says nothing itself.
@@ -376,11 +477,59 @@ pub struct ThingView {
     /// Date properties that are events, beside the day each source first spoke of the thing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub timeline: Vec<String>,
+    /// Pictures of the thing among the others: where it is, how it moved, how its sources differ.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub show: Vec<crate::charts::Show>,
+    /// A thing's title, from what its sources say: `{brand|name} · {city}`, `{country} {year}`,
+    /// `{@value} · {@title}`. Each `{}` the first of its properties a source says, `@value` the
+    /// identifier, `@title` the source's own title; `:latin` takes a word in Latin letters where
+    /// there is one. A `{}` with nothing in it takes the words before it along. Nothing said, the
+    /// source's own title.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+    /// Marks beside the title, each shown where its `when` holds, in the terms a ladder's are.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub badges: Vec<Badge>,
+    /// The claims a thing is made of, as a table: every quantisation of a model, every list a
+    /// person is on, every exploit of a vulnerability, each a row with these columns.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<PartsView>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PartsView {
+    /// The kind of claim, or every kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<String>,
+    /// A column the rows are ordered by, the most first; `-name` for the least first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<String>,
+    #[serde(default = "twenty_five")]
+    pub limit: usize,
+}
+
+fn twenty_five() -> usize {
+    25
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Badge {
+    pub name: String,
+    pub when: String,
+    /// `hot` for what somebody acts on first.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tone: String,
 }
 
 impl ThingView {
     pub fn is_empty(&self) -> bool {
-        self.summary.is_empty() && self.ladder.is_none() && self.timeline.is_empty()
+        self.summary.is_empty() && self.ladder.is_none() && self.timeline.is_empty() && self.show.is_empty() && self.title.is_empty() && self.badges.is_empty() && self.parts.is_empty()
     }
 }
 

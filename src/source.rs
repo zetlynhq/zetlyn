@@ -106,6 +106,10 @@ impl Source {
         if let crate::sourcedecl::Fetch::Package { tracker, .. } = &self.decl.source {
             return Err(format!("it came in the package {tracker}. `zetlyn tracker pull` takes a newer version"));
         }
+        // A read writes thousands of claims: the cache of a writer for it, and the small one of a
+        // reader again after, as the store opens.
+        let _ = self.store.db.execute_batch("pragma cache_size=-16000;");
+        let _restore = Restore(&self.store);
         // One read of a source at a time, whoever asks: the app, `zetlyn run`, a server's pass. The
         // lock is the system's, held while this read is, so one that dies leaves none behind.
         let lock_path = self.dir.join(".reading");
@@ -445,8 +449,7 @@ impl Source {
             "licence": d.licence,
 
             "history": d.retention.history,
-            "schemes": J::Array(self.store.schemes().iter()
-                .map(|(s, n)| json!({ "scheme": s, "claims": n })).collect()),
+            "schemes": self.schemes_described(),
             "properties": fields,
             "vocabulary": json!(d.vocabulary),
             // The whole shape, because a tracker that adopts one reaches it only through here.
@@ -468,6 +471,22 @@ impl Source {
             }),
             "can": self.can(),
         })
+    }
+
+    /// How many claims carry each identifier scheme, kept as the properties are: counted again
+    /// only after a run or a claim more or less. Counting it over NVD's 2.5 million identifiers
+    /// took 2.6 seconds, and a tracker opens its sources every minute it is served (2026-10-13).
+    fn schemes_described(&self) -> J {
+        let stamp = format!("{}|{}", self.store.last_run(), self.store.count());
+        if self.store.meta("schemes_at").as_deref() == Some(stamp.as_str()) {
+            if let Some(kept) = self.store.meta("schemes").and_then(|s| serde_json::from_str::<J>(&s).ok()) {
+                return kept;
+            }
+        }
+        let schemes = J::Array(self.store.schemes().iter().map(|(s, n)| json!({ "scheme": s, "claims": n })).collect());
+        let _ = self.store.set_meta("schemes", &schemes.to_string());
+        let _ = self.store.set_meta("schemes_at", &stamp);
+        schemes
     }
 
     /// Every property with its count, its values and its range: a pass over every claim, so it
@@ -955,5 +974,14 @@ pub fn heavy_turn(world: &Path, wait: bool) -> Result<Option<std::fs::File>, Str
         }
         Err(std::fs::TryLockError::WouldBlock) => Ok(None),
         Err(std::fs::TryLockError::Error(e)) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
+/// Puts a store's cache back to a reader's when a read ends, however it ends.
+struct Restore<'a>(&'a crate::store::Store);
+
+impl Drop for Restore<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.db.execute_batch("pragma cache_size=-512;");
     }
 }

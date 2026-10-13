@@ -190,7 +190,10 @@ fn migrate(db: &Connection) {
 impl Store {
     pub fn open(dir: &Path) -> Result<Store, String> {
         let db = Connection::open(dir.join("claims.db")).map_err(|e| e.to_string())?;
-        db.execute_batch("pragma journal_mode=wal; pragma synchronous=normal;")
+        // A small cache of its own: a tracker holds each of its sources open while it is served, and
+        // eight sources at two megabytes each were held for pages that read a few rows of each. The
+        // system keeps the file's pages in memory for every connection at once.
+        db.execute_batch("pragma journal_mode=wal; pragma synchronous=normal; pragma cache_size=-512;")
             .map_err(|e| e.to_string())?;
         db.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
         migrate(&db);

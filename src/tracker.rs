@@ -250,7 +250,7 @@ impl Tracker {
     }
 
     /// And back, so a source's answer can be shown under the name this tracker uses.
-    fn field_out(&self, member: &str, member_field: &str) -> String {
+    pub fn field_out(&self, member: &str, member_field: &str) -> String {
         for (scope_field, n) in &self.decl.normalise {
             if n.from.get(member).map(String::as_str) == Some(member_field) {
                 return scope_field.clone();
@@ -809,6 +809,21 @@ impl Tracker {
             truncated: false,
             subjects: true,
         })
+    }
+
+    /// A thing's title as the tracker makes it from what its sources say, where it declares how;
+    /// its highest source's own otherwise. The same the store keeps, so a list and a page agree.
+    pub fn title_of(&self, e: &Thing) -> String {
+        let template = &self.decl.thing.title;
+        if template.is_empty() {
+            return e.title.clone();
+        }
+        let order: Vec<&str> = self.members.iter().map(|m| m.name()).collect();
+        let said = |p: &str| -> Vec<String> {
+            e.fields.get(p).map(|f| order.iter().filter_map(|m| f.means.get(*m).or_else(|| f.by.get(*m))).flatten().cloned().collect()).unwrap_or_default()
+        };
+        let value = e.key.as_ref().map(|k| k.value.clone()).unwrap_or_default();
+        crate::display::title(template, &self.decl, &said, &value, &e.title).unwrap_or_else(|| e.title.clone())
     }
 
     fn new_entry(&self, key: Option<Id>, hit: &Hit) -> Thing {
@@ -1775,7 +1790,7 @@ impl Tracker {
                 let ids: Vec<String> = p.claims.get(m.name()).into_iter().flatten().cloned().collect();
                 for chunk in ids.chunks(200) {
                     for c in m.member.fetch(chunk, false) {
-                        self.take(&mut snap, &keys, m, &c.record_id, &c.title, &c.ids, &c.fields, Some(&p.keys));
+                        self.take(&mut snap, &keys, m, &c.record_id, &c.title, &c.known, &c.ids, &c.fields, Some(&p.keys));
                     }
                 }
                 continue;
@@ -1799,7 +1814,7 @@ impl Tracker {
                     break;
                 }
                 for hit in &hits {
-                    self.take(&mut snap, &keys, m, &hit.record_id, &hit.title, &hit.ids, &hit.fields, None);
+                    self.take(&mut snap, &keys, m, &hit.record_id, &hit.title, &hit.known, &hit.ids, &hit.fields, None);
                 }
                 offset += hits.len();
                 if hits.len() < 5000 {
@@ -1811,6 +1826,21 @@ impl Tracker {
         for m in crate::matches::standing(&self.dir) {
             if let Some(t) = snap.things.get_mut(&m.key) {
                 t.related.entry(m.relation.clone()).or_default().entry(m.target.clone()).or_default().insert(format!("person:{}", m.by));
+            }
+        }
+        // The title the tracker makes of what its sources say, where it declares one: a station by
+        // its brand and town rather than its address, a country-year by the country's name.
+        let template = &self.decl.thing.title;
+        if !template.is_empty() {
+            let order: Vec<&str> = self.members.iter().map(|m| m.name()).collect();
+            for t in snap.things.values_mut() {
+                let made = {
+                    let said = |p: &str| -> Vec<String> { order.iter().filter_map(|m| t.by.get(*m)?.get(p)).flat_map(|s| s.means.iter().cloned()).collect() };
+                    crate::display::title(template, &self.decl, &said, &t.value, &t.title)
+                };
+                if let Some(title) = made {
+                    t.title = title;
+                }
             }
         }
         snap
@@ -1827,6 +1857,7 @@ impl Tracker {
         m: &Resolved,
         record_id: &str,
         title: &str,
+        known: &str,
         ids: &[Id],
         fields: &BTreeMap<String, crate::claim::Value>,
         only: Option<&BTreeSet<String>>,
@@ -1870,6 +1901,13 @@ impl Tracker {
             .entry(m.name().to_string())
             .or_default()
             .insert(record_id.to_string());
+        // The source's own date for it, the earliest of its claims': when NVD published a CVE.
+        if !known.trim().is_empty() {
+            let held = thing.known.entry(m.name().to_string()).or_insert_with(|| known.to_string());
+            if known < held.as_str() {
+                *held = known.to_string();
+            }
+        }
         // What this claim says the thing is to something else: every other
         // identifier it states of a scheme a relation names.
         for r in &self.decl.relations {
@@ -1971,7 +2009,18 @@ impl Tracker {
         };
         store.set_meta("mark", &self.mark())?;
         store.set_meta("stated", &self.stated())?;
+        // What the store holds moved: everything read again, or something said differently. A run
+        // that found nothing new leaves what was drawn of it standing, and draws nothing again.
+        let moved = piecemeal.is_none() || r.signals > 0;
+        if moved {
+            store.set_meta("content", &format!("{}.{}", crate::now(), store.last_signal()))?;
+        }
         drop(store);
+        // And the pictures of it drawn again ahead of the first visitor, once the sources running
+        // about now have all run.
+        if moved {
+            crate::warm::due(&self.dir, &self.root);
+        }
         // While the lock is still held: the first visitor after an update finds the counts made.
         self.count_facets_ahead();
         Ok(r)
@@ -1979,10 +2028,14 @@ impl Tracker {
 
     /// What the store was made from besides the sources' claims: the statement, and the matches
     /// people signed. Either changed, every thing is read again.
+    /// Where the sources stand and what the statement and matches say: what something drawn of
+    /// the tracker, or counted, is kept under, and made again when it moves.
+    pub fn standing(&self) -> String {
+        standing_of(&self.dir)
+    }
+
     fn stated(&self) -> String {
-        let statement = std::fs::read_to_string(self.dir.join(crate::trackerdecl::FILE)).unwrap_or_default();
-        let matches = std::fs::read_to_string(self.dir.join(crate::matches::FILE)).unwrap_or_default();
-        format!("{}|{}", crate::place::sha256(statement.as_bytes()), crate::place::sha256(matches.as_bytes()))
+        stated_of(&self.dir)
     }
 
     /// The things a claim moved about since the store's mark, and the claims to read them from,
@@ -2142,6 +2195,21 @@ impl Tracker {
     pub fn text_shown(&self, source: &str) -> bool {
         self.licences().iter().find(|(s, _)| s == source).map_or(true, |(_, r)| r != "summary")
     }
+}
+
+/// The statement and the matches a store was made under, as one stamp.
+pub fn stated_of(dir: &Path) -> String {
+    let statement = std::fs::read_to_string(dir.join(crate::trackerdecl::FILE)).unwrap_or_default();
+    let matches = std::fs::read_to_string(dir.join(crate::matches::FILE)).unwrap_or_default();
+    format!("{}|{}", crate::place::sha256(statement.as_bytes()), crate::place::sha256(matches.as_bytes()))
+}
+
+/// What a picture of the tracker is kept under: what its store holds, which moves only when a
+/// refresh found something, and the statement it was made under. Asked of the directory alone, so
+/// a picture can be drawn ahead without opening the tracker and every source.
+pub fn standing_of(dir: &Path) -> String {
+    let content = crate::thingstore::ThingStore::open(dir).ok().and_then(|s| s.meta("content").or_else(|| s.meta("refreshed"))).unwrap_or_default();
+    format!("{content}|{}", stated_of(dir))
 }
 
 /// Every `same` a person confirmed and did not take back, followed to its end: where c was

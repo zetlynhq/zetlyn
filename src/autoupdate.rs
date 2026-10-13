@@ -45,6 +45,10 @@ pub struct Config {
     /// The offer to turn it on has been made once, and answered.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub offered: bool,
+    /// How long after new data its pages are drawn again ahead of the first visitor: long enough
+    /// for the sources updating about then to have all run, so they are drawn once. `2m` absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warm_after: Option<String>,
 }
 
 /// How often the workspace updates its sources, in seconds; `None` when it is off.
@@ -68,8 +72,28 @@ pub fn words(seconds: i64) -> String {
     }
 }
 
+/// How long after new data the pages are drawn again, the waits a person may choose.
+pub const WARM_AFTER: [(&str, &str); 5] = [("30s", "after 30 seconds"), ("1m", "after a minute"), ("2m", "after 2 minutes"), ("5m", "after 5 minutes"), ("15m", "after 15 minutes")];
+
+/// How long after new data the pages are drawn again, in seconds: two minutes unless the owner
+/// says otherwise.
+pub fn warm_after(root: &Path) -> i64 {
+    crate::account::Site::load(root).update.warm_after.as_deref().and_then(crate::fetch::duration).unwrap_or(120).clamp(10, 3600)
+}
+
 /// The workspace's `update:` block, written as text so the rest of the file stays as it was.
 pub fn set(root: &Path, every: Option<&str>, offered: bool) -> Result<(), String> {
+    let warm = crate::account::Site::load(root).update.warm_after;
+    set_all(root, every, offered, warm.as_deref())
+}
+
+/// The wait before pages are drawn again, the rest of the block as it is.
+pub fn set_warm(root: &Path, warm_after: Option<&str>) -> Result<(), String> {
+    let u = crate::account::Site::load(root).update;
+    set_all(root, u.every.as_deref(), u.offered, warm_after)
+}
+
+fn set_all(root: &Path, every: Option<&str>, offered: bool, warm_after: Option<&str>) -> Result<(), String> {
     let path = root.join(crate::account::WORKSPACE);
     let text = std::fs::read_to_string(&path).unwrap_or_default();
     let mut kept: Vec<&str> = Vec::new();
@@ -86,13 +110,16 @@ pub fn set(root: &Path, every: Option<&str>, offered: bool) -> Result<(), String
         kept.push(l);
     }
     let mut block = String::new();
-    if every.is_some() || offered {
+    if every.is_some() || offered || warm_after.is_some() {
         block.push_str("update:\n");
         if let Some(e) = every {
             block.push_str(&format!("  every: {e}\n"));
         }
         if offered {
             block.push_str("  offered: true\n");
+        }
+        if let Some(w) = warm_after {
+            block.push_str(&format!("  warm_after: {w}\n"));
         }
     }
     let t = format!("{}\n{block}", kept.join("\n").trim_end());

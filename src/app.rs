@@ -406,7 +406,35 @@ fn open_trackers() -> &'static Mutex<BTreeMap<PathBuf, SharedSite>> {
     OPEN.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
+/// When each open tracker was last asked for.
+fn last_asked() -> &'static Mutex<BTreeMap<PathBuf, i64>> {
+    static ASKED: std::sync::OnceLock<Mutex<BTreeMap<PathBuf, i64>>> = std::sync::OnceLock::new();
+    ASKED.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// A tracker nobody has asked for in this long is closed, and opened again on its next visit: a
+/// tenth of a second, where held open each one kept its sources and their caches, tens of
+/// megabytes, for a page somebody might ask for once a day.
+const IDLE: i64 = 15 * 60;
+
+/// Closes the trackers nobody has asked for since `IDLE`, unless one is answering right now.
+pub fn close_idle() -> usize {
+    let now = crate::now();
+    let asked = last_asked().lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let mut open = open_trackers().lock().unwrap_or_else(|e| e.into_inner());
+    let idle: Vec<PathBuf> = open
+        .iter()
+        .filter(|(dir, site)| asked.get(*dir).is_none_or(|t| now - t > IDLE) && Arc::strong_count(site) == 1)
+        .map(|(dir, _)| dir.clone())
+        .collect();
+    for dir in &idle {
+        open.remove(dir);
+    }
+    idle.len()
+}
+
 fn tracker_site(dir: &Path, sources: &Path, addr: &str) -> Result<SharedSite, String> {
+    last_asked().lock().unwrap_or_else(|e| e.into_inner()).insert(dir.to_path_buf(), crate::now());
     if let Some(site) = open_trackers().lock().unwrap_or_else(|e| e.into_inner()).get(dir) {
         return Ok(site.clone());
     }
@@ -1535,6 +1563,12 @@ impl App {
                 let every = form.get("every").map(String::as_str).filter(|e| ok(e));
                 if let Err(e) = crate::autoupdate::set(&self.root, every, true) {
                     said.push(e);
+                }
+                // How long after new data the pages are drawn again: one of the waits offered.
+                if let Some(w) = form.get("warm_after").filter(|w| crate::autoupdate::WARM_AFTER.iter().any(|(v, _)| v == *w)) {
+                    if let Err(e) = crate::autoupdate::set_warm(&self.root, Some(w)) {
+                        said.push(e);
+                    }
                 }
                 let mut changed = 0;
                 for (name, dir) in crate::tracker::registry(&self.sources()) {
@@ -3128,6 +3162,12 @@ impl App {
                         @for (v, l) in &choices { option value=(v) selected[current == *v] disabled[!allowed(v)] { (l) } }
                     }
                 } }
+                @let warm = crate::account::Site::load(&self.root).update.warm_after.unwrap_or_else(|| "2m".into());
+                p { label { strong { "Pages drawn again" } span.dim { " · after new data, before anybody asks; until then they show the data before. Waiting a little draws them once for sources that update together." } br;
+                    select name="warm_after" {
+                        @for (v, l) in crate::autoupdate::WARM_AFTER { option value=(v) selected[warm == v] { (l) } }
+                    }
+                } }
                 table.settings-sources {
                     thead { tr { th { "Source" } th { "How often" } th { "Last read" } th { "Next" } th.num { "Reads a month" } } }
                     tbody {
@@ -4536,7 +4576,10 @@ pub fn world_serve(args: &[String]) -> Result<(), String> {
         }
     }
     let owners = crate::account::Site::load(&root).all_owners();
-    if owners.is_empty() {
+    // A copy that only shows its pages may have none: a world synced from a hosting keeps its owners
+    // there, and naming one here would be carried back by the next sync.
+    let pages_only = args.iter().any(|a| a == "--no-updates");
+    if owners.is_empty() && !pages_only {
         return Err(format!("{}: its workspace.yaml names no owners (`access: {{ owners: [...] }}`), so nobody could sign in to run it", root.display()));
     }
     let server = tiny_http::Server::http(&addr).map_err(|e| e.to_string())?;
@@ -4547,7 +4590,12 @@ pub fn world_serve(args: &[String]) -> Result<(), String> {
             None => println!("No address in a network found for this machine; others reach it at its address, port {port}."),
         }
     }
-    {
+    // `--no-updates`: pages only. No source is read, nothing published to the hub, and the
+    // directory not told where the world is: what a copy of a world on a laptop is for, to try
+    // things on, while the world itself runs where it runs.
+    if args.iter().any(|a| a == "--no-updates") {
+        println!("Pages only: no source is read here, nothing published, the directory not told.");
+    } else {
         let root = root.clone();
         std::thread::spawn(move || loop {
             let soonest = crate::schedule_pass(&root, true, &crate::Limits::default());
@@ -4568,6 +4616,14 @@ pub fn world_serve(args: &[String]) -> Result<(), String> {
         });
     }
     crate::account::Accounts::open(&root)?;
+    // The pictures of new data drawn ahead of the first visitor, here where the pages are served.
+    {
+        let root = root.clone();
+        crate::warm::spawn(move || vec![root.clone()]);
+    }
+    // Small while it serves: few arenas, trackers nobody asks for closed, what was freed given back.
+    crate::memory::serving();
+    crate::memory::spawn_janitor(close_idle);
     // Several requests at once, as on the hosting machine: each thread its own app and its own
     // connection to the accounts, the jobs shared.
     let server = Arc::new(server);
@@ -5891,6 +5947,14 @@ fn hosting_serve(args: &[String]) -> Result<(), String> {
         "none" => {}
         other => return Err(format!("--updates {other}: in, apart or none")),
     }
+    // The pictures of new data drawn ahead of the first visitor, by the process that serves them,
+    // whichever process read the data: every organisation's, as it is now.
+    {
+        let dir = dir.clone();
+        crate::warm::spawn(move || orgs_in(&dir).into_iter().map(|o| dir.join("orgs").join(o)).collect());
+    }
+    crate::memory::serving();
+    crate::memory::spawn_janitor(close_idle);
 
     // Several requests at once: a slow page (a tracker's filter over thousands of claims) holds up
     // its own thread and nobody else's. Crawlers walking those filters, two a second, once kept

@@ -390,6 +390,82 @@ details { margin: 2rem 0; } details > summary { cursor: pointer; font-weight: 60
   .stats b { font-size: 1.5rem; }
 }
 @media (max-width: 40rem) { main, .wrap, footer.site-footer { width: calc(100% - 28px); } main { padding: 1.2rem 0 4rem; } footer.site-footer { height: auto; padding: 26px 0; flex-wrap: wrap; gap: 12px; } }
+/* Pictures of a tracker (charts.rs): maps, series, spread, distribution, matrix, ranking. */
+section.chart { margin: 1.4rem 0 1.6rem; }
+section.chart h2 { margin-bottom: .5rem; }
+section.chart h3 { margin: .8rem 0 .2rem; font-size: .9rem; font-weight: 500; }
+section.chart svg { width: 100%; height: auto; display: block; }
+.map { border: 1px solid var(--line); background: var(--panel); overflow: hidden; }
+.map svg.zoomable { cursor: grab; touch-action: none; }
+.map svg.zoomable:active { cursor: grabbing; }
+svg path.land { fill: color-mix(in srgb, var(--fg) 7%, var(--panel)); stroke: color-mix(in srgb, var(--fg) 25%, transparent); stroke-width: .5; vector-effect: non-scaling-stroke; }
+svg path.area { stroke: var(--panel); stroke-width: .6; vector-effect: non-scaling-stroke; }
+svg path.area:hover, svg circle.dot:hover { stroke: var(--fg); stroke-width: 1.5; }
+svg.zoomable circle.dot { r: calc(2.4px * max(var(--rs, 1), .22)); }
+svg.zoomable text.place { font-size: calc(12px * var(--r, 1)); fill: var(--fg); paint-order: stroke; stroke: var(--panel); stroke-width: calc(3px * var(--r, 1)); pointer-events: none; font-weight: 500; }
+svg.zoomable:not([data-z="2"]):not([data-z="3"]) text.place.t2, svg.zoomable:not([data-z="3"]) text.place.t3 { display: none; }
+svg[data-only] .k { opacity: .07; }
+svg[data-only="0"] .k0, svg[data-only="1"] .k1, svg[data-only="2"] .k2, svg[data-only="3"] .k3, svg[data-only="4"] .k4, svg[data-only="5"] .k5, svg[data-only="6"] .k6, svg[data-only="7"] .k7 { opacity: 1; }
+.legend.keys button.key { all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: .45rem; padding: .1rem .3rem; }
+.legend.keys button.key:hover { background: var(--wash); }
+.legend.keys button.key.off { opacity: .4; }
+.legend { display: flex; flex-wrap: wrap; align-items: center; gap: .2rem .6rem; margin: .5rem 0; font-size: .82rem; }
+.legend .swatch { display: inline-block; width: .9rem; height: .7rem; margin-right: -.3rem; }
+.legend .swatch.round { border-radius: 50%; width: .7rem; }
+svg .grid { stroke: var(--line); stroke-width: 1; }
+svg .zero { stroke: var(--dim); stroke-width: 1; }
+svg .tick { fill: var(--dim); font-size: 11px; font-family: var(--mono, monospace); }
+svg .label { fill: var(--fg); font-size: 12px; }
+svg a:hover .label { text-decoration: underline; }
+svg .range { stroke: var(--dim); stroke-width: 2; opacity: .5; }
+svg .line { fill: none; stroke-width: 2; }
+svg .line.ahead { stroke-dasharray: 5 4; opacity: .8; }
+svg .bin { fill: color-mix(in srgb, var(--accent) 70%, var(--panel)); }
+svg .bin:hover { fill: var(--accent); }
+svg .mark { stroke: var(--fg); stroke-width: 2; }
+table.matrix td, table.matrix th { padding: .35rem .6rem; }
+table.matrix td.num { min-width: 4.5rem; }
+table.ranking td.barcell { width: 45%; }
+table.ranking .bar { display: block; height: .7rem; background: color-mix(in srgb, var(--accent) 70%, var(--panel)); }
+table.ranking .bar.joined { background: color-mix(in srgb, var(--fg) 55%, var(--panel)); }
+table.ranking td.when { width: 7rem; white-space: nowrap; font-variant-numeric: tabular-nums; }
+table.matrix td.dark { color: #fff; }
+svg .bin.out { fill: color-mix(in srgb, var(--fg) 40%, var(--panel)); }
+.small { font-size: .78rem; }
+.chip.small { font-size: .72rem; padding: .05rem .35rem; }
+p.lede-small { margin: .3rem 0 .6rem; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(12.5rem, 1fr)); gap: .6rem; margin: .6rem 0 1rem; }
+.tile { display: flex; flex-direction: column; gap: .2rem; border: 1px solid var(--line); background: var(--panel); padding: .7rem .9rem; color: var(--fg); }
+a.tile:hover { border-color: var(--fg); }
+.tile b { font-size: 1.6rem; font-variant-numeric: tabular-nums; }
+.change { font-size: .85rem; font-variant-numeric: tabular-nums; }
+.change.good { color: #1a7a3f; }
+.change.bad { color: #c0392b; }
+svg.spark { width: 100%; height: 2.2rem; margin-top: .3rem; }
+svg.spark polyline { fill: none; stroke: var(--accent); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+table.entities td.cell { white-space: nowrap; }
+table.entities .dot, td.cell .dot { display: inline-block; width: .6rem; height: .6rem; border-radius: 50%; margin-right: .4rem; vertical-align: middle; }
+table.entities th.num a { color: var(--dim); }
+p.badges { margin: .4rem 0 .8rem; display: flex; flex-wrap: wrap; gap: .35rem; }
+.thing-badge { display: inline-block; padding: .15rem .55rem; border: 1px solid var(--fg); font-size: .8rem; font-weight: 600; }
+.thing-badge.hot { background: var(--accent); border-color: var(--accent); color: #fff; }
+table.side tr.hot td, table.side tr.hot th { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+table.entities tr.ahead td { opacity: .6; font-style: italic; }
+svg.hexed:not([data-z="2"]):not([data-z="3"]) circle.dot { display: none; }
+svg.hexed[data-z="2"] path.hex, svg.hexed[data-z="3"] path.hex { display: none; }
+svg path.hex { stroke: var(--panel); stroke-width: .4; }
+svg path.hex:hover { stroke: var(--fg); stroke-width: 1; }
+svg.atlas path.land, svg.atlas path.area { stroke-width: .5; }
+section.chart .map svg.atlas { height: auto; }
+svg circle.small { stroke: var(--panel); stroke-width: .6; }
+table.bars td.barcell { width: 55%; }
+table.bars .track { position: relative; height: .75rem; }
+table.bars .track.centred::before { content: ""; position: absolute; left: 50%; top: -.2rem; bottom: -.2rem; border-left: 1px solid var(--line-strong); }
+table.bars .fill { position: absolute; top: 0; bottom: 0; }
+.bar .gap { display: inline-block; width: 1rem; }
+table.ranking tr.fits td { background: color-mix(in srgb, #1a9850 14%, transparent); }
+table.ranking tr.tight td { background: color-mix(in srgb, #e6dc8c 30%, transparent); }
+table.ranking tr.no td { opacity: .45; }
 "#;
 
 pub fn urldecode(s: &str) -> String {

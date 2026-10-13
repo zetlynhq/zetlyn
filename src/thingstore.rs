@@ -849,6 +849,12 @@ impl ThingStore {
         serde_json::from_str(&counts).ok()
     }
 
+    /// The counts last made for a question, under whatever mark.
+    pub fn facet_cached_any(&self, question: &str) -> Option<(Vec<(String, u64)>, u64)> {
+        let counts: String = self.db.query_row("select counts from facet_cache where question = ?1", [question], |r| r.get(0)).ok()?;
+        serde_json::from_str(&counts).ok()
+    }
+
     pub fn keep_facet(&self, question: &str, mark: &str, counts: &(Vec<(String, u64)>, u64)) {
         if let Ok(text) = serde_json::to_string(counts) {
             let _ = self.db.execute(

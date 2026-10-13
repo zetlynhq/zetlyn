@@ -990,6 +990,17 @@ impl Tracker {
         if let Some(kept) = store.as_ref().and_then(|s| s.facet_cached(&question, &mark)) {
             return kept;
         }
+        // A source has run and the tracker's refresh, which counts these ahead, is still to come:
+        // the counts made last, until it has. Counted here instead, a reader waited up to a minute
+        // and a half for the CVE tracker's overview (2026-10-13).
+        if let Some(s) = &store {
+            let behind = s.meta("mark").is_some_and(|m| m != self.mark());
+            if behind {
+                if let Some(kept) = s.facet_cached_any(&question) {
+                    return kept;
+                }
+            }
+        }
         let counts = self.facet_counted(q, field, limit);
         if let Some(s) = &store {
             s.keep_facet(&question, &mark, &counts);

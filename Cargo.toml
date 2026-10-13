@@ -1,6 +1,6 @@
 [package]
 name = "zetlyn"
-version = "0.3.114"
+version = "0.3.115"
 edition = "2021"
 rust-version = "1.82"
 publish = false

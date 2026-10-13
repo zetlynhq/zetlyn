@@ -107,7 +107,7 @@ impl Fetcher {
             // A publisher that has not answered in thirty seconds is throttling, and the next
             // page is a better use of the time than this one.
             .timeout_global(Some(Duration::from_secs(30)))
-            .max_redirects(5)
+            .max_redirects(if guarded() { 0 } else { 5 })
             .build()
             .new_agent();
         let mut resolved = BTreeMap::new();
@@ -134,7 +134,7 @@ impl Fetcher {
         self.agent = ureq::Agent::config_builder()
             .user_agent(crate::sourcedecl::AGENT)
             .timeout_global(Some(Duration::from_secs(600)))
-            .max_redirects(5)
+            .max_redirects(if guarded() { 0 } else { 5 })
             .build()
             .new_agent();
         self
@@ -151,17 +151,38 @@ impl Fetcher {
     /// A 429 or a 503 slows the whole run down and then retries. Retrying at the old pace is what
     /// gives up at 455 things out of 2,684 and calls a perfectly good source broken.
     pub fn fetch(&self, url: &str) -> Result<(String, Option<String>), String> {
+        // On a server, each address asked and each one it redirects to is on the public internet:
+        // a source anybody may add is not a way to read the server's own network. The agent there
+        // follows no redirect itself; each is followed here, once it is checked.
+        let guarded = guarded();
+        let mut url = url.to_string();
+        let mut hops = 0usize;
+        if guarded {
+            crate::outbound::public_target(&url)?;
+        }
         let mut lost = 0usize;
         for attempt in 0..9 {
             let pause = self.pause.get();
             if attempt > 0 || !pause.is_zero() {
                 std::thread::sleep(pause.max(Duration::from_millis(200)));
             }
-            let mut request = self.agent.get(url);
+            let mut request = self.agent.get(&url);
             for (k, v) in &self.headers {
                 request = request.header(k.as_str(), v.as_str());
             }
             let throttled = match request.call() {
+                // Guarded, a redirect is answered here: where it leads checked, then asked.
+                Ok(response) if guarded && response.status().is_redirection() => {
+                    hops += 1;
+                    let to = response.headers().get("location").and_then(|v| v.to_str().ok()).ok_or_else(|| format!("{url}: a redirect that says not where"))?;
+                    let next = absolute(&url, to);
+                    if hops > 5 {
+                        return Err(format!("{url}: redirected more than five times"));
+                    }
+                    crate::outbound::public_target(&next)?;
+                    url = next;
+                    continue;
+                }
                 Ok(mut response) => {
                     let status = response.status().as_u16();
                     if status == 429 || status == 503 {
@@ -192,7 +213,7 @@ impl Fetcher {
                     lost += 1;
                     let wait = [2, 5, 15][lost - 1];
                     // Said, so a read that takes hours says why: the answer that did not come.
-                    eprintln!("  {}: {e}; asked again in {wait} s", without_query(url));
+                    eprintln!("  {}: {e}; asked again in {wait} s", without_query(&url));
                     std::thread::sleep(Duration::from_secs(wait));
                     false
                 }
@@ -200,7 +221,7 @@ impl Fetcher {
             };
             if throttled {
                 self.harder();
-                eprintln!("  {}: the source asks for less; {:.1} s between requests now", without_query(url), self.pause.get().as_secs_f64());
+                eprintln!("  {}: the source asks for less; {:.1} s between requests now", without_query(&url), self.pause.get().as_secs_f64());
             }
         }
         Err(format!("{url}: throttled, and the retries ran out"))
@@ -822,4 +843,63 @@ mod tests {
 /// An address without what follows `?`, where a key would be: what a message about it may say.
 fn without_query(url: &str) -> &str {
     url.split('?').next().unwrap_or(url)
+}
+
+thread_local! {
+    /// A test's own say on whether this thread is guarded, beside every other test's.
+    static GUARD_HERE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Whether this process reads on a server, where each address asked is checked first: in a cell,
+/// unless `ZETLYN_GUARD_OUTBOUND=0` says it reads sources on its own machine on purpose (a test of
+/// a cell), and anywhere `ZETLYN_GUARD_OUTBOUND` says so.
+pub fn guarded() -> bool {
+    if let Some(g) = GUARD_HERE.with(|g| g.get()) {
+        return g;
+    }
+    match std::env::var("ZETLYN_GUARD_OUTBOUND").as_deref() {
+        Ok("0") => false,
+        Ok(_) => true,
+        Err(_) => crate::usage::cell_dir().is_some(),
+    }
+}
+
+/// Where a redirect leads, whole: a `Location` may be a path, or an address without its scheme.
+fn absolute(base: &str, to: &str) -> String {
+    let to = to.trim();
+    if to.starts_with("http://") || to.starts_with("https://") {
+        return to.to_string();
+    }
+    let (scheme, rest) = base.split_once("://").unwrap_or(("https", base));
+    if let Some(r) = to.strip_prefix("//") {
+        return format!("{scheme}://{r}");
+    }
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if to.starts_with('/') {
+        return format!("{scheme}://{host}{to}");
+    }
+    let path = rest[host.len()..].split(['?', '#']).next().unwrap_or("");
+    let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+    format!("{scheme}://{host}{dir}/{to}")
+}
+
+#[cfg(test)]
+mod guard_tests {
+    #[test]
+    fn a_redirect_is_followed_to_where_it_says_whole() {
+        assert_eq!(super::absolute("https://a.example/x/y?q=1", "/z"), "https://a.example/z");
+        assert_eq!(super::absolute("https://a.example/x/y", "z"), "https://a.example/x/z");
+        assert_eq!(super::absolute("https://a.example/x", "//b.example/w"), "https://b.example/w");
+        assert_eq!(super::absolute("https://a.example/x", "http://c.example/"), "http://c.example/");
+    }
+
+    #[test]
+    fn guarded_a_source_on_the_server_s_own_network_is_not_read() {
+        super::GUARD_HERE.with(|g| g.set(Some(true)));
+        let f = super::Fetcher::new("test", &Default::default(), 0).unwrap();
+        let e = f.get("http://127.0.0.1:9/x").unwrap_err();
+        assert!(e.contains("not on the public internet"), "{e}");
+        assert!(crate::outbound::public_target("http://169.254.169.254/latest/meta-data").is_err());
+        super::GUARD_HERE.with(|g| g.set(None));
+    }
 }

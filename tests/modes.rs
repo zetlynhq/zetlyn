@@ -59,6 +59,8 @@ fn spawn(args: &[&str], env: &[(&str, String)], cwd: Option<&Path>, log: PathBuf
     for _ in 0..5 {
         let out = std::fs::File::create(&log).unwrap();
         let mut c = Command::new(env!("CARGO_BIN_EXE_zetlyn"));
+        // These worlds read sources served on this machine, which a cell on a server would refuse.
+        c.env("ZETLYN_GUARD_OUTBOUND", "0");
         c.args(&args).stdin(Stdio::null()).stdout(Stdio::from(out.try_clone().unwrap())).stderr(Stdio::from(out));
         if let Some(d) = cwd {
             c.current_dir(d);

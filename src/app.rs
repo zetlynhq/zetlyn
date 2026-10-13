@@ -2690,7 +2690,8 @@ impl App {
             p { a href={(serve::at("/new/")) (tracker) "?title=" (urlencode(&title))} { "← another address" } }
             h1 { "That is a web page" }
             p.about { code { (url) } " is a page for people to read in a browser. Zetlyn can read a list on it: every item one claim, what is in it the values." }
-            @let found = crate::fetch::Fetcher::new(crate::sourcedecl::AGENT, &BTreeMap::new(), 0).and_then(|f| f.get(&url)).map(|b| crate::web::candidates(&b)).unwrap_or_default();
+            // Asked only where it may be, as every address a person gives a hosted world is.
+            @let found = self.may_read(&url).and_then(|_| crate::fetch::Fetcher::new(crate::sourcedecl::AGENT, &BTreeMap::new(), 0)).and_then(|f| f.get(&url)).map(|b| crate::web::candidates(&b)).unwrap_or_default();
             @if found.is_empty() {
                 p { "No list was found on it. The address of a list works best: search results, a category, a page of new releases." }
             } @else {

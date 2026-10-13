@@ -53,6 +53,22 @@ pub fn allowed(url: &str, loopback_ok: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `url` is somewhere on the public internet, http or https: what a source on a server
+/// may be read from, and each place it redirects to. Plain http to a public address hides
+/// nothing of this machine; what is refused is an address of its own or of the network it is in.
+pub fn public_target(url: &str) -> Result<(), String> {
+    let refuse = |why: &str| Err(format!("{url}: {why}"));
+    let (scheme, rest) = match url.split_once("://") {
+        Some(p) => p,
+        None => return refuse("not an address"),
+    };
+    if scheme != "https" && scheme != "http" {
+        return refuse("only http and https");
+    }
+    let https = format!("https://{rest}");
+    allowed(&https, false)
+}
+
 /// Whether the place serving at `url` is on loopback itself.
 pub fn on_loopback(url: &str) -> bool {
     let host = url.split("://").nth(1).unwrap_or("").split(['/', ':', '?']).next().unwrap_or("");

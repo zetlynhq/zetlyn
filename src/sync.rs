@@ -713,9 +713,17 @@ pub fn run(root: &Path, url: &str, key: &str, take: Option<&str>, with_data: boo
             let _ = std::fs::remove_file(&file);
             return Err(e);
         }
+        let was_there = root.exists();
         let r = crate::world::import(&file, &root, None, None);
         let _ = std::fs::remove_file(&file);
-        r?;
+        if let Err(e) = r {
+            // What an import that stopped half way wrote is no world, and the next sync would take
+            // it for one: gone again, where there was nothing before it.
+            if !was_there {
+                let _ = std::fs::remove_dir_all(&root);
+            }
+            return Err(e);
+        }
         crate::world::set_top(&root.join(crate::account::WORKSPACE), "url", None)?;
         let _ = std::fs::remove_file(root.join(".zetlyn").join("instance"));
         // What both hold now is what both agree on: every run there is had here.

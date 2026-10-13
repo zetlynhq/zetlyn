@@ -591,6 +591,9 @@ pub fn export(dir: &Path, to: &Path) -> Result<usize, String> {
     let result = (|| {
         let file = create_private(&partial, 0o600)?;
         let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(file, flate2::Compression::default()));
+        // Plain files only: a copy of a store with holes in it would otherwise go in as a GNU sparse
+        // entry, which an importer of 0.3.109 and before refused (zetlyn.com, 2026-10-12).
+        tar.sparse(false);
         let mut n = 0usize;
         for path in files(dir)? {
             let rel = path.strip_prefix(dir).map_err(|e| e.to_string())?;
@@ -603,8 +606,29 @@ pub fn export(dir: &Path, to: &Path) -> Result<usize, String> {
             let inside = format!("world/{name}");
             if is_sqlite(&path) {
                 let copy = scratch.join(format!("{n}.db"));
-                let db = rusqlite::Connection::open(&path).map_err(|e| format!("{name}: {e}"))?;
-                db.execute("vacuum into ?1", rusqlite::params![copy.to_string_lossy()]).map_err(|e| format!("{name}: {e}"))?;
+                // A source's store is copied while no read of it writes: its read lock held for the
+                // copy, waited for where a read is going on. And once more where the copy failed: an
+                // export of zetlyn.com broke off three times at one store being written while it
+                // was copied (2026-10-12).
+                let _reading = path
+                    .parent()
+                    .map(|d| d.join(".reading"))
+                    .filter(|l| l.exists())
+                    .and_then(|l| std::fs::OpenOptions::new().write(true).open(l).ok())
+                    .filter(|f| f.lock().is_ok());
+                let copied = (0..2).find_map(|attempt| {
+                    let _ = std::fs::remove_file(&copy);
+                    let tried = rusqlite::Connection::open(&path).and_then(|db| {
+                        db.busy_timeout(std::time::Duration::from_secs(30))?;
+                        db.execute("vacuum into ?1", rusqlite::params![copy.to_string_lossy()])
+                    });
+                    match tried {
+                        Ok(_) => Some(Ok(())),
+                        Err(e) if attempt == 1 => Some(Err(format!("{name}: {e}"))),
+                        Err(_) => None,
+                    }
+                });
+                copied.unwrap_or_else(|| Err(format!("{name}: not copied")))?;
                 tar.append_path_with_name(&copy, &inside).map_err(|e| format!("{name}: {e}"))?;
                 let _ = std::fs::remove_file(&copy);
             } else {
@@ -1025,7 +1049,8 @@ pub fn import(file: &Path, dir: &Path, url: Option<&str>, owner: Option<&str>) -
         // Files and directories, nothing else: a link in an archive points wherever its maker liked,
         // and the next file written "inside" it lands there.
         let kind = entry.header().entry_type();
-        if !kind.is_file() && !kind.is_dir() {
+        // A file with holes (a copy of a store SQLite left gaps in) is a file, packed sparse.
+        if !kind.is_file() && !kind.is_dir() && !kind.is_gnu_sparse() {
             return Err(format!("{}: {} is a link or a device, which no export holds", file.display(), path.display()));
         }
         bytes += entry.size();
@@ -1082,7 +1107,8 @@ pub fn check_export(file: &Path) -> Result<usize, String> {
             continue;
         }
         let kind = entry.header().entry_type();
-        if !kind.is_file() && !kind.is_dir() {
+        // A file with holes (a copy of a store SQLite left gaps in) is a file, packed sparse.
+        if !kind.is_file() && !kind.is_dir() && !kind.is_gnu_sparse() {
             return Err(format!("{} is a link or a device, which no export holds", path.display()));
         }
         if path == Path::new("world").join(crate::account::WORKSPACE) {

@@ -893,6 +893,28 @@ pub fn frame() -> Frame {
     FRAME.with(|f| f.borrow().clone())
 }
 
+/// What a link to the page says where it is shared, in a chat or a post: its name, a sentence of
+/// what it holds, and its address. Set by the page while it is drawn; taken by the shell, so it
+/// is said of that page only.
+#[derive(Clone, Default)]
+pub struct Preview {
+    pub title: String,
+    pub description: String,
+    pub url: String,
+}
+
+thread_local! {
+    static PREVIEW: std::cell::RefCell<Option<Preview>> = const { std::cell::RefCell::new(None) };
+}
+
+pub fn preview(p: Preview) {
+    PREVIEW.with(|x| *x.borrow_mut() = Some(p));
+}
+
+fn take_preview() -> Option<Preview> {
+    PREVIEW.with(|x| x.borrow_mut().take())
+}
+
 const MARK: &str = include_str!("mark.b64");
 const FAVICON: &str = include_str!("favicon.b64");
 
@@ -981,6 +1003,18 @@ pub fn shell(title: &str, body: Markup) -> String {
                 // As the website does: a theme already chosen is applied before the first paint.
                 script { (maud::PreEscaped(THEME_EARLY)) }
                 title { (title) @if title != "Zetlyn" { " · Zetlyn" } }
+                // What a shared link to it says: in a chat, a post, a search result.
+                @if let Some(p) = take_preview() {
+                    meta name="description" content=(p.description);
+                    meta property="og:type" content="website";
+                    meta property="og:site_name" content="Zetlyn";
+                    meta property="og:title" content=(p.title);
+                    meta property="og:description" content=(p.description);
+                    @if !p.url.is_empty() { meta property="og:url" content=(p.url); link rel="canonical" href=(p.url); }
+                    meta name="twitter:card" content="summary";
+                    meta name="twitter:title" content=(p.title);
+                    meta name="twitter:description" content=(p.description);
+                }
                 link rel="icon" type="image/png" href={"data:image/png;base64," (FAVICON)};
                 link rel="stylesheet" href={(at("/zetlyn.css")) "?v=" (env!("CARGO_PKG_VERSION"))};
             }

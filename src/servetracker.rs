@@ -537,6 +537,11 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
             @if !site.title.is_empty() { " · " (site.title) }
         }
     };
+    crate::serve::preview(crate::serve::Preview {
+        title: d.title.clone(),
+        description: format!("{}{}{} things from {}, each with what every source says of it.", d.about, if d.about.is_empty() { "" } else { " " }, thousands(things_n), scope.members.iter().map(|m| m.title()).collect::<Vec<_>>().join(", ")),
+        url: page_url("/"),
+    });
     shell(&d.title, body)
 }
 
@@ -911,7 +916,27 @@ fn entry_page(scope: &Tracker, scheme: &str, value: &str, operator: bool, said: 
         @if shaped { details.claims-all { summary { "Every claim, by kind" } (claims_by_kind) } }
         @if !shaped { (claims_by_kind) }
     };
+    // Shared, it says its marks and what it is first said to be, each with who says so.
+    let said: Vec<String> = badges
+        .iter()
+        .map(|b| b.name.clone())
+        .chain(summary_rows.iter().take(4).filter_map(|(name, f)| {
+            let (member, words) = f.by.iter().next()?;
+            let shown: Vec<String> = f.means.get(member).unwrap_or(words).iter().take(2).map(|w| crate::display::shown(d, name, yes_no(w))).collect();
+            Some(format!("{}: {} ({})", crate::display::label(d, name), shown.join(", "), title_of(scope, member)))
+        }))
+        .collect();
+    crate::serve::preview(crate::serve::Preview {
+        title: format!("{title} · {}", d.title),
+        description: format!("{}{}{} sources.", said.join(" · "), if said.is_empty() { "" } else { " · " }, entry.members().len()),
+        url: page_url(&format!("/thing/{}/{}", urlencode(scheme), urlencode(value))),
+    });
     Some(shell(&title, body))
+}
+
+/// This page's address, whole, as the request came to it.
+fn page_url(path: &str) -> String {
+    ORIGIN.with(|o| o.borrow().clone()).map(|o| format!("{o}{}", at(path))).unwrap_or_default()
 }
 
 /// The source's own definition of its own word, which arrived with its `describe`.
@@ -2457,7 +2482,15 @@ impl TrackerSite {
                     if parts.len() == 1 {
                         crate::charts::entity_index(&ctx, &p, &at(&url)).map(|body| shell(&scope.decl.title, body))
                     } else {
-                        crate::charts::entity_page(&ctx, &parts[1], &p, &at(&url)).map(|(name, body)| shell(&format!("{name} · {}", scope.decl.title), body))
+                        crate::charts::entity_page(&ctx, &parts[1], &p, &at(&url)).map(|(name, body)| {
+                            let values: Vec<String> = scope.decl.entity.iter().flat_map(|e| e.values.iter()).map(|v| crate::display::label(&scope.decl, v)).collect();
+                            crate::serve::preview(crate::serve::Preview {
+                                title: format!("{name} · {}", scope.decl.title),
+                                description: format!("{} of {name}, every {}, as {} each say it, and where they differ.", values.join(", "), scope.decl.entity.as_ref().map(|e| crate::display::label(&scope.decl, &e.time).to_lowercase()).unwrap_or_default(), scope.members.iter().map(|m| m.title()).collect::<Vec<_>>().join(", ")),
+                                url: page_url(&format!("/entity/{}", urlencode(&parts[1]))),
+                            });
+                            shell(&format!("{name} · {}", scope.decl.title), body)
+                        })
                     }
                 });
                 match page {

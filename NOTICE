@@ -18,3 +18,10 @@ argument for being copied is its licence should not be a project whose licence g
 
 The country shapes in src/geo/countries.json.gz are Natural Earth's Admin 0 countries at 1:50m
 (naturalearthdata.com), in the public domain, cut down to their codes, names and outlines.
+The maps in src/geo/world.svg and src/geo/europe.svg are drawn from the same Natural Earth
+countries, at 1:110m and 1:50m, with mapshaper.
+
+The fonts in src/fonts, which the preview pictures of pages are drawn with, are Inter (copyright
+2016 The Inter Project Authors) and IBM Plex Mono (copyright 2017 IBM Corp.), both under the SIL
+Open Font License 1.1, whose text is beside them: src/fonts/Inter-LICENSE.txt and
+src/fonts/IBMPlexMono-OFL.txt.

@@ -2199,6 +2199,27 @@ fn sparkline(points: &[(String, f64)]) -> Markup {
 
 /// An entity's page: what it is now on each value, with the time before and its rank, every
 /// value over time, and every time as a row.
+/// An entity's name and what its page leads with, as words: each value's latest, its time and who
+/// says it. What a picture of the page shows where a link to it is shared.
+pub fn entity_said(ctx: &Ctx, code: &str) -> Option<(String, Vec<(String, String, String)>)> {
+    let e = ctx.decl.entity.as_ref()?;
+    let values: Vec<String> = if e.values.is_empty() { ctx.decl.view.columns.iter().filter(|c| **c != e.property && **c != e.time).cloned().collect() } else { e.values.clone() };
+    let code = ctx.entity_code(&e.property, code);
+    let g = grid(ctx, &e.property, &e.time, &values);
+    if !g.at.keys().any(|(x, _)| *x == code) {
+        return None;
+    }
+    let rows = values
+        .iter()
+        .filter_map(|v| {
+            let h = headline(ctx, &g, &code, v)?;
+            let who = h.said.iter().map(|(s, _)| ctx.source_title(s)).collect::<Vec<_>>().join(", ");
+            Some((format!("{} · {}", ctx.label(v), ctx.time_word(&e.time, &h.time)), ctx.fmt(v, h.value), who))
+        })
+        .collect();
+    Some((ctx.entity_name(&e.property, &code), rows))
+}
+
 pub fn entity_page(ctx: &Ctx, code: &str, params: &BTreeMap<String, String>, here: &str) -> Option<(String, Markup)> {
     let e = ctx.decl.entity.as_ref()?;
     let values: Vec<String> = if e.values.is_empty() { ctx.decl.view.columns.iter().filter(|c| **c != e.property && **c != e.time).cloned().collect() } else { e.values.clone() };

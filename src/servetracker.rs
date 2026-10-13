@@ -541,6 +541,7 @@ fn overview(scope: &Tracker, url: &str, v: &Viewer, site: &Site) -> String {
         title: d.title.clone(),
         description: format!("{}{}{} things from {}, each with what every source says of it.", d.about, if d.about.is_empty() { "" } else { " " }, thousands(things_n), scope.members.iter().map(|m| m.title()).collect::<Vec<_>>().join(", ")),
         url: page_url("/"),
+        image: page_url("/preview.png"),
     });
     shell(&d.title, body)
 }
@@ -930,8 +931,80 @@ fn entry_page(scope: &Tracker, scheme: &str, value: &str, operator: bool, said: 
         title: format!("{title} · {}", d.title),
         description: format!("{}{}{} sources.", said.join(" · "), if said.is_empty() { "" } else { " · " }, entry.members().len()),
         url: page_url(&format!("/thing/{}/{}", urlencode(scheme), urlencode(value))),
+        image: page_url(&format!("/preview/thing/{}/{}.png", urlencode(scheme), urlencode(value))),
     });
     Some(shell(&title, body))
+}
+
+/// The picture of a page that a shared link shows: `/preview.png` the overview,
+/// `/preview/thing/<scheme>/<value>.png` a thing, `/preview/entity/<code>.png` an entity. Drawn once
+/// for what the store holds, and kept.
+fn preview_png(scope: &Tracker, parts: &[String]) -> Option<Vec<u8>> {
+    let d = &scope.decl;
+    let sources = scope.members.len();
+    let standing = scope.standing();
+    let strip = |s: &str| s.trim_end_matches(".png").to_string();
+    match parts {
+        [p] if p == "preview.png" => crate::ogimage::kept(&scope.dir, &standing, "overview", || {
+            let store = crate::thingstore::ThingStore::open(&scope.dir).ok()?;
+            let c = store.coverage_kept(&standing);
+            let by = c["by_sources"].as_object().cloned().unwrap_or_default();
+            let several: i64 = by.iter().filter(|(n, _)| n.parse::<i64>().unwrap_or(0) > 1).map(|(_, v)| v.as_i64().unwrap_or(0)).sum();
+            Some(crate::ogimage::Card {
+                overline: format!("Tracker · {}", plural(sources, "source")),
+                title: d.title.clone(),
+                badges: Vec::new(),
+                rows: vec![
+                    ("Things".into(), thousands(c["things"].as_i64().unwrap_or(0)), "the sources joined".into()),
+                    ("Named by two or more".into(), thousands(several), "compared".into()),
+                    ("Conflicts".into(), thousands(c["conflicts"].as_i64().unwrap_or(0)), "where they disagree".into()),
+                ],
+                footer: d.about.clone(),
+            })
+        }),
+        [p, kind, scheme, value] if p == "preview" && kind == "thing" => {
+            let value = strip(value);
+            crate::ogimage::kept(&scope.dir, &standing, &format!("thing|{scheme}|{value}"), || {
+                let entry = scope.entry(scheme, &value)?;
+                let badges = d.thing.badges.iter().filter(|b| step_holds(&entry, &b.when).is_some()).map(|b| (b.name.clone(), b.tone == "hot")).collect();
+                let rows = d
+                    .thing
+                    .summary
+                    .iter()
+                    .filter_map(|p| entry.fields.get(p).map(|f| (p, f)))
+                    .take(4)
+                    .filter_map(|(name, f)| {
+                        let (member, words) = f.by.iter().next()?;
+                        let shown: Vec<String> = f.means.get(member).unwrap_or(words).iter().take(2).map(|w| crate::display::shown(d, name, yes_no(w))).collect();
+                        Some((crate::display::label(d, name), shown.join(", "), title_of(scope, member)))
+                    })
+                    .collect();
+                Some(crate::ogimage::Card {
+                    overline: d.title.clone(),
+                    title: scope.title_of(&entry),
+                    badges,
+                    rows,
+                    footer: format!("{} · what each says of it, and where they differ", plural(entry.members().len(), "source")),
+                })
+            })
+        }
+        [p, kind, code] if p == "preview" && kind == "entity" => {
+            let code = strip(code);
+            crate::ogimage::kept(&scope.dir, &standing, &format!("entity|{code}"), || {
+                let store = crate::thingstore::ThingStore::open(&scope.dir).ok()?;
+                let ctx = chart_context(scope, &store);
+                let (name, rows) = crate::charts::entity_said(&ctx, &code)?;
+                Some(crate::ogimage::Card {
+                    overline: d.title.clone(),
+                    title: name,
+                    badges: Vec::new(),
+                    rows,
+                    footer: format!("{} · every {} side by side", plural(sources, "source"), d.entity.as_ref().map(|e| crate::display::label(d, &e.time).to_lowercase()).unwrap_or_default()),
+                })
+            })
+        }
+        _ => None,
+    }
 }
 
 /// This page's address, whole, as the request came to it.
@@ -1967,6 +2040,22 @@ impl TrackerSite {
         // (body, content type, extra header)
         // A page that says "no such claim" under a 200 is telling a person one thing and
         // every machine another. 402 is the paywall, 404 is nothing there.
+        // A picture of a page for where a link to it is shared: the overview, a thing, an entity.
+        if !scope.private() && path.starts_with("/preview") && path.ends_with(".png") {
+            match preview_png(scope, &parts) {
+                Some(png) => {
+                    let mut response = tiny_http::Response::from_data(png).with_status_code(200);
+                    for (n, v) in [("Content-Type", "image/png"), ("Cache-Control", "public, max-age=3600")] {
+                        if let Ok(h) = tiny_http::Header::from_bytes(n.as_bytes(), v.as_bytes()) {
+                            response = response.with_header(h);
+                        }
+                    }
+                    let _ = request.respond(response);
+                }
+                None => respond(request, 404, "no such picture".into(), "text/plain; charset=utf-8", None, "drawn"),
+            }
+            return Ok(());
+        }
         let mut status = 200u16;
         let mut missing = false;
         let (body, kind, extra): (String, &str, Option<(String, String)>) = match path.as_str() {
@@ -2488,6 +2577,7 @@ impl TrackerSite {
                                 title: format!("{name} · {}", scope.decl.title),
                                 description: format!("{} of {name}, every {}, as {} each say it, and where they differ.", values.join(", "), scope.decl.entity.as_ref().map(|e| crate::display::label(&scope.decl, &e.time).to_lowercase()).unwrap_or_default(), scope.members.iter().map(|m| m.title()).collect::<Vec<_>>().join(", ")),
                                 url: page_url(&format!("/entity/{}", urlencode(&parts[1]))),
+                                image: page_url(&format!("/preview/entity/{}.png", urlencode(&parts[1]))),
                             });
                             shell(&format!("{name} · {}", scope.decl.title), body)
                         })

@@ -818,6 +818,13 @@ impl Tracker {
         if template.is_empty() {
             return e.title.clone();
         }
+        // The store made it from every word each source said, one by one; a thing assembled for a
+        // page holds a list of names as one line, and finds no name in Latin letters in it.
+        if let Some(k) = &e.key {
+            if let Some((t, _, _)) = crate::thingstore::ThingStore::open(&self.dir).ok().and_then(|s| s.named(&crate::schemes::key(&k.scheme, &k.value))) {
+                return t;
+            }
+        }
         let order: Vec<&str> = self.members.iter().map(|m| m.name()).collect();
         let said = |p: &str| -> Vec<String> {
             e.fields.get(p).map(|f| order.iter().filter_map(|m| f.means.get(*m).or_else(|| f.by.get(*m))).flatten().cloned().collect()).unwrap_or_default()

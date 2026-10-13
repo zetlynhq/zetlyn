@@ -901,6 +901,8 @@ pub struct Preview {
     pub title: String,
     pub description: String,
     pub url: String,
+    /// A picture of it, 1200 by 630, where it has one.
+    pub image: String,
 }
 
 thread_local! {
@@ -1011,7 +1013,13 @@ pub fn shell(title: &str, body: Markup) -> String {
                     meta property="og:title" content=(p.title);
                     meta property="og:description" content=(p.description);
                     @if !p.url.is_empty() { meta property="og:url" content=(p.url); link rel="canonical" href=(p.url); }
-                    meta name="twitter:card" content="summary";
+                    @if !p.image.is_empty() {
+                        meta property="og:image" content=(p.image);
+                        meta property="og:image:width" content="1200";
+                        meta property="og:image:height" content="630";
+                        meta name="twitter:image" content=(p.image);
+                    }
+                    meta name="twitter:card" content=(if p.image.is_empty() { "summary" } else { "summary_large_image" });
                     meta name="twitter:title" content=(p.title);
                     meta name="twitter:description" content=(p.description);
                 }

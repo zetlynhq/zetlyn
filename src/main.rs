@@ -22,6 +22,7 @@ mod charts;
 mod display;
 mod warm;
 mod memory;
+mod ogimage;
 mod geo;
 mod fetch;
 mod grant;

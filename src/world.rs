@@ -600,7 +600,9 @@ pub fn export(dir: &Path, to: &Path) -> Result<usize, String> {
             let name = rel.to_string_lossy().replace('\\', "/");
             if name.ends_with("-wal") || name.ends_with("-shm") || name.ends_with("-journal") || name.ends_with(".arriving") || name.ends_with(".partial")
                 // An upload waiting to be imported, or an export waiting to be fetched, is not part of it.
-                || name.starts_with("incoming/") || name.starts_with(".zetlyn/incoming/") || name.starts_with(".zetlyn/exports/") {
+                || name.starts_with("incoming/") || name.starts_with(".zetlyn/incoming/") || name.starts_with(".zetlyn/exports/")
+                // Drawn again from what is exported: a tracker's preview pictures, and its ask to draw.
+                || name.contains("/.previews/") || name.ends_with("/.warm") {
                 continue;
             }
             let inside = format!("world/{name}");

@@ -47,6 +47,9 @@ ring = "0.17"
 base64 = "0.22"
 # A source that is a web page: its items by CSS selector. html5ever underneath, as browsers parse.
 scraper = "0.23"
+# A preview of a page as a picture, for where a shared link shows one: SVG drawn to PNG, pure Rust,
+# with the fonts it needs carried in the binary and none read from the system.
+resvg = { version = "0.48", default-features = false, features = ["text"] }
 
 [profile.release]
 strip = true

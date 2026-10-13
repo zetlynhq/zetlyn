@@ -154,6 +154,9 @@ impl Fetcher {
         // On a server, each address asked and each one it redirects to is on the public internet:
         // a source anybody may add is not a way to read the server's own network. The agent there
         // follows no redirect itself; each is followed here, once it is checked.
+        if let Some(body) = PRIMED.with(|p| p.borrow_mut().remove(url)) {
+            return Ok((body, None));
+        }
         let guarded = guarded();
         let mut url = url.to_string();
         let mut hops = 0usize;
@@ -865,7 +868,7 @@ pub fn guarded() -> bool {
 }
 
 /// Where a redirect leads, whole: a `Location` may be a path, or an address without its scheme.
-fn absolute(base: &str, to: &str) -> String {
+pub fn absolute(base: &str, to: &str) -> String {
     let to = to.trim();
     if to.starts_with("http://") || to.starts_with("https://") {
         return to.to_string();
@@ -902,4 +905,28 @@ mod guard_tests {
         assert!(crate::outbound::public_target("http://169.254.169.254/latest/meta-data").is_err());
         super::GUARD_HERE.with(|g| g.set(None));
     }
+}
+
+/// What `f` reads, read on this thread as on a server, wherever it runs: every address and every
+/// redirect checked first. For a link somebody pasted.
+pub fn guarding<T>(f: impl FnOnce() -> T) -> T {
+    let before = GUARD_HERE.with(|g| g.replace(Some(true)));
+    let out = f();
+    GUARD_HERE.with(|g| g.set(before));
+    out
+}
+
+thread_local! {
+    /// Answers already in hand, by address, each taken once by the next request for it.
+    static PRIMED: std::cell::RefCell<BTreeMap<String, String>> = const { std::cell::RefCell::new(BTreeMap::new()) };
+}
+
+/// What `f` reads, with what `url` answered a moment ago given in place of asking it again: a
+/// source proposed from a page and read at once asks the page twice otherwise, and a site that
+/// takes that for a crawler made a preview wait a minute.
+pub fn primed<T>(url: &str, body: &str, f: impl FnOnce() -> T) -> T {
+    PRIMED.with(|p| p.borrow_mut().insert(url.to_string(), body.to_string()));
+    let out = f();
+    PRIMED.with(|p| p.borrow_mut().remove(url));
+    out
 }

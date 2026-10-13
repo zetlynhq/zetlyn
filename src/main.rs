@@ -23,6 +23,7 @@ mod display;
 mod warm;
 mod memory;
 mod ogimage;
+mod watchlink;
 mod geo;
 mod fetch;
 mod grant;

@@ -707,7 +707,12 @@ pub fn propose_url(
 ) -> Result<String, String> {
     let f = crate::fetch::Fetcher::new(crate::sourcedecl::AGENT, &BTreeMap::new(), 0)?;
     let body = f.get(url)?;
+    propose_body(url, &body, dir, name, kind)
+}
 
+/// As `propose_url`, from what the address already answered.
+pub fn propose_body(url: &str, body: &str, dir: &Path, name: Option<&str>, kind: Option<&str>) -> Result<String, String> {
+    let body = body.to_string();
     // The directory is made once the shape is known. Refusing a JSON API after making it
     // leaves an empty source directory that every later update trips over.
     // A web page is not a feed because both begin with `<`: a page someone reads in a browser is
@@ -970,6 +975,16 @@ mod web_tests {
 /// fields as the columns of a table, and from those the identifier, the title, the date and the
 /// types, the same as for a spreadsheet. Paging where the page links its own second page.
 pub fn propose_web(url: &str, body: &str, dir: &Path, name: Option<&str>, pick: usize) -> Result<String, String> {
+    propose_list(url, body, dir, name, pick, false)
+}
+
+/// The list on this page and on it alone, every update: what a person watching a page wants to
+/// hear about, and not the pages behind it.
+pub fn propose_page(url: &str, body: &str, dir: &Path, name: Option<&str>, pick: usize) -> Result<String, String> {
+    propose_list(url, body, dir, name, pick, true)
+}
+
+fn propose_list(url: &str, body: &str, dir: &Path, name: Option<&str>, pick: usize, one_page: bool) -> Result<String, String> {
     let found = crate::web::candidates(body);
     let c = found.get(pick).ok_or_else(|| format!("{WEB_PAGE}[]"))?;
     let fields: BTreeMap<String, String> = c.fields.iter().map(|(n, s, _)| (n.clone(), s.clone())).collect();
@@ -1005,7 +1020,7 @@ pub fn propose_web(url: &str, body: &str, dir: &Path, name: Option<&str>, pick: 
             .map(|c| c.name.clone());
     }
     let mut fetch = json!({ "type": "web", "url": url, "items": c.items, "fields": fields });
-    if let Some(param) = crate::web::paging_parameter(body, url) {
+    if let Some(param) = crate::web::paging_parameter(body, url).filter(|_| !one_page) {
         fetch["page"] = json!({ "offset": param, "by": "page", "max": rows.len().max(1) });
         fetch["top"] = json!(1000);
     }

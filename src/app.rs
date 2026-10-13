@@ -1165,6 +1165,12 @@ impl App {
                 let _ = std::fs::write(dir.join(DRAFT), format!("# A topic with no source yet.\ntitle: {}\n", serde_json::to_string(&title).unwrap_or_default()));
                 return redirect(request, &serve::at(&format!("/new/{slug}?title={}", urlencode(&title))));
             }
+            // A link brought from zetlyn.com/watch: a topic named after it, its address filled in.
+            (false, ["new"]) if query.contains_key("url") => {
+                let title = query.get("title").map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).unwrap_or_else(|| "My tracker".to_string());
+                let slug = self.free(&self.trackers(), &crate::guess::slug(&title));
+                return redirect(request, &serve::at(&format!("/new/{slug}?title={}&url={}", urlencode(&title), urlencode(&query["url"]))));
+            }
             (true, ["example"]) => {
                 let slug = self.free(&self.trackers(), &crate::guess::slug(EXAMPLE_TITLE));
                 return redirect(
@@ -6171,6 +6177,12 @@ fn hosting_worker(server: &tiny_http::Server, dir: &Path, addr: &str, jobs: &Sha
             hosting_root(request, dir, &accounts, &parts[1..], "");
             continue;
         }
+        // A link anybody pastes, and what Zetlyn reads on it (watchlink.rs).
+        if first == "watch" && crate::ops::is_control(dir) {
+            serve::mount("");
+            watch_page(request, dir, &accounts, &parts[1..]);
+            continue;
+        }
         serve::mount("");
         respond(request, 404, "text/html; charset=utf-8", &page("Not here", html! { h1 { "Not here" } p { a href="/hub/" { "Every tracker on the hub" } } }));
     }
@@ -7105,6 +7117,107 @@ fn signed_in(request: &tiny_http::Request, accounts: &crate::account::Accounts) 
 /// Every public tracker on the machine as a link: its title, and where it answers.
 fn public_links(dir: &Path) -> Vec<(String, String)> {
     public_trackers(dir).into_iter().map(|(org, name, decl)| (decl.title, format!("/{org}/trackers/{name}/"))).collect()
+}
+
+/// zetlyn.com/watch: a link pasted, what Zetlyn reads on it, and how to have it read for good,
+/// in a world of one's own here or with Zetlyn on one's own machine. Nothing of it is kept.
+fn watch_page(request: tiny_http::Request, dir: &Path, accounts: &crate::account::Accounts, rest: &[String]) {
+    let header = |name: &'static str| request.headers().iter().find(|h| h.field.equiv(name)).map(|h| h.value.as_str().to_string());
+    let from = header("X-Forwarded-For").map(|v| v.split(',').next().unwrap_or("").trim().to_string()).unwrap_or_else(|| request.remote_addr().map(|a| a.ip().to_string()).unwrap_or_default());
+    let session = header("Cookie").and_then(|c| c.split(';').filter_map(|p| p.trim().split_once('=')).find(|(k, _)| *k == "zs").map(|(_, v)| v.to_string()));
+    let who = session.as_deref().and_then(|s| accounts.by_session(s, crate::account::Kind::Member)).map(|a| a.email);
+    // The worlds whoever is signed in may add a source to.
+    let worlds: Vec<(String, String)> = who
+        .as_deref()
+        .map(|e| Membership::load(dir).orgs_of(e).into_iter().filter(|(_, role)| role == "owner" || role == "editor").map(|(org, _)| {
+            let t = crate::account::Site::load(&dir.join("orgs").join(&org)).title;
+            (if t.is_empty() { org.clone() } else { t }, org)
+        }).collect())
+        .unwrap_or_default();
+    serve::frame_site("App");
+    serve::frame_home("Account", "/account/", public_links(dir));
+    serve::frame_current(None);
+    serve::frame_hosted(None, Some(who.clone()));
+    serve::frame_area("app", None, who.as_deref().map(|e| orgs_links(dir, e)).unwrap_or_default());
+    serve::frame_side("");
+    serve::frame_section(None, Vec::new());
+    serve::frame_app(None, None);
+    let query = serve::params(request.url());
+    let url = query.get("url").cloned().unwrap_or_default();
+    let pick: usize = query.get("pick").and_then(|p| p.parse().ok()).unwrap_or(0);
+    let paste = |url: &str, said: Option<&str>| {
+        html! {
+            form.watch-paste.bar method="get" action="/watch/try" {
+                input type="url" name="url" value=(url) placeholder="https://… a page with a list, a feed or a table" required autofocus;
+                button.primary type="submit" { "Read it" }
+            }
+            @if let Some(s) = said { div.note { (s) } }
+        }
+    };
+    let html_kind = "text/html; charset=utf-8";
+    match rest {
+        [] => respond(request, 200, html_kind, &page("Watch a link", html! {
+            h1 { "Watch a link" }
+            p.lede { "Paste the address of a list, a feed or a table. Zetlyn reads it once and shows you what it found: every item an entry, what is in it the values." }
+            (paste("", None))
+            p.dim { "Nothing is kept. To have it read again and again, take it into a world of your own." }
+        })),
+        [t] if t == "try" => {
+            let body = match crate::watchlink::preview(dir, &from, &url, pick) {
+                Err(e) => html! { h1 { "Watch a link" } (paste(&url, Some(&e))) },
+                Ok(r) => {
+                    let here = format!("/watch/try?url={}&pick={}", urlencode(&r.url), r.pick);
+                    let command = format!("zetlyn source new --from '{}'{} --at sources/{}", r.url.replace('\'', "%27"), if r.pick > 0 { format!(" --pick {}", r.pick) } else { String::new() }, r.name);
+                    html! {
+                        p.overline { (r.what) }
+                        h1 { (r.title) }
+                        p.dim { a href=(r.url) rel="nofollow noopener" { (r.url) } " · " (r.count) " items read" }
+                        @if r.lists.len() > 1 {
+                            p.bar { span.dim { "Lists on the page: " }
+                                @for (i, n) in r.lists.iter().enumerate().take(8) {
+                                    a.chip.on[i == r.pick] rel="nofollow" href={"/watch/try?url=" (urlencode(&r.url)) "&pick=" (i)} { (n) " items" } " "
+                                }
+                            }
+                        }
+                        div.scroll { table {
+                            thead { tr { th { "Item" } @for c in &r.columns { th { (c.replace('_', " ")) } } } }
+                            tbody { @for (title, values) in &r.rows { tr { td { (title) } @for v in values { td { (v) } } } } }
+                        } }
+                        section.watch-keep {
+                            h2 { "Keep it watched" }
+                            p { "As a source, Zetlyn reads it again on a schedule, keeps what each item said and since when, and tells you what is new, what changed and what is gone." }
+                            h3 { "In a world of yours on zetlyn.com" }
+                            @if !worlds.is_empty() {
+                                p.bar { @for (title, org) in &worlds {
+                                    a.button.primary href={"/" (org) "/new?title=" (urlencode(&r.title)) "&url=" (urlencode(&r.url))} { "Add to " (title) } " "
+                                } }
+                            } @else if who.is_some() {
+                                p { "A world of your own here is " a href="/hosting" { "Zetlyn Managed" } "." }
+                                p.bar { a.button.primary href="/order" { "Get Zetlyn Managed" } }
+                            } @else {
+                                p { "A world of your own here is " a href="/hosting" { "Zetlyn Managed" } ". Have one already? Sign in, and add it there." }
+                                p.bar {
+                                    a.button.primary href={"/account/signin?next=" (urlencode(&here))} { "Sign in" } " "
+                                    a.button href="/order" { "Get Zetlyn Managed" }
+                                }
+                            }
+                            h3 { "With Zetlyn on your own machine" }
+                            p { "Zetlyn is free and open source. In your world's folder:" }
+                            pre { code { (command) } }
+                            p.dim { "Or take " a href={"/watch/source.yaml?url=" (urlencode(&r.url)) "&pick=" (r.pick)} download="source.yaml" rel="nofollow" { "its source.yaml" } " and put it in sources/" (r.name) "/. "
+                                a href="https://zetlyn.com/docs/getting_started#install" { "Installing Zetlyn" } }
+                        }
+                    }
+                }
+            };
+            respond(request, 200, html_kind, &page("Watch a link", body))
+        }
+        [f] if f == "source.yaml" => match crate::watchlink::preview(dir, &from, &url, pick) {
+            Ok(r) => respond(request, 200, "text/yaml; charset=utf-8", &r.decl),
+            Err(e) => respond(request, 400, "text/plain; charset=utf-8", &e),
+        },
+        _ => respond(request, 404, html_kind, &page("Not here", html! { h1 { "Not here" } })),
+    }
 }
 
 /// The organisations somebody belongs to, by their titles, for the app's sidebar.

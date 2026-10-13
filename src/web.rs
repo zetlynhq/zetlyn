@@ -538,7 +538,7 @@ pub fn candidates(html: &str) -> Vec<Candidate> {
         for (_, spec, _) in &fields {
             let v = values(spec);
             let distinct: BTreeSet<&String> = v.iter().collect();
-            if distinct.len() * 2 >= sample.len().max(2) {
+            if distinct.len() * 2 >= sample.len().max(2) && v.len() * 4 >= sample.len() * 3 {
                 varying += 1;
             }
             if !v.is_empty() && distinct.len() == v.len() && v.len() == sample.len() && v.iter().all(|x| x.len() <= 64) {
@@ -581,5 +581,16 @@ mod found {
         let names: Vec<&str> = best.fields.iter().map(|(n, ..)| n.as_str()).collect();
         assert!(names.contains(&"title") && names.contains(&"search_released") && names.contains(&"data_ds_appid"), "{names:?}");
         assert_eq!(super::paging_parameter(&html, "https://store.steampowered.com/search/?tags=492").as_deref(), Some("page"));
+    }
+
+    #[test]
+    fn rows_that_alternate_with_others_are_not_the_list() {
+        let mut html = String::from("<html><body><table>");
+        for i in 1..=12 {
+            html.push_str(&format!(r#"<tr class="item story"><td class="titleline"><span class="title">Story {i}</span><span class="site">s{i}.example</span></td></tr>"#));
+            html.push_str(&format!(r#"<tr class="item"><td><span class="score">{i} points</span><span class="age">{i} hours ago</span></td></tr>"#));
+        }
+        html.push_str("</table></body></html>");
+        assert_eq!(super::candidates(&html)[0].items, "td.titleline", "the stories, not the rows half of which are something else");
     }
 }

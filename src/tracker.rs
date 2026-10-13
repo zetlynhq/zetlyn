@@ -2334,6 +2334,26 @@ impl Tracker {
         // hear the same answer: the first part writes the new shapes, and the rest would otherwise
         // take everything that source says for news.
         let shapes_before = store.meta("shapes");
+        // Every row written again: the charts' index made after, in one pass, and not kept up a row
+        // at a time. Made again however the parts end.
+        store.without_said_index()?;
+        let parts = self.refresh_parts(store, keys_in, claims_in, shapes_before, quiet, &mut total);
+        let made = store.with_said_index();
+        parts?;
+        made?;
+        Ok(total)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn refresh_parts(
+        &self,
+        store: &mut crate::thingstore::ThingStore,
+        keys_in: Vec<BTreeSet<String>>,
+        claims_in: Vec<Vec<(usize, String)>>,
+        shapes_before: Option<String>,
+        quiet: bool,
+        total: &mut crate::thingstore::Refreshed,
+    ) -> Result<(), String> {
         for (part_keys, part_claims) in keys_in.into_iter().zip(claims_in) {
             if part_keys.is_empty() {
                 continue;
@@ -2351,6 +2371,6 @@ impl Tracker {
             total.conflicts = r.conflicts;
             total.wording = r.wording;
         }
-        Ok(total)
+        Ok(())
     }
 }

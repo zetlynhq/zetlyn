@@ -241,10 +241,8 @@ create index if not exists word_key on word(key);
 -- Facet counts as a page asked them, kept while the sources stand where they stood: counting a
 -- facet over 400,000 things takes seconds, and every page of a list asks the same counts.
 create table if not exists facet_cache(question text primary key, mark text not null, counts text not null);
--- What a chart asks: every value of one property, across every thing. Covering, so a chart reads
--- one run of the index and not a row of the table for each thing: the CVSS of 287,000 CVEs took
--- 3.4 seconds through an index on the property alone, its rows scattered over 1.7 GB (2026-10-13).
-create index if not exists said_property_values on said(property, key, source, means);
+-- What a chart asks is indexed by SAID_INDEX, made after the schema unless a refresh in parts has
+-- it off while it writes every row again.
 -- Every thing a page at a time, the last changed first, without sorting them all for each page.
 create index if not exists thing_changed on thing(changed desc, key);
 drop index if exists said_property;
@@ -253,6 +251,11 @@ drop index if exists said_property;
 pub struct ThingStore {
     pub db: Connection,
 }
+
+/// What a chart asks: every value of one property, across every thing. Covering, so a chart reads
+/// one run of the index and not a row of the table for each thing: the CVSS of 287,000 CVEs took
+/// 3.4 seconds through an index on the property alone, its rows scattered over 1.7 GB (2026-10-13).
+const SAID_INDEX: &str = "create index if not exists said_property_values on said(property, key, source, means);";
 
 /// What a refresh found: how many things, conflicts and signals.
 #[derive(Debug, Default)]
@@ -280,7 +283,25 @@ impl ThingStore {
         ] {
             let _ = db.execute_batch(statement);
         }
-        Ok(ThingStore { db })
+        let store = ThingStore { db };
+        // Unless a refresh in parts has it off while it writes every row again.
+        if store.meta("said_index").as_deref() != Some("off") {
+            let _ = store.db.execute_batch(SAID_INDEX);
+        }
+        Ok(store)
+    }
+
+    /// The index off while every row is written again: kept up a row at a time, it made a refresh
+    /// of the CVE tracker in parts write 68 GB for a store of 2 (2026-10-13). Made again after, in
+    /// one pass over what was written, by `with_said_index`.
+    pub fn without_said_index(&self) -> Result<(), String> {
+        self.set_meta("said_index", "off")?;
+        self.db.execute_batch("drop index if exists said_property_values").map_err(|e| e.to_string())
+    }
+
+    pub fn with_said_index(&self) -> Result<(), String> {
+        self.db.execute_batch(SAID_INDEX).map_err(|e| e.to_string())?;
+        self.set_meta("said_index", "on")
     }
 
     pub fn meta(&self, key: &str) -> Option<String> {

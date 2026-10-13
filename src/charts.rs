@@ -330,6 +330,8 @@ pub struct Ctx<'a> {
     pub standing: String,
     /// New data is in and its pictures are being drawn: until they are, the last ones are shown.
     pub warming: bool,
+    /// Where the tracker is, whole, for the code that embeds its pictures elsewhere.
+    pub embed_base: Option<String>,
 }
 
 /// Numbers of a property, the ones a picture counts, and how many it left out and why.
@@ -342,7 +344,7 @@ struct Numbers {
 
 impl<'a> Ctx<'a> {
     pub fn new(store: &'a ThingStore, decl: &'a TrackerDecl) -> Ctx<'a> {
-        Ctx { store, decl, sources: BTreeMap::new(), history: BTreeMap::new(), titles: Default::default(), standing: String::new(), warming: false }
+        Ctx { store, decl, sources: BTreeMap::new(), history: BTreeMap::new(), titles: Default::default(), standing: String::new(), warming: false, embed_base: None }
     }
 
     fn value(&self, property: &str) -> Option<&ValueDecl> {
@@ -616,22 +618,85 @@ fn left_out(n: &Numbers) -> Markup {
 /// What `view.show` declares, drawn for the overview. Each kept while the sources stand where they
 /// stood, per the choices the reader made.
 pub fn overview(ctx: &Ctx, show: &[Show], params: &BTreeMap<String, String>) -> Markup {
-    let real = crate::serve::mounted();
     html! {
         @for (i, s) in show.iter().enumerate() {
-            @let mine = choices_of(s, params);
-            @let question = question_of(s, i, &mine);
-            // While new data's pictures are drawn ahead, the last ones; otherwise drawn now.
-            @let drawn = match ctx.store.drawn(&question, &ctx.standing) {
-                Some(d) => d,
-                None => match ctx.store.drawn_any(&question).filter(|_| ctx.warming) {
-                    Some(d) => d,
-                    None => draw(ctx, s, i, &mine),
-                },
-            };
-            (PreEscaped(drawn.replace(MOUNTED, &real)))
+            (PreEscaped(picture(ctx, s, i, params)))
+            @if let Some(base) = &ctx.embed_base {
+                (embed_code(&format!("{base}/embed/{i}{}", query_of(&choices_of(s, params))), &title_of_show(ctx, s), height_of(s)))
+            }
         }
         (PreEscaped(SCRIPT))
+    }
+}
+
+/// One picture of the overview as it is shown: kept, the last one while new data's is drawn ahead,
+/// or drawn now; its links put back where the tracker is served.
+pub fn picture(ctx: &Ctx, s: &Show, i: usize, params: &BTreeMap<String, String>) -> String {
+    let mine = choices_of(s, params);
+    let question = question_of(s, i, &mine);
+    let drawn = match ctx.store.drawn(&question, &ctx.standing) {
+        Some(d) => d,
+        None => match ctx.store.drawn_any(&question).filter(|_| ctx.warming) {
+            Some(d) => d,
+            None => draw(ctx, s, i, &mine),
+        },
+    };
+    drawn.replace(MOUNTED, &crate::serve::mounted())
+}
+
+/// `?k=v&…` of a picture's own choices, or nothing.
+fn query_of(mine: &BTreeMap<String, String>) -> String {
+    if mine.is_empty() {
+        return String::new();
+    }
+    format!("?{}", mine.iter().map(|(k, v)| format!("{k}={}", urlencode(v))).collect::<Vec<_>>().join("&"))
+}
+
+/// What a picture is called, for the title of the frame it is embedded in.
+pub fn title_of_show(ctx: &Ctx, s: &Show) -> String {
+    let named = |t: &str, v: &str| if t.is_empty() { ctx.label(v) } else { t.to_string() };
+    match s {
+        Show::Map(m) => named(&m.title, m.colour.first().map(String::as_str).unwrap_or("")),
+        Show::Areas(a) => named(&a.title, a.value.first().map(String::as_str).unwrap_or("")),
+        Show::Series(x) => named(&x.title, x.value.first().map(String::as_str).unwrap_or("")),
+        Show::Spread(x) => named(&x.title, x.value.first().map(String::as_str).unwrap_or("")),
+        Show::Distribution(d) => named(&d.title, d.value.first().map(String::as_str).unwrap_or("")),
+        Show::Matrix(m) => named(&m.title, &m.rows),
+        Show::Ranking(r) => named(&r.title, &r.value),
+        Show::Arrivals(a) => named(&a.title, &a.date),
+        Show::Table(t) => named(&t.title, &t.entity),
+        Show::Averages(a) => named(&a.title, a.value.first().map(String::as_str).unwrap_or("")),
+        Show::Overlap(o) => named(&o.title, "sources"),
+        Show::History(h) => named(&h.title, h.value.first().map(String::as_str).unwrap_or("")),
+        Show::Memory(m) => named(&m.title, &m.parameters),
+    }
+}
+
+/// How tall a frame a picture wants, before it says so itself.
+pub fn height_of(s: &Show) -> u32 {
+    match s {
+        Show::Map(_) => 760,
+        Show::Areas(_) => 620,
+        Show::Table(_) | Show::Ranking(_) | Show::Averages(_) => 640,
+        Show::Matrix(_) | Show::Overlap(_) => 480,
+        _ => 420,
+    }
+}
+
+/// The code that puts a page of Zetlyn into somebody else's: a frame, and a line that makes it as
+/// tall as what it shows.
+pub fn embed_code(src: &str, title: &str, height: u32) -> Markup {
+    let code = format!(
+        "<iframe src=\"{src}\" title=\"{}\" width=\"100%\" height=\"{height}\" style=\"border:0\" loading=\"lazy\"></iframe>\n<script>addEventListener('message',function(e){{var d=e.data;if(d&&d.zetlynEmbed)document.querySelectorAll('iframe[src=\"'+d.zetlynEmbed+'\"]').forEach(function(f){{f.style.height=d.height+'px'}})}})</script>",
+        title.replace('"', "&quot;")
+    );
+    html! {
+        details.embed {
+            summary { "Embed" }
+            p.dim { "Put this where the picture should be: it shows what the tracker holds as it is updated, and links back here." }
+            textarea.embed-code readonly rows="4" onclick="this.select()" { (code) }
+            p.dim.small { a href=(src) { "Open it on its own" } }
+        }
     }
 }
 
@@ -2228,6 +2293,11 @@ pub fn entity_index(ctx: &Ctx, params: &BTreeMap<String, String>, here: &str) ->
         h1 { "Every " (called) }
         (table(ctx, &spec, params, here))
     })
+}
+
+/// The few lines that make a picture zoom and its legend choose, for a page that is one picture.
+pub fn script() -> &'static str {
+    SCRIPT
 }
 
 /// Wheel to zoom and drag to move, for a map whose `viewBox` is the whole of what it shows; the

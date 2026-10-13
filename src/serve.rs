@@ -451,6 +451,13 @@ p.badges { margin: .4rem 0 .8rem; display: flex; flex-wrap: wrap; gap: .35rem; }
 .thing-badge.hot { background: var(--accent); border-color: var(--accent); color: #fff; }
 table.side tr.hot td, table.side tr.hot th { background: color-mix(in srgb, var(--accent) 10%, transparent); }
 table.entities tr.ahead td { opacity: .6; font-style: italic; }
+details.embed { margin: -.6rem 0 1.4rem; font-size: .85rem; }
+details.embed > summary { cursor: pointer; color: var(--dim); display: inline; }
+textarea.embed-code { width: 100%; box-sizing: border-box; font: .78rem var(--mono, monospace); padding: .5rem; border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
+body.embed { margin: 0; padding: 12px 14px; background: var(--panel); }
+body.embed section.chart { margin: 0; }
+body.embed h2.embed-title { font-size: 1.1rem; margin: 0 0 .4rem; text-transform: none; letter-spacing: 0; color: var(--fg); }
+p.embed-foot { margin: .6rem 0 0; font-size: .8rem; }
 svg.hexed:not([data-z="2"]):not([data-z="3"]) circle.dot { display: none; }
 svg.hexed[data-z="2"] path.hex, svg.hexed[data-z="3"] path.hex { display: none; }
 svg path.hex { stroke: var(--panel); stroke-width: .4; }

@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use maud::{html, Markup};
+use maud::{html, Markup, PreEscaped};
 use serde_json::{json, Value as J};
 
 use crate::account::{self, Accounts, Site, Viewer};
@@ -56,6 +56,10 @@ fn chart_context<'a>(scope: &'a Tracker, store: &'a crate::thingstore::ThingStor
     ctx.sources = scope.members.iter().map(|m| (m.name().to_string(), m.title())).collect();
     ctx.standing = scope.standing();
     ctx.warming = crate::warm::pending(&scope.dir);
+    // A public tracker's pictures may be embedded elsewhere; a private one's are its readers'.
+    if !scope.private() {
+        ctx.embed_base = ORIGIN.with(|o| o.borrow().clone()).map(|o| format!("{o}{}", crate::serve::mounted()));
+    }
     ctx
 }
 
@@ -741,6 +745,7 @@ fn entry_page(scope: &Tracker, scheme: &str, value: &str, operator: bool, said: 
         p.state { span.chip { (scheme) " " (value) } " "
             span.dim { (plural(entry.members().len(), "source")) ", " (plural(entry.parts.len(), "claim")) " · " }
             a href={(at("/thing/")) (urlencode(scheme)) "/" (urlencode(value)) ".atom"} { "Watch" }
+            @if !scope.private() { " · " a href="#embed" { "Embed" } }
             @if let Some((href, name)) = &entity_link { " · " a href=(href) { "All of " (name) " →" } } }
         @if !badges.is_empty() || !projected.is_empty() {
             p.badges {
@@ -882,6 +887,12 @@ fn entry_page(scope: &Tracker, scheme: &str, value: &str, operator: bool, said: 
                 @let mut ctx = chart_context(scope, &store);
                 @let _ = { ctx.history = history.clone(); };
                 (crate::charts::thing(&ctx, &d.thing.show, &key, &asked, &at(&format!("/thing/{}/{}", urlencode(scheme), urlencode(value)))))
+            }
+        }
+        // A card of it for a page elsewhere, where the tracker is public.
+        @if !scope.private() {
+            @if let Some(o) = ORIGIN.with(|o| o.borrow().clone()) {
+                div #embed {} (crate::charts::embed_code(&format!("{o}{}/embed/thing/{}/{}", crate::serve::mounted(), urlencode(scheme), urlencode(value)), &title, 380))
             }
         }
         (relations_section(scope, &key, scheme, value, operator, said))
@@ -1688,7 +1699,7 @@ fn respond_kept(request: tiny_http::Request, page: Page, gzipped: bool) {
         return respond(request, 200, gunzip(&body), &kind, extra, "kept");
     }
     let mut response = tiny_http::Response::from_data(body).with_status_code(200);
-    let headers = [Some(("Content-Type".to_string(), kind)), Some(("Content-Encoding".to_string(), "gzip".to_string())), Some(("Vary".to_string(), "Accept-Encoding".to_string())), extra, Some(("X-Zetlyn-Page".to_string(), "kept".to_string()))];
+    let headers = [Some(("Content-Type".to_string(), kind)), Some(("Content-Encoding".to_string(), "gzip".to_string())), Some(("Vary".to_string(), "Accept-Encoding".to_string())), extra, Some(("X-Zetlyn-Page".to_string(), "kept".to_string())), Some(framing())];
     for (name, value) in headers.into_iter().flatten() {
         if let Ok(h) = tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes()) {
             response = response.with_header(h);
@@ -1876,6 +1887,13 @@ impl TrackerSite {
         };
         let cookie = header("Cookie");
         let takes_gzip = header("Accept-Encoding").is_some_and(|a| a.contains("gzip"));
+        // Where the request came to, for the code that embeds a page: behind the proxy https.
+        let origin = header("Host").map(|h| {
+            let here = h.starts_with("127.0.0.1") || h.starts_with("localhost") || h.starts_with("[::1]");
+            format!("{}://{h}", header("X-Forwarded-Proto").unwrap_or_else(|| if here { "http".into() } else { "https".into() }))
+        });
+        ORIGIN.with(|o| *o.borrow_mut() = origin);
+        EMBED.with(|e| e.set(path.starts_with("/embed/")));
         let authorization = header("Authorization");
         let mut v = if *operator {
             Viewer::operator()
@@ -2404,6 +2422,33 @@ impl TrackerSite {
                     }
                 }
             }
+            // A picture of the overview, or a thing, on a page of its own for a frame elsewhere.
+            _ if parts.len() >= 2 && parts[0] == "embed" && !scope.private() => {
+                let p = params(&url);
+                let page = crate::thingstore::ThingStore::open(&scope.dir).ok().and_then(|store| {
+                    let ctx = chart_context(scope, &store);
+                    match parts.as_slice() {
+                        [_, i] => {
+                            let i: usize = i.parse().ok()?;
+                            let s = scope.decl.view.show.get(i)?;
+                            // Its buttons choose in the frame, and every other link opens here.
+                            let m = crate::serve::mounted();
+                            let drawn = crate::charts::picture(&ctx, s, i, &p).replace(&format!("href=\"{m}/?"), &format!("target=\"_self\" href=\"{m}/embed/{i}?"));
+                            let body = html! { (PreEscaped(drawn)) (PreEscaped(crate::charts::script())) };
+                            Some(embed_shell(scope, &crate::charts::title_of_show(&ctx, s), body, &at("/")))
+                        }
+                        [_, kind, scheme, value] if kind == "thing" => embed_thing(scope, scheme, value),
+                        _ => None,
+                    }
+                });
+                match page {
+                    Some(html) => (html, "text/html; charset=utf-8", None),
+                    None => {
+                        missing = true;
+                        (shell("Not here", html! { h1 { "Nothing to embed here" } }), "text/html; charset=utf-8", None)
+                    }
+                }
+            }
             // An entity's own page, over every time, and the page they are found from.
             _ if !parts.is_empty() && parts[0] == "entity" && scope.decl.entity.is_some() => {
                 let page = crate::thingstore::ThingStore::open(&scope.dir).ok().and_then(|store| {
@@ -2506,9 +2551,78 @@ impl TrackerSite {
 
 /// The answer, with its content type, the one header beside it, and whether it was drawn for
 /// this request or kept from an earlier one.
+/// A page made to sit in a frame on somebody else's page: the picture or the thing, what it is
+/// from, and a way back here; its links open here, not in the frame. It says its height to the
+/// page it is in, which the code that embeds it listens for.
+fn embed_shell(scope: &Tracker, title: &str, body: Markup, back: &str) -> String {
+    let sources: Vec<String> = scope.members.iter().map(|m| m.title()).collect();
+    html! {
+        (maud::DOCTYPE)
+        html lang="en" {
+            head {
+                meta charset="utf-8";
+                meta name="viewport" content="width=device-width, initial-scale=1";
+                base target="_blank";
+                title { (title) " · " (scope.decl.title) }
+                link rel="stylesheet" href={(at("/zetlyn.css")) "?v=" (env!("CARGO_PKG_VERSION"))};
+            }
+            body.embed {
+                (body)
+                p.embed-foot {
+                    a href=(back) { (scope.decl.title) } " on Zetlyn"
+                    span.dim { " · from " (sources.join(", ")) }
+                }
+                script { (PreEscaped("(function(){function s(){parent.postMessage({zetlynEmbed:location.href,height:document.documentElement.scrollHeight},'*')}addEventListener('load',s);addEventListener('resize',s);setTimeout(s,400)})();")) }
+            }
+        }
+    }
+    .into_string()
+}
+
+/// A thing as a card for a frame elsewhere: its title, its marks, what it is said to be and by
+/// whom, and the way to its page.
+fn embed_thing(scope: &Tracker, scheme: &str, value: &str) -> Option<String> {
+    let entry = scope.entry(scheme, value)?;
+    let d = &scope.decl;
+    let title = scope.title_of(&entry);
+    let badges: Vec<&crate::trackerdecl::Badge> = d.thing.badges.iter().filter(|b| step_holds(&entry, &b.when).is_some()).collect();
+    let rows: Vec<(&String, &crate::tracker::PropertyView)> = d.thing.summary.iter().filter_map(|p| entry.fields.get(p).map(|f| (p, f))).take(8).collect();
+    let link = at(&format!("/thing/{}/{}", urlencode(scheme), urlencode(value)));
+    let body = html! {
+        h2.embed-title { a href=(link) { (title) } }
+        @if !badges.is_empty() { p.badges { @for b in &badges { span.thing-badge.(b.tone) { (b.name) } " " } } }
+        dl.thing-summary {
+            @for (name, f) in &rows {
+                div {
+                    dt { (crate::display::label(d, name)) }
+                    dd { @for (member, said) in &f.by {
+                        @let shown: Vec<String> = f.means.get(member).unwrap_or(said).iter().map(|w| crate::display::shown(d, name, yes_no(w))).collect();
+                        div { strong { (shown.join(", ")) } " " span.src { (title_of(scope, member)) } }
+                    } }
+                }
+            }
+        }
+    };
+    Some(embed_shell(scope, &title, body, &link))
+}
+
+thread_local! {
+    /// Where this request came to, `https://zetlyn.com`, for code that embeds a page elsewhere.
+    static ORIGIN: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    /// This request is for an embed, which any page may frame; every other page only its own.
+    static EMBED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Who may put this page in a frame: anybody for an embed, made for it; only this site for every
+/// other page, so nobody frames a form of it under a page of their own.
+fn framing() -> (String, String) {
+    let who = if EMBED.with(|e| e.get()) { "*" } else { "'self'" };
+    ("Content-Security-Policy".to_string(), format!("frame-ancestors {who}"))
+}
+
 fn respond(request: tiny_http::Request, status: u16, body: String, kind: &str, extra: Option<(String, String)>, page: &str) {
     let mut response = tiny_http::Response::from_string(body).with_status_code(status);
-    let headers = [Some(("Content-Type".to_string(), kind.to_string())), extra, Some(("X-Zetlyn-Page".to_string(), page.to_string()))];
+    let headers = [Some(("Content-Type".to_string(), kind.to_string())), extra, Some(("X-Zetlyn-Page".to_string(), page.to_string())), Some(framing())];
     for (name, value) in headers.into_iter().flatten() {
         if let Ok(h) = tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes()) {
             response = response.with_header(h);

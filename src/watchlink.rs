@@ -108,9 +108,10 @@ fn read_once(dir: &Path, url: &str, body: &str) -> Result<crate::source::Source,
 
 /// What Zetlyn reads at `url`: read into a scratch directory under `root` and gone after.
 pub fn read(root: &Path, url: &str, pick: usize) -> Result<Read, String> {
-    let url = url.trim();
-    if !url.starts_with("https://") && !url.starts_with("http://") {
-        return Err("A link, starting with https://".into());
+    let url = with_scheme(url);
+    let url = url.as_str();
+    if url.len() <= "https://".len() || url.contains(char::is_whitespace) {
+        return Err("That is not an address. One like news.ycombinator.com, or the address of a feed or a CSV file.".into());
     }
     let body = get(url)?;
     let name = crate::guess::page_name(url);
@@ -121,19 +122,40 @@ pub fn read(root: &Path, url: &str, pick: usize) -> Result<Read, String> {
         let ds = read_once(&dir, url, &body)?;
         let q = crate::source::Query { limit: 12, ..Default::default() };
         let (count, hits, _) = ds.search(&q)?;
+        // An item with nothing that reads as its title is named by the first thing it does say.
+        let titled: Vec<(String, &crate::store::Hit)> = hits
+            .iter()
+            .map(|h| {
+                let named = !h.title.is_empty() && !h.title.starts_with(url);
+                let title = if named { h.title.clone() } else { h.fields.values().map(|v| v.display()).find(|v| !v.is_empty() && !v.starts_with('/') && !v.contains("://")).unwrap_or_default() };
+                (title, h)
+            })
+            .collect();
+        // Four columns at most, and none that only says the title again.
         let mut columns: Vec<String> = Vec::new();
-        for h in &hits {
+        for (_, h) in &titled {
             for k in h.fields.keys() {
-                if !columns.contains(k) && columns.len() < 4 {
+                let echoes = titled.iter().all(|(t, h)| h.fields.get(k).map(|v| v.display()).is_none_or(|v| v.is_empty() || v == *t || t.contains(&v)));
+                if !columns.contains(k) && columns.len() < 4 && !echoes {
                     columns.push(k.clone());
                 }
             }
         }
-        let rows = hits.iter().map(|h| (h.title.clone(), columns.iter().map(|c| h.fields.get(c).map(|v| v.display()).unwrap_or_default()).collect())).collect();
+        let rows = titled.iter().map(|(t, h)| (t.clone(), columns.iter().map(|c| h.fields.get(c).map(|v| v.display()).unwrap_or_default()).collect())).collect();
         Ok(Read { url: url.to_string(), what, title, count, columns, rows, lists, pick, name: name.clone(), decl })
     })();
     let _ = std::fs::remove_dir_all(&dir);
     result
+}
+
+/// An address as somebody types it, `news.ycombinator.com` as much as `https://…`.
+pub fn with_scheme(url: &str) -> String {
+    let url = url.trim();
+    if url.starts_with("https://") || url.starts_with("http://") {
+        url.to_string()
+    } else {
+        format!("https://{}", url.trim_start_matches('/'))
+    }
 }
 
 /// Previews asked per address in the last hour, and in all: a visitor reading a link is a

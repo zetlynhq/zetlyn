@@ -7134,83 +7134,123 @@ fn watch_page(request: tiny_http::Request, dir: &Path, accounts: &crate::account
             (if t.is_empty() { org.clone() } else { t }, org)
         }).collect())
         .unwrap_or_default();
-    serve::frame_site("App");
-    serve::frame_home("Account", "/account/", public_links(dir));
+    // A page of the website's, not of the app: its header and footer, and no sidebar.
+    serve::frame_site("");
+    serve::frame_home("", "", Vec::new());
+    serve::frame_area("", None, Vec::new());
     serve::frame_current(None);
     serve::frame_hosted(None, Some(who.clone()));
-    serve::frame_area("app", None, who.as_deref().map(|e| orgs_links(dir, e)).unwrap_or_default());
-    serve::frame_side("");
-    serve::frame_section(None, Vec::new());
     serve::frame_app(None, None);
     let query = serve::params(request.url());
-    let url = query.get("url").cloned().unwrap_or_default();
+    let url = query.get("url").map(|u| crate::watchlink::with_scheme(u)).unwrap_or_default();
     let pick: usize = query.get("pick").and_then(|p| p.parse().ok()).unwrap_or(0);
-    let paste = |url: &str, said: Option<&str>| {
+    let try_at = |u: &str| format!("/watch/try?url={}", urlencode(u.trim_start_matches("https://")));
+    // The field says https:// before what is typed, as most addresses begin.
+    let paste = |url: &str| {
         html! {
-            form.watch-paste.bar method="get" action="/watch/try" {
-                input type="url" name="url" value=(url) placeholder="https://… a page with a list, a feed or a table" required autofocus;
+            form.watch-form method="get" action="/watch/try" {
+                label.watch-field {
+                    span.watch-scheme { "https://" }
+                    input type="text" name="url" value=(url.trim_start_matches("https://")) placeholder="news.ycombinator.com" required autofocus[url.is_empty()] spellcheck="false" autocapitalize="off" aria-label="Address of a page, a feed or a table";
+                }
                 button.primary type="submit" { "Read it" }
             }
-            @if let Some(s) = said { div.note { (s) } }
+        }
+    };
+    let examples = [
+        ("A shop", "books.toscrape.com"),
+        ("A news page", "news.ycombinator.com"),
+        ("A feed", "hnrss.org/frontpage"),
+        ("A table", "raw.githubusercontent.com/datasets/country-codes/main/data/country-codes.csv"),
+    ];
+    let tries = html! {
+        p.watch-examples { span { "Or try one:" }
+            @for (label, at) in examples { a rel="nofollow" href=(try_at(at)) { (label) } }
         }
     };
     let html_kind = "text/html; charset=utf-8";
     match rest {
-        [] => respond(request, 200, html_kind, &page("Watch a link", html! {
-            h1 { "Watch a link" }
-            p.lede { "Paste the address of a list, a feed or a table. Zetlyn reads it once and shows you what it found: every item an entry, what is in it the values." }
-            (paste("", None))
-            p.dim { "Nothing is kept. To have it read again and again, take it into a world of your own." }
+        [] => respond(request, 200, html_kind, &page("Try Zetlyn on a page", html! {
+            div.watch {
+                p.overline { "Try Zetlyn" }
+                h1 { "See what Zetlyn reads on a page" }
+                p.lede { "Zetlyn follows lists on the web, the products of a shop, the posts of a feed, the rows of a table, and tells you what is new, what changed and what is gone. Paste an address, and see what it would follow there." }
+                (paste(""))
+                (tries)
+                ol.watch-steps {
+                    li { strong { "Read" } span { "Every item of the list becomes an entry, and what it says, a price or a date, its values." } }
+                    li { strong { "Kept" } span { "Read again on a schedule, each value kept with the day it was said, and what it said before." } }
+                    li { strong { "Told" } span { "What is new, what changed and what is gone: on a page, in a feed, by mail." } }
+                }
+                p.dim { "Nothing you paste here is kept. To have it followed, take it into a world of your own." }
+            }
         })),
         [t] if t == "try" => {
+            let host = url.split("://").nth(1).unwrap_or(&url).split('/').next().unwrap_or("").trim_start_matches("www.").to_string();
             let body = match crate::watchlink::preview(dir, &from, &url, pick) {
-                Err(e) => html! { h1 { "Watch a link" } (paste(&url, Some(&e))) },
+                Err(e) => html! {
+                    div.watch {
+                        p.overline { "Try Zetlyn" }
+                        h1 { "Nothing to follow there" }
+                        (paste(&url))
+                        div.note { (e) }
+                        (tries)
+                    }
+                },
                 Ok(r) => {
                     let here = format!("/watch/try?url={}&pick={}", urlencode(&r.url), r.pick);
                     let command = format!("zetlyn source new --from '{}'{} --at sources/{}", r.url.replace('\'', "%27"), if r.pick > 0 { format!(" --pick {}", r.pick) } else { String::new() }, r.name);
                     html! {
-                        p.overline { (r.what) }
-                        h1 { (r.title) }
-                        p.dim { a href=(r.url) rel="nofollow noopener" { (r.url) } " · " (r.count) " items read" }
-                        @if r.lists.len() > 1 {
-                            p.bar { span.dim { "Lists on the page: " }
-                                @for (i, n) in r.lists.iter().enumerate().take(8) {
-                                    a.chip.on[i == r.pick] rel="nofollow" href={"/watch/try?url=" (urlencode(&r.url)) "&pick=" (i)} { (n) " items" } " "
+                        div.watch {
+                            (paste(&r.url))
+                            p.overline { "What Zetlyn reads on " (host) }
+                            h1 { (r.title) }
+                            p.dim { (r.count) " " (if r.count == 1 { "item" } else { "items" }) " in " (r.what) " · " a href=(r.url) rel="nofollow noopener" target="_blank" { (r.url) } }
+                            @if r.lists.len() > 1 {
+                                p.watch-lists { span { "This page has " (r.lists.len()) " lists:" }
+                                    @for (i, n) in r.lists.iter().enumerate().take(8) {
+                                        a.on[i == r.pick] rel="nofollow" href={"/watch/try?url=" (urlencode(&r.url)) "&pick=" (i)} { (n) " items" }
+                                    }
                                 }
                             }
-                        }
-                        div.scroll { table {
-                            thead { tr { th { "Item" } @for c in &r.columns { th { (c.replace('_', " ")) } } } }
-                            tbody { @for (title, values) in &r.rows { tr { td { (title) } @for v in values { td { (v) } } } } }
-                        } }
-                        section.watch-keep {
-                            h2 { "Keep it watched" }
-                            p { "As a source, Zetlyn reads it again on a schedule, keeps what each item said and since when, and tells you what is new, what changed and what is gone." }
-                            h3 { "In a world of yours on zetlyn.com" }
-                            @if !worlds.is_empty() {
-                                p.bar { @for (title, org) in &worlds {
-                                    a.button.primary href={"/" (org) "/new?title=" (urlencode(&r.title)) "&url=" (urlencode(&r.url))} { "Add to " (title) } " "
-                                } }
-                            } @else if who.is_some() {
-                                p { "A world of your own here is " a href="/hosting" { "Zetlyn Managed" } "." }
-                                p.bar { a.button.primary href="/order" { "Get Zetlyn Managed" } }
-                            } @else {
-                                p { "A world of your own here is " a href="/hosting" { "Zetlyn Managed" } ". Have one already? Sign in, and add it there." }
-                                p.bar {
-                                    a.button.primary href={"/account/signin?next=" (urlencode(&here))} { "Sign in" } " "
-                                    a.button href="/order" { "Get Zetlyn Managed" }
+                            div.scroll { table.watch-table {
+                                thead { tr { th { "Item" } @for c in &r.columns { th { (c.replace('_', " ")) } } } }
+                                tbody { @for (title, values) in &r.rows { tr { td { @if title.is_empty() { span.dim { "—" } } @else { (title) } } @for v in values { td { (v) } } } } }
+                            } }
+                            @if r.count > r.rows.len() as u64 { p.dim { "And " ((r.count - r.rows.len() as u64)) " more." } }
+                            h2 { "Have it followed" }
+                            p.lede { "As a source, Zetlyn reads it again on a schedule, keeps what each item said and since when, and tells you what is new, what changed and what is gone." }
+                            div.watch-ways {
+                                section {
+                                    h3 { "On zetlyn.com" }
+                                    @if !worlds.is_empty() {
+                                        p { "Add it to a world of yours, and choose there how often it is read." }
+                                        p.watch-actions { @for (title, org) in &worlds {
+                                            a.button.primary href={"/" (org) "/new?title=" (urlencode(&r.title)) "&url=" (urlencode(&r.url))} { "Add to " (title) }
+                                        } }
+                                    } @else if who.is_some() {
+                                        p { "A world of your own on zetlyn.com, kept current for you, is " a href="/hosting" { "Zetlyn Managed" } "." }
+                                        p.watch-actions { a.button.primary href="/order" { "Get Zetlyn Managed" } }
+                                    } @else {
+                                        p { "A world of your own on zetlyn.com, kept current for you, is " a href="/hosting" { "Zetlyn Managed" } ". Have one? Sign in and add it there." }
+                                        p.watch-actions {
+                                            a.button.primary href={"/account/signin?next=" (urlencode(&here))} { "Sign in" }
+                                            a.button href="/hosting" { "About Zetlyn Managed" }
+                                        }
+                                    }
+                                }
+                                section {
+                                    h3 { "On your own machine" }
+                                    p { "Zetlyn is free and open source. " a href="https://zetlyn.com/docs/getting_started#install" { "Install it" } ", then in your world's folder:" }
+                                    pre { code { (command) } }
+                                    p.dim { "Or download " a href={"/watch/source.yaml?url=" (urlencode(&r.url)) "&pick=" (r.pick)} download="source.yaml" rel="nofollow" { "its source.yaml" } " and put it in sources/" (r.name) "/." }
                                 }
                             }
-                            h3 { "With Zetlyn on your own machine" }
-                            p { "Zetlyn is free and open source. In your world's folder:" }
-                            pre { code { (command) } }
-                            p.dim { "Or take " a href={"/watch/source.yaml?url=" (urlencode(&r.url)) "&pick=" (r.pick)} download="source.yaml" rel="nofollow" { "its source.yaml" } " and put it in sources/" (r.name) "/. "
-                                a href="https://zetlyn.com/docs/getting_started#install" { "Installing Zetlyn" } }
                         }
                     }
                 }
             };
-            respond(request, 200, html_kind, &page("Watch a link", body))
+            respond(request, 200, html_kind, &page("Try Zetlyn on a page", body))
         }
         [f] if f == "source.yaml" => match crate::watchlink::preview(dir, &from, &url, pick) {
             Ok(r) => respond(request, 200, "text/yaml; charset=utf-8", &r.decl),

@@ -298,6 +298,35 @@ nav.tabs a.on { color: var(--fg); border-bottom-color: var(--accent); font-weigh
 .entry-link a { color: var(--fg); text-decoration: underline; text-underline-offset: 3px; }
 .entry-link a:hover { color: var(--accent); }
 .lede { font-size: 1.05rem; color: var(--dim); max-width: 46rem; margin: .4rem 0 0; }
+/* zetlyn.com/watch: a page of the website's, a field to paste into, what was read, two ways on. */
+.watch { max-width: 60rem; }
+.watch h1 { margin: .2rem 0 .6rem; }
+.watch h2 { margin: 3rem 0 .3rem; }
+.watch-form { display: flex; gap: 0; margin: 1.6rem 0 .8rem; max-width: 44rem; }
+.watch-field { flex: 1; display: flex; align-items: stretch; min-width: 0; border: 1px solid var(--fg); border-right: 0; background: var(--panel); }
+.watch-field:focus-within { border-color: var(--accent); }
+.watch-scheme { display: flex; align-items: center; padding: 0 .1rem 0 .8rem; color: var(--dim); font: .95rem/1 ui-monospace, SFMono-Regular, Menlo, monospace; user-select: none; }
+.watch-field input[type=text] { flex: 1; min-width: 0; border: 0; background: transparent; padding: .75rem .8rem .75rem .1rem; font: .95rem/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; outline: none; }
+.watch-form button.primary { padding: 0 1.3rem; border-radius: 0; }
+.watch-examples { display: flex; flex-wrap: wrap; gap: .4rem .5rem; align-items: center; margin: 0 0 2.2rem; font-size: .9rem; color: var(--dim); }
+.watch-examples a { padding: .2rem .6rem; border: 1px solid var(--line); color: var(--fg); text-decoration: none; }
+.watch-examples a:hover { border-color: var(--fg); }
+.watch-steps { list-style: none; counter-reset: step; display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: 0; padding: 0; margin: 0 0 1.6rem; border-top: 1px solid var(--line-strong); }
+.watch-steps li { counter-increment: step; padding: 1rem 1.2rem 1.1rem 0; display: grid; gap: .3rem; align-content: start; }
+.watch-steps li + li { padding-left: 1.2rem; border-left: 1px solid var(--line); }
+.watch-steps strong::before { content: counter(step) "  "; color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.watch-steps span { color: var(--dim); font-size: .92rem; }
+.watch .watch-form + .overline { margin-top: 2rem; }
+.watch-lists { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; font-size: .9rem; color: var(--dim); }
+.watch-lists a { padding: .15rem .55rem; border: 1px solid var(--line); color: var(--fg); text-decoration: none; }
+.watch-lists a.on { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+.watch-table td:first-child { font-weight: 500; }
+.watch-ways { display: grid; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); gap: 1rem; margin-top: 1.2rem; }
+.watch-ways section { border: 1px solid var(--line-strong); padding: 1.1rem 1.2rem 1.2rem; display: flex; flex-direction: column; }
+.watch-ways h3 { margin: 0 0 .5rem; }
+.watch-ways pre { margin: .3rem 0 .6rem; padding: .7rem .8rem; background: var(--panel); border: 1px solid var(--line); white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; }
+.watch-actions { display: flex; flex-wrap: wrap; gap: .5rem; padding-top: .4rem; }
+@media (max-width: 40rem) { .watch-steps li + li { padding-left: 0; border-left: 0; border-top: 1px solid var(--line); } }
 .meta { font-size: .85rem; color: var(--dim); margin: .8rem 0 0; display: flex; gap: .4rem 1rem; flex-wrap: wrap; }
 .meta .current::before, .meta .partial::before { content: ""; display: inline-block; width: .5rem; height: .5rem;
   border-radius: 50%; margin-right: .4rem; background: #2e7d32; vertical-align: .05em; }

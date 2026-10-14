@@ -488,10 +488,21 @@ pub fn candidates(html: &str) -> Vec<Candidate> {
                     }
                 }
             }
+            // A heading with no class of its own is the item's title all the same, and where its
+            // link carries one, the whole of it: a shop shortens a long name on the page.
+            if let Some(h) = item.descendants().skip(1).filter_map(ElementRef::wrap).find(|d| matches!(d.value().name(), "h1" | "h2" | "h3" | "h4" | "h5" | "h6") && d.value().attr("class").is_none()) {
+                let tag = h.value().name();
+                if h.descendants().filter_map(ElementRef::wrap).any(|a| a.value().name() == "a" && a.value().attr("title").is_some_and(|t| !t.trim().is_empty())) {
+                    *tally.entry(format!("{tag} a@title")).or_default() += 1;
+                } else if !text_of(h).is_empty() {
+                    *tally.entry(tag.to_string()).or_default() += 1;
+                }
+            }
         }
         let enough = (sample.len() + 1) / 2;
         for (spec, _) in tally.into_iter().filter(|(_, n)| *n >= enough.max(2)) {
-            let name = crate::guess::slug(spec.trim_start_matches(['.', '@']));
+            let heading = !spec.starts_with(['.', '@']);
+            let name = if heading { "title".to_string() } else { crate::guess::slug(spec.trim_start_matches(['.', '@'])) };
             if !name.is_empty() && !specs.contains_key(&name) {
                 specs.insert(name, spec);
             }
@@ -517,7 +528,22 @@ pub fn candidates(html: &str) -> Vec<Candidate> {
         // An element whose text holds two other fields'"'"' in every item is their container.
         let texts: Vec<Vec<String>> = kept.iter().map(|(_, s)| sample.iter().map(|i| field(*i, s).ok().and_then(|j| j.as_str().map(str::to_string)).unwrap_or_default()).collect()).collect();
         let container = |k: usize| -> bool {
-            (0..kept.len()).filter(|j| *j != k).filter(|j| (0..sample.len()).all(|n| !texts[*j][n].is_empty() && texts[k][n].contains(texts[*j][n].as_str()) && texts[k][n] != texts[*j][n])).count() >= 2
+            let inside: Vec<usize> = (0..kept.len()).filter(|j| *j != k).filter(|j| (0..sample.len()).all(|n| !texts[*j][n].is_empty() && texts[k][n].contains(texts[*j][n].as_str()) && texts[k][n] != texts[*j][n])).collect();
+            // Unless more of its text is its own than theirs, the longest of theirs taken out first: a
+            // title that names its site holds the site's field, and is the title all the same.
+            let own = (0..sample.len())
+                .filter(|&n| {
+                    let mut t = texts[k][n].clone();
+                    let mut theirs: Vec<&String> = inside.iter().map(|j| &texts[*j][n]).collect();
+                    theirs.sort_by_key(|s| std::cmp::Reverse(s.len()));
+                    for s in theirs {
+                        t = t.replacen(s.as_str(), "", 1);
+                    }
+                    let all = texts[k][n].chars().filter(|c| c.is_alphanumeric()).count();
+                    t.chars().filter(|c| c.is_alphanumeric()).count() * 2 > all
+                })
+                .count();
+            inside.len() >= 2 && own * 2 <= sample.len()
         };
         let specs: BTreeMap<String, String> = kept.iter().enumerate().filter(|(k, _)| !container(*k)).map(|(_, (n, s))| (n.clone(), s.clone())).collect();
         let fields: Vec<(String, String, Vec<String>)> = specs
@@ -527,12 +553,27 @@ pub fn candidates(html: &str) -> Vec<Candidate> {
                 (name, spec, said)
             })
             .collect();
-        let texts = fields.iter().filter(|(_, s, _)| s.starts_with('.')).count();
+        let texts = fields.iter().filter(|(_, s, _)| !s.starts_with('@')).count();
         if fields.len() < 2 || texts == 0 {
             continue;
         }
         // A list is a few dozen items that differ: what repeats six hundred times alike is a menu.
         let values = |spec: &str| -> Vec<String> { sample.iter().filter_map(|i| field(*i, spec).ok()).filter_map(|v| v.as_str().map(str::to_string)).collect() };
+        // What the page is framed with, its navigation, its header and its footer, is not what it
+        // lists; nor are links and buttons of a word or three with no number or date among them,
+        // which is a menu wherever it stands. A shop's items are links too, and have a price.
+        let framing = items.iter().filter(|e| e.ancestors().filter_map(ElementRef::wrap).any(|a| matches!(a.value().name(), "nav" | "header" | "footer"))).count();
+        if framing * 2 > items.len() {
+            continue;
+        }
+        if matches!(items.first().map(|e| e.value().name()), Some("a" | "button")) {
+            let said: Vec<String> = fields.iter().filter(|(_, s, _)| !s.starts_with('@')).flat_map(|(_, s, _)| values(s)).collect();
+            let figures = said.iter().filter(|x| x.chars().any(|c| c.is_ascii_digit())).count();
+            let words = said.iter().map(|x| x.split_whitespace().count()).sum::<usize>();
+            if figures * 4 < said.len() && words <= said.len() * 3 {
+                continue;
+            }
+        }
         let mut varying = 0usize;
         let mut bonus = 0usize;
         for (_, spec, _) in &fields {
@@ -543,6 +584,12 @@ pub fn candidates(html: &str) -> Vec<Candidate> {
             }
             if !v.is_empty() && distinct.len() == v.len() && v.len() == sample.len() && v.iter().all(|x| x.len() <= 64) {
                 bonus = bonus.max(50);
+            }
+            // A field of a few words that differ on every item is what the items are called,
+            // and a list whose items are called something is a list somebody reads.
+            let words = v.iter().map(|x| x.split_whitespace().count()).sum::<usize>();
+            if v.len() * 4 >= sample.len() * 3 && distinct.len() == v.len() && words >= v.len() * 4 {
+                bonus += 60;
             }
             if v.iter().filter(|x| crate::build::as_date(x).is_some()).count() * 2 >= sample.len() {
                 bonus += 50;
@@ -592,5 +639,23 @@ mod found {
         }
         html.push_str("</table></body></html>");
         assert_eq!(super::candidates(&html)[0].items, "td.titleline", "the stories, not the rows half of which are something else");
+    }
+
+    #[test]
+    fn a_menu_is_not_a_list_and_neither_is_the_page_s_frame() {
+        let mut html = String::from("<html><body><header><ul>");
+        for i in 1..=8 {
+            html.push_str(&format!(r#"<li class="nav-item"><span class="label">Topic {i}</span><span class="hint">see topic number {i} here</span></li>"#));
+        }
+        html.push_str("</ul></header><div>");
+        for w in ["Verify", "About us", "Pricing", "Guide", "Use cases", "Sign in"] {
+            html.push_str(&format!(r#"<a class="pill" href="/{w}"><span class="pill-text">{w}</span></a>"#));
+        }
+        for i in 1..=6 {
+            html.push_str(&format!(r#"<a class="product" href="/p/{i}"><span class="name">Book {i}</span><span class="price">{i}.99</span></a>"#));
+        }
+        html.push_str("</div></body></html>");
+        let found: Vec<String> = super::candidates(&html).into_iter().map(|c| c.items).collect();
+        assert_eq!(found, vec!["a.product".to_string()]);
     }
 }

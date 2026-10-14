@@ -118,6 +118,12 @@ pub fn read(root: &Path, url: &str, pick: usize) -> Result<Read, String> {
     let dir = root.join(".zetlyn").join("watch").join(format!("try-{}", crate::jwt::random()));
     let result = (|| {
         let (title, what, lists) = propose(url, &body, &dir, &format!("local/{name}"), pick)?;
+        // Taken home, it is read again once a day, as somebody watching a page would want.
+        let mut sd = crate::sourcedecl::SourceDecl::load(&dir)?;
+        if sd.schedule.every.is_none() {
+            sd.schedule.every = Some("1d".into());
+            std::fs::write(dir.join(crate::sourcedecl::FILE), crate::yaml::to_string(&sd)?).map_err(|e| e.to_string())?;
+        }
         let decl = std::fs::read_to_string(dir.join(crate::sourcedecl::FILE)).map_err(|e| e.to_string())?;
         let ds = read_once(&dir, url, &body)?;
         let q = crate::source::Query { limit: 12, ..Default::default() };

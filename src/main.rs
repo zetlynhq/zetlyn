@@ -114,11 +114,12 @@ zetlyn
       The workspace in a browser, for the person at the machine: a tracker from a first source
       and a second, with what they share shown before they are connected.
 
-  zetlyn source new --from <path or URL> [--at <dir>] [--name owner/name] [--kind <word>] [--pick N]
+  zetlyn source new --from <path or URL> [--at <dir>] [--name owner/name] [--kind <word>] [--pick N] [--every 1d]
       Reads a folder, a .csv or an .xlsx, a feed, a JSON API or a list on a web page, guesses the
       identifier, the title, the text and the property types, writes <dir>/source.yaml, and prints
       the first three claims it would make. On a web page it names the lists it found; --pick
-      chooses another, and the first read is a trial of one page.
+      chooses another, and the first read is a trial of one page. --every 1d says how often it is
+      read again; what to do next is said at the end.
 
   zetlyn source measure <dir>
       How long a web list is, from a few of its pages: how many, back to which date, how long a
@@ -180,6 +181,10 @@ zetlyn
 
   zetlyn search <dir> <query> [--view <name>] [--limit <n>]
       Free text and comparisons mixed: `log4j severity=high known>2026-01-01`.
+
+  zetlyn tracker new --from <source dir> [--title …] [--at <dir>]
+      A tracker of one source, joined on what identifies its claims: the first of what it reads.
+      In the workspace the source is in, unless --at says where.
 
   zetlyn tracker describe <dir> [--sources <dir>]
   zetlyn tracker search <dir> <query> [--view <name>] [--kind <word>] [--limit <n>]
@@ -446,6 +451,7 @@ fn run(args: &[String]) -> Result<(), String> {
         Some("watch") => watch_cmd(args),
         Some("account") => account_cmd(args),
         Some("tracker") => match args.get(1).map(String::as_str) {
+            Some("new") => tracker_new(args),
             Some("publish") => scope_publish(args),
             Some("subscribe") => scope_subscribe(args),
             Some("pack") => scope_pack(args),
@@ -717,7 +723,7 @@ fn dataset_new(args: &[String]) -> Result<(), String> {
         let proposed = guess::propose_github(from, &dir, flag(args, "--name"))?;
         println!("{}\n", dir.join(crate::sourcedecl::FILE).display());
         print!("{proposed}");
-        return Ok(());
+        return next_steps(&dir, flag(args, "--every"));
     }
     if from.starts_with("http://") || from.starts_with("https://") {
         let stem = from
@@ -755,7 +761,7 @@ fn dataset_new(args: &[String]) -> Result<(), String> {
         println!("{}\n", dir.join(crate::sourcedecl::FILE).display());
         print!("{proposed}");
         println!();
-        return preview(&dir);
+        return preview(&dir).and_then(|_| next_steps(&dir, flag(args, "--every")));
     }
     let from = Path::new(from);
     let stem = from
@@ -773,7 +779,66 @@ fn dataset_new(args: &[String]) -> Result<(), String> {
     println!();
     print!("{proposed}");
     println!();
-    preview(&dir)
+    preview(&dir).and_then(|_| next_steps(&dir, flag(args, "--every")))
+}
+
+/// `zetlyn tracker new --from <source dir>`: a tracker of one source, in the workspace the source
+/// is in, as the app's "Make a tracker of it" makes one. A source never read is read first, since
+/// what it is joined on is what its claims are identified by.
+fn tracker_new(args: &[String]) -> Result<(), String> {
+    let from = PathBuf::from(flag(args, "--from").ok_or("--from <source dir> is required")?);
+    let ds = Source::open(&from)?;
+    if ds.store.count() == 0 {
+        let report = ds.run()?;
+        println!("read {}: +{} claims", from.display(), report.added);
+    }
+    // One tracker of it is what was asked for; a second, only where --at says so.
+    let trackers = workspace_of(&from).join("trackers");
+    if flag(args, "--at").is_none() {
+        let reading = std::fs::read_dir(&trackers).into_iter().flatten().flatten().map(|e| e.path()).find(|d| {
+            trackerdecl::TrackerDecl::load(d).is_ok_and(|t| t.members.iter().any(|m| m.dataset == ds.decl.name))
+        });
+        if let Some(d) = reading {
+            return Err(format!("{} reads it already. Open it: zetlyn {}", d.display(), workspace_of(&from).display()));
+        }
+    }
+    let title = flag(args, "--title").map(str::to_string).unwrap_or_else(|| ds.decl.title.clone());
+    let dir = match flag(args, "--at") {
+        Some(at) => PathBuf::from(at),
+        None => {
+            let stem = guess::slug(&title);
+            let stem = if stem.is_empty() { "tracker".to_string() } else { stem };
+            (1..).map(|n| trackers.join(if n == 1 { stem.clone() } else { format!("{stem}-{n}") })).find(|d| !d.exists()).unwrap_or_else(|| trackers.join(&stem))
+        }
+    };
+    if dir.join(trackerdecl::FILE).exists() {
+        return Err(format!("{}: a tracker is there already", dir.join(trackerdecl::FILE).display()));
+    }
+    app::first_tracker(&dir, &ds, &title, "")?;
+    println!("{}", dir.join(trackerdecl::FILE).display());
+    println!("\nOpen it: zetlyn {}   (Trackers → {title})", workspace_of(&from).display());
+    Ok(())
+}
+
+/// What to do with a source just written: read it, look at it, have it read again, make a
+/// tracker of it. Said after `zetlyn source new`, since nothing of it is obvious from the file.
+/// `--every 1d` writes how often it is read again.
+fn next_steps(dir: &Path, every: Option<&str>) -> Result<(), String> {
+    let mut decl = sourcedecl::SourceDecl::load(dir)?;
+    if let Some(e) = every {
+        decl.schedule.every = Some(e.to_string());
+        std::fs::write(dir.join(sourcedecl::FILE), yaml::to_string(&decl)?).map_err(|e| e.to_string())?;
+    }
+    let at = dir.display();
+    println!("\nNext:");
+    println!("  zetlyn source update {at}             read it now");
+    println!("  zetlyn search {at} ''                 what it holds");
+    println!("  zetlyn tracker new --from {at}        a tracker of it, to open in `zetlyn`");
+    match &decl.schedule.every {
+        Some(e) => println!("  It is read again every {e} by `zetlyn run` (from cron, say), or while the app runs with Auto-update on."),
+        None => println!("  To have it read again by itself: --every 1d, or `schedule: {{ every: 1d }}` in its source.yaml; then `zetlyn run` (from cron, say), or the app with Auto-update on."),
+    }
+    Ok(())
 }
 
 /// Three claims, because a creator who agrees changes nothing and a creator who does not needs to

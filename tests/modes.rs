@@ -1869,3 +1869,28 @@ fn a_copy_without_data_takes_what_a_world_is_and_gives_back_its_changes() {
     assert!(std::fs::read_to_string(w.root.join("trackers/cve/tracker.yaml")).unwrap().contains("CVE edited here"), "{said}");
     assert_eq!(claim_of(&w.root, "kev", "CVE-2026-0001", "vendorProject").0.is_empty(), false, "its data there as it was");
 }
+
+#[test]
+fn a_source_written_says_what_next_and_becomes_a_tracker_once() {
+    let tmp = std::env::temp_dir().join(format!("zetlyn-modes-{}-next", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(tmp.join("workspace.yaml"), "title: Next\n").unwrap();
+    let csv = tmp.join("books.csv");
+    std::fs::write(&csv, "isbn,title,price\n9780441172719,Dune,11.99\n9780547928227,The Hobbit,10.49\n9780743273565,The Great Gatsby,10.99\n").unwrap();
+    let source = tmp.join("sources/books");
+    let (ok, said) = z(&["source", "new", "--from", &csv.display().to_string(), "--at", &source.display().to_string(), "--every", "1d"]);
+    assert!(ok, "{said}");
+    assert!(said.contains("Next:") && said.contains("zetlyn tracker new --from") && said.contains("every 1d"), "{said}");
+    assert!(std::fs::read_to_string(source.join("source.yaml")).unwrap().contains("every: 1d"));
+    // Never read, it is read first; made once, it is not made again.
+    let (ok, said) = z(&["tracker", "new", "--from", &source.display().to_string()]);
+    assert!(ok, "{said}");
+    let made: Vec<_> = std::fs::read_dir(tmp.join("trackers")).unwrap().flatten().collect();
+    assert_eq!(made.len(), 1);
+    let decl = std::fs::read_to_string(made[0].path().join("tracker.yaml")).unwrap();
+    assert!(decl.contains("identified_by:") && decl.contains("- source: "), "{decl}");
+    let (ok, said) = z(&["tracker", "new", "--from", &source.display().to_string()]);
+    assert!(!ok && said.contains("reads it already"), "{said}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}

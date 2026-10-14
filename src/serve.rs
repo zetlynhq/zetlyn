@@ -298,6 +298,8 @@ nav.tabs a.on { color: var(--fg); border-bottom-color: var(--accent); font-weigh
 .entry-link a { color: var(--fg); text-decoration: underline; text-underline-offset: 3px; }
 .entry-link a:hover { color: var(--accent); }
 .lede { font-size: 1.05rem; color: var(--dim); max-width: 46rem; margin: .4rem 0 0; }
+form.inline { display: inline; margin: 0; }
+button.link { border: 0; background: none; padding: 0; color: var(--accent); font: inherit; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
 /* zetlyn.com/watch: a page of the website's, a field to paste into, what was read, two ways on. */
 .watch { max-width: 60rem; }
 .watch h1 { margin: .2rem 0 .6rem; }

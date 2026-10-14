@@ -1196,6 +1196,17 @@ impl App {
                 }
                 return redirect(request, &serve::at("/"));
             }
+            // A source no tracker names, made the first of a tracker of its own.
+            (true, ["adopt", source]) if !source.contains("..") => {
+                let made = Source::open(&self.sources().join(source)).and_then(|ds| {
+                    let slug = self.free(&self.trackers(), &crate::guess::slug(&ds.decl.title));
+                    self.accept(&slug, source, "", &ds.decl.title)
+                });
+                match made {
+                    Ok(to) => return redirect(request, &to),
+                    Err(e) => (400, html_kind, page("No tracker made", html! { h1 { "No tracker made" } div.note { (e) } p { a href=(serve::at("/")) { "← Back" } } })),
+                }
+            }
             (false, ["webpage", tracker]) => (200, html_kind, self.webpage_page(tracker, &query)),
             (true, ["reach", tracker, source]) => {
                 let id = self.reach(tracker, source, query.get("choice").cloned().unwrap_or_default(), form_title(&query));
@@ -1967,16 +1978,7 @@ impl App {
         let why = if why.trim().is_empty() { format!("What {} says.", ds.decl.title) } else { why.trim().to_string() };
         let member = json!({ "source": ds.decl.name, "why": why });
         if !dir.join(crate::trackerdecl::FILE).exists() {
-            let scheme = primary_scheme(&ds).ok_or_else(|| {
-                format!("{} carries no identifier, so no second source could ever meet it", ds.decl.title)
-            })?;
-            let decl = json!({
-                "name": format!("local/{tracker}"),
-                "title": if title.is_empty() { tracker.to_string() } else { title.to_string() },
-                "sources": [member],
-                "identified_by": [scheme],
-            });
-            write_tracker(&dir, decl)?;
+            first_tracker(&dir, &ds, title, &why)?;
             let _ = std::fs::remove_file(dir.join(DRAFT));
             return Ok(serve::at(&format!("/review/{tracker}/{source}?added=1")));
         }
@@ -2406,7 +2408,7 @@ impl App {
                         dt { "How often" } dd { (d.schedule.every.clone().unwrap_or_else(|| "as the world's setting".into())) " · " a href=(serve::at("/settings/updates")) { "change" } }
                         dt { "Its page" } dd { (if shown_source(&self.root, slug).is_some() { "public" } else { "private" }) " · " a href=(serve::at("/settings/seen/sources")) { "change" } }
                         dt { "In public trackers" } dd { (match crate::sourcedecl::shown(&d.licence.republish) { "yes" => "everything", _ => "titles, values and a link" }) }
-                        dt { "Feeds" } dd { @for (folder, t) in &trackers { a href=(serve::at(&format!("/trackers/{folder}/"))) { (if t.title.is_empty() { folder.as_str() } else { t.title.as_str() }) } " " } @if trackers.is_empty() { span.dim { "no tracker" } } }
+                        dt { "Feeds" } dd { @for (folder, t) in &trackers { a href=(serve::at(&format!("/trackers/{folder}/"))) { (if t.title.is_empty() { folder.as_str() } else { t.title.as_str() }) } " " } @if trackers.is_empty() { span.dim { "no tracker" } " · " form.inline method="post" action={(serve::at("/adopt/")) (slug)} { button.link type="submit" { "make a tracker of it" } } } }
                     }
                 }
                 // Who edits this source beside the world's owners and editors: its page, its proposals.
@@ -2678,7 +2680,8 @@ impl App {
             @if !orphans.is_empty() {
                 table { tbody { @for (dir, title, n) in &orphans {
                     tr {
-                        td { strong { (title) } div.why { (n) " claims · a source no tracker names · " code { "sources/" (dir) } } }
+                        td { a href={(serve::at("/sources/")) (dir)} { strong { (title) } } div.why { (n) " claims · a source no tracker names · " code { "sources/" (dir) } } }
+                        td.num { form method="post" action={(serve::at("/adopt/")) (dir)} { button.primary type="submit" { "Make a tracker of it" } } }
                         td.num { form method="post" action={(serve::at("/drop/")) (dir)} { button type="submit" { "Delete it" } } }
                     }
                 } } }
@@ -4117,6 +4120,21 @@ fn source_of(ds: &Source) -> String {
         .or_else(|| j["urls"].as_array().map(|u| u.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", ")))
         .or_else(|| j["list"].as_str().map(str::to_string))
         .unwrap_or_else(|| ds.decl.source.address())
+}
+
+/// A tracker made of one source, in `dir`: called `title`, joined on the source's identifier, the
+/// first of what a tracker reads. The app's first source and `zetlyn tracker new` both end here.
+pub fn first_tracker(dir: &Path, ds: &Source, title: &str, why: &str) -> Result<(), String> {
+    let scheme = primary_scheme(ds).ok_or_else(|| format!("{} carries no identifier, so no second source could ever meet it", ds.decl.title))?;
+    let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let why = if why.trim().is_empty() { format!("What {} says.", ds.decl.title) } else { why.trim().to_string() };
+    let decl = json!({
+        "name": format!("local/{name}"),
+        "title": if title.is_empty() { name.clone() } else { title.to_string() },
+        "sources": [{ "source": ds.decl.name, "why": why }],
+        "identified_by": [scheme],
+    });
+    write_tracker(dir, decl)
 }
 
 fn write_tracker(dir: &Path, decl: J) -> Result<(), String> {
@@ -7199,7 +7217,7 @@ fn watch_page(request: tiny_http::Request, dir: &Path, accounts: &crate::account
                 },
                 Ok(r) => {
                     let here = format!("/watch/try?url={}&pick={}", urlencode(&r.url), r.pick);
-                    let command = format!("zetlyn source new --from '{}'{} --at sources/{}", r.url.replace('\'', "%27"), if r.pick > 0 { format!(" --pick {}", r.pick) } else { String::new() }, r.name);
+                    let command = format!("zetlyn source new --from '{}'{} --every 1d --at sources/{}", r.url.replace('\'', "%27"), if r.pick > 0 { format!(" --pick {}", r.pick) } else { String::new() }, r.name);
                     html! {
                         div.watch {
                             (paste(&r.url))
@@ -7243,6 +7261,9 @@ fn watch_page(request: tiny_http::Request, dir: &Path, accounts: &crate::account
                                     h3 { "On your own machine" }
                                     p { "Zetlyn is free and open source. " a href="https://zetlyn.com/docs/getting_started#install" { "Install it" } ", then in your world's folder:" }
                                     pre { code { (command) } }
+                                    p { "Then make a tracker of it, and open it:" }
+                                    pre { code { "zetlyn tracker new --from sources/" (r.name) "\nzetlyn" } }
+                                    p.dim { "It is read again once a day while the app runs with Auto-update on, or whenever " code { "zetlyn run" } " runs, from cron for instance." }
                                     p.dim { "Or download " a href={"/watch/source.yaml?url=" (urlencode(&r.url)) "&pick=" (r.pick)} download="source.yaml" rel="nofollow" { "its source.yaml" } " and put it in sources/" (r.name) "/." }
                                 }
                             }

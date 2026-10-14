@@ -299,6 +299,7 @@ nav.tabs a.on { color: var(--fg); border-bottom-color: var(--accent); font-weigh
 .entry-link a:hover { color: var(--accent); }
 .lede { font-size: 1.05rem; color: var(--dim); max-width: 46rem; margin: .4rem 0 0; }
 .source-read { margin: 0 0 1.2rem; } .source-read form { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+.source-claims-about { padding: 1rem 1rem 0; } .source-claims-about h2 { margin: 0 0 .3rem; font-size: 1rem; } .source-claims-about p { margin: 0; max-width: 52rem; }
 /* The picker: the steps beside the page, the page in its frame. */
 .picker-head h1 { margin: .1rem 0 .2rem; }
 .picker-body { display: grid; grid-template-columns: minmax(22rem, 28rem) minmax(0, 1fr); gap: 1.2rem; margin-top: 1rem; align-items: start; }

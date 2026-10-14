@@ -1294,6 +1294,16 @@ pub fn parse_fields(raw: &str) -> BTreeMap<String, Value> {
 }
 
 impl Store {
+    /// A person changed what this source reads: what it held before is no measure of what it
+    /// reads now, so the next update is held against nothing before this.
+    pub fn redefined(&self) -> Result<(), String> {
+        self.set_meta("redefined_at", &self.last_run().to_string())
+    }
+
+    fn redefined_at(&self) -> i64 {
+        self.meta("redefined_at").and_then(|v| v.parse().ok()).unwrap_or(0)
+    }
+
     /// What the run saw, so the next one can be held against it.
     /// The store as the last complete run left it, and the fields it carried. A run is held
     /// against the store rather than against another run: one that reads a slice adds
@@ -1302,8 +1312,8 @@ impl Store {
         self.db
             .query_row(
                 "select coalesce(records, added + changed + unchanged), coalesce(fields, '')
-                 from run where complete = 1 and id < ?1 order by id desc limit 1",
-                rusqlite::params![before],
+                 from run where complete = 1 and id < ?1 and id > ?2 order by id desc limit 1",
+                rusqlite::params![before, self.redefined_at()],
                 |r| {
                     let total: i64 = r.get(0)?;
                     let fields: String = r.get(1)?;

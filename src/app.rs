@@ -1232,6 +1232,7 @@ impl App {
                         p.label(format!("Reading {}", ds.decl.title));
                         crate::autoupdate::forgive(&ds.dir);
                         let report = ds.run()?;
+                        if let Some(why) = report.refused.as_ref().or(report.error.as_ref()) { return Err(format!("Read, and not kept: {why}")); }
                         p.say(format!("+{} new · {} changed · {} gone · {} as they were", report.added, report.changed, report.removed, report.unchanged));
                         Ok(back)
                     });
@@ -2478,9 +2479,11 @@ impl App {
         std::fs::write(&path, crate::yaml::to_string(&decl)?).map_err(|e| format!("{}: {e}", path.display()))?;
         let back = serve::at(&format!("/sources/{slug}?saved={}", urlencode("Saved as chosen on the page, and read.")));
         let ds = Source::open(&dir)?;
+        ds.store.redefined()?;
         Ok(self.start(move |p| {
             p.label(format!("Reading {}", ds.decl.title));
             let report = ds.run()?;
+            if let Some(why) = report.refused.as_ref().or(report.error.as_ref()) { return Err(format!("Read, and not kept: {why}")); }
             p.say(format!("+{} new · {} changed · {} gone · {} as they were", report.added, report.changed, report.removed, report.unchanged));
             Ok(back)
         }))
@@ -2593,6 +2596,11 @@ impl App {
                 }
             }
             section.admin-card.flush {
+                // What the list below is, said once: each line a thing this source follows.
+                div.source-claims-about {
+                    h2 { "What it read" }
+                    p.dim { "A line for each thing this source follows: the page itself, or each item of a list on it. " strong { "Says" } " is what it read of it, each value under its name; " strong { "Known" } " is since when. A value that changes is kept with when it changed: open a line to see its history." }
+                }
                 div.source-claims-head {
                     form.bar method="get" action=(here) {
                         input type="search" name="q" value=(text) placeholder="Search its claims";

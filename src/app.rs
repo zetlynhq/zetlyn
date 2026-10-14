@@ -2459,7 +2459,7 @@ impl App {
         if fields.is_empty() {
             return Err("Choose at least one part of an item to keep".into());
         }
-        let chosen = crate::guess::Chosen { id: asked["id"].as_str().map(crate::guess::slug), title: asked["title"].as_str().map(crate::guess::slug) };
+        let chosen = crate::guess::Chosen { picked: true, single: asked["single"].as_bool().unwrap_or(false), id: asked["id"].as_str().map(crate::guess::slug), title: asked["title"].as_str().map(crate::guess::slug) };
         let (_, body) = self.pick_body(slug, false)?;
         let scratch = self.root.join(".zetlyn").join("pick").join(format!("{slug}-{}", crate::jwt::random()));
         let made = crate::guess::propose_items(url, &body, &scratch, Some(&old.name), items, &fields, &chosen, true).and_then(|_| crate::sourcedecl::SourceDecl::load(&scratch));

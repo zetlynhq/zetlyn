@@ -1003,6 +1003,10 @@ fn propose_list(url: &str, body: &str, dir: &Path, name: Option<&str>, pick: usi
 /// and the one that is its title.
 #[derive(Default)]
 pub struct Chosen {
+    /// Every field was pointed at by a person: each is kept, none dropped as saying nothing.
+    pub picked: bool,
+    /// One thing on the page, not a list: the page is the item, and it is named after the page.
+    pub single: bool,
     pub id: Option<String>,
     pub title: Option<String>,
 }
@@ -1098,6 +1102,30 @@ pub fn propose_items(url: &str, body: &str, dir: &Path, name: Option<&str>, item
             built["claims"]["id"]["scheme"] = json!(site);
         }
     }
+    // One thing on a page is the page: named after it, whatever its values say.
+    if chosen.single {
+        let host = url.split('/').nth(2).unwrap_or("site").trim_start_matches("www.");
+        let site = slug(host.split('.').next().unwrap_or(host)).replace('_', "-");
+        built["claims"]["id"] = json!({ "scheme": site, "from": format!("const:{}", page_name(url)) });
+        built["about"] = json!(format!("What {url} says."));
+        // Called what the page calls itself.
+        let called = regex::Regex::new(r"(?is)<title[^>]*>(.*?)</title>").ok().and_then(|re| re.captures(body)).map(|c| c[1].split_whitespace().collect::<Vec<_>>().join(" ")).filter(|t| !t.is_empty()).unwrap_or_else(|| page_name(url));
+        built["claims"]["title"] = json!(format!("const:{}", called.replace("&amp;", "&")));
+    }
+    // What a person pointed at is kept, each value, under the name they gave it: what is not the
+    // title, the address or a property yet becomes one.
+    if chosen.picked {
+        let said = built["claims"].to_string();
+        let missing: Vec<String> = fields.keys().filter(|k| !said.contains(&format!("\"field:{k}\"")) || built["claims"]["text"].as_array().is_some_and(|t| t.iter().any(|x| x.as_str() == Some(&format!("field:{k}"))))).cloned().collect();
+        if !built["claims"]["properties"].is_object() {
+            built["claims"]["properties"] = json!({});
+        }
+        for k in missing {
+            if built["claims"]["properties"].get(&k).is_none() && built["claims"]["title"].as_str() != Some(&format!("field:{k}")) {
+                built["claims"]["properties"][&k] = json!({ "type": "text", "from": format!("field:{k}") });
+            }
+        }
+    }
     finish(built, dir)
 }
 
@@ -1162,5 +1190,22 @@ mod named_by {
         let rows: Vec<Vec<String>> = (1..=8).map(|i| vec![format!("£{i}.99"), format!("Book number {i}")]).collect();
         let sh = super::shape(&super::columns_from_rows(&headers, &rows));
         assert_eq!(sh.id.as_deref(), Some("title"));
+    }
+}
+
+#[cfg(test)]
+mod one_thing {
+    #[test]
+    fn one_thing_on_a_page_is_the_page_and_keeps_every_value_clicked() {
+        let body = "<html><head><title>Shop &amp; more</title></head><body><h1 class=\"big\">Big news</h1><p class=\"lead\">A cloud platform that keeps signed snapshots of any page, for courts and for compliance.</p><span class=\"n\">42</span></body></html>";
+        let dir = std::env::temp_dir().join(format!("zetlyn-one-thing-{}", std::process::id()));
+        let fields: std::collections::BTreeMap<String, String> = [("title", "body > h1.big"), ("lead", "body > p.lead"), ("n", "body > span.n")].into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let chosen = super::Chosen { single: true, picked: true, ..Default::default() };
+        let text = super::propose_items("https://shop.example/news", body, &dir, Some("local/news"), "html", &fields, &chosen, true).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(text.contains("const:news") && text.contains("const:Shop & more"), "{text}");
+        for f in ["from: field:title", "from: field:lead", "field:n"] {
+            assert!(text.contains(f), "{f} is kept: {text}");
+        }
     }
 }

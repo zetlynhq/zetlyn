@@ -308,10 +308,16 @@ nav.tabs a.on { color: var(--fg); border-bottom-color: var(--accent); font-weigh
 .picker-steps h2 { margin: 0 0 .4rem; font-size: 1rem; display: flex; align-items: center; gap: .5rem; }
 .picker-steps .step { display: inline-flex; width: 1.4rem; height: 1.4rem; align-items: center; justify-content: center; background: var(--accent); color: #fff; font-size: .8rem; }
 .picker-found { display: flex; flex-wrap: wrap; gap: .3rem; align-items: center; margin: .5rem 0 0; }
-.picker-fields { width: 100%; font-size: .88rem; }
-.picker-fields input[type=text] { width: 100%; padding: .25rem .4rem; font: inherit; }
-.picker-fields td, .picker-fields th { padding: .3rem .3rem; }
 .picker-actions { display: flex; gap: .5rem; flex-wrap: wrap; margin: .8rem 0 .3rem; }
+.picker button:disabled { opacity: .45; cursor: not-allowed; }
+.picker-ask { border-left: 3px solid var(--accent); padding: .5rem .8rem; margin: .6rem 0; background: var(--bg); }
+.picker-ask p { margin: .2rem 0; }
+.picker-tracked { list-style: none; padding: 0; margin: .3rem 0 .6rem; display: grid; gap: .35rem; }
+.picker-tracked li { display: grid; grid-template-columns: minmax(6rem, 9rem) 1fr auto; gap: .5rem; align-items: center; font-size: .9rem; }
+.picker-tracked input[type=text] { width: 100%; padding: .25rem .4rem; font: inherit; }
+.picker-sample { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#pick-advanced summary { cursor: pointer; color: var(--dim); font-size: .88rem; }
+#pick-advanced select { font: inherit; padding: .15rem .3rem; }
 .picker-frame iframe { width: 100%; height: calc(100vh - 9rem); min-height: 32rem; border: 1px solid var(--fg); background: #fff; }
 #pick-preview .admin-table { font-size: .82rem; }
 @media (max-width: 60rem) { .picker-body { grid-template-columns: 1fr; } .picker-steps { position: static; max-height: none; } }

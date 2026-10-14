@@ -299,6 +299,22 @@ nav.tabs a.on { color: var(--fg); border-bottom-color: var(--accent); font-weigh
 .entry-link a:hover { color: var(--accent); }
 .lede { font-size: 1.05rem; color: var(--dim); max-width: 46rem; margin: .4rem 0 0; }
 .source-read { margin: 0 0 1.2rem; } .source-read form { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+/* The picker: the steps beside the page, the page in its frame. */
+.picker-head h1 { margin: .1rem 0 .2rem; }
+.picker-body { display: grid; grid-template-columns: minmax(22rem, 28rem) minmax(0, 1fr); gap: 1.2rem; margin-top: 1rem; align-items: start; }
+.picker-steps { display: grid; gap: 1.1rem; position: sticky; top: 1rem; max-height: calc(100vh - 2rem); overflow: auto; }
+.picker-steps { min-width: 0; }
+.picker-steps section { border: 1px solid var(--line-strong); padding: .9rem 1rem 1rem; background: var(--panel); min-width: 0; overflow-x: auto; }
+.picker-steps h2 { margin: 0 0 .4rem; font-size: 1rem; display: flex; align-items: center; gap: .5rem; }
+.picker-steps .step { display: inline-flex; width: 1.4rem; height: 1.4rem; align-items: center; justify-content: center; background: var(--accent); color: #fff; font-size: .8rem; }
+.picker-found { display: flex; flex-wrap: wrap; gap: .3rem; align-items: center; margin: .5rem 0 0; }
+.picker-fields { width: 100%; font-size: .88rem; }
+.picker-fields input[type=text] { width: 100%; padding: .25rem .4rem; font: inherit; }
+.picker-fields td, .picker-fields th { padding: .3rem .3rem; }
+.picker-actions { display: flex; gap: .5rem; flex-wrap: wrap; margin: .8rem 0 .3rem; }
+.picker-frame iframe { width: 100%; height: calc(100vh - 9rem); min-height: 32rem; border: 1px solid var(--fg); background: #fff; }
+#pick-preview .admin-table { font-size: .82rem; }
+@media (max-width: 60rem) { .picker-body { grid-template-columns: 1fr; } .picker-steps { position: static; max-height: none; } }
 form.inline { display: inline; margin: 0; }
 button.link { border: 0; background: none; padding: 0; color: var(--accent); font: inherit; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
 /* zetlyn.com/watch: a page of the website's, a field to paste into, what was read, two ways on. */

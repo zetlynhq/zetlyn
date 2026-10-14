@@ -45,6 +45,7 @@ mod migrate;
 mod oidc;
 mod ops;
 mod outbound;
+mod picker;
 mod package;
 mod claim;
 mod remote;

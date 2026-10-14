@@ -601,6 +601,8 @@ pub fn export(dir: &Path, to: &Path) -> Result<usize, String> {
             if name.ends_with("-wal") || name.ends_with("-shm") || name.ends_with("-journal") || name.ends_with(".arriving") || name.ends_with(".partial")
                 // An upload waiting to be imported, or an export waiting to be fetched, is not part of it.
                 || name.starts_with("incoming/") || name.starts_with(".zetlyn/incoming/") || name.starts_with(".zetlyn/exports/")
+                // A page kept while somebody chose on it, and a preview read and gone.
+                || name.starts_with(".zetlyn/pick/") || name.starts_with(".zetlyn/watch/")
                 // Drawn again from what is exported: a tracker's preview pictures, and its ask to draw.
                 || name.contains("/.previews/") || name.ends_with("/.warm") {
                 continue;

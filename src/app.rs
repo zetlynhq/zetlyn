@@ -1200,6 +1200,29 @@ impl App {
                 return redirect(request, &serve::at("/"));
             }
             // A source no tracker names, made the first of a tracker of its own.
+            // The list on a web page chosen by pointing at it (picker.rs): the page with the steps,
+            // the page itself in its frame, what a choice reads, and the choice saved and read.
+            (false, ["sources", slug, "pick"]) if !slug.starts_with('.') => (200, html_kind, self.pick_page(slug)),
+            (false, ["sources", slug, "pick", "page"]) if !slug.starts_with('.') => {
+                let nonce = crate::jwt::random();
+                return match self.pick_body(slug, true).and_then(|(url, b)| Ok(crate::picker::framed(&b, &url, &nonce))) {
+                    Ok(page) => respond_policy(request, &page, &crate::picker::frame_policy(&nonce)),
+                    Err(e) => respond(request, 502, "text/plain; charset=utf-8", &e),
+                };
+            }
+            (true, ["sources", slug, "pick", "preview"]) if !slug.starts_with('.') => {
+                let asked: J = serde_json::from_slice(&body).unwrap_or(J::Null);
+                let fields: BTreeMap<String, String> = asked["fields"].as_object().map(|o| o.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect()).unwrap_or_default();
+                let said = self.pick_body(slug, false).and_then(|(_, b)| crate::picker::preview(&b, asked["items"].as_str().unwrap_or(""), &fields));
+                (200, json_kind, said.unwrap_or_else(|e| json!({ "error": e })).to_string())
+            }
+            (true, ["sources", slug, "pick", "save"]) if !slug.starts_with('.') => {
+                let asked: J = serde_json::from_slice(&body).unwrap_or(J::Null);
+                match self.pick_save(slug, &asked) {
+                    Ok(id) => (200, json_kind, json!({ "job": id }).to_string()),
+                    Err(e) => (200, json_kind, json!({ "error": e }).to_string()),
+                }
+            }
             // A source read now, as a job the page follows, then shown again with what it holds.
             (true, ["read", source]) if !source.contains("..") => match Source::open(&self.sources().join(source)) {
                 Err(e) => (404, json_kind, json!({ "error": e }).to_string()),
@@ -2385,6 +2408,84 @@ impl App {
     /// One source, for the world's members: what it is and where it reads, what it feeds, its
     /// claims to look through, each with a correction to propose, and rows to propose where it
     /// takes them. A claim's own page and the proposal forms are a tracker's that holds the source.
+    /// The page a web source reads, as it answered when the picker opened: fetched afresh for the
+    /// frame, kept for what the choices read after.
+    fn pick_body(&self, slug: &str, fresh: bool) -> Result<(String, String), String> {
+        let ds = Source::open(&self.sources().join(slug))?;
+        let crate::sourcedecl::Fetch::Web { url, .. } = &ds.decl.source else {
+            return Err(format!("{} is not read from a web page", ds.decl.title));
+        };
+        let kept = self.root.join(".zetlyn").join("pick").join(format!("{slug}.html"));
+        if !fresh {
+            if let Ok(b) = std::fs::read_to_string(&kept) {
+                return Ok((url.clone(), b));
+            }
+        }
+        self.may_read(url)?;
+        let b = crate::fetch::Fetcher::new(crate::sourcedecl::AGENT, &BTreeMap::new(), 0)?.get(url)?;
+        let _ = std::fs::create_dir_all(kept.parent().unwrap_or(&self.root));
+        let _ = std::fs::write(&kept, &b);
+        Ok((url.clone(), b))
+    }
+
+    fn pick_page(&self, slug: &str) -> String {
+        let Ok(ds) = Source::open(&self.sources().join(slug)) else {
+            return page("Not here", html! { h1 { "No such source" } });
+        };
+        let crate::sourcedecl::Fetch::Web { url, items, fields, .. } = &ds.decl.source else {
+            return page("Choose on the page", html! { h1 { (ds.decl.title) } div.note { "Only a source read from a web page is chosen on the page." } });
+        };
+        let found = self.pick_body(slug, true).map(|(_, b)| crate::picker::found(&b)).unwrap_or(J::Array(Vec::new()));
+        let base = serve::at(&format!("/sources/{slug}"));
+        let frame = serve::at(&format!("/sources/{slug}/pick/page"));
+        let now = json!({ "items": items, "fields": fields });
+        let title = if ds.decl.title.is_empty() { slug.to_string() } else { ds.decl.title.clone() };
+        page("Choose on the page", crate::picker::page(&title, url, &frame, &base, &serve::at("/job/"), &now, &found))
+    }
+
+    /// The choice made on the page, written as the source's own: what guess writes for a list,
+    /// with the person's list, fields, identifier and title, and the source's name, title and
+    /// rhythm as they were. Then read, as a job.
+    fn pick_save(&self, slug: &str, asked: &J) -> Result<u64, String> {
+        let dir = self.sources().join(slug);
+        let old = crate::sourcedecl::SourceDecl::load(&dir)?;
+        let url = match &old.source {
+            crate::sourcedecl::Fetch::Web { url, .. } => url.clone(),
+            _ => return Err(format!("{} is not read from a web page", old.title)),
+        };
+        let url = &url;
+        let items = asked["items"].as_str().filter(|s| !s.trim().is_empty()).ok_or("Choose the list first: click an item on the page")?;
+        let fields: BTreeMap<String, String> = asked["fields"].as_object().map(|o| o.iter().filter_map(|(k, v)| Some((crate::guess::slug(k), v.as_str()?.to_string()))).filter(|(k, _)| !k.is_empty()).collect()).unwrap_or_default();
+        if fields.is_empty() {
+            return Err("Choose at least one part of an item to keep".into());
+        }
+        let chosen = crate::guess::Chosen { id: asked["id"].as_str().map(crate::guess::slug), title: asked["title"].as_str().map(crate::guess::slug) };
+        let (_, body) = self.pick_body(slug, false)?;
+        let scratch = self.root.join(".zetlyn").join("pick").join(format!("{slug}-{}", crate::jwt::random()));
+        let made = crate::guess::propose_items(url, &body, &scratch, Some(&old.name), items, &fields, &chosen, true).and_then(|_| crate::sourcedecl::SourceDecl::load(&scratch));
+        let _ = std::fs::remove_dir_all(&scratch);
+        let mut decl = made?;
+        decl.name = old.name.clone();
+        decl.title = old.title.clone();
+        decl.schedule = old.schedule;
+        // A list read over several pages keeps how it is: only what an item is and holds changed.
+        if let (crate::sourcedecl::Fetch::Web { page: p, limit: l, top: t, .. }, crate::sourcedecl::Fetch::Web { page, limit, top, .. }) = (&mut decl.source, old.source) {
+            *p = page;
+            *l = limit;
+            *t = top;
+        }
+        let path = dir.join(crate::sourcedecl::FILE);
+        std::fs::write(&path, crate::yaml::to_string(&decl)?).map_err(|e| format!("{}: {e}", path.display()))?;
+        let back = serve::at(&format!("/sources/{slug}?saved={}", urlencode("Saved as chosen on the page, and read.")));
+        let ds = Source::open(&dir)?;
+        Ok(self.start(move |p| {
+            p.label(format!("Reading {}", ds.decl.title));
+            let report = ds.run()?;
+            p.say(format!("+{} new · {} changed · {} gone · {} as they were", report.added, report.changed, report.removed, report.unchanged));
+            Ok(back)
+        }))
+    }
+
     fn source_detail(&self, slug: &str, query: &BTreeMap<String, String>) -> Option<String> {
         if slug.contains(['/', '\\']) || slug.starts_with('.') {
             return None;
@@ -2430,6 +2531,9 @@ impl App {
             div.source-read {
                 form method="post" action=(serve::at(&format!("/read/{slug}"))) data-job=(serve::at(&format!("/read/{slug}"))) {
                     button.primary type="submit" { "Read it now" }
+                    @if matches!(d.source, crate::sourcedecl::Fetch::Web { .. }) {
+                        a.button href=(serve::at(&format!("/sources/{slug}/pick"))) { "Choose on the page" }
+                    }
                     " " span.dim { "Last read " (crate::autoupdate::last_finished(&ds).map(|t| stamp_words(&crate::iso_stamp(t))).unwrap_or_else(|| "never".into())) }
                 }
                 pre #log data-jobs=(serve::at("/job/")) hidden {}
@@ -4235,6 +4339,17 @@ fn parse_form(s: &str) -> BTreeMap<String, String> {
 
 fn page(title: &str, body: Markup) -> String {
     serve::shell(title, body)
+}
+
+/// A page answered under a policy of its own: the picker's frame, which shows somebody else's page.
+fn respond_policy(request: tiny_http::Request, body: &str, policy: &str) {
+    let mut response = tiny_http::Response::from_string(body).with_status_code(200);
+    for (k, v) in [("Content-Type", "text/html; charset=utf-8"), ("Content-Security-Policy", policy), ("Referrer-Policy", "no-referrer")] {
+        if let Ok(h) = tiny_http::Header::from_bytes(k.as_bytes(), v.as_bytes()) {
+            response = response.with_header(h);
+        }
+    }
+    let _ = request.respond(response);
 }
 
 fn respond(request: tiny_http::Request, status: u16, kind: &str, body: &str) {

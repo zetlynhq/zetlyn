@@ -996,7 +996,26 @@ fn propose_list(url: &str, body: &str, dir: &Path, name: Option<&str>, pick: usi
     let found = crate::web::candidates(body);
     let c = found.get(pick).ok_or_else(|| format!("{WEB_PAGE}[]"))?;
     let fields: BTreeMap<String, String> = c.fields.iter().map(|(n, s, _)| (n.clone(), s.clone())).collect();
-    let rows = crate::web::extract(body, &c.items, &fields)?;
+    propose_items(url, body, dir, name, &c.items, &fields, &Chosen::default(), one_page)
+}
+
+/// What a person chose on the page itself, over what is guessed: the field that names an item,
+/// and the one that is its title.
+#[derive(Default)]
+pub struct Chosen {
+    pub id: Option<String>,
+    pub title: Option<String>,
+}
+
+/// The source a list on a page becomes, its items and their fields given: found by
+/// `web::candidates`, or pointed at on the page.
+#[allow(clippy::too_many_arguments)]
+pub fn propose_items(url: &str, body: &str, dir: &Path, name: Option<&str>, items: &str, fields: &BTreeMap<String, String>, chosen: &Chosen, one_page: bool) -> Result<String, String> {
+    let fields = fields.clone();
+    let rows = crate::web::extract(body, items, &fields)?;
+    if rows.is_empty() {
+        return Err(format!("{items}: nothing on the page"));
+    }
     let headers: Vec<String> = fields.keys().cloned().collect();
     let table: Vec<Vec<String>> = rows
         .iter()
@@ -1004,6 +1023,13 @@ fn propose_list(url: &str, body: &str, dir: &Path, name: Option<&str>, pick: usi
         .collect();
     let cols = columns_from_rows(&headers, &table);
     let mut sh = shape(&cols);
+    if let Some(id) = chosen.id.as_ref().filter(|i| fields.contains_key(*i)) {
+        sh.id = Some(id.clone());
+        sh.id_scheme = None;
+    }
+    if let Some(t) = chosen.title.as_ref().filter(|t| fields.contains_key(*t)) {
+        sh.title = t.clone();
+    }
     // A page shows one item in several places (a front page's tabs, a list and its highlights).
     // An attribute named as an id, on every item and the same only where the item is the same,
     // still names it; the repeats are kept once.
@@ -1027,7 +1053,7 @@ fn propose_list(url: &str, body: &str, dir: &Path, name: Option<&str>, pick: usi
             .min_by_key(|c| c.name.len())
             .map(|c| c.name.clone());
     }
-    let mut fetch = json!({ "type": "web", "url": url, "items": c.items, "fields": fields });
+    let mut fetch = json!({ "type": "web", "url": url, "items": items, "fields": fields });
     if let Some(param) = crate::web::paging_parameter(body, url).filter(|_| !one_page) {
         fetch["page"] = json!({ "offset": param, "by": "page", "max": rows.len().max(1) });
         fetch["top"] = json!(1000);

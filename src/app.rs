@@ -71,15 +71,13 @@ pub fn run(args: &[String]) -> Result<(), String> {
 
 /// The current directory if it is a workspace, and `~/zetlyn` otherwise, made on first use.
 
-/// The background pass, for a workspace that turned it on: once a minute it looks for sources
-/// that are due and updates them as one job, which the bar at the bottom of every page shows and
-/// can stop. Never beside a job a person started: theirs comes first, and this waits a minute.
+/// The background pass: once a minute it looks for sources that are due and updates them as one
+/// job, which the bar at the bottom of every page shows and can stop. Due is a source's own
+/// rhythm where it has one, tracker or none, and the workspace's otherwise; with neither, only
+/// when somebody asks. Never beside a job a person started: theirs comes first, and this waits.
 fn background(root: &Path, jobs: &Arc<Mutex<Jobs>>) {
     loop {
         std::thread::sleep(std::time::Duration::from_secs(60));
-        if crate::autoupdate::every(root).is_none() {
-            continue;
-        }
         let busy = jobs.lock().map(|j| j.all.values().any(|job| !job.done)).unwrap_or(true);
         if busy {
             continue;
@@ -1061,11 +1059,16 @@ impl App {
         if self.visitor {
             serve::frame_app(None, None);
         } else {
-            let words = match crate::autoupdate::every(&self.root) {
-                Some(s) => format!("Auto-update: {}", crate::autoupdate::words(s)),
-                None => "Auto-update: off".to_string(),
+            // Off for the workspace, a source with a rhythm of its own still keeps it.
+            let own = || crate::tracker::registry(&self.sources()).values().filter(|d| crate::sourcedecl::SourceDecl::load(d).is_ok_and(|s| s.schedule.every.as_deref().is_some_and(|e| e != "never"))).count();
+            let (words, on) = match crate::autoupdate::every(&self.root) {
+                Some(s) => (format!("Auto-update: {}", crate::autoupdate::words(s)), true),
+                None => match own() {
+                    0 => ("Auto-update: off".to_string(), false),
+                    1 => ("Auto-update: 1 source on its own".to_string(), true),
+                    n => (format!("Auto-update: {n} sources on their own"), true),
+                },
             };
-            let on = crate::autoupdate::every(&self.root).is_some();
             serve::frame_app(Some(home.clone()), Some((words, format!("{}/settings", self.base), on)));
         }
         // A tracker's pages are under the world's trackers, as the address says (trackers/<name>/).
@@ -1197,8 +1200,27 @@ impl App {
                 return redirect(request, &serve::at("/"));
             }
             // A source no tracker names, made the first of a tracker of its own.
+            // A source read now, as a job the page follows, then shown again with what it holds.
+            (true, ["read", source]) if !source.contains("..") => match Source::open(&self.sources().join(source)) {
+                Err(e) => (404, json_kind, json!({ "error": e }).to_string()),
+                Ok(ds) => {
+                    let back = serve::at(&format!("/sources/{source}"));
+                    let id = self.start(move |p| {
+                        p.label(format!("Reading {}", ds.decl.title));
+                        crate::autoupdate::forgive(&ds.dir);
+                        let report = ds.run()?;
+                        p.say(format!("+{} new · {} changed · {} gone · {} as they were", report.added, report.changed, report.removed, report.unchanged));
+                        Ok(back)
+                    });
+                    (200, json_kind, json!({ "job": id }).to_string())
+                }
+            },
             (true, ["adopt", source]) if !source.contains("..") => {
                 let made = Source::open(&self.sources().join(source)).and_then(|ds| {
+                    // Never read, it has nothing yet to say what it is joined on: read once first.
+                    if ds.store.count() == 0 {
+                        ds.run()?;
+                    }
                     let slug = self.free(&self.trackers(), &crate::guess::slug(&ds.decl.title));
                     self.accept(&slug, source, "", &ds.decl.title)
                 });
@@ -1569,6 +1591,10 @@ impl App {
                     Ok(format!("{}: {}.", decl.title, match every { Some("never") => "never updated by itself".to_string(), Some(e) => crate::fetch::duration(e).map(crate::autoupdate::words).unwrap_or_default(), None => "as above".to_string() }))
                 })()
                 .unwrap_or_else(|e| e);
+                // Changed on the source's own page, back there.
+                if let Some(back) = form.get("back").filter(|b| b.starts_with('/') && !b.starts_with("//")) {
+                    return redirect(request, &format!("{back}?saved={}", urlencode(&said)));
+                }
                 return redirect(request, &serve::at(&format!("/settings/updates?saved={}", urlencode(&said))));
             }
             // Every source's rhythm and the one for all, from one form: each a rhythm offered and
@@ -2399,13 +2425,37 @@ impl App {
                     @if !d.kind.is_empty() { span.chip { (d.kind) } }
                 }
             }
+            @if let Some(s) = query.get("saved") { div.note { (s) } }
+            // Read now, whatever its rhythm: the log of it here, and the page again when it is done.
+            div.source-read {
+                form method="post" action=(serve::at(&format!("/read/{slug}"))) data-job=(serve::at(&format!("/read/{slug}"))) {
+                    button.primary type="submit" { "Read it now" }
+                    " " span.dim { "Last read " (crate::autoupdate::last_finished(&ds).map(|t| stamp_words(&crate::iso_stamp(t))).unwrap_or_else(|| "never".into())) }
+                }
+                pre #log data-jobs=(serve::at("/job/")) hidden {}
+                div #error .note hidden {}
+            }
+            (PreEscaped(JOB_SCRIPT))
             div.admin-cards.two {
                 section.admin-card {
                     h2 { "Where it reads" }
                     dl.admin-kv {
                         dt { "From" } dd { code { (d.source.address()) } }
                         dt { "Last read" } dd { (crate::autoupdate::last_finished(&ds).map(|t| stamp_words(&crate::iso_stamp(t))).unwrap_or_else(|| "never".into())) }
-                        dt { "How often" } dd { (d.schedule.every.clone().unwrap_or_else(|| "as the world's setting".into())) " · " a href=(serve::at("/settings/updates")) { "change" } }
+                        dt { "How often" } dd {
+                            // Its own rhythm, here where it is read: a source keeps it with a tracker or without.
+                            form.inline method="post" action=(serve::at(&format!("/settings/source/{slug}"))) {
+                                input type="hidden" name="back" value=(here);
+                                select name="every" {
+                                    option value="" selected[d.schedule.every.is_none()] { "As the world's: " (crate::autoupdate::every(&self.root).map(crate::autoupdate::words).unwrap_or_else(|| "off".into())) }
+                                    @for (v, l) in crate::autoupdate::INTERVALS.iter().filter(|(v, _)| crate::fetch::duration(v).is_some_and(|s| s >= crate::autoupdate::floor())) {
+                                        option value=(v) selected[d.schedule.every.as_deref() == Some(*v)] { (l) }
+                                    }
+                                    option value="never" selected[d.schedule.every.as_deref() == Some("never")] { "Never by itself" }
+                                }
+                                " " button type="submit" { "Save" }
+                            }
+                        }
                         dt { "Its page" } dd { (if shown_source(&self.root, slug).is_some() { "public" } else { "private" }) " · " a href=(serve::at("/settings/seen/sources")) { "change" } }
                         dt { "In public trackers" } dd { (match crate::sourcedecl::shown(&d.licence.republish) { "yes" => "everything", _ => "titles, values and a link" }) }
                         dt { "Feeds" } dd { @for (folder, t) in &trackers { a href=(serve::at(&format!("/trackers/{folder}/"))) { (if t.title.is_empty() { folder.as_str() } else { t.title.as_str() }) } " " } @if trackers.is_empty() { span.dim { "no tracker" } " · " form.inline method="post" action={(serve::at("/adopt/")) (slug)} { button.link type="submit" { "make a tracker of it" } } } }
@@ -2461,7 +2511,7 @@ impl App {
                         }
                     } }
                 }
-                @if hits.is_empty() { p.dim style="padding: 1rem" { "Nothing here." } }
+                @if hits.is_empty() { p.dim style="padding: 1rem" { @if total == 0 && text.is_empty() && crate::autoupdate::last_finished(&ds).is_none() { "Not read yet. " strong { "Read it now" } ", above, and what it holds is here." } @else { "Nothing here." } } }
             }
             @if pages > 1 {
                 nav.admin-pages {
@@ -3168,7 +3218,7 @@ impl App {
             form.settings method="post" action=(serve::at("/settings/updates")) {
                 p { label { strong { "Every source" } span.dim { " · unless it says otherwise below" } br;
                     select name="every" {
-                        option value="" selected[current.is_empty()] { "Off: only when you say Update now" }
+                        option value="" selected[current.is_empty()] { "Off: only a source with a rhythm of its own, and Update now" }
                         @for (v, l) in &choices { option value=(v) selected[current == *v] disabled[!allowed(v)] { (l) } }
                     }
                 } }

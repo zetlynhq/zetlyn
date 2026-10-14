@@ -159,7 +159,9 @@ pub fn held(ds: &Source, dir: &Path) -> Option<String> {
     if let Some(r) = crate::web::resume_of(dir).filter(|r| !r.goes_on) {
         return Some(format!("a read of it is not finished ({}): go on with it first", r.why));
     }
-    if !ever_complete(ds) {
+    // The first read in full is a person's to start, since it may be all of a large register;
+    // a rhythm written into the source itself is that person saying so.
+    if !ever_complete(ds) && ds.decl.schedule.every.as_deref().is_none_or(|e| e == "never") {
         return Some("never read in full yet".into());
     }
     if failures(ds) >= PATIENCE {

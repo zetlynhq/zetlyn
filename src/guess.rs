@@ -280,7 +280,11 @@ fn shape(cols: &[Column]) -> Shape {
                 &c.name,
                 &["id", "key", "number", "code", "ref", "isbn", "sku"],
             );
-            (whole(c).is_none(), !named)
+            // A price or a score is unique on a page by chance and changes: what names an item
+            // does not hold a decimal figure.
+            let filled = c.filled();
+            let figures = filled.iter().filter(|v| v.as_bytes().windows(3).any(|w| w[0].is_ascii_digit() && (w[1] == b'.' || w[1] == b',') && w[2].is_ascii_digit())).count();
+            (whole(c).is_none(), !named, figures * 2 > filled.len())
         })
         .map(|c| c.name.clone());
     let id_scheme = cols.iter().find(|c| Some(&c.name) == id.as_ref()).and_then(whole);
@@ -797,6 +801,10 @@ fn feed_declaration(name: &str, kind: &str, url: &str, body: &str) -> J {
             "from": format!("text:/{}/", scheme.pattern),
             "all": true,
         });
+    } else {
+        // Otherwise an item is its link: what a tracker joins it on, and a change is said of.
+        let scheme = slug(name.rsplit('/').next().unwrap_or(name)).replace('_', "-");
+        d["claims"]["id"] = json!({ "scheme": if scheme.is_empty() { "feed".to_string() } else { scheme }, "from": "meta:link" });
     }
     d
 }
@@ -1117,5 +1125,16 @@ mod page_names {
         assert_eq!(super::page_name("https://store.steampowered.com/search/?tags=492"), "steampowered");
         assert_eq!(super::page_name("http://127.0.0.1:4791/examples/lindenhof/"), "lindenhof");
         assert_eq!(super::page_name("http://127.0.0.1:4791/"), "site");
+    }
+}
+
+#[cfg(test)]
+mod named_by {
+    #[test]
+    fn a_price_unique_by_chance_is_not_what_names_an_item() {
+        let headers = vec!["price".to_string(), "title".to_string()];
+        let rows: Vec<Vec<String>> = (1..=8).map(|i| vec![format!("£{i}.99"), format!("Book number {i}")]).collect();
+        let sh = super::shape(&super::columns_from_rows(&headers, &rows));
+        assert_eq!(sh.id.as_deref(), Some("title"));
     }
 }

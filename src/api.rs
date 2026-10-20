@@ -78,13 +78,15 @@ fn preview(_c: &Caller, url: &str, find: Option<&str>) -> Answer {
     };
     let find = find.map(str::trim).filter(|f| !f.is_empty());
     let places: Vec<J> = anchor::places(&html, 150, find).into_iter().map(|a| json!({ "selector": a.path, "text": a.text, "beside": a.label })).collect();
-    let lines = crate::text::lines(&html).len();
+    let page_text = crate::text::lines(&html).join("\n");
+    let lines = page_text.lines().count();
     (
         200,
         json!({
             "url": url,
             "places": places,
             "whole_page_lines": lines,
+            "whole_page_watchable": check::watchable_whole(&page_text),
             "rendered": rendered,
             "find": find,
             "how": match (find, places.is_empty()) {

@@ -171,6 +171,10 @@ pub fn html(url: &str) -> Result<(String, String), String> {
         *slot = None;
     }
     let (at, html) = result?;
+    // As large as a page read without Chrome may be, and no larger: past that it is read without.
+    if html.len() as u64 > crate::fetch::BODY_LIMIT {
+        return Err(format!("{url}: larger than {} MB once its scripts ran", crate::fetch::BODY_LIMIT / 1024 / 1024));
+    }
     let noscript = regex::Regex::new(r"(?is)<noscript\b.*?</noscript\s*>").expect("a fixed pattern");
     Ok((at, noscript.replace_all(&html, "").into_owned()))
 }

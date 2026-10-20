@@ -6,7 +6,7 @@ use std::time::Duration;
 pub const AGENT: &str = "ZetlynBot/0.1 (+https://zetlyn.com)";
 
 /// A page larger than this is not a page somebody reads.
-const BODY_LIMIT: u64 = 5 * 1024 * 1024;
+pub const BODY_LIMIT: u64 = 5 * 1024 * 1024;
 
 pub struct Fetched {
     /// Where it was read, after redirects.

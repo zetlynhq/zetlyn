@@ -78,6 +78,10 @@ pub fn said(url: &str, e: &str) -> String {
         let host = url.split_once("://").map_or(url, |(_, r)| r).split(['/', '?', '#']).next().unwrap_or(url).trim_start_matches("www.");
         return format!("{host} refused to answer Zetlyn ({}): it does not let programs read this page, or not just now. Zetlyn does not get around that; another site with the same information may work.", e.rsplit(": ").next().unwrap_or(e));
     }
+    if e.contains("timeout") {
+        let host = url.split_once("://").map_or(url, |(_, r)| r).split(['/', '?', '#']).next().unwrap_or(url).trim_start_matches("www.");
+        return format!("{host} took longer than 20 seconds to send the page: it is very large, or the site is slow just now. Try again later, or watch a smaller page with the same information.");
+    }
     e.to_string()
 }
 
@@ -137,8 +141,23 @@ pub fn first(url: &str, anchor: Option<Anchor>) -> Result<(Mode, String, bool), 
         Mode::Page { .. } if value.lines().filter(|l| !l.trim().is_empty()).count() < 3 => {
             Err("The page shows Zetlyn almost no text, so there is nothing to watch. It may need signing in, or not let programs read it.".into())
         }
+        Mode::Page { .. } if !watchable_whole(&value) => Err(format!(
+            "The page is too long to watch whole ({} lines; at most {PAGE_LINES_MAX}). Mark the place on it that matters instead.",
+            value.lines().count()
+        )),
         _ => Ok((mode, value, render)),
     }
+}
+
+/// How long a whole page may be to be watched: compared on every check and kept with every
+/// change, a page longer than this (a specification on one page, an endless list) is watched by
+/// a place on it.
+pub const PAGE_LINES_MAX: usize = 20_000;
+const PAGE_TEXT_MAX: usize = 1_000_000;
+
+/// Whether a page's text is short enough to be watched whole.
+pub fn watchable_whole(text: &str) -> bool {
+    text.len() <= PAGE_TEXT_MAX && text.lines().count() <= PAGE_LINES_MAX
 }
 
 fn first_read(url: &str, anchor: Option<Anchor>) -> Result<(Mode, String, bool), String> {
@@ -344,6 +363,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_page_too_long_is_watched_by_a_place_on_it() {
+        assert!(watchable_whole(&"a line\n".repeat(PAGE_LINES_MAX)));
+        assert!(!watchable_whole(&"a line\n".repeat(PAGE_LINES_MAX + 1)), "too many lines");
+        assert!(!watchable_whole(&"x".repeat(1_000_001)), "too much text in few lines");
+    }
+
+    #[test]
     fn a_wall_is_said_for_what_it_is() {
         let amazon = r#"<html><head><title>Amazon.de</title></head><body><p>To discuss automated access to Amazon data please contact api-services-support@amazon.com.</p><form action="/errors/validateCaptcha"></form></body></html>"#;
         assert!(walled(amazon));
@@ -357,6 +383,7 @@ mod tests {
         let said = said("https://www.amazon.de/dp/B0", "https://www.amazon.de/dp/B0: HTTP 503");
         assert!(said.starts_with("amazon.de refused to answer Zetlyn (HTTP 503)"), "{said}");
         assert_eq!(super::said("https://a.example/", "a.example: that name does not resolve"), "a.example: that name does not resolve");
+        assert!(super::said("https://html.spec.whatwg.org/", "https://html.spec.whatwg.org/: timeout: global").starts_with("html.spec.whatwg.org took longer than 20 seconds"));
     }
 
     fn watch(mode: Mode, last: &str) -> Watch {

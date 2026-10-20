@@ -606,6 +606,7 @@ fn frame(url: &str, origin: &str, browser: bool) -> Reply {
     match address(url).and_then(|u| crate::fetch::get(&u)) {
         // A wall instead of the page (a captcha): said, not shown as if it were the page.
         Ok(f) if f.is_html() && check::walled(&f.body) => message(&check::refused(url)),
+        Ok(f) if f.is_html() && check::frames(&f.body, &f.url).is_some() => message(&check::framed_said(url, &check::frames(&f.body, &f.url).unwrap_or_default())),
         Ok(f) if f.is_html() => {
             let nonce = crate::crypto::token();
             // As served, which takes a moment, when that shows the page; in Chrome (seconds) when

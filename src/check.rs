@@ -21,6 +21,9 @@ pub fn read(url: &str) -> Result<String, String> {
             None => Err(format!("{url}: not something with text to watch ({}); Zetlyn reads web pages, JSON, RSS and Atom feeds, XML and text", f.content_type)),
         };
     }
+    if let Some(frames) = frames(&f.body, &f.url) {
+        return Err(framed_said(url, &frames));
+    }
     if walled(&f.body) {
         return Err(refused(url));
     }
@@ -68,6 +71,24 @@ pub fn walled(html: &str) -> bool {
     ];
     // A wall is a short page; a long one that only carries a captcha form somewhere is a page.
     html.len() < 60_000 && WALLS.iter().any(|w| html.contains(w))
+}
+
+/// Where a page is a frameset, the addresses of its frames: each is a page of its own, and the
+/// frameset has no text to watch.
+pub fn frames(html: &str, base: &str) -> Option<Vec<String>> {
+    let lower = html.to_ascii_lowercase();
+    if !lower.contains("<frameset") {
+        return None;
+    }
+    let doc = scraper::Html::parse_document(html);
+    let frame = scraper::Selector::parse("frame[src]").expect("a fixed selector");
+    let found: Vec<String> = doc.select(&frame).filter_map(|f| f.value().attr("src")).map(|src| fetch::join(base, src.trim())).collect();
+    (!found.is_empty()).then_some(found)
+}
+
+/// What to tell a person about a page made of frames.
+pub fn framed_said(url: &str, frames: &[String]) -> String {
+    format!("{url} is made of frames, each a page of its own, so it has no text of its own to watch. Watch one of them instead: {}", frames.join(" , "))
 }
 
 /// What to tell a person when a site will not be read by a program.
@@ -383,6 +404,13 @@ pub fn confirm(w: &Watch, first: &str, second: &str) -> Confirmed {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_page_of_frames_names_its_frames() {
+        let page = r#"<html><frameset cols="20%,80%"><frame src="menu.htm" name="left"><frame src="/top.htm"></frameset></html>"#;
+        assert_eq!(frames(page, "http://abe.example/").unwrap(), vec!["http://abe.example/menu.htm", "http://abe.example/top.htm"]);
+        assert!(frames("<html><body><iframe src=x></iframe><p>text</p></body></html>", "http://a.example/").is_none(), "an iframe in a page is no frameset");
+    }
 
     #[test]
     fn a_page_too_long_is_watched_by_a_place_on_it() {

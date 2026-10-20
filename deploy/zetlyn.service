@@ -1,0 +1,44 @@
+# Zetlyn on the machine that serves zetlyn.com: one instance, behind Caddy.
+# /etc/zetlyn/env holds SMTP_HOST, SMTP_PORT, SMTP_USER, MAIL_FROM and, once payment is set up,
+# STRIPE_*; /etc/zetlyn/smtp-password (0600 root) is handed in as a credential, so the service
+# reads it without any right to /etc/zetlyn. The user is zetlyn-app: `zetlyn` is the old product's.
+[Unit]
+Description=Zetlyn: a URL in, its changes out
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/srv/zetlyn/zetlyn serve --hosted --base https://zetlyn.com --bind 127.0.0.1:4848 --data /var/lib/zetlyn
+EnvironmentFile=/etc/zetlyn/env
+# The Stripe mode in use: the key, its webhook secret and the two price ids (see stripe-setup).
+EnvironmentFile=-/etc/zetlyn/stripe.env
+LoadCredential=smtp-password:/etc/zetlyn/smtp-password
+Environment=SMTP_PASSWORD_FILE=%d/smtp-password
+# Signing in with Google: the client file from Google's console (0600 root), also a credential.
+LoadCredential=google-client:/etc/zetlyn/google-client.json
+Environment=GOOGLE_CLIENT_FILE=%d/google-client
+# Signing in with Apple: its key (0600 root); APPLE_CLIENT_ID, APPLE_TEAM_ID and APPLE_KEY_ID are in env.
+LoadCredential=apple-key:/etc/zetlyn/apple-key.p8
+Environment=APPLE_KEY_FILE=%d/apple-key
+# Telegram: the bot that tells changes in a chat (tell.rs).
+LoadCredential=telegram-bot-token:/etc/zetlyn/telegram-bot-token
+Environment=TELEGRAM_BOT_TOKEN_FILE=%d/telegram-bot-token
+# Pages their scripts make are read in Google Chrome (its AppArmor profile lets its sandbox work).
+Environment=ZETLYN_CHROME=/opt/google/chrome/chrome
+DynamicUser=yes
+User=zetlyn-app
+StateDirectory=zetlyn
+Restart=always
+RestartSec=5
+MemoryMax=2G
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+# Neither the app nor the Chrome it starts reaches the machine's own surroundings: no private
+# networks, and not the cloud's metadata service at 169.254.169.254, whatever a page's address
+# turns out to resolve to. Loopback stays, for Caddy and the resolver.
+IPAddressDeny=10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10 fc00::/7 fe80::/10
+
+[Install]
+WantedBy=multi-user.target

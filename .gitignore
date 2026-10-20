@@ -1,0 +1,5 @@
+/target
+/data
+/dist
+# Credentials for trying things locally (Google's client file and the like); never committed.
+/secrets

@@ -1,0 +1,18 @@
+# Mails alarm@zetlyn.com when Zetlyn does not answer or its checks have stopped, and once more
+# when it is right again. Runs as the instance's own user, beside it, so it runs when it does not.
+[Unit]
+Description=Zetlyn: is it well?
+
+[Service]
+Type=oneshot
+ExecStart=/srv/zetlyn/zetlyn alert --data /var/lib/zetlyn --to alarm@zetlyn.com
+EnvironmentFile=/etc/zetlyn/env
+LoadCredential=smtp-password:/etc/zetlyn/smtp-password
+Environment=SMTP_PASSWORD_FILE=%d/smtp-password
+DynamicUser=yes
+User=zetlyn-app
+StateDirectory=zetlyn
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes

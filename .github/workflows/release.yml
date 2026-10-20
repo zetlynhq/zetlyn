@@ -1,0 +1,52 @@
+# A tag v<version> makes a release: the binaries for Linux (x86_64, arm64) and macOS (arm64), and
+# the image ghcr.io/zetlynhq/zetlyn for both Linux architectures.
+name: Release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+  packages: write
+jobs:
+  binaries:
+    strategy:
+      matrix:
+        include:
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-14, target: aarch64-apple-darwin }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - run: |
+          name=zetlyn-${GITHUB_REF_NAME}-${{ matrix.target }}
+          mkdir "$name" && cp target/release/zetlyn LICENSE NOTICE THIRD_PARTY_LICENSES README.md "$name/"
+          tar -czf "$name.tar.gz" "$name"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            zetlyn-*.tar.gz
+            zetlyn-*.tar.gz.sha256
+  image:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/zetlynhq/zetlyn:${{ github.ref_name }}
+            ghcr.io/zetlynhq/zetlyn:latest

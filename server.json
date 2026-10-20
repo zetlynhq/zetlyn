@@ -1,0 +1,14 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "com.zetlyn/zetlyn",
+  "title": "Zetlyn",
+  "description": "Watch a place on a web page (a price, stock, a version) or a whole page; get told when it changes.",
+  "version": "1.0.0",
+  "websiteUrl": "https://zetlyn.com",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://zetlyn.com/mcp"
+    }
+  ]
+}

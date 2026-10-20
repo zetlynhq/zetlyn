@@ -1,0 +1,13 @@
+Zetlyn is built from the crates below as well as its own code. Their licences follow, each with
+the crates it covers. The source of every one of them is on crates.io under its name and version.
+{{#each licenses}}
+
+================================================================================
+{{{name}}} ({{id}})
+Used by:
+{{#each used_by}}  {{crate.name}} {{crate.version}}
+{{/each}}
+--------------------------------------------------------------------------------
+
+{{{text}}}
+{{/each}}

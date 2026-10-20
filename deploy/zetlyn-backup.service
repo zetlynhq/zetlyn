@@ -1,0 +1,6 @@
+[Unit]
+Description=Zetlyn: the data copied off the machine
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh /srv/zetlyn/backup.sh

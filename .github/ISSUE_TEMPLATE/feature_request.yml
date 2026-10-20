@@ -1,0 +1,21 @@
+name: Something you are trying to do
+description: A page that will not read, a change you want to be told about, a way you want to be told.
+labels: [use case]
+body:
+  - type: textarea
+    id: trying
+    attributes:
+      label: What are you trying to do?
+      description: The page and what you want to know about it, as you would tell a colleague.
+    validations:
+      required: true
+  - type: textarea
+    id: today
+    attributes:
+      label: Why can't you do it today?
+    validations:
+      required: true
+  - type: textarea
+    id: good
+    attributes:
+      label: What would a good solution look like?

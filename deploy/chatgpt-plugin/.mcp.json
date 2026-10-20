@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "zetlyn": {
+      "type": "streamable-http",
+      "url": "https://zetlyn.com/mcp",
+      "headers": {},
+      "extensions": {
+        "com.openai": {
+          "auth": {
+            "type": "oauth",
+            "client": {
+              "mode": "dcr"
+            }
+          }
+        }
+      }
+    }
+  }
+}

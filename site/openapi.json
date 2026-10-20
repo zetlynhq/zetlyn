@@ -1,0 +1,176 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Zetlyn API",
+    "version": "1",
+    "summary": "Watch public web pages and be told when they change.",
+    "description": "Zetlyn watches one place on a page (a price, a version, a date) or a whole page, and tells the account when it changes, or only when a condition comes true (a number below a mark, a text there or gone). Everything a person does on zetlyn.com can be done here, acting as the account the key or token belongs to. The same operations are tools of the MCP server at {{BASE}}/mcp. Guide for LLMs and agents: {{BASE}}/llms.txt",
+    "contact": { "email": "hello@zetlyn.com", "url": "{{BASE}}" },
+    "termsOfService": "{{BASE}}/terms"
+  },
+  "servers": [{ "url": "{{BASE}}/api/v1" }],
+  "security": [{ "bearer": [] }],
+  "externalDocs": { "url": "{{BASE}}/docs" },
+  "paths": {
+    "/account": {
+      "get": {
+        "operationId": "getAccount",
+        "summary": "The account: subscription, watches running, watches in the plan",
+        "responses": { "200": { "description": "The account", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Account" } } } }, "default": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/preview": {
+      "post": {
+        "operationId": "previewPage",
+        "summary": "Read a page and list the places on it that can be watched",
+        "description": "Each place comes with the selector that marks it, what it says now and the text beside it. Pick the place that matters and pass its selector to create a watch.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["url"], "properties": { "url": { "type": "string", "examples": ["https://example.com/pricing"] } } } } } },
+        "responses": {
+          "200": { "description": "The places", "content": { "application/json": { "schema": { "type": "object", "properties": {
+            "url": { "type": "string" },
+            "rendered": { "type": "boolean", "description": "Read in a browser after the page's scripts ran" },
+            "whole_page_lines": { "type": "integer" },
+            "places": { "type": "array", "items": { "$ref": "#/components/schemas/Place" } }
+          } } } } },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/read": {
+      "post": {
+        "operationId": "readPlaces",
+        "summary": "Read what places say now, twice, without watching anything",
+        "description": "For trying selectors before watching. steady: false means the place said something else on a second read seconds later: the site changes it on its own.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["url", "selectors"], "properties": { "url": { "type": "string" }, "selectors": { "type": "array", "items": { "type": "string" }, "maxItems": 10 } } } } } },
+        "responses": {
+          "200": { "description": "What each place says", "content": { "application/json": { "schema": { "type": "object", "properties": {
+            "url": { "type": "string" },
+            "rendered": { "type": "boolean" },
+            "places": { "type": "array", "items": { "type": "object", "properties": {
+              "selector": { "type": "string" }, "text": { "type": "string" }, "beside": { "type": "string" }, "empty": { "type": "boolean" },
+              "steady": { "type": ["boolean", "null"] }, "second_read": { "type": "string" }, "error": { "type": "string" }
+            } } }
+          } } } } },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/watches": {
+      "get": {
+        "operationId": "listWatches",
+        "summary": "The account's watches",
+        "responses": { "200": { "description": "The watches", "content": { "application/json": { "schema": { "type": "object", "properties": { "watches": { "type": "array", "items": { "$ref": "#/components/schemas/Watch" } } } } } } }, "default": { "$ref": "#/components/responses/Error" } }
+      },
+      "post": {
+        "operationId": "watchPage",
+        "summary": "Start watching a place on a page, or the whole page",
+        "description": "Without a selector the whole page is watched. The account's first watch is free for 24 hours; after that a watch waits in state `waiting` until the person subscribes (see /subscribe-link). A watch beyond the subscription's 10 costs 0.50 € a month and is refused with 402 until confirm_cost is true.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["url"], "properties": {
+          "url": { "type": "string" },
+          "selector": { "type": "string", "description": "From preview or read" },
+          "every_minutes": { "type": "integer", "enum": [60, 15, 5, 1], "default": 60, "description": "15, 5 and 1 need a subscription" },
+          "notify_when": { "$ref": "#/components/schemas/Condition" },
+          "confirm_cost": { "type": "boolean", "description": "The person agreed to 0.50 € a month for a watch beyond the plan" }
+        } } } } },
+        "responses": {
+          "201": { "description": "Made", "content": { "application/json": { "schema": { "type": "object", "properties": { "watch": { "$ref": "#/components/schemas/Watch" }, "note": { "type": "string" } } } } } },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/watches/{id}": {
+      "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" }, "description": "The watch's id, e.g. k3x9tq2mfa" }],
+      "get": {
+        "operationId": "getWatch",
+        "summary": "One watch with its last 20 changes and recent checks",
+        "responses": { "200": { "description": "The watch", "content": { "application/json": { "schema": { "type": "object", "properties": {
+          "watch": { "$ref": "#/components/schemas/Watch" },
+          "changes": { "type": "array", "items": { "$ref": "#/components/schemas/Change" } },
+          "recent_checks": { "type": "array", "items": { "type": "object", "properties": { "at": { "type": "string", "format": "date-time" }, "outcome": { "type": "string" }, "found_again": { "type": "boolean" } } } }
+        } } } } }, "default": { "$ref": "#/components/responses/Error" } }
+      },
+      "patch": {
+        "operationId": "updateWatch",
+        "summary": "Watch another place on the same page, the whole page, at another interval, or with another condition",
+        "description": "The watch keeps its id and history.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": {
+          "selector": { "type": "string" },
+          "whole_page": { "type": "boolean" },
+          "every_minutes": { "type": "integer", "enum": [60, 15, 5, 1] },
+          "notify_when": { "oneOf": [{ "$ref": "#/components/schemas/Condition" }, { "type": "null" }], "description": "null: told of every change again" }
+        } } } } },
+        "responses": { "200": { "description": "Changed", "content": { "application/json": { "schema": { "type": "object", "properties": { "watch": { "$ref": "#/components/schemas/Watch" }, "note": { "type": "string" } } } } } }, "default": { "$ref": "#/components/responses/Error" } }
+      },
+      "delete": {
+        "operationId": "endWatch",
+        "summary": "End a watch; it is deleted with its history",
+        "responses": { "200": { "description": "Ended", "content": { "application/json": { "schema": { "type": "object", "properties": { "ended": { "type": "string" }, "url": { "type": "string" }, "note": { "type": "string" } } } } } }, "default": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/changes": {
+      "get": {
+        "operationId": "listChanges",
+        "summary": "The changes on all the account's watches since a moment, newest first",
+        "parameters": [{ "name": "since", "in": "query", "schema": { "type": "string", "format": "date-time" }, "description": "RFC 3339; the last 7 days without it" }],
+        "responses": { "200": { "description": "The changes", "content": { "application/json": { "schema": { "type": "object", "properties": {
+          "since": { "type": "string", "format": "date-time" },
+          "changes": { "type": "array", "items": { "allOf": [{ "$ref": "#/components/schemas/Change" }, { "type": "object", "properties": { "watch": { "type": "string" }, "url": { "type": "string" } } }] } }
+        } } } } }, "default": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/subscribe-link": {
+      "post": {
+        "operationId": "subscribeLink",
+        "summary": "A link for the person to subscribe by, in their own browser",
+        "description": "Valid for an hour. The person agrees and pays at Stripe themselves; a program cannot pay for them.",
+        "responses": { "200": { "description": "The link, or that the account subscribes already", "content": { "application/json": { "schema": { "type": "object", "properties": {
+          "subscribed": { "type": "boolean" }, "url": { "type": "string" }, "price": { "type": "string" }, "expires_in_minutes": { "type": "integer" }, "billing_url": { "type": "string" }
+        } } } } }, "default": { "$ref": "#/components/responses/Error" } }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearer": { "type": "http", "scheme": "bearer", "description": "An API key of the account (zk_…, made under Account, API keys) or an OAuth access token (zat_…; discovery at {{BASE}}/.well-known/oauth-authorization-server)." }
+    },
+    "responses": {
+      "Error": { "description": "What went wrong and what to do", "content": { "application/json": { "schema": { "type": "object", "required": ["error"], "properties": { "error": { "type": "string" } } } } } }
+    },
+    "schemas": {
+      "Account": { "type": "object", "properties": {
+        "email": { "type": "string" }, "watches": { "type": "integer" }, "watches_running": { "type": "integer" },
+        "subscribed": { "type": "boolean" }, "watches_in_plan": { "type": "integer" }, "free_trial_used": { "type": "boolean" },
+        "subscribe_url": { "type": "string" }, "price": { "type": "string" }
+      } },
+      "Place": { "type": "object", "properties": { "selector": { "type": "string" }, "text": { "type": "string" }, "beside": { "type": "string" } } },
+      "Condition": {
+        "description": "Tell only when this comes true: a number in the place below or above a mark, or a text there or gone (case aside).",
+        "oneOf": [
+          { "type": "object", "required": ["below"], "properties": { "below": { "type": "number" } }, "additionalProperties": false },
+          { "type": "object", "required": ["above"], "properties": { "above": { "type": "number" } }, "additionalProperties": false },
+          { "type": "object", "required": ["contains"], "properties": { "contains": { "type": "string" } }, "additionalProperties": false },
+          { "type": "object", "required": ["not_contains"], "properties": { "not_contains": { "type": "string" } }, "additionalProperties": false }
+        ]
+      },
+      "Change": { "type": "object", "properties": { "at": { "type": "string", "format": "date-time" }, "before": { "type": "string" }, "after": { "type": "string" } } },
+      "Watch": { "type": "object", "properties": {
+        "id": { "type": "string" },
+        "url": { "type": "string" },
+        "what": { "type": "string" },
+        "selector": { "type": ["string", "null"], "description": "null for the whole page" },
+        "beside": { "type": ["string", "null"] },
+        "state": { "type": "string", "enum": ["pending", "waiting", "running", "ended"] },
+        "last_outcome": { "type": "string", "enum": ["new", "same", "changed", "unclear", "gone", "failed"] },
+        "value": { "type": ["string", "null"], "description": "What it read last" },
+        "checked_every_minutes": { "type": "integer" },
+        "notify_when": { "oneOf": [{ "$ref": "#/components/schemas/Condition" }, { "type": "null" }] },
+        "condition_met_now": { "type": ["boolean", "null"] },
+        "rendered": { "type": "boolean" },
+        "learned_flips": { "type": "array", "items": { "type": "string" } },
+        "free_until": { "type": ["string", "null"], "format": "date-time" },
+        "last_checked": { "type": ["string", "null"], "format": "date-time" },
+        "created": { "type": "string", "format": "date-time" }
+      } }
+    }
+  }
+}

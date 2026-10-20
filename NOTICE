@@ -1,0 +1,13 @@
+Zetlyn
+Copyright (c) 2026 Artur Susdorf
+
+Licensed under the MIT License, whose text is in LICENSE.
+
+"Zetlyn" and its mark are the name of the service at zetlyn.com. The licence grants no rights in
+them: a fork may take the code and must take another name and another mark.
+
+The crates Zetlyn is built from, and their licences, are listed in THIRD_PARTY_LICENSES (made with
+`cargo about generate about.hbs -o THIRD_PARTY_LICENSES`).
+
+This file is here because LICENSE is the licence and nothing else: a word of preamble in front of
+it is enough to stop the tools that read licences from recognising one.

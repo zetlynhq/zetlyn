@@ -1,0 +1,71 @@
+# Step 1 trial: 50 public pages, two weeks, hourly.
+# <url> [<css>]   with a selector: that place is watched, as a click on it would mark it;
+#                 without: the whole page.
+# Measured: how often a place is found again where it was, found by its label after the page
+# moved, unclear, gone; and for whole pages, how many changes were real.
+
+# Releases and versions: change every few weeks
+https://www.kernel.org/ #latest_link a
+https://www.python.org/downloads/ a.button[href*="/ftp/python/"]
+https://pypi.org/project/requests/ h1.project-header__name
+https://pypi.org/project/django/ h1.project-header__name
+https://endoflife.date/python tbody tr
+https://endoflife.date/nodejs tbody tr
+https://endoflife.date/postgresql tbody tr
+https://github.com/dgtlmoon/changedetection.io/releases h2.sr-only
+https://github.com/rust-lang/rust/releases h2.sr-only
+https://github.com/caddyserver/caddy/releases h2.sr-only
+https://www.mozilla.org/en-US/firefox/notes/ .c-release-version
+https://en.wikipedia.org/wiki/Rust_(programming_language) .infobox
+https://www.ruby-lang.org/en/ a[href^="/en/news/20"]
+https://www.sqlite.org/index.html
+https://www.postgresql.org/
+https://nginx.org/en/
+https://releases.ubuntu.com/
+https://www.haproxy.org/
+https://httpd.apache.org/
+https://www.openssl-library.org/news/
+
+# Rates and figures: change daily
+https://www.ecb.europa.eu/stats/policy_and_exchange_rates/euro_reference_exchange_rates/html/index.en.html tbody tr .rate
+https://www.x-rates.com/table/?from=EUR&amount=1 .ratesTable tbody tr td a
+https://www.federalreserve.gov/monetarypolicy/openmarket.htm table tbody tr
+https://www.destatis.de/DE/Themen/Wirtschaft/Preise/Verbraucherpreisindex/_inhalt.html
+
+# Status pages: mostly the same, sometimes not
+https://www.githubstatus.com/ .page-status
+https://www.cloudflarestatus.com/
+https://status.python.org/ .page-status
+
+# News: change all the time
+https://news.ycombinator.com/ .titleline a
+https://lobste.rs/ a.u-url
+https://en.wikipedia.org/wiki/Main_Page #mp-tfa b a
+https://de.wikipedia.org/wiki/Wikipedia:Hauptseite
+https://www.heise.de/ article h3
+https://www.golem.de/
+https://www.tagesschau.de/ .teaser__headline
+https://www.spiegel.de/ article h2
+https://blog.rust-lang.org/
+https://this-week-in-rust.org/
+https://kubernetes.io/releases/ table tbody tr
+https://www.debian.org/News/
+https://www.w3.org/
+
+# Terms and law: rarely change
+https://www.gesetze-im-internet.de/bgb/__312g.html
+https://www.hetzner.com/legal/terms-and-conditions
+https://www.apple.com/legal/internet-services/itunes/de/terms.html
+https://www.gesetze-im-internet.de/ustg_1980/__19.html
+
+# Moves on every load: what changes on its own must not be reported
+https://www.random.org/integers/?num=1&min=1&max=1000&col=1&base=10&format=html&rnd=new
+https://www.uuidgenerator.net/
+
+# Controls: never change
+https://www.iana.org/help/example-domains h1
+https://example.com/
+
+# Likely refused: blocked or asks who we are
+https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0000320193&type=8-K
+https://www.amazon.de/dp/B0CHX3QBCH

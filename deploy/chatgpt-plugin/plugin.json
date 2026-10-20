@@ -1,0 +1,99 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "zetlyn",
+  "version": "1.0.0",
+  "description": "Watch public web pages, or one place on them such as a price, stock or a version, and get told when they change.",
+  "author": {
+    "name": "Artur Susdorf",
+    "email": "susdorf@zetlyn.com",
+    "url": "https://zetlyn.com"
+  },
+  "homepage": "https://zetlyn.com",
+  "keywords": [
+    "web monitoring",
+    "change detection",
+    "price alert",
+    "stock alert",
+    "website changes",
+    "mcp"
+  ],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Zetlyn",
+        "shortDescription": "Get told when web pages change",
+        "longDescription": "Zetlyn watches public web pages for you. Ask ChatGPT to keep an eye on a price, an availability, a release version, a date or a whole page, and Zetlyn reads it on its own servers every hour, or as often as every minute with a subscription, and tells you when it changes: by email, Telegram, Slack, Discord or a signed webhook. It reports what was there before and what is there now.\n\nYou can say when it is worth telling: only when a price falls below a mark, when \"In stock\" appears, or when \"Sold out\" goes. Clocks, counters and rotating adverts are recognised and not reported.\n\nChatGPT previews a page and picks the place that matters, tries places before watching them, changes a watch in place, and lists what changed lately across all your watches.\n\nLimits: pages behind a login, a paywall or a captcha are not read, and sites that refuse programs are not worked around. The first watch is free for 24 hours; a subscription is 9.99 € a month for 10 watches (0.50 € for each one more), VAT included, paid by the person at Stripe on zetlyn.com, never inside ChatGPT.",
+        "developerName": "Artur Susdorf",
+        "category": "Productivity",
+        "capabilities": [
+          "ChatCompletion"
+        ],
+        "websiteURL": "https://zetlyn.com",
+        "supportURL": "https://zetlyn.com/docs",
+        "privacyPolicyURL": "https://zetlyn.com/privacy",
+        "termsOfServiceURL": "https://zetlyn.com/terms",
+        "logo": "./assets/logo.png",
+        "composerIcon": "./assets/icon.png",
+        "brandColor": "#111111",
+        "defaultPrompt": [
+          "Tell me when the price on this product page drops below 500 €",
+          "Watch this page and tell me when it changes",
+          "What changed on my watched pages this week?"
+        ]
+      },
+      "review": {
+        "test_cases": {
+          "positive": [
+            {
+              "description": "Watch one place on a page with a price condition",
+              "prompt": "Watch the price of the book on https://books.toscrape.com/catalogue/a-light-in-the-attic_1000/index.html and tell me when it drops below 40 £.",
+              "tools_triggered": "preview_page, watch_page",
+              "expected_behavior": "Previews the page, picks the place with the price (£51.77), and makes a watch with that selector and notify_when {\"below\": 40}; says it is watching and that the price is above the mark now."
+            },
+            {
+              "description": "Watch a release version",
+              "prompt": "Let me know when a new version of Rust is released on https://www.rust-lang.org/",
+              "tools_triggered": "preview_page, watch_page",
+              "expected_behavior": "Picks the place that says \"Version …\" and makes a watch of it; reports the version it reads now."
+            },
+            {
+              "description": "List the account's watches",
+              "prompt": "What am I watching on Zetlyn, and what do the pages say now?",
+              "tools_triggered": "list_watches",
+              "expected_behavior": "Lists each watch with its page, what it watches, its condition if any, and the value read last."
+            },
+            {
+              "description": "Change a watch in place",
+              "prompt": "Check the Python downloads watch every hour and tell me only when it says Python 3.18.",
+              "tools_triggered": "list_watches, update_watch",
+              "expected_behavior": "Finds the python.org watch and changes its notify_when to {\"contains\": \"Python 3.18\"}; the watch keeps its id and history."
+            },
+            {
+              "description": "Recent changes across all watches",
+              "prompt": "Did anything change on my watched pages in the last week?",
+              "tools_triggered": "list_changes",
+              "expected_behavior": "Lists the changes since a week ago with page, time, before and after, or says there were none."
+            }
+          ],
+          "negative": [
+            {
+              "description": "A page behind a login is not watched; the assistant explains that only public pages can be read.",
+              "prompt": "Watch my bank account balance at https://banking.example-bank.com/accounts"
+            },
+            {
+              "description": "The assistant does not pay or subscribe for the person; it gives the subscribe link and the price for the person to open.",
+              "prompt": "Subscribe me to Zetlyn and pay with my card."
+            },
+            {
+              "description": "Requests unrelated to watching web pages are not served by Zetlyn's tools.",
+              "prompt": "Book me a table at a restaurant in Berlin tonight."
+            }
+          ]
+        },
+        "commerce": true,
+        "commerce_description": "No purchase happens inside ChatGPT. The subscribe_link tool returns a link to the developer's own subscription page on zetlyn.com, which the person opens and pays at Stripe themselves; a watch beyond the subscription's 10 (0.50 € a month) is only made after the person agreed to the cost."
+      }
+    }
+  },
+  "license": "MIT"
+}

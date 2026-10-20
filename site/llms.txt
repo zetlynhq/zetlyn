@@ -1,0 +1,151 @@
+# Zetlyn
+
+> Zetlyn watches public web pages for a person and tells them when something changes: one
+> place on a page (a price, a version, a date) or the whole page. It reports the value before
+> and after, not a diff. An LLM or agent can do everything a person does on https://zetlyn.com
+> through the MCP server or the HTTP API described here, acting for the person who connected it.
+
+## How to connect
+
+The simplest way: the MCP server at `https://zetlyn.com/mcp`, connected by OAuth. The client
+needs nothing but that address. It discovers how to sign in (`/.well-known/oauth-protected-resource`,
+then `/.well-known/oauth-authorization-server`), registers itself (dynamic client registration),
+and opens a browser where the person signs in to Zetlyn (email link, Google or Apple; the
+account is made then if there is none) and allows the client. Authorization code flow with PKCE
+(S256); access tokens last an hour and come with a refresh token.
+
+- Claude (web, desktop, mobile): Settings → Connectors → Add custom connector, URL
+  `https://zetlyn.com/mcp`.
+- Claude Code: `claude mcp add --transport http --scope user zetlyn https://zetlyn.com/mcp`, then
+  `/mcp` to sign in.
+- ChatGPT, Cursor, VS Code and other clients: add an MCP server by the URL `https://zetlyn.com/mcp`.
+
+Where a client cannot sign in, or for a program: an API key of the person's account. Only the
+person can make one, under Account, API keys (https://zetlyn.com/account/keys); it starts with
+`zk_` and is shown once. Send it with every request as `Authorization: Bearer zk_…`. Never put
+the key in a page, a commit or a message to anyone else.
+
+## How watching works
+
+- Zetlyn reads the page every hour from its own servers; with a subscription a watch can be read
+  every 15, 5 or 1 minutes instead (`every_minutes`). Changes go by email to the account's
+  address; the API shows the same, and Telegram, Slack, Discord or a webhook can be told too (see below).
+- A **place** is named by a CSS selector. Get the selectors from `preview` (below) instead of
+  writing your own: Zetlyn finds the place again by its selector and by the text beside it, so a
+  selector from `preview` survives small changes to the page.
+- **When to tell** (`notify_when`): without it, every change is told. With it, only the change
+  that makes a condition come true: `{"below": 400}` or `{"above": 1000}` (the first number in
+  the place, written as the page writes it, e.g. `1.299,00 €`; needs a selector),
+  `{"contains": "In stock"}`, `{"not_contains": "Sold out"}` (case aside). It is told once when
+  it comes true, and again only after it was false in between. Every change still goes into the
+  history. A watch says its `notify_when` and whether it holds now (`condition_met_now`).
+- Without a selector the **whole page** is watched, as text; clocks, counters and adverts that
+  change on their own are recognised and not reported.
+- Only public pages that show their content without signing in are read. A page whose content
+  its scripts make is read in a browser on Zetlyn's server (a watch's `rendered` says so). Pages
+  behind a login, a paywall or a captcha are not read, and a site that refuses Zetlyn is not
+  worked around.
+- The account's **first watch is free for 24 hours**. After that, and for a second watch, the
+  person needs a subscription: 9.99 € a month for up to 10 watches, 0.50 € a month for each one
+  more, VAT included. Get a link for them with `subscribe_link` (an hour long, it opens the
+  subscription for their account without signing in) and give it to them with the price; they
+  agree and pay at Stripe themselves. You cannot pay or agree for them.
+  A watch made without a subscription is kept in state `waiting` and starts once they subscribe.
+- A watch beyond the subscription's 10 costs 0.50 € a month more. Creating one is refused (402,
+  with the price) until the person agreed and the call says `"confirm_cost": true`.
+
+## MCP server
+
+Endpoint: `https://zetlyn.com/mcp` (Streamable HTTP, JSON-RPC by POST). Without a token it
+answers 401 with `WWW-Authenticate: Bearer resource_metadata="https://zetlyn.com/.well-known/oauth-protected-resource/mcp"`;
+an MCP client follows that to sign in (see How to connect). With a key instead:
+
+    claude mcp add --transport http --scope user zetlyn https://zetlyn.com/mcp --header "Authorization: Bearer zk_…"
+
+    { "mcpServers": { "zetlyn": { "type": "http", "url": "https://zetlyn.com/mcp",
+                                  "headers": { "Authorization": "Bearer zk_…" } } } }
+
+Tools:
+
+| Tool | Arguments | Does |
+|---|---|---|
+| `preview_page` | `url` | Reads the page and lists the places on it, each with `selector`, `text` and the text `beside` it |
+| `watch_page` | `url`, optional `selector`, optional `every_minutes` (60, or 15/5/1 with a subscription), `notify_when`, `confirm_cost` (see How watching works) | Starts watching that place, or the whole page without a selector |
+| `read_place` | `url`, `selectors` (up to 10) | Reads what those places say now, twice seconds apart, without watching; `steady: false` means a place flips on its own |
+| `update_watch` | `id`, optional `selector` or `whole_page: true`, optional `every_minutes`, optional `notify_when` | Watches another place on the same page, or at another interval; keeps the watch and its history |
+| `list_changes` | optional `since` (RFC 3339; 7 days without) | The changes on all the account's watches since then, newest first |
+| `subscribe_link` | – | A link for the person to subscribe by, in their own browser; they pay at Stripe themselves |
+| `list_watches` | – | The account's watches |
+| `get_watch` | `id` | One watch with its last 20 changes and recent checks |
+| `end_watch` | `id` | Ends a watch; it is deleted with its history |
+| `get_account` | – | Subscription, watches running, watches in the plan |
+
+## HTTP API
+
+Base: `https://zetlyn.com/api/v1`. JSON in, JSON out. An error has a status ≥ 400 and a body
+`{"error": "…"}` that says what to do.
+
+| Call | Body | Answer |
+|---|---|---|
+| `GET /account` | – | `email`, `subscribed`, `watches_in_plan`, `watches_running`, `free_trial_used`, `subscribe_url` |
+| `POST /preview` | `{"url": "…"}` | `places`: `[{"selector", "text", "beside"}]`, `whole_page_lines` |
+| `POST /read` | `{"url": "…", "selectors": ["…"]}` | `places`: `[{"selector", "text", "beside", "steady", "second_read"}]`; nothing is watched |
+| `POST /watches` | `{"url": "…", "selector": "…", "every_minutes": 60, "notify_when": {"below": 400}}` (all but url optional; 15, 5 or 1 need a subscription, else 403; a watch beyond the plan needs `"confirm_cost": true`, else 402) | 201 `{"watch": {…}, "note": "…"}` |
+| `GET /watches` | – | `{"watches": [ … ]}` |
+| `GET /watches/{id}` | – | `{"watch", "changes": [{"at", "before", "after"}], "recent_checks"}` |
+| `PATCH /watches/{id}` | `{"selector": "…"}` or `{"whole_page": true}`, and/or `{"every_minutes": 15}`, `{"notify_when": …}` | `{"watch", "note"}` |
+| `GET /changes?since=…` | – | `{"since", "changes": [{"watch", "url", "at", "before", "after"}]}` |
+| `POST /subscribe-link` | – | `{"url", "price", "expires_in_minutes"}`, or `{"subscribed": true, "billing_url"}` |
+| `DELETE /watches/{id}` | – | `{"ended": id}` |
+
+A watch: `id` (a short string such as `k3x9tq2mfa`), `url`, `what`, `selector` (null for the whole page), `beside`, `state`
+(`pending`, `waiting`, `running`, `ended`), `last_outcome` (`same`, `changed`, `unclear`, `gone`,
+`failed`), `value` (what it read last), `checked_every_minutes`, `notify_when`, `condition_met_now`, `rendered`, `learned_flips`, `free_until`, `last_checked`,
+`created`. Times are RFC 3339 in UTC.
+
+`unclear` or `gone` means the page was rebuilt and Zetlyn cannot be sure where the place is now;
+it does not report a change then. Call `preview` again and move the watch to the place with
+`PATCH /watches/{id}` (`update_watch`).
+
+A place that changed is read once more seconds later before the change is believed. A place that
+says one thing on one read and another on the next (an A/B test, a box that guesses where the
+reader is) is learned as flipping between those texts (`learned_flips`), and moving between them
+is not reported; a new number in the same text always is. Try places with `read_place` first and
+prefer a narrow one (the availability line, not the whole buy box).
+
+## Webhooks and other channels
+
+Besides the account's email, the person can have changes told to Telegram, Slack, Discord or a
+webhook of their own, under Account, Notifications (https://zetlyn.com/account/notifications).
+A webhook gets each change as a POST of JSON:
+
+    {"event": "change", "at": "2026-10-20T09:00:00Z",
+     "watch": {"id": "k3x9tq2mfa", "url": "…", "what": "…", "notify_when": {"below": 400}},
+     "before": "429,00 €", "after": "389,00 €", "condition": "Now below 400",
+     "link": "https://zetlyn.com/watches/k3x9tq2mfa"}
+
+`event` is `change`, `unclear` (the place cannot be found any more; `link` is where to mark it
+again) or `test`. Each request carries `Zetlyn-Event` and
+`Zetlyn-Signature: t=<unix time>,v1=<hex>`, where the hex is the HMAC-SHA256 of `<t>.<body>`
+with the webhook's signing secret (shown with it, `zws_…`). Check it, and refuse a `t` more than
+five minutes old. An answer other than 2xx is tried again once, a minute later.
+
+## Example: watch a price
+
+    curl -s https://zetlyn.com/api/v1/preview \
+      -H "Authorization: Bearer $ZETLYN_KEY" -H "Content-Type: application/json" \
+      -d '{"url": "https://example.com/pricing"}'
+
+    # pick the place whose text is the price and whose "beside" names the plan, then:
+    curl -s https://zetlyn.com/api/v1/watches \
+      -H "Authorization: Bearer $ZETLYN_KEY" -H "Content-Type: application/json" \
+      -d '{"url": "https://example.com/pricing", "selector": "html > body:nth-of-type(1) > … > span:nth-of-type(1)"}'
+
+## Limits
+
+600 requests per 10 minutes per account; of them 60 that read a page (`preview`, `read`, creating
+or changing a watch). Beyond that the answer is 429; wait a few minutes.
+
+## Contact
+
+hello@zetlyn.com · Terms: https://zetlyn.com/terms · Privacy: https://zetlyn.com/privacy

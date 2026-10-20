@@ -1,0 +1,9 @@
+[Unit]
+Description=Zetlyn: is it well? Every five minutes.
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target

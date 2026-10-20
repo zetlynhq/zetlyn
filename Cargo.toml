@@ -1,0 +1,39 @@
+[package]
+name = "zetlyn"
+version = "1.0.0"
+edition = "2021"
+publish = false
+description = "Watch a place on a web page, or a whole page, and be told when it changes; with an API and an MCP server for LLMs."
+license = "MIT"
+repository = "https://github.com/zetlynhq/zetlyn"
+homepage = "https://zetlyn.com"
+keywords = ["change-detection", "web-monitoring", "mcp", "price-alert", "website-watcher"]
+categories = ["web-programming", "command-line-utilities"]
+
+[dependencies]
+# Watches, checks and changes: one file, no server to run beside it.
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Outward only, and rustls, so there is no OpenSSL in the binary.
+ureq = { version = "3", default-features = false, features = ["rustls", "gzip", "brotli"] }
+# A page as a browser parses it, and the marked place found again by CSS selector.
+scraper = "0.23"
+ego-tree = "0.10"
+tiny_http = "0.12"
+form_urlencoded = "1"
+# A finite-automaton engine: a page that is somebody else's cannot make a pattern run away.
+regex = { version = "1", default-features = false, features = ["std", "perf", "unicode-perl", "unicode-case"] }
+sha2 = "0.10"
+# Mail over SMTP with TLS: the same rustls ureq already brings, with the ring provider.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
+# Chrome driven over a pipe on fds 3 and 4 (`render.rs`): dup2 between fork and exec.
+libc = "0.2"
+# Signing in with Google and Apple (`oauth.rs`): ID tokens read, Apple's client secret signed
+# (ES256). Both are in the build already, through rustls and ureq.
+ring = "0.17"
+base64 = "0.23"
+# The QR code that takes a phone to the Telegram bot (`serve.rs`, connecting Telegram).
+qrcodegen = "1"
+

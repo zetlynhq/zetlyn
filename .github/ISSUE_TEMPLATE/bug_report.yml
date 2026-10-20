@@ -1,0 +1,44 @@
+name: Bug
+description: Something Zetlyn does that it should not, or does not do that it should.
+labels: [bug]
+body:
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How can we reproduce it?
+      description: The page's address, the place you marked (or its selector), the API call or the MCP prompt.
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where
+      options:
+        - zetlyn.com
+        - An instance of my own
+        - Through Claude, ChatGPT or another MCP client
+        - Through the API
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Zetlyn version
+      description: "On your own instance, the first line it prints when it starts."
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output or logs
+      render: text

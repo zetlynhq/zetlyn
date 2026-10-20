@@ -321,7 +321,7 @@ fn route(app: &App, store: &Store, a: &Asked) -> Result<Reply, String> {
             Some(w) => {
                 let faster = a.account.as_ref().is_some_and(|acc| crate::plan::interval_allowed(acc, app.hosted.is_some(), 1));
                 let to = a.account.as_ref().map(|acc| acc.email.clone()).filter(|e| e != LOCAL);
-                page_reply(app, a, &host_of(&w.url), &detail(app, store, &w, faster, to.as_deref(), a.q("when").as_deref() == Some("bad"))?, 200)
+                page_reply(app, a, &host_of(&w.url), &detail(app, store, &w, faster, to.as_deref(), a.q("when").filter(|v| v == "bad").map(|_| a.q("why").unwrap_or_default()))?, 200)
             }
             // A link from a mail opened where nobody is signed in: signing in comes first.
             None if a.account.is_none() => redirect("/signin"),
@@ -343,6 +343,11 @@ fn route(app: &App, store: &Store, a: &Asked) -> Result<Reply, String> {
         (Method::Post, ["watches", id, "when"]) => match owned(store, a, id)? {
             Some(w) => match crate::when::Condition::from_form(&a.f("kind"), &a.f("operand")) {
                 Ok(k) if k.as_ref().is_some_and(|k| k.needs_number()) && !matches!(w.mode, crate::store::Mode::Place(_)) => redirect(&format!("/watches/{}?when=bad", w.key)),
+                // Weighed on what the place says now: two amounts there leave the number unclear.
+                Ok(Some(k)) if k.fits(w.last_value.as_deref().unwrap_or("")).is_err() => {
+                    let why = k.fits(w.last_value.as_deref().unwrap_or("")).err().unwrap_or_default();
+                    redirect(&format!("/watches/{}?when=bad&why={}", w.key, enc(&why)))
+                }
                 Ok(k) => {
                     store.set_condition(w.id, k.as_ref())?;
                     redirect(&format!("/watches/{}", w.key))
@@ -487,6 +492,9 @@ fn watch(app: &App, store: &Store, a: &Asked) -> Result<Reply, String> {
         Ok(x) => x,
         Err(e) => return Ok(back(&e)),
     };
+    if let Some(Err(e)) = condition.as_ref().map(|k| k.fits(&value)) {
+        return Ok(back(&e));
+    }
     // Marked again: the watch keeps its history and its state.
     if let Some(w) = owned(store, a, &a.f("watch"))? {
         store.remark(w.id, &mode, &value)?;
@@ -1289,7 +1297,7 @@ fn interval_form(w: &Watch, faster: bool) -> String {
 
 /// When the watch tells: on every change, or once a condition comes true (`when.rs`), and the
 /// form that sets it. A number is read in one place, so the whole page offers only the texts.
-fn when_form(w: &Watch, bad: bool) -> String {
+fn when_form(w: &Watch, bad: Option<&str>) -> String {
     let current = w.condition.as_ref().map_or("any", |k| k.kind());
     let operand = w.condition.as_ref().map(|k| k.operand()).unwrap_or_default();
     let mut kinds = vec![("any", "On every change")];
@@ -1307,12 +1315,16 @@ fn when_form(w: &Watch, bad: bool) -> String {
         key = w.key,
         v = esc(&operand),
         hide = if current == "any" { " hidden" } else { "" },
-        err = if bad { "<p class=error>That did not work: give a number for below and above, a text for the others.</p>" } else { "" },
+        err = match bad {
+            None => String::new(),
+            Some("") => "<p class=error>That did not work: give a number for below and above, a text for the others.</p>".to_string(),
+            Some(why) => format!("<p class=error>{}</p>", esc(why)),
+        },
     )
 }
 
 /// `/watches/{id}`: one watch, from what it reads now to every check.
-fn detail(app: &App, store: &Store, w: &Watch, faster: bool, to: Option<&str>, bad: bool) -> Result<String, String> {
+fn detail(app: &App, store: &Store, w: &Watch, faster: bool, to: Option<&str>, bad: Option<String>) -> Result<String, String> {
     let (class, standing) = standing(w);
     let next = w.last_checked.unwrap_or(w.created) + w.interval_min * 60;
     let tell = match to {
@@ -1355,7 +1367,7 @@ fn detail(app: &App, store: &Store, w: &Watch, faster: bool, to: Option<&str>, b
             o = esc(&c.outcome),
         ));
     }
-    let mut facts = vec![("Checked", interval_form(w, faster)), ("Tell me", when_form(w, bad))];
+    let mut facts = vec![("Checked", interval_form(w, faster)), ("Tell me", when_form(w, bad.as_deref()))];
     if w.state == "running" {
         facts.push(("Next check", when(next)));
         facts.push(("Last check", format!("{} · {}", w.last_checked.map(ago).unwrap_or_else(|| "not yet".into()), outcome(&w.status))));

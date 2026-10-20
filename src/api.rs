@@ -212,7 +212,14 @@ fn update(c: &Caller, id: &str, selector: Option<&str>, whole_page: bool, every:
     if page_after && condition.as_ref().is_some_and(|k| k.as_ref().is_some_and(|k| k.needs_number())) {
         return error(400, "below and above need one place with a number (a selector); a whole page can be watched with contains or not_contains.");
     }
+    // The condition the watch will have, weighed on what its place will say: refused before anything changes.
+    let wanted = condition.clone().unwrap_or_else(|| w.condition.clone());
     let mut note = Vec::new();
+    if selector.is_none() && !whole_page {
+        if let Some(Err(e)) = condition.as_ref().and_then(|k| k.as_ref()).map(|k| k.fits(w.last_value.as_deref().unwrap_or(""))) {
+            return error(422, &e);
+        }
+    }
     if selector.is_some() || whole_page {
         let anchor = match selector {
             Some(css) => match check::seen(&w.url).and_then(|(html, _)| anchor::at(&html, css)) {
@@ -225,6 +232,9 @@ fn update(c: &Caller, id: &str, selector: Option<&str>, whole_page: bool, every:
             Ok(x) => x,
             Err(e) => return error(422, &e),
         };
+        if let Some(Err(e)) = wanted.as_ref().filter(|_| !whole_page).map(|k| k.fits(&value)) {
+            return error(422, &e);
+        }
         if let Err(e) = c.store.remark(w.id, &mode, &value).and_then(|_| c.store.set_render(w.id, render)) {
             return error(500, &e);
         }
@@ -348,6 +358,9 @@ fn watch(c: &Caller, url: &str, selector: Option<&str>, every: Option<i64>, conf
         Ok(x) => x,
         Err(e) => return error(422, &e),
     };
+    if let Some(Err(e)) = condition.as_ref().map(|k| k.fits(&value)) {
+        return error(422, &e);
+    }
     let store = c.store;
     let Some(h) = c.hosted else {
         return match store.add_watch(c.account.id, &url, &mode, every, None, &value).and_then(|id| store.set_render(id, render).and_then(|_| store.set_condition(id, condition.as_ref())).map(|_| id)) {
@@ -488,7 +501,7 @@ fn tool_list() -> J {
                 "selector": { "type": "string", "description": "The selector of the place to watch, from preview_page. Leave out to watch the whole page." },
                 "every_minutes": { "type": "integer", "enum": [60, 15, 5, 1], "description": "How often to check, in minutes. 60 if left out; 15, 5 and 1 need a subscription." },
                 "confirm_cost": { "type": "boolean", "description": "Only when the person agreed: a watch beyond the 10 in the subscription costs 0.50 € a month more. Without it such a watch is refused with the price, to ask them first." },
-                "notify_when": { "type": "object", "description": "Tell the person only when the value comes to meet this, not on every change: {\"below\": 400} or {\"above\": 1000} (the first number in the place; needs a selector), {\"contains\": \"In stock\"} or {\"not_contains\": \"Sold out\"} (case does not matter). Told once when it comes true, again only after it stopped being true. Leave out to be told of every change." }
+                "notify_when": { "type": "object", "description": "Tell the person only when the value comes to meet this, not on every change: {\"below\": 400} or {\"above\": 1000} (the amount of money in the place, a number beside €, $, EUR and the like, else its first number; needs a selector; a place showing two different amounts is refused, mark a narrower one), {\"contains\": \"In stock\"} or {\"not_contains\": \"Sold out\"} (case does not matter). Told once when it comes true, again only after it stopped being true. Leave out to be told of every change." }
             }, "required": ["url"] }
         },
         {

@@ -34,8 +34,10 @@ the key in a page, a commit or a message to anyone else.
   writing your own: Zetlyn finds the place again by its selector and by the text beside it, so a
   selector from `preview` survives small changes to the page.
 - **When to tell** (`notify_when`): without it, every change is told. With it, only the change
-  that makes a condition come true: `{"below": 400}` or `{"above": 1000}` (the first number in
-  the place, written as the page writes it, e.g. `1.299,00 €`; needs a selector),
+  that makes a condition come true: `{"below": 400}` or `{"above": 1000}` (the amount of money in
+  the place, a number beside €, $, EUR and the like, as the page writes it, e.g. `1.299,00 €`;
+  without money, its first number; needs a selector; a place showing two different amounts, such
+  as "RRP 999 € now 799 €", is refused: mark the one amount meant),
   `{"contains": "In stock"}`, `{"not_contains": "Sold out"}` (case aside). It is told once when
   it comes true, and again only after it was false in between. Every change still goes into the
   history. A watch says its `notify_when` and whether it holds now (`condition_met_now`).

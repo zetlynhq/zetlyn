@@ -23,8 +23,8 @@ impl Condition {
     /// not met.
     pub fn met(&self, value: &str) -> bool {
         match self {
-            Condition::Below(mark) => number_in(value).is_some_and(|n| n < *mark),
-            Condition::Above(mark) => number_in(value).is_some_and(|n| n > *mark),
+            Condition::Below(mark) => the_number(value).ok().flatten().is_some_and(|n| n < *mark),
+            Condition::Above(mark) => the_number(value).ok().flatten().is_some_and(|n| n > *mark),
             Condition::Contains(t) => folded(value).contains(&folded(t)),
             Condition::NotContains(t) => !folded(value).contains(&folded(t)),
         }
@@ -37,6 +37,18 @@ impl Condition {
 
     pub fn needs_number(&self) -> bool {
         matches!(self, Condition::Below(_) | Condition::Above(_))
+    }
+
+    /// Whether the condition can be weighed on what the place says now: a number condition on a
+    /// place with two different amounts cannot, since which one is meant is not clear.
+    pub fn fits(&self, value: &str) -> Result<(), String> {
+        match (self.needs_number(), the_number(value)) {
+            (true, Err(amounts)) => Err(format!(
+                "The place shows several amounts ({}), so it is not clear which one to compare. Mark a narrower place: the one amount you mean.",
+                amounts.join(", ")
+            )),
+            _ => Ok(()),
+        }
     }
 
     /// The condition said, as in "Tell me when the value is …".
@@ -147,31 +159,71 @@ fn plain(n: f64) -> String {
 /// `19,99`, `1 299`. Where only one separator appears once, three digits after it make it a
 /// thousands separator (`1.299` is 1299), fewer make it a decimal one (`19,99`).
 pub fn number_in(s: &str) -> Option<f64> {
+    numbers(s).first().map(|n| n.0)
+}
+
+/// The number a condition compares: the amount of money in the text where there is one (a number
+/// beside €, $, EUR and the like), else its first number. Two different amounts are not one
+/// number: which of them is meant ("RRP 999 € now 799 €") is the person's to say, by marking a
+/// narrower place. None where the text has no number.
+pub fn the_number(s: &str) -> Result<Option<f64>, Vec<String>> {
+    let found = numbers(s);
     let chars: Vec<char> = s.chars().collect();
-    let start = chars.iter().position(|c| c.is_ascii_digit())?;
-    let mut run = String::new();
-    let mut i = start;
-    while i < chars.len() {
-        let c = chars[i];
-        let next_digit = chars.get(i + 1).is_some_and(|n| n.is_ascii_digit());
-        if c.is_ascii_digit() {
-            run.push(c);
-        } else if matches!(c, '.' | ',') && next_digit {
-            run.push(c);
-        } else if matches!(c, ' ' | '\u{a0}' | '\u{202f}' | '\'') && next_digit && chars.get(i + 1..i + 4).is_some_and(|g| g.iter().all(|d| d.is_ascii_digit())) && !chars.get(i + 4).is_some_and(|d| d.is_ascii_digit()) {
-            // A space between groups of three: 1 299.
-        } else {
-            break;
+    let mut amounts: Vec<(f64, String)> = Vec::new();
+    for (n, start, end) in &found {
+        if money_beside(&chars, *start, *end) && !amounts.iter().any(|(m, _)| m == n) {
+            amounts.push((*n, chars[*start..*end].iter().collect::<String>().trim().to_string()));
         }
-        i += 1;
     }
+    match amounts.len() {
+        0 => Ok(found.first().map(|n| n.0)),
+        1 => Ok(Some(amounts[0].0)),
+        _ => Err(amounts.into_iter().map(|(_, said)| said).collect()),
+    }
+}
+
+/// Every number in a text, with where it starts and ends (in chars).
+fn numbers(s: &str) -> Vec<(f64, usize, usize)> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if !chars[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut run = String::new();
+        while i < chars.len() {
+            let c = chars[i];
+            let next_digit = chars.get(i + 1).is_some_and(|n| n.is_ascii_digit());
+            if c.is_ascii_digit() {
+                run.push(c);
+            } else if matches!(c, '.' | ',') && next_digit {
+                run.push(c);
+            } else if matches!(c, ' ' | '\u{a0}' | '\u{202f}' | '\'') && next_digit && chars.get(i + 1..i + 4).is_some_and(|g| g.iter().all(|d| d.is_ascii_digit())) && !chars.get(i + 4).is_some_and(|d| d.is_ascii_digit()) {
+                // A space between groups of three: 1 299.
+            } else {
+                break;
+            }
+            i += 1;
+        }
+        if let Some(n) = parse_run(&run) {
+            out.push((n, start, i));
+        }
+    }
+    out
+}
+
+/// A run of digits and separators as a number (see `number_in`).
+fn parse_run(run: &str) -> Option<f64> {
     let (dots, commas) = (run.matches('.').count(), run.matches(',').count());
     let normal = if dots > 0 && commas > 0 {
         let decimal = if run.rfind('.') > run.rfind(',') { '.' } else { ',' };
         let thousands = if decimal == '.' { ',' } else { '.' };
         run.replace(thousands, "").replace(decimal, ".")
     } else if dots + commas == 0 {
-        run
+        run.to_string()
     } else {
         let sep = if dots > 0 { '.' } else { ',' };
         let after = run.rsplit(sep).next().unwrap_or("").len();
@@ -179,6 +231,31 @@ pub fn number_in(s: &str) -> Option<f64> {
         if dots + commas > 1 || (after == 3 && before != "0") { run.replace(sep, "") } else { run.replace(sep, ".") }
     };
     normal.parse().ok()
+}
+
+/// Whether a currency stands right before or after the number at `start..end`: a sign
+/// (€, $, £ …) or a code (EUR, USD, CHF …), with at most a space between.
+fn money_beside(chars: &[char], start: usize, end: usize) -> bool {
+    const SIGNS: &[char] = &['€', '$', '£', '¥', '₹', '₽', '₺', '₩', '₪', '₫', '₴', '฿', '₣', '₱'];
+    const CODES: &[&str] = &["EUR", "USD", "GBP", "CHF", "JPY", "CNY", "SEK", "NOK", "DKK", "PLN", "CZK", "HUF", "CAD", "AUD", "INR", "BRL", "TRY", "kr", "zł", "Fr", "Kč"];
+    let space = |c: char| matches!(c, ' ' | '\u{a0}' | '\u{202f}');
+    let mut b = start;
+    while b > 0 && space(chars[b - 1]) && start - b < 2 {
+        b -= 1;
+    }
+    let before: String = chars[b.saturating_sub(3)..b].iter().collect();
+    let mut a = end;
+    // "499,-" and "12.-": the dash that stands for no cents.
+    if chars.get(a).is_some_and(|c| *c == '-' || *c == '–') {
+        a += 1;
+    }
+    while a < chars.len() && space(chars[a]) && a - end < 3 {
+        a += 1;
+    }
+    let after: String = chars[a..(a + 3).min(chars.len())].iter().collect();
+    before.chars().last().is_some_and(|c| SIGNS.contains(&c))
+        || after.chars().next().is_some_and(|c| SIGNS.contains(&c))
+        || CODES.iter().any(|code| before.ends_with(code) || (after.starts_with(code) && !after[code.len()..].starts_with(|c: char| c.is_alphabetic())))
 }
 
 #[cfg(test)]
@@ -226,5 +303,27 @@ mod tests {
         assert_eq!((c.said(), c.json()), ("below 399.5".to_string(), json!({ "below": 399.5 })));
         let stored = serde_json::to_string(&c).unwrap();
         assert_eq!(serde_json::from_str::<Condition>(&stored).unwrap(), c);
+    }
+
+    #[test]
+    fn the_amount_of_money_is_the_number_and_two_amounts_are_none() {
+        assert_eq!(the_number("3 Angebote ab 699 €"), Ok(Some(699.0)), "not the count of offers");
+        assert_eq!(the_number("Nur noch 2 Stück auf Lager: 1.299,00 €"), Ok(Some(1299.0)));
+        assert_eq!(the_number("$1,299.99 (3 colors)"), Ok(Some(1299.99)));
+        assert_eq!(the_number("EUR 49,90 inkl. MwSt."), Ok(Some(49.9)));
+        assert_eq!(the_number("CHF 12.50"), Ok(Some(12.5)));
+        assert_eq!(the_number("499,- €"), Ok(Some(499.0)));
+        assert_eq!(the_number("799 € 799 €"), Ok(Some(799.0)), "the same amount twice is one");
+        assert_eq!(the_number("Rang 5 von 20"), Ok(Some(5.0)), "no money: the first number, as before");
+        assert_eq!(the_number("Currently unavailable"), Ok(None));
+        assert_eq!(the_number("UVP 999 € jetzt 799 €"), Err(vec!["999".to_string(), "799".to_string()]));
+        assert_eq!(the_number("Free shipping from 5 Fr"), Ok(Some(5.0)));
+        assert_eq!(the_number("Fresh 12 items"), Ok(Some(12.0)), "Fresh is no franc");
+        let below = Condition::Below(700.0);
+        assert!(below.met("3 Angebote ab 699 €"));
+        assert!(!below.met("UVP 999 € jetzt 799 €"), "unclear is not met");
+        assert!(below.fits("UVP 999 € jetzt 799 €").unwrap_err().contains("999, 799"));
+        assert!(below.fits("ab 699 €").is_ok());
+        assert!(Condition::Contains("x".into()).fits("UVP 999 € jetzt 799 €").is_ok(), "a text condition minds no amounts");
     }
 }

@@ -620,7 +620,20 @@ fn frame(url: &str, origin: &str, browser: bool) -> Reply {
                 .with_header(header("Content-Type", "text/html; charset=utf-8"))
                 .with_header(header("Content-Security-Policy", &page::frame_policy(&nonce, origin)))
         }
-        Ok(f) => message(&format!("This is not a web page ({}). For now Zetlyn watches web pages; PDF, CSV and JSON are coming.", f.content_type)),
+        // JSON, a feed, XML or text: its page (`doc.rs`), marked like any other.
+        Ok(f) if crate::doc::kind(&f.content_type, &f.body).is_some() => {
+            let kind = crate::doc::kind(&f.content_type, &f.body).expect("just seen");
+            match crate::doc::page(kind, &f.body) {
+                Ok(body) => {
+                    let nonce = crate::crypto::token();
+                    Response::from_string(page::framed(&body, &f.url, &nonce, origin))
+                        .with_header(header("Content-Type", "text/html; charset=utf-8"))
+                        .with_header(header("Content-Security-Policy", &page::frame_policy(&nonce, origin)))
+                }
+                Err(e) => message(&e),
+            }
+        }
+        Ok(f) => message(&format!("There is no text here to watch ({}). Zetlyn reads web pages, JSON, RSS and Atom feeds, XML and text.", f.content_type)),
         Err(e) => message(&format!("Zetlyn could not read this page: {}", check::said(url, &e))),
     }
 }

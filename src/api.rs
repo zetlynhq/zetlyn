@@ -497,12 +497,12 @@ fn tool_list() -> J {
     json!([
         {
             "name": "preview_page",
-            "description": "Read a public web page and list the places on it that can be watched, each with the selector that marks it, what it says now, and the text beside it: the page's own content first, its menus, header and footer last. Call this before watch_page to choose a place. If the place the person means is not among them, call it again with find (a word or sign the place says, such as \"€\", \"In stock\" or \"Version\"), which searches the whole page. If it fails saying the site does not let programs read the page, that page cannot be watched: tell the person, and do not call watch_page for it.",
+            "description": "Read a public web page (or JSON, an RSS or Atom feed, XML or plain text, each read as a page of its own: one line per value, the field's path beside it) and list the places on it that can be watched, each with the selector that marks it, what it says now, and the text beside it: the page's own content first, its menus, header and footer last. Call this before watch_page to choose a place. If the place the person means is not among them, call it again with find (a word or sign the place says, such as \"€\", \"In stock\" or \"Version\"), which searches the whole page. If it fails saying the site does not let programs read the page, that page cannot be watched: tell the person, and do not call watch_page for it.",
             "inputSchema": { "type": "object", "properties": { "url": { "type": "string", "description": "The page's address, e.g. https://example.com/pricing" }, "find": { "type": "string", "description": "Only the places whose text, or the text beside them, says this (case aside), from the whole page." } }, "required": ["url"] }
         },
         {
             "name": "watch_page",
-            "description": "Start watching a page: one place on it (give the selector from preview_page) or the whole page (no selector). Zetlyn checks it every hour (with a subscription as often as every minute, see every_minutes) and notifies the account when it changes.",
+            "description": "Start watching a page: one place on it (give the selector from preview_page) or the whole page (no selector). A JSON field is a place like any other; a feed watched whole is told by its new entries. Zetlyn checks it every hour (with a subscription as often as every minute, see every_minutes) and notifies the account when it changes.",
             "inputSchema": { "type": "object", "properties": {
                 "url": { "type": "string", "description": "The page's address." },
                 "selector": { "type": "string", "description": "The selector of the place to watch, from preview_page. Leave out to watch the whole page." },

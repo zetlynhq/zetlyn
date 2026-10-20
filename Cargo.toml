@@ -38,4 +38,6 @@ base64 = "0.23"
 qrcodegen = "1"
 # A page in a legacy charset (Shift_JIS, ISO-8859-1, windows-1252) read as its bytes say (`fetch.rs`).
 encoding_rs = "0.8"
+# Feeds and other XML read as a plain page of their own (`doc.rs`).
+quick-xml = "0.38"
 

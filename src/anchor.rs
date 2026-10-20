@@ -207,28 +207,36 @@ pub fn places(html: &str, max: usize, find: Option<&str>) -> Vec<Anchor> {
         let place = describe(el);
         if in_frame(el) { frame.push(place) } else { content.push(place) }
     };
-    for node in body.descendants() {
-        let Some(el) = ElementRef::wrap(node) else { continue };
-        if matches!(el.value().name(), "script" | "style" | "template" | "noscript" | "svg" | "head" | "title") {
-            continue;
+    // A document read as a page: its values are its places, each with its path beside it.
+    if crate::doc::is_document(html) {
+        let Ok(values) = Selector::parse("span.v") else { return Vec::new() };
+        for el in doc.select(&values) {
+            take(el, &mut content, &mut frame);
         }
-        let own = el.children().any(|c| matches!(c.value(), Node::Text(t) if !t.trim().is_empty()));
-        if !own {
-            continue;
-        }
-        // A piece of a value: the element around it that says it whole, before the piece.
-        if piece(&value_of(el)) {
-            let whole = el.ancestors().take(3).filter_map(ElementRef::wrap).find(|a| {
-                let t = value_of(*a);
-                t.chars().count() <= 40 && crate::when::money_in(&t)
-            });
-            if let Some(whole) = whole {
-                take(whole, &mut content, &mut frame);
+    } else {
+        for node in body.descendants() {
+            let Some(el) = ElementRef::wrap(node) else { continue };
+            if matches!(el.value().name(), "script" | "style" | "template" | "noscript" | "svg" | "head" | "title") {
+                continue;
             }
-        }
-        take(el, &mut content, &mut frame);
-        if wanted.is_none() && content.len() >= max {
-            break;
+            let own = el.children().any(|c| matches!(c.value(), Node::Text(t) if !t.trim().is_empty()));
+            if !own {
+                continue;
+            }
+            // A piece of a value: the element around it that says it whole, before the piece.
+            if piece(&value_of(el)) {
+                let whole = el.ancestors().take(3).filter_map(ElementRef::wrap).find(|a| {
+                    let t = value_of(*a);
+                    t.chars().count() <= 40 && crate::when::money_in(&t)
+                });
+                if let Some(whole) = whole {
+                    take(whole, &mut content, &mut frame);
+                }
+            }
+            take(el, &mut content, &mut frame);
+            if wanted.is_none() && content.len() >= max {
+                break;
+            }
         }
     }
     content.extend(frame);

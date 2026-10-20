@@ -23,6 +23,10 @@ pub fn shape(s: &str) -> String {
 
 /// The text of the page's body, one line per piece of text, as it reads.
 pub fn lines(html: &str) -> Vec<String> {
+    // A document read as a page (JSON, a feed, XML, text) is compared by the lines it says it has.
+    if let Some(lines) = crate::doc::lines(html) {
+        return lines;
+    }
     let doc = Html::parse_document(html);
     let body = Selector::parse("body").expect("a fixed selector");
     let mut out: Vec<String> = Vec::new();

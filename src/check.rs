@@ -15,7 +15,11 @@ use crate::text;
 pub fn read(url: &str) -> Result<String, String> {
     let f = fetch::get(url).map_err(|e| said(url, &e))?;
     if !f.is_html() {
-        return Err(format!("{url}: not a web page ({}); only web pages for now", f.content_type));
+        // JSON, a feed, XML or text: read as a page of its own (`doc.rs`).
+        return match crate::doc::kind(&f.content_type, &f.body) {
+            Some(kind) => crate::doc::page(kind, &f.body).map_err(|e| format!("{url}: {e}")),
+            None => Err(format!("{url}: not something with text to watch ({}); Zetlyn reads web pages, JSON, RSS and Atom feeds, XML and text", f.content_type)),
+        };
     }
     if walled(&f.body) {
         return Err(refused(url));
@@ -94,6 +98,10 @@ pub fn read_as(url: &str, render: bool) -> Result<String, String> {
 /// Whether it was rendered comes with it.
 pub fn seen(url: &str) -> Result<(String, bool), String> {
     let served = read(url)?;
+    // A document has nothing a browser would add.
+    if crate::doc::is_document(&served) {
+        return Ok((served, false));
+    }
     if render::available() {
         if let Ok(html) = rendered(url) {
             return Ok((html, true));
@@ -178,7 +186,7 @@ fn first_read(url: &str, anchor: Option<Anchor>) -> Result<(Mode, String, bool),
             }
         }
         None => {
-            let shown = if render::available() { rendered(url).ok() } else { None };
+            let shown = if render::available() && !crate::doc::is_document(&served) { rendered(url).ok() } else { None };
             let (render, html) = match shown {
                 Some(html) if says_more(&text::lines(&html), &text::lines(&served)) => (true, html),
                 _ => (false, served),
@@ -270,6 +278,20 @@ pub fn round_of(store: &Store, watches: Vec<Watch>) -> Result<Vec<Checked>, Stri
                     store.set_last_value(w.id, &c.before)?;
                 }
                 (outcome, detail, change) = (c.outcome, c.now.clone(), c.change);
+            }
+        }
+        // A feed is told by the entries that came; entries that went (older ones falling off its
+        // end) are taken in silently, and what is told is only what came.
+        if outcome == "changed" && page.as_ref().is_ok_and(|h| crate::doc::is_feed(h)) {
+            if let Some((before, now)) = change.take() {
+                let old: std::collections::HashSet<&str> = before.lines().collect();
+                if now.lines().all(|l| old.contains(l)) {
+                    store.set_last_value(w.id, &now)?;
+                    (outcome, detail) = ("same".into(), String::new());
+                } else {
+                    let stayed: Vec<&str> = now.lines().filter(|l| old.contains(l)).collect();
+                    change = Some((stayed.join("\n"), now));
+                }
             }
         }
         // A place that changed is read once more too: a box that says one thing on one read and

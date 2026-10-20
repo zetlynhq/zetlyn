@@ -13,6 +13,7 @@ pub mod anchor;
 pub mod check;
 pub mod cli;
 pub mod crypto;
+pub mod doc;
 pub mod docs;
 pub mod fetch;
 pub mod life;

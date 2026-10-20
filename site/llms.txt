@@ -43,6 +43,13 @@ the key in a page, a commit or a message to anyone else.
   history. A watch says its `notify_when` and whether it holds now (`condition_met_now`).
 - Without a selector the **whole page** is watched, as text; clocks, counters and adverts that
   change on their own are recognised and not reported.
+- **Not only web pages:** JSON (an API's answer), RSS and Atom feeds, other XML and plain text
+  (CSV among it) are read too, as a page of their own: one line per value, each value a place
+  with its path beside it (`tag_name`, `assets[0].size`, `catalog.book[1].price`), so a field is
+  watched like any place, with a condition if wanted; `find` with the field's name finds it. A
+  whole JSON or XML document is compared line by line ("tag_name: 1.99.0"). A feed watched whole
+  is told by its new entries only (title and link), not by entries that drop off its end. PDFs
+  and images are not read.
 - Only public pages that show their content without signing in are read. A page whose content
   its scripts make is read in a browser on Zetlyn's server (a watch's `rendered` says so). Pages
   behind a login, a paywall or a captcha are not read, and a site that refuses Zetlyn is not

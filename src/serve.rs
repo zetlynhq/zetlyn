@@ -462,7 +462,8 @@ fn address(typed: &str) -> Result<String, String> {
 }
 
 fn watch(app: &App, store: &Store, a: &Asked) -> Result<Reply, String> {
-    let back = |e: &str| redirect(&format!("/mark?error={}{}&url={}", enc(e), if a.f("watch").is_empty() { String::new() } else { format!("&watch={}", a.f("watch")) }, enc(&a.f("url"))));
+    // Back to the page to mark, with what was chosen beside the mark still chosen.
+    let back = |e: &str| redirect(&format!("/mark?error={}{}&url={}&kind={}&operand={}", enc(e), if a.f("watch").is_empty() { String::new() } else { format!("&watch={}", a.f("watch")) }, enc(&a.f("url")), enc(&a.f("kind")), enc(&a.f("operand"))));
     let url = match address(&a.f("url")) {
         Ok(u) => u,
         Err(e) => return Ok(redirect(&format!("/?error={}", enc(&e)))),
@@ -804,10 +805,12 @@ fn mark_page(app: &App, store: &Store, a: &Asked) -> Result<Reply, String> {
     let host = url.split_once("://").map_or(url.as_str(), |(_, r)| r).split(['/', '?', '#']).next().unwrap_or("");
     // When to tell: on any change, or once a condition comes true; marked again, as it was.
     let held = remark.as_ref().and_then(|w| w.condition.clone());
-    let current = held.as_ref().map_or("any", |k| k.kind());
+    // Coming back from an error, what was chosen then; else the watch's own.
+    let asked = a.q("kind").filter(|k| ["any", "below", "above", "contains", "not_contains"].contains(&k.as_str()));
+    let current = asked.as_deref().unwrap_or_else(|| held.as_ref().map_or("any", |k| k.kind()));
     let kinds = [("any", "On every change"), ("below", "When the number is below"), ("above", "When the number is above"), ("contains", "When it says"), ("not_contains", "When it no longer says")];
     let kinds: String = kinds.iter().map(|(k, label)| format!("<option value={k}{}{}>{label}</option>", if *k == current { " selected" } else { "" }, if k.starts_with("below") || k.starts_with("above") { " class=number" } else { "" })).collect();
-    let operand = held.as_ref().map(|k| k.operand()).unwrap_or_default();
+    let operand = if asked.is_some() { a.q("operand").unwrap_or_default() } else { held.as_ref().map(|k| k.operand()).unwrap_or_default() };
     let tell = format!("<div class=tell><label for=kind>Tell me</label><div class=tell-row><select name=kind id=kind>{kinds}</select><input name=operand id=operand value=\"{}\" placeholder=\"399 or In stock\" aria-label=\"Number or text\"{}></div></div>", esc(&operand), if current == "any" { " hidden" } else { "" });
     let body = format!(
         r#"<div class=bar><a href="/" class=brand><img src="/mark.png" alt="">Zetlyn</a><span class=url title="{u}">{u}</span><a href="/" class=cancel>Cancel</a></div>
@@ -1042,12 +1045,20 @@ fn mcp_reply(app: &App, store: &Store, a: &Asked) -> Reply {
     };
     let mut answers: Option<serde_json::Value> = None;
     let reply = programmatic(app, store, a, |c| {
+        // A tool that reads a page counts against the same limit as the API's calls that do.
+        let one = |m: &serde_json::Value| {
+            if crate::api::reads_a_page(m) && !app.allow("api-fetch", &c.account.id.to_string(), 60, 600) {
+                crate::api::too_many_reads(m)
+            } else {
+                crate::api::mcp(c, m)
+            }
+        };
         let out = match &message {
             serde_json::Value::Array(batch) => {
-                let all: Vec<serde_json::Value> = batch.iter().filter_map(|m| crate::api::mcp(c, m)).collect();
+                let all: Vec<serde_json::Value> = batch.iter().filter_map(one).collect();
                 if all.is_empty() { None } else { Some(serde_json::Value::Array(all)) }
             }
-            m => crate::api::mcp(c, m),
+            m => one(m),
         };
         answers = out.clone();
         (200, out.unwrap_or(serde_json::Value::Null))

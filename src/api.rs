@@ -545,6 +545,27 @@ fn tool_list() -> J {
     ])
 }
 
+/// Whether an MCP message is a tool call that reads a page, and so counts against the account's
+/// limit of pages read, as the same calls through the API do.
+pub fn reads_a_page(msg: &J) -> bool {
+    if msg["method"] != "tools/call" {
+        return false;
+    }
+    let args = &msg["params"]["arguments"];
+    match msg["params"]["name"].as_str().unwrap_or("") {
+        "preview_page" | "read_place" | "watch_page" => true,
+        "update_watch" => args.get("selector").is_some_and(|s| !s.is_null()) || args["whole_page"].as_bool() == Some(true),
+        _ => false,
+    }
+}
+
+/// The answer to a tool call refused because the account read too many pages lately.
+pub fn too_many_reads(msg: &J) -> Option<J> {
+    let id = msg.get("id").cloned()?;
+    let text = "Too many pages read for this account in the last ten minutes (60 at most); try again in a few minutes. Reading the account's watches and changes still works.";
+    Some(json!({ "jsonrpc": "2.0", "id": id, "result": { "content": [{ "type": "text", "text": text }], "structuredContent": { "error": text }, "isError": true } }))
+}
+
 /// One JSON-RPC message to the MCP server. None for a notification, which gets no answer.
 pub fn mcp(c: &Caller, msg: &J) -> Option<J> {
     let id = msg.get("id").cloned()?;
@@ -737,5 +758,21 @@ mod tests {
         let (_, body) = rest(&c, "PATCH", &["watches", &key], &json!({ "notify_when": null }));
         assert_eq!(body["watch"]["notify_when"], J::Null);
         assert_eq!(body["note"], "Every change is told.");
+    }
+
+    #[test]
+    fn the_tools_that_read_a_page_are_the_ones_counted() {
+        let call = |name: &str, args: J| json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": name, "arguments": args } });
+        assert!(reads_a_page(&call("preview_page", json!({ "url": "x" }))));
+        assert!(reads_a_page(&call("read_place", json!({}))));
+        assert!(reads_a_page(&call("watch_page", json!({}))));
+        assert!(reads_a_page(&call("update_watch", json!({ "id": "a", "selector": "h1" }))));
+        assert!(reads_a_page(&call("update_watch", json!({ "id": "a", "whole_page": true }))));
+        assert!(!reads_a_page(&call("update_watch", json!({ "id": "a", "every_minutes": 15 }))), "an interval reads nothing");
+        assert!(!reads_a_page(&call("list_watches", json!({}))));
+        assert!(!reads_a_page(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })));
+        let refused = too_many_reads(&call("preview_page", json!({}))).unwrap();
+        assert_eq!((refused["id"].as_i64(), refused["result"]["isError"].as_bool()), (Some(1), Some(true)));
+        assert!(too_many_reads(&json!({ "method": "tools/call" })).is_none(), "a notification gets no answer");
     }
 }

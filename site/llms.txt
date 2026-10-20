@@ -71,7 +71,7 @@ Tools:
 
 | Tool | Arguments | Does |
 |---|---|---|
-| `preview_page` | `url` | Reads the page and lists the places on it, each with `selector`, `text` and the text `beside` it |
+| `preview_page` | `url`, optional `find` | Reads the page and lists the places on it, each with `selector`, `text` and the text `beside` it: the page's own content first, menus and footers last. With `find` (e.g. `"€"`, `"In stock"`), only the places that say it, from the whole page |
 | `watch_page` | `url`, optional `selector`, optional `every_minutes` (60, or 15/5/1 with a subscription), `notify_when`, `confirm_cost` (see How watching works) | Starts watching that place, or the whole page without a selector |
 | `read_place` | `url`, `selectors` (up to 10) | Reads what those places say now, twice seconds apart, without watching; `steady: false` means a place flips on its own |
 | `update_watch` | `id`, optional `selector` or `whole_page: true`, optional `every_minutes`, optional `notify_when` | Watches another place on the same page, or at another interval; keeps the watch and its history |
@@ -90,7 +90,7 @@ Base: `https://zetlyn.com/api/v1`. JSON in, JSON out. An error has a status ≥ 
 | Call | Body | Answer |
 |---|---|---|
 | `GET /account` | – | `email`, `subscribed`, `watches_in_plan`, `watches_running`, `free_trial_used`, `subscribe_url` |
-| `POST /preview` | `{"url": "…"}` | `places`: `[{"selector", "text", "beside"}]`, `whole_page_lines` |
+| `POST /preview` | `{"url": "…", "find": "€"}` (`find` optional) | `places`: `[{"selector", "text", "beside"}]`, `whole_page_lines`, `find` |
 | `POST /read` | `{"url": "…", "selectors": ["…"]}` | `places`: `[{"selector", "text", "beside", "steady", "second_read"}]`; nothing is watched |
 | `POST /watches` | `{"url": "…", "selector": "…", "every_minutes": 60, "notify_when": {"below": 400}}` (all but url optional; 15, 5 or 1 need a subscription, else 403; a watch beyond the plan needs `"confirm_cost": true`, else 402) | 201 `{"watch": {…}, "note": "…"}` |
 | `GET /watches` | – | `{"watches": [ … ]}` |

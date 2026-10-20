@@ -35,7 +35,7 @@ pub struct Caller<'a> {
 pub fn rest(c: &Caller, method: &str, path: &[&str], body: &J) -> Answer {
     match (method, path) {
         ("GET", ["account"]) => account(c),
-        ("POST", ["preview"]) => preview(c, body["url"].as_str().unwrap_or("")),
+        ("POST", ["preview"]) => preview(c, body["url"].as_str().unwrap_or(""), body["find"].as_str()),
         ("GET", ["watches"]) => list(c),
         ("POST", ["watches"]) => watch(c, body["url"].as_str().unwrap_or(""), body["selector"].as_str(), body["every_minutes"].as_i64(), body["confirm_cost"].as_bool().unwrap_or(false), body.get("notify_when").unwrap_or(&J::Null)),
         ("POST", ["read"]) => read_place(c, body["url"].as_str().unwrap_or(""), &selectors_of(body)),
@@ -67,7 +67,7 @@ fn address(typed: &str) -> Result<String, String> {
     crate::outbound::public_target(&url).map(|_| url)
 }
 
-fn preview(_c: &Caller, url: &str) -> Answer {
+fn preview(_c: &Caller, url: &str, find: Option<&str>) -> Answer {
     let url = match address(url) {
         Ok(u) => u,
         Err(e) => return error(400, &e),
@@ -76,7 +76,8 @@ fn preview(_c: &Caller, url: &str) -> Answer {
         Ok(h) => h,
         Err(e) => return error(422, &format!("Zetlyn could not read this page: {e}")),
     };
-    let places: Vec<J> = anchor::outline(&html, 150).into_iter().map(|a| json!({ "selector": a.path, "text": a.text, "beside": a.label })).collect();
+    let find = find.map(str::trim).filter(|f| !f.is_empty());
+    let places: Vec<J> = anchor::places(&html, 150, find).into_iter().map(|a| json!({ "selector": a.path, "text": a.text, "beside": a.label })).collect();
     let lines = crate::text::lines(&html).len();
     (
         200,
@@ -85,7 +86,11 @@ fn preview(_c: &Caller, url: &str) -> Answer {
             "places": places,
             "whole_page_lines": lines,
             "rendered": rendered,
-            "how": "To watch one place, pass its `selector` to create a watch. To watch the whole page, pass no selector.",
+            "find": find,
+            "how": match (find, places.is_empty()) {
+                (Some(_), true) => "No place on the page says that. Try another word (a currency sign, a word beside the value), or leave find out to see the page's places.",
+                _ => "To watch one place, pass its `selector` to create a watch. To watch the whole page, pass no selector. The page's own content comes first, its menus, header and footer last; with find, only the places that say it.",
+            },
         }),
     )
 }
@@ -490,8 +495,8 @@ fn tool_list() -> J {
     json!([
         {
             "name": "preview_page",
-            "description": "Read a public web page and list the places on it that can be watched, each with the selector that marks it, what it says now, and the text beside it. Call this before watch_page to choose a place. If it fails saying the site does not let programs read the page, or lists only menus and navigation, that page cannot be watched: tell the person, and do not call watch_page for it.",
-            "inputSchema": { "type": "object", "properties": { "url": { "type": "string", "description": "The page's address, e.g. https://example.com/pricing" } }, "required": ["url"] }
+            "description": "Read a public web page and list the places on it that can be watched, each with the selector that marks it, what it says now, and the text beside it: the page's own content first, its menus, header and footer last. Call this before watch_page to choose a place. If the place the person means is not among them, call it again with find (a word or sign the place says, such as \"€\", \"In stock\" or \"Version\"), which searches the whole page. If it fails saying the site does not let programs read the page, that page cannot be watched: tell the person, and do not call watch_page for it.",
+            "inputSchema": { "type": "object", "properties": { "url": { "type": "string", "description": "The page's address, e.g. https://example.com/pricing" }, "find": { "type": "string", "description": "Only the places whose text, or the text beside them, says this (case aside), from the whole page." } }, "required": ["url"] }
         },
         {
             "name": "watch_page",
@@ -601,7 +606,7 @@ pub fn mcp(c: &Caller, msg: &J) -> Option<J> {
             let args = &msg["params"]["arguments"];
             let id_of = |a: &J| a["id"].as_i64().map(|n| n.to_string()).or_else(|| a["id"].as_str().map(str::to_string)).unwrap_or_default();
             let (status, body) = match msg["params"]["name"].as_str().unwrap_or("") {
-                "preview_page" => preview(c, args["url"].as_str().unwrap_or("")),
+                "preview_page" => preview(c, args["url"].as_str().unwrap_or(""), args["find"].as_str()),
                 "watch_page" => watch(c, args["url"].as_str().unwrap_or(""), args["selector"].as_str(), args["every_minutes"].as_i64(), args["confirm_cost"].as_bool().unwrap_or(false), args.get("notify_when").unwrap_or(&J::Null)),
                 "list_watches" => list(c),
                 "get_watch" => get(c, &id_of(args)),

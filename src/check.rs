@@ -275,7 +275,10 @@ pub fn round_of(store: &Store, watches: Vec<Watch>) -> Result<Vec<Checked>, Stri
         }
         // A value read before pages were decoded in their own charset held '�' where letters were:
         // the same page read right is taken in silently, not told as a change.
-        if let Some((_, now)) = change.take_if(|(b, a)| b.contains('\u{FFFD}') && !a.contains('\u{FFFD}')) {
+        // Likewise a value that differs only in where its spaces are ("14, 99 €" read as "14,99 €"
+        // now that pieces of a number are joined): nothing a reader would call a change.
+        let spaceless = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        if let Some((_, now)) = change.take_if(|(b, a)| (b.contains('\u{FFFD}') && !a.contains('\u{FFFD}')) || spaceless(b) == spaceless(a)) {
             store.set_last_value(w.id, &now)?;
             (outcome, detail) = ("same".into(), String::new());
         }

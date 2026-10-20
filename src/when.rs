@@ -182,6 +182,12 @@ pub fn the_number(s: &str) -> Result<Option<f64>, Vec<String>> {
     }
 }
 
+/// Whether a text says an amount of money: a number beside a currency.
+pub fn money_in(s: &str) -> bool {
+    let chars: Vec<char> = s.chars().collect();
+    numbers(s).iter().any(|(_, start, end)| money_beside(&chars, *start, *end))
+}
+
 /// Every number in a text, with where it starts and ends (in chars).
 fn numbers(s: &str) -> Vec<(f64, usize, usize)> {
     let chars: Vec<char> = s.chars().collect();

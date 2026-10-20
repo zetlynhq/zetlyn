@@ -184,11 +184,29 @@ pub fn path_of(el: ElementRef) -> String {
 /// element with text of its own, short enough to be a value, with the selector that marks it, what
 /// it says and what stands beside it. In page order, each text once, at most `max`.
 pub fn outline(html: &str, max: usize) -> Vec<Anchor> {
+    places(html, max, None)
+}
+
+/// The places on a page a person would mark, at most `max`: what the page is about first, its
+/// menus, headers, footers and side bars after. A value a page writes in pieces ("799", ",99",
+/// "€" in elements of their own) is offered whole too, as the element around the pieces. With
+/// `find`, only the places whose text, or the text beside them, has it in it, from the whole page.
+pub fn places(html: &str, max: usize, find: Option<&str>) -> Vec<Anchor> {
     let doc = Html::parse_document(html);
     let Ok(body) = Selector::parse("body") else { return Vec::new() };
     let Some(body) = doc.select(&body).next() else { return Vec::new() };
-    let mut seen = HashSet::new();
-    let mut out = Vec::new();
+    let wanted = find.map(|f| norm(f).to_lowercase()).filter(|f| !f.is_empty());
+    let mut seen_text = HashSet::new();
+    let mut seen_node = HashSet::new();
+    let (mut content, mut frame) = (Vec::new(), Vec::new());
+    let mut take = |el: ElementRef, content: &mut Vec<Anchor>, frame: &mut Vec<Anchor>| {
+        let text = value_of(el);
+        if text.is_empty() || text.chars().count() > 120 || !seen_node.insert(el.id()) || !seen_text.insert(text.clone()) {
+            return;
+        }
+        let place = describe(el);
+        if in_frame(el) { frame.push(place) } else { content.push(place) }
+    };
     for node in body.descendants() {
         let Some(el) = ElementRef::wrap(node) else { continue };
         if matches!(el.value().name(), "script" | "style" | "template" | "noscript" | "svg" | "head" | "title") {
@@ -198,16 +216,54 @@ pub fn outline(html: &str, max: usize) -> Vec<Anchor> {
         if !own {
             continue;
         }
-        let text = value_of(el);
-        if text.is_empty() || text.chars().count() > 120 || !seen.insert(text.clone()) {
-            continue;
+        // A piece of a value: the element around it that says it whole, before the piece.
+        if piece(&value_of(el)) {
+            let whole = el.ancestors().take(3).filter_map(ElementRef::wrap).find(|a| {
+                let t = value_of(*a);
+                t.chars().count() <= 40 && crate::when::money_in(&t)
+            });
+            if let Some(whole) = whole {
+                take(whole, &mut content, &mut frame);
+            }
         }
-        out.push(describe(el));
-        if out.len() >= max {
+        take(el, &mut content, &mut frame);
+        if wanted.is_none() && content.len() >= max {
             break;
         }
     }
-    out
+    content.extend(frame);
+    // What was looked for: the places that say it; where none does, those beside which it is said.
+    if let Some(w) = &wanted {
+        let says = |t: &str| t.to_lowercase().contains(w.as_str());
+        content = if content.iter().any(|p| says(&p.text)) { content.into_iter().filter(|p| says(&p.text)).collect() } else { content.into_iter().filter(|p| says(&p.label)).collect() };
+    }
+    content.truncate(max);
+    content
+}
+
+/// Whether a text is only a piece of a value: digits, a separator or a currency, and short.
+fn piece(t: &str) -> bool {
+    let t = t.trim();
+    !t.is_empty() && t.chars().count() <= 6 && !crate::when::money_in(t) && t.chars().all(|c| c.is_ascii_digit() || matches!(c, '.' | ',' | '-' | '€' | '$' | '£' | '¥' | ' ' | '\u{a0}'))
+}
+
+/// Whether an element is part of a page's frame rather than what the page is about: its header,
+/// menus, footer, side bars, breadcrumbs, cookie notices.
+fn in_frame(el: ElementRef) -> bool {
+    const ROLES: &[&str] = &["navigation", "banner", "contentinfo", "complementary", "menu", "menubar"];
+    const WORDS: &[&str] = &["nav", "menu", "breadcrumb", "cookie", "consent", "sidebar"];
+    // A header or footer of an article (a product's title, often) belongs to what the page is about.
+    let in_main = |a: ElementRef| a.ancestors().filter_map(ElementRef::wrap).any(|m| matches!(m.value().name(), "main" | "article"));
+    el.ancestors().filter_map(ElementRef::wrap).chain(std::iter::once(el)).any(|a| {
+        let e = a.value();
+        matches!(e.name(), "nav" | "aside")
+            || (matches!(e.name(), "header" | "footer") && !in_main(a))
+            || e.attr("role").is_some_and(|r| ROLES.contains(&r))
+            || e.id().into_iter().chain(e.classes()).any(|n| {
+                let n = n.to_ascii_lowercase();
+                WORDS.iter().any(|w| n == *w || n.starts_with(&format!("{w}-")) || n.starts_with(&format!("{w}_")) || n.ends_with(&format!("-{w}")) || n.ends_with(&format!("_{w}")))
+            })
+    })
 }
 
 /// What the place says: its text as a reader sees it, bounded.
@@ -221,7 +277,9 @@ pub fn value_of(el: ElementRef) -> String {
     for n in el.descendants().filter(|n| !hidden(n)) {
         if let Node::Text(t) = n.value() {
             let block = n.ancestors().find(|a| a.value().as_element().is_some_and(|e| BLOCK.contains(&e.name()))).map(|a| a.id());
-            if last_block.is_some() && block != last_block {
+            // A price in pieces ("14," and "99" in blocks of their own) stays one number.
+            let joins_number = shown.trim_end().ends_with([',', '.']) && shown.trim_end().chars().rev().nth(1).is_some_and(|c| c.is_ascii_digit()) && t.trim_start().starts_with(|c: char| c.is_ascii_digit());
+            if last_block.is_some() && block != last_block && !joins_number {
                 shown.push(' ');
             }
             last_block = block;
@@ -371,5 +429,33 @@ mod tests {
     fn gone_when_nothing_like_it_is_left() {
         let a = anchor_on(PAGE, PRO);
         assert_eq!(find("<html><body><p>Closed</p></body></html>", &a), Found::Gone);
+    }
+
+    #[test]
+    fn a_shop_page_offers_its_product_first_and_its_price_whole() {
+        let page = r#"<html><body>
+            <header><nav><a>Home</a><a>Phones</a><a>Deals</a></nav></header>
+            <div class="cookie-banner"><p>We use cookies</p></div>
+            <main><article><header><h1>iPhone 16, 128 GB</h1></header>
+              <div class="price"><span class="whole">799</span><sup>,99</sup><span class="cur">€</span></div>
+              <p class="stock">In stock</p></article></main>
+            <footer><a>Imprint</a></footer></body></html>"#;
+        let texts: Vec<String> = places(page, 50, None).into_iter().map(|a| a.text).collect();
+        assert_eq!(texts.first().map(String::as_str), Some("iPhone 16, 128 GB"), "the product, though in a header, comes first: {texts:?}");
+        let whole = texts.iter().position(|t| t == "799,99€").expect("the price offered whole");
+        let piece = texts.iter().position(|t| t == "799").unwrap();
+        assert!(whole < piece, "the whole before its pieces: {texts:?}");
+        let home = texts.iter().position(|t| t == "Home").unwrap();
+        assert!(home > texts.iter().position(|t| t == "In stock").unwrap(), "menus after the content");
+        assert!(texts.iter().position(|t| t == "We use cookies").unwrap() > whole, "cookie notices after the content");
+        let found: Vec<String> = places(page, 50, Some("€")).into_iter().map(|a| a.text).collect();
+        assert_eq!(found, vec!["799,99€".to_string(), "€".to_string()], "find searches text");
+        assert_eq!(places(page, 50, Some("in STOCK")).len(), 1, "case aside");
+        let blocks = r#"<html><body><main><div class="p"><div>14,</div><div>99</div><span>&nbsp;€</span></div><ul><li>Rot,</li><li>Blau</li></ul></main></body></html>"#;
+        assert!(places(blocks, 50, Some("€")).iter().any(|a| a.text == "14,99 €"), "cents in a block of their own stay with the euros");
+        assert_eq!(at(blocks, "ul").unwrap().text, "Rot, Blau", "words in blocks stay apart");
+        let beside: Vec<String> = places(page, 50, Some("Phones")).into_iter().map(|a| a.text).collect();
+        assert_eq!(beside, vec!["Phones".to_string()], "said in a place: that place, not those beside it");
+        assert!(places(page, 50, Some("nothing like this")).is_empty());
     }
 }

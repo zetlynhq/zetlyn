@@ -118,16 +118,58 @@ pub fn read_as(url: &str, render: bool) -> Result<String, String> {
     if render { rendered(url) } else { read(url) }
 }
 
+/// A page read for a person or an agent choosing a place (the preview, read_place, a watch made
+/// or changed) is kept for two minutes, so that choosing reads the page once, not once a step:
+/// less load on the site, fewer refusals, quicker answers. The checks of watches, and the second
+/// reads that tell what moves on its own, always read anew. Kept up to 50 MB, the oldest first
+/// to go; a failed read is not kept.
+mod recent {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    const KEPT: Duration = Duration::from_secs(120);
+    const MOST: usize = 50 * 1024 * 1024;
+    static PAGES: Mutex<Vec<(String, Instant, String)>> = Mutex::new(Vec::new());
+
+    pub fn get_or(key: String, read: impl FnOnce() -> Result<String, String>) -> Result<String, String> {
+        {
+            let mut pages = PAGES.lock().unwrap_or_else(|e| e.into_inner());
+            pages.retain(|(_, at, _)| at.elapsed() < KEPT);
+            if let Some((_, _, html)) = pages.iter().find(|(k, _, _)| *k == key) {
+                return Ok(html.clone());
+            }
+        }
+        let html = read()?;
+        let mut pages = PAGES.lock().unwrap_or_else(|e| e.into_inner());
+        pages.retain(|(k, _, _)| *k != key);
+        pages.push((key, Instant::now(), html.clone()));
+        while pages.iter().map(|(_, _, h)| h.len()).sum::<usize>() > MOST && pages.len() > 1 {
+            pages.remove(0);
+        }
+        Ok(html)
+    }
+}
+
+/// `read`, kept for two minutes (`recent`).
+fn read_recent(url: &str) -> Result<String, String> {
+    recent::get_or(format!("served {url}"), || read(url))
+}
+
+/// `rendered`, kept for two minutes (`recent`).
+fn rendered_recent(url: &str) -> Result<String, String> {
+    recent::get_or(format!("rendered {url}"), || rendered(url))
+}
+
 /// A page as a person marking it sees it: rendered where Chrome is at hand, else as served.
 /// Whether it was rendered comes with it.
 pub fn seen(url: &str) -> Result<(String, bool), String> {
-    let served = read(url)?;
+    let served = read_recent(url)?;
     // A document has nothing a browser would add.
     if crate::doc::is_document(&served) {
         return Ok((served, false));
     }
     if render::available() {
-        if let Ok(html) = rendered(url) {
+        if let Ok(html) = rendered_recent(url) {
             return Ok((html, true));
         }
     }
@@ -193,7 +235,7 @@ pub fn watchable_whole(text: &str) -> bool {
 }
 
 fn first_read(url: &str, anchor: Option<Anchor>) -> Result<(Mode, String, bool), String> {
-    let served = read(url)?;
+    let served = read_recent(url)?;
     match anchor {
         // The place was described on an earlier read of the page; this one keeps of it what held.
         Some(a) => {
@@ -204,13 +246,13 @@ fn first_read(url: &str, anchor: Option<Anchor>) -> Result<(Mode, String, bool),
             if let Some((mode, value)) = found(&served) {
                 return Ok((mode, value, false));
             }
-            match render::available().then(|| rendered(url)).transpose()?.and_then(|html| found(&html)) {
+            match render::available().then(|| rendered_recent(url)).transpose()?.and_then(|html| found(&html)) {
                 Some((mode, value)) => Ok((mode, value, true)),
                 None => Err("The marked place could not be found on the page again. Please mark it once more.".into()),
             }
         }
         None => {
-            let shown = if render::available() && !crate::doc::is_document(&served) { rendered(url).ok() } else { None };
+            let shown = if render::available() && !crate::doc::is_document(&served) { rendered_recent(url).ok() } else { None };
             let (render, html) = match shown {
                 Some(html) if says_more(&text::lines(&html), &text::lines(&served)) => (true, html),
                 _ => (false, served),

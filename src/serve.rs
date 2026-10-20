@@ -248,7 +248,9 @@ fn route(app: &App, store: &Store, a: &Asked) -> Result<Reply, String> {
             if let (Method::Get, Some(since)) = (&a.method, a.q("since")) {
                 body = serde_json::json!({ "since": since });
             }
-            let fetches = matches!((&a.method, rest), (Method::Post, ["preview"] | ["watches"] | ["read"]) | (Method::Patch, ["watches", _]));
+            // A change of a watch reads its page only when it marks another place, or the whole page.
+            let rereads = body.get("selector").is_some_and(|s| !s.is_null()) || body["whole_page"].as_bool() == Some(true);
+            let fetches = matches!((&a.method, rest), (Method::Post, ["preview"] | ["watches"] | ["read"])) || (matches!((&a.method, rest), (Method::Patch, ["watches", _])) && rereads);
             if fetches && !app.allow("api-fetch", &c.account.id.to_string(), 60, 600) {
                 return (429, serde_json::json!({ "error": "Too many pages read for this account; try again in a few minutes." }));
             }

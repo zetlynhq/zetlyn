@@ -120,7 +120,7 @@ or Apple where they are set up), and each sees only their own watches. What it n
 4. **Payment, if any.** Without Stripe settings every account has the free day and nothing can be
    bought; `ZETLYN_ADMINS` can make accounts free without Stripe in `/admin`.
 
-The units in `deploy/` (systemd with `DynamicUser`, no access to private networks, backups) are
+The units in `deploy/` (systemd with `DynamicUser`, no access to private networks, an alarm) are
 how zetlyn.com runs, and a good start for your own; `deploy/README.md` describes them.
 
 ## Commands

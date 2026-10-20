@@ -649,7 +649,7 @@ fn system(app: &App, store: &Store) -> Result<String, String> {
     Ok(format!(
         "<h1>System</h1><table>{info}</table><h2>Notice</h2><p class=dim>Shown over every page, e.g. before maintenance. Empty: none.</p><form method=post action=/admin/banner class=field><input name=banner value=\"{}\" maxlength=300 placeholder=\"Zetlyn is updated tonight at 22:00 CET for a few minutes.\"><button>Save</button></form>\
          <h2>Busiest addresses, last hour</h2><p class=dim>Requests counted against the limits (reading a page to mark, new watches, sign-in links, the API), by kind and address.</p>{}\
-         <p class=dim>Backups and the alarm run on the server by their own timers (<code>zetlyn-backup.timer</code>, <code>zetlyn-alert.timer</code>); they mail when something is wrong.</p>",
+         <p class=dim>The alarm runs on the server by its own timer (<code>zetlyn-alert.timer</code>) and mails when something is wrong. Backups are Hetzner's daily backups of the whole server, the last seven.</p>",
         esc(&banner),
         if limit_rows.is_empty() { "<p class=dim>None.</p>".to_string() } else { format!("<table>{limit_rows}</table>") }
     ))

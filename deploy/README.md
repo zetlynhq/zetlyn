@@ -1,7 +1,7 @@
 # Running zetlyn.com
 
 How the hosted service at zetlyn.com is built and run; the files beside this one are its units,
-Caddy configuration, backup and restore. Nothing here is needed to run an instance of your own
+Caddy configuration and listings. Nothing here is needed to run an instance of your own
 (see the README at the top).
 
 The server is n1 (`root@zetlyn.com`). The program is `/srv/zetlyn/zetlyn`, its data
@@ -17,10 +17,10 @@ ssh root@zetlyn.com 'cd /srv/zetlyn && cp zetlyn zetlyn.prev && mv zetlyn.new ze
 Back: `cp /srv/zetlyn/zetlyn.prev /srv/zetlyn/zetlyn && systemctl restart zetlyn`.
 
 - `zetlyn.service`: the app. `zetlyn-alert.timer`: every 5 minutes, mail to alarm@zetlyn.com when
-  something is wrong and again when it is right. `zetlyn-backup.timer`: daily 03:30 UTC, the data
-  checked, compressed, encrypted with `/etc/zetlyn/backup.key` and put in the object storage
-  (`deploy/backup.sh`); `deploy/restore.sh daily/Mon /tmp/x.db` brings one back into a file of its
-  own. Keep a copy of `backup.key` away from the server.
+  something is wrong and again when it is right.
+- Backups: Hetzner backs up the whole server each day and keeps the last seven (the server's
+  Backups in Hetzner's console); there is no copy of its own beside them. To have one file of the
+  data while it runs, `zetlyn backup <file>` (as the service's user, below).
 - Caddy: write `deploy/Caddyfile.zetlyn.com` to `/etc/caddy/Caddyfile.candidate`, check it with
   `caddy validate`, keep the old file, then move it in place and `systemctl reload caddy`.
 - Commands on the server run as the service's user, so the file stays its own:

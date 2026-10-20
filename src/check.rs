@@ -259,6 +259,12 @@ pub fn round_of(store: &Store, watches: Vec<Watch>) -> Result<Vec<Checked>, Stri
                 }
             }
         }
+        // A value read before pages were decoded in their own charset held '�' where letters were:
+        // the same page read right is taken in silently, not told as a change.
+        if let Some((_, now)) = change.take_if(|(b, a)| b.contains('\u{FFFD}') && !a.contains('\u{FFFD}')) {
+            store.set_last_value(w.id, &now)?;
+            (outcome, detail) = ("same".into(), String::new());
+        }
         store.record(w.id, at, &outcome, moved, &detail, change.as_ref().map(|(b, a)| (b.as_str(), a.as_str())))?;
         done.push(Checked { watch: w, outcome, moved, change });
     }

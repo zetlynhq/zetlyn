@@ -36,4 +36,6 @@ ring = "0.17"
 base64 = "0.23"
 # The QR code that takes a phone to the Telegram bot (`serve.rs`, connecting Telegram).
 qrcodegen = "1"
+# A page in a legacy charset (Shift_JIS, ISO-8859-1, windows-1252) read as its bytes say (`fetch.rs`).
+encoding_rs = "0.8"
 

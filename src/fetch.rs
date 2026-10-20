@@ -24,7 +24,40 @@ impl Fetched {
 
 pub fn get(url: &str) -> Result<Fetched, String> {
     let got = get_bytes(url, BODY_LIMIT)?;
-    Ok(Fetched { url: got.url, content_type: got.content_type, body: String::from_utf8_lossy(&got.bytes).into_owned() })
+    let body = decode(&got.bytes, &got.content_type);
+    Ok(Fetched { url: got.url, content_type: got.content_type, body })
+}
+
+/// A page's bytes as text, in the charset it is written in: the one its `Content-Type` names,
+/// else its byte order mark, else a `<meta>` near its top; with none of them, UTF-8 where the
+/// bytes are UTF-8 and windows-1252 where they are not, as browsers read such pages.
+pub fn decode(bytes: &[u8], content_type: &str) -> String {
+    let named = charset_in(content_type).or_else(|| {
+        let head = String::from_utf8_lossy(&bytes[..bytes.len().min(2048)]).to_ascii_lowercase();
+        head.find("<meta").and_then(|_| meta_charset(&head))
+    });
+    let encoding = encoding_rs::Encoding::for_bom(bytes)
+        .map(|(e, _)| e)
+        .or_else(|| named.and_then(|n| encoding_rs::Encoding::for_label(n.as_bytes())))
+        .unwrap_or(if std::str::from_utf8(bytes).is_ok() { encoding_rs::UTF_8 } else { encoding_rs::WINDOWS_1252 });
+    encoding.decode(bytes).0.into_owned()
+}
+
+/// `charset=…` in a header value or a meta's content.
+fn charset_in(s: &str) -> Option<String> {
+    let lower = s.to_ascii_lowercase();
+    let at = lower.find("charset=")? + "charset=".len();
+    let name: String = lower[at..].trim_start_matches(['"', '\'', ' ']).chars().take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.')).collect();
+    (!name.is_empty()).then_some(name)
+}
+
+/// The charset a page's `<meta charset=…>` or `<meta http-equiv=content-type content=…>` names,
+/// from its lowercased top.
+fn meta_charset(head: &str) -> Option<String> {
+    head.match_indices("<meta").find_map(|(at, _)| {
+        let tag = &head[at..head[at..].find('>').map_or(head.len(), |e| at + e)];
+        charset_in(tag)
+    })
 }
 
 /// What was read, as it came: an image, a font, a stylesheet.
@@ -156,5 +189,18 @@ mod tests {
         assert_eq!(join("https://a.example/x/y", "/z"), "https://a.example/z");
         assert_eq!(join("https://a.example/x/y?q=1", "z"), "https://a.example/x/z");
         assert_eq!(join("https://a.example", "z"), "https://a.example/z");
+    }
+
+    #[test]
+    fn a_page_is_read_in_the_charset_it_is_written_in() {
+        let sjis = [b"<html><head><meta charset=\"Shift_JIS\"></head><body>".as_slice(), &[0x83, 0x81, 0x83, 0x43, 0x83, 0x93], b"</body></html>"].concat();
+        assert!(decode(&sjis, "text/html").contains("メイン"), "named by its meta");
+        let latin1 = [b"<p>".as_slice(), &[0x47, 0x72, 0xfc, 0xdf, 0x65], b"</p>"].concat();
+        assert!(decode(&latin1, "text/html; charset=ISO-8859-1").contains("Grüße"), "named by its header");
+        assert!(decode(&latin1, "text/html").contains("Grüße"), "not UTF-8 and nothing named: windows-1252");
+        let equiv = [b"<meta http-equiv=\"Content-Type\" content=\"text/html; charset=iso-8859-1\"><p>".as_slice(), &[0xfc], b"</p>"].concat();
+        assert!(decode(&equiv, "text/html").contains('ü'));
+        assert_eq!(decode("Grüße".as_bytes(), "text/html"), "Grüße", "UTF-8 stays UTF-8");
+        assert_eq!(decode(&[0xef, 0xbb, 0xbf, b'a'], "text/html; charset=iso-8859-1"), "a", "a byte order mark wins");
     }
 }

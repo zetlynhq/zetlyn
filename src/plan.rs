@@ -44,7 +44,7 @@ pub struct Plan {
     pub stripe: Option<Stripe>,
 }
 
-pub const PRICING: &str = r#"<section class="block pricing"><p class=overline>Pricing</p><h2>One day free.<br><span>Then 9.99 € a month.</span></h2><div class=plans>
+pub const PRICING: &str = r#"<section class="block pricing"><p class=overline>Pricing</p><h2>Three days free.<br><span>Then 9.99 € a month.</span></h2><div class=plans>
 <div class=plan><h3>Try it</h3><p class=price>Free</p><p>One watch for 3 days, checked every hour. No card.</p></div>
 <div class="plan main"><h3>Subscription</h3><p class=price>9.99 € <span>a month</span></p><p>Up to 10 watches, as long as you like, checked as often as every minute. 0.50 € a month for each watch more. VAT included. Cancel any time.</p></div>
 </div></section>"#;
@@ -325,7 +325,7 @@ mod tests {
     }
 
     #[test]
-    fn the_first_watch_is_a_free_day_the_second_waits_and_paying_starts_both() {
+    fn the_first_watch_is_a_free_trial_the_second_waits_and_paying_starts_both() {
         let dir = std::env::temp_dir().join(format!("zetlyn-plan-{}", crate::crypto::token()));
         let (h, s, plan) = (hosted(&dir), Store::in_memory(), Plan { stripe: None });
         let a = s.account("a@example.com").unwrap();
@@ -346,7 +346,7 @@ mod tests {
     }
 
     #[test]
-    fn a_free_day_is_said_two_hours_before_it_ends_and_then_ends() {
+    fn a_free_trial_is_said_a_day_before_it_ends_and_then_ends() {
         let dir = std::env::temp_dir().join(format!("zetlyn-plan-{}", crate::crypto::token()));
         let (h, s, plan) = (hosted(&dir), Store::in_memory(), Plan { stripe: None });
         let a = s.account("a@example.com").unwrap();

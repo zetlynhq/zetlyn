@@ -62,6 +62,7 @@ pub fn start(store: &Store, _h: &Hosted, plan: &Plan, account: i64, watch: i64) 
 pub fn tick(store: &Store, hosted: Option<&Hosted>, plan: &Plan) -> Result<Vec<String>, String> {
     let at = now();
     crate::tell::record(store);
+    store.prune_checks(at)?;
     let mut said = Vec::new();
     if let Some(h) = hosted {
         said.extend(plan.tick(store, h, at)?);

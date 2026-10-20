@@ -202,6 +202,7 @@ CREATE TABLE IF NOT EXISTS channels (
 CREATE INDEX IF NOT EXISTS oauth_grants_account ON oauth_grants(account, client);
 CREATE INDEX IF NOT EXISTS checks_watch ON checks(watch, at);
 CREATE INDEX IF NOT EXISTS checks_at ON checks(at);
+CREATE INDEX IF NOT EXISTS checks_at ON checks(at);
 CREATE INDEX IF NOT EXISTS changes_watch ON changes(watch, at);
 ";
 
@@ -265,6 +266,16 @@ impl Store {
             conn.execute("UPDATE watches SET key = ?2 WHERE id = ?1", params![id, crate::crypto::short_id()]).map_err(e)?;
         }
         conn.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS watches_key ON watches(key)").map_err(e)?;
+        // Checks that found the page unchanged once kept all of its text, which is the watch's value
+        // anyway: taken out once, and the file made small again.
+        let slim: bool = conn.query_row("SELECT EXISTS (SELECT 1 FROM meta WHERE key = 'checks_slim')", [], |r| r.get(0)).map_err(e)?;
+        if !slim {
+            let n = conn.execute("UPDATE checks SET detail = '' WHERE outcome = 'same' AND detail != ''", []).map_err(e)?;
+            conn.execute("INSERT INTO meta (key, value) VALUES ('checks_slim', '1')", []).map_err(e)?;
+            if n > 0 {
+                conn.execute_batch("VACUUM").map_err(e)?;
+            }
+        }
         Ok(Store { conn })
     }
 
@@ -507,6 +518,8 @@ impl Store {
 
     /// One check: its outcome, and the watch's new value and the change when there is one.
     pub fn record(&self, watch: i64, at: i64, outcome: &str, moved: bool, detail: &str, change: Option<(&str, &str)>) -> Result<(), String> {
+        // An unchanged page says nothing the watch's value does not: only the outcome is kept.
+        let detail = if outcome == "same" { "" } else { detail };
         self.conn.execute("INSERT INTO checks (watch, at, outcome, moved, detail) VALUES (?1, ?2, ?3, ?4, ?5)", params![watch, at, outcome, moved, detail]).map_err(e)?;
         self.conn.execute("UPDATE watches SET last_checked = ?2, status = ?3 WHERE id = ?1", params![watch, at, outcome]).map_err(e)?;
         if let Some((before, after)) = change {
@@ -772,6 +785,14 @@ impl Store {
     /// A client let out of an account: all it was given goes.
     pub fn disconnect(&self, account: i64, client: &str) -> Result<(), String> {
         self.conn.execute("DELETE FROM oauth_grants WHERE account = ?1 AND client = ?2", params![account, client]).map(|_| ()).map_err(e)
+    }
+
+    /// How long a check is kept: the changes stay as long as the watch, the checks for 90 days.
+    pub const CHECKS_KEPT: i64 = 90 * 86400;
+
+    /// Checks older than `CHECKS_KEPT` go.
+    pub fn prune_checks(&self, at: i64) -> Result<usize, String> {
+        self.conn.execute("DELETE FROM checks WHERE at < ?1", [at - Self::CHECKS_KEPT]).map_err(e)
     }
 
     /// What expired a day ago goes; clients nobody uses go after 30 days.
@@ -1097,5 +1118,21 @@ mod tests {
         assert_eq!(s.count("SELECT COUNT(*) FROM checks", []).unwrap(), 0);
         assert_eq!(s.session(&session).unwrap(), None);
         assert_eq!(s.admin_log(10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn an_unchanged_check_keeps_no_text_and_old_checks_go() {
+        let s = Store::in_memory();
+        let a = s.account("a@example.com").unwrap();
+        let w = s.add_watch(a, "https://example.com/", &Mode::Page { volatile: vec![] }, 60, None, "x").unwrap();
+        s.record(w, 1_000, "same", false, "the whole page, again", None).unwrap();
+        s.record(w, 2_000, "failed", false, "HTTP 503", None).unwrap();
+        s.record(w, now(), "changed", false, "y", Some(("x", "y"))).unwrap();
+        let details: Vec<String> = s.checks(w, 10).unwrap().into_iter().map(|c| c.detail).collect();
+        assert_eq!(details.iter().filter(|d| d.as_str() == "the whole page, again").count(), 0, "unchanged: no text");
+        assert!(details.contains(&"HTTP 503".to_string()), "why it failed is kept");
+        assert!(details.contains(&"y".to_string()));
+        assert_eq!(s.prune_checks(now()).unwrap(), 2, "the two old ones go");
+        assert_eq!(s.changes(w, 10).unwrap().len(), 1, "changes stay");
     }
 }

@@ -28,6 +28,8 @@ pub struct Caller<'a> {
     pub plan: &'a crate::plan::Plan,
     pub every_min: i64,
     pub base: String,
+    /// How the caller came: `api` (a key), or the name of the app it connected as by OAuth.
+    pub via: String,
 }
 
 /// `/api/v1/<path>`: GET account | GET watches | POST watches | GET watches/<id> | PATCH watches/<id> |
@@ -74,12 +76,16 @@ fn preview(_c: &Caller, url: &str, find: Option<&str>) -> Answer {
     };
     let (html, rendered) = match check::seen(&url) {
         Ok(h) => h,
-        Err(e) => return error(422, &format!("Zetlyn could not read this page: {e}")),
+        Err(e) => {
+            let _ = _c.store.refused(&url, "preview", &e);
+            return error(422, &format!("Zetlyn could not read this page: {e}"));
+        }
     };
     let find = find.map(str::trim).filter(|f| !f.is_empty());
     let places: Vec<J> = anchor::places(&html, 150, find).into_iter().map(|a| json!({ "selector": a.path, "text": a.text, "beside": a.label })).collect();
     // A page with nothing on it to mark is said so, as a watch of it would be.
     if places.is_empty() && find.is_none() {
+        let _ = _c.store.refused(&url, "preview", check::NO_TEXT);
         return error(422, check::NO_TEXT);
     }
     let page_text = crate::text::lines(&html).join("\n");
@@ -127,7 +133,10 @@ fn read_place(_c: &Caller, url: &str, selectors: &[String]) -> Answer {
     };
     let (html, rendered) = match check::seen(&url) {
         Ok(h) => h,
-        Err(e) => return error(422, &format!("Zetlyn could not read this page: {e}")),
+        Err(e) => {
+            let _ = _c.store.refused(&url, "read", &e);
+            return error(422, &format!("Zetlyn could not read this page: {e}"));
+        }
     };
     std::thread::sleep(std::time::Duration::from_secs(3));
     let again = check::read_as(&url, rendered).ok();
@@ -383,11 +392,15 @@ fn watch(c: &Caller, url: &str, selector: Option<&str>, every: Option<i64>, conf
     };
     let (mode, value, render) = match check::first(&url, anchor) {
         Ok(x) => x,
-        Err(e) => return error(422, &e),
+        Err(e) => {
+            let _ = c.store.refused(&url, "watch", &e);
+            return error(422, &e);
+        }
     };
     if let Some(Err(e)) = condition.as_ref().map(|k| k.fits(&value)) {
         return error(422, &e);
     }
+    let _ = c.store.step(c.account.id, "first_watch", &c.via);
     let store = c.store;
     let Some(h) = c.hosted else {
         return match store.add_watch(c.account.id, &url, &mode, every, None, &value).and_then(|id| store.set_render(id, render).and_then(|_| store.set_condition(id, condition.as_ref())).map(|_| id)) {
@@ -687,7 +700,7 @@ mod tests {
 
     fn caller(store: &Store) -> Caller<'_> {
         let id = store.account("a@example.com").unwrap();
-        Caller { store, account: store.account_by_id(id).unwrap().unwrap(), hosted: None, plan: &crate::plan::Plan { stripe: None }, every_min: 60, base: "https://zetlyn.test".into() }
+        Caller { store, account: store.account_by_id(id).unwrap().unwrap(), hosted: None, plan: &crate::plan::Plan { stripe: None }, every_min: 60, base: "https://zetlyn.test".into(), via: "api".into() }
     }
 
     #[test]

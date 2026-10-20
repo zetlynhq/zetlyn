@@ -492,7 +492,10 @@ fn watch(app: &App, store: &Store, a: &Asked) -> Result<Reply, String> {
     }
     let (mode, value, render) = match check::first(&url, anchor) {
         Ok(x) => x,
-        Err(e) => return Ok(back(&e)),
+        Err(e) => {
+            let _ = store.refused(&url, "mark", &e);
+            return Ok(back(&e));
+        }
     };
     if let Some(Err(e)) = condition.as_ref().map(|k| k.fits(&value)) {
         return Ok(back(&e));
@@ -513,6 +516,7 @@ fn watch(app: &App, store: &Store, a: &Asked) -> Result<Reply, String> {
     if let Some(acc) = &a.account {
         let id = store.add_watch_as(acc.id, &url, &mode, app.every_min, None, &value, "pending")?;
         store.set_condition(id, condition.as_ref())?;
+        store.step(acc.id, "first_watch", "web")?;
         store.set_render(id, render)?;
         let key = store.watch(id)?.map(|w| w.key).unwrap_or_default();
         return Ok(redirect(&started(life::start(store, h, &app.plan, acc.id, id)?, &key)));
@@ -541,6 +545,7 @@ fn watch(app: &App, store: &Store, a: &Asked) -> Result<Reply, String> {
     }
     let id = store.add_watch_as(account, &url, &mode, app.every_min, None, &value, "pending")?;
     store.set_condition(id, condition.as_ref())?;
+    store.step(account, "first_watch", "web")?;
     store.set_render(id, render)?;
     let token = store.new_token(account, "confirm", Some(id), 2 * 86400)?;
     let w = store.watch(id)?.ok_or("the watch just made")?;
@@ -557,6 +562,7 @@ fn confirm(app: &App, store: &Store, token: &str) -> Result<Reply, String> {
         return Ok(redirect("/signin?expired=1"));
     }
     store.confirm_account(account)?;
+    store.step(account, "confirmed", "email")?;
     let key = store.watch(watch)?.map(|w| w.key).unwrap_or_default();
     let to = started(life::start(store, h, &app.plan, account, watch)?, &key);
     let session = store.new_session(account)?;
@@ -598,6 +604,7 @@ fn enter(app: &App, store: &Store, token: &str, next: &str) -> Result<Reply, Str
         return Ok(redirect("/signin?expired=1"));
     }
     store.confirm_account(account)?;
+    store.step(account, "confirmed", "email")?;
     let session = store.new_session(account)?;
     // Only a path on this site: a link must not send its reader elsewhere.
     let to = if next.starts_with('/') && !next.starts_with("//") && !next.contains('\\') { next } else { "/watches" };
@@ -1056,7 +1063,12 @@ fn programmatic(app: &App, store: &Store, a: &Asked, call: impl FnOnce(&crate::a
         return json_reply(429, &serde_json::json!({ "error": "Too many requests for this account; try again in a few minutes." }));
     }
     let base = app.hosted.as_ref().map(|h| h.base.clone()).unwrap_or_else(|| "http://127.0.0.1:4848".into());
-    let caller = crate::api::Caller { store, account, hosted: app.hosted.as_ref(), plan: &app.plan, every_min: app.every_min, base };
+    // How it came: an app connected by OAuth by its name, else a key of the account.
+    let via = match a.bearer.as_deref() {
+        Some(t) if t.starts_with("zat_") => store.access_client(t).ok().flatten().unwrap_or_else(|| "oauth".into()),
+        _ => "api".into(),
+    };
+    let caller = crate::api::Caller { store, account, hosted: app.hosted.as_ref(), plan: &app.plan, every_min: app.every_min, base, via };
     let (status, body) = call(&caller);
     json_reply(status, &body)
 }
@@ -1899,11 +1911,13 @@ fn oauth_back(app: &App, store: &Store, a: &Asked, provider: &str, state: &str, 
         return Ok(redirect("/signin?failed=1").with_header(gone).with_header(gone_w));
     }
     store.confirm_account(acc.id)?;
+    store.step(acc.id, "confirmed", provider)?;
     let session = store.new_session(acc.id)?;
     let to = match (intent, &app.hosted) {
         (Some(i), Some(h)) => {
             let id = store.add_watch_as(acc.id, &i.url, &i.mode, app.every_min, None, &i.value, "pending")?;
             store.set_condition(id, i.condition.as_ref())?;
+            store.step(acc.id, "first_watch", "web")?;
             store.set_render(id, i.render)?;
             let key = store.watch(id)?.map(|w| w.key).unwrap_or_default();
             started(life::start(store, h, &app.plan, acc.id, id)?, &key)

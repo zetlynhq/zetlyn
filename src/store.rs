@@ -199,6 +199,20 @@ CREATE TABLE IF NOT EXISTS channels (
   last_at INTEGER,
   last_status TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS steps (
+  account INTEGER NOT NULL,
+  step TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  via TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (account, step)
+);
+CREATE TABLE IF NOT EXISTS refusals (
+  at INTEGER NOT NULL,
+  host TEXT NOT NULL,
+  what TEXT NOT NULL,
+  reason TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS refusals_at ON refusals(at);
 CREATE INDEX IF NOT EXISTS oauth_grants_account ON oauth_grants(account, client);
 CREATE INDEX IF NOT EXISTS checks_watch ON checks(watch, at);
 CREATE INDEX IF NOT EXISTS checks_at ON checks(at);
@@ -268,6 +282,18 @@ impl Store {
         conn.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS watches_key ON watches(key)").map_err(e)?;
         // Checks that found the page unchanged once kept all of its text, which is the watch's value
         // anyway: taken out once, and the file made small again.
+        // The steps of accounts made before steps were kept, as far as what is kept tells them.
+        let stepped: bool = conn.query_row("SELECT EXISTS (SELECT 1 FROM meta WHERE key = 'steps_backfilled')", [], |r| r.get(0)).map_err(e)?;
+        if !stepped {
+            conn.execute_batch(
+                "INSERT OR IGNORE INTO steps (account, step, at, via) SELECT id, 'made', created, 'before' FROM accounts;
+                 INSERT OR IGNORE INTO steps (account, step, at, via) SELECT id, 'confirmed', created, 'before' FROM accounts WHERE confirmed = 1;
+                 INSERT OR IGNORE INTO steps (account, step, at, via) SELECT account, 'first_watch', MIN(created), 'before' FROM watches GROUP BY account;
+                 INSERT OR IGNORE INTO steps (account, step, at, via) SELECT id, 'subscribed', created, 'before' FROM accounts WHERE paid = 1 AND free = 0;
+                 INSERT INTO meta (key, value) VALUES ('steps_backfilled', '1');",
+            )
+            .map_err(e)?;
+        }
         let slim: bool = conn.query_row("SELECT EXISTS (SELECT 1 FROM meta WHERE key = 'checks_slim')", [], |r| r.get(0)).map_err(e)?;
         if !slim {
             let n = conn.execute("UPDATE checks SET detail = '' WHERE outcome = 'same' AND detail != ''", []).map_err(e)?;
@@ -296,8 +322,12 @@ impl Store {
     /// The account of an address, made the first time the address is seen.
     pub fn account(&self, email: &str) -> Result<i64, String> {
         let email = email.trim().to_lowercase();
-        self.conn.execute("INSERT OR IGNORE INTO accounts (email, created) VALUES (?1, ?2)", params![email, now()]).map_err(e)?;
-        self.conn.query_row("SELECT id FROM accounts WHERE email = ?1", [email], |r| r.get(0)).map_err(e)
+        let made = self.conn.execute("INSERT OR IGNORE INTO accounts (email, created) VALUES (?1, ?2)", params![email, now()]).map_err(e)?;
+        let id = self.conn.query_row("SELECT id FROM accounts WHERE email = ?1", [email], |r| r.get(0)).map_err(e)?;
+        if made > 0 {
+            self.step(id, "made", "")?;
+        }
+        Ok(id)
     }
 
     pub fn account_by_id(&self, id: i64) -> Result<Option<Account>, String> {
@@ -306,6 +336,45 @@ impl Store {
 
     pub fn account_by_customer(&self, customer: &str) -> Result<Option<Account>, String> {
         self.accounts(&format!("{ACCOUNT} WHERE stripe_customer = ?1 AND stripe_customer != ''"), [customer]).map(|mut v| v.pop())
+    }
+
+    /// A step an account took, once each, kept without anything that names the person (only the
+    /// account's number, which outlives the account): `made`, `confirmed` (`via` email, google,
+    /// apple), `first_watch` (`via` web, api, or the app that connected by OAuth), `trial_ended`,
+    /// `subscribed`, `cancelled`. For the admin's funnel.
+    pub fn step(&self, account: i64, step: &str, via: &str) -> Result<(), String> {
+        self.conn.execute("INSERT OR IGNORE INTO steps (account, step, at, via) VALUES (?1, ?2, ?3, ?4)", params![account, step, now(), via]).map(|_| ()).map_err(e)
+    }
+
+    /// The steps taken by accounts made since `since`: (account, step, at, via).
+    pub fn steps_since(&self, since: i64) -> Result<Vec<(i64, String, i64, String)>, String> {
+        let mut st = self.conn.prepare("SELECT s.account, s.step, s.at, s.via FROM steps s WHERE s.account IN (SELECT account FROM steps WHERE step = 'made' AND at >= ?1)").map_err(e)?;
+        let rows = st.query_map([since], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).map_err(e)?;
+        rows.collect::<Result<_, _>>().map_err(e)
+    }
+
+    /// A page Zetlyn could not read when a person or an agent wanted to watch it: its host, what
+    /// was being done (`preview`, `watch`, `read`), and why. Kept 90 days, for the admin.
+    pub fn refused(&self, url: &str, what: &str, reason: &str) -> Result<(), String> {
+        let host = url.split_once("://").map_or(url, |(_, r)| r).split(['/', '?', '#']).next().unwrap_or("").trim_start_matches("www.").to_string();
+        let reason: String = reason.chars().take(300).collect();
+        self.conn.execute("INSERT INTO refusals (at, host, what, reason) VALUES (?1, ?2, ?3, ?4)", params![now(), host, what, reason]).map_err(e)?;
+        self.conn.execute("DELETE FROM refusals WHERE at < ?1", [now() - 90 * 86400]).map(|_| ()).map_err(e)
+    }
+
+    /// The refusals since `since`: (host, what, reason, at), newest first.
+    pub fn refusals_since(&self, since: i64) -> Result<Vec<(String, String, String, i64)>, String> {
+        let mut st = self.conn.prepare("SELECT host, what, reason, at FROM refusals WHERE at >= ?1 ORDER BY at DESC").map_err(e)?;
+        let rows = st.query_map([since], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).map_err(e)?;
+        rows.collect::<Result<_, _>>().map_err(e)
+    }
+
+    /// The name of the app an OAuth access token was given to.
+    pub fn access_client(&self, token: &str) -> Result<Option<String>, String> {
+        self.conn
+            .query_row("SELECT c.name FROM oauth_grants g JOIN oauth_clients c ON c.id = g.client WHERE g.digest = ?1 AND g.kind = 'access'", [crate::crypto::digest(token)], |r| r.get(0))
+            .optional()
+            .map_err(e)
     }
 
     pub fn confirm_account(&self, id: i64) -> Result<(), String> {
@@ -1134,5 +1203,22 @@ mod tests {
         assert!(details.contains(&"y".to_string()));
         assert_eq!(s.prune_checks(now()).unwrap(), 2, "the two old ones go");
         assert_eq!(s.changes(w, 10).unwrap().len(), 1, "changes stay");
+    }
+
+    #[test]
+    fn steps_are_kept_once_and_outlive_their_account() {
+        let s = Store::in_memory();
+        let a = s.account("a@example.com").unwrap();
+        s.account("a@example.com").unwrap();
+        s.step(a, "confirmed", "google").unwrap();
+        s.step(a, "confirmed", "email").unwrap();
+        s.step(a, "first_watch", "Claude").unwrap();
+        let steps = s.steps_since(0).unwrap();
+        assert_eq!(steps.iter().filter(|x| x.1 == "made").count(), 1, "made once, though asked for twice");
+        assert_eq!(steps.iter().find(|x| x.1 == "confirmed").unwrap().3, "google", "the first way stays");
+        s.delete_account(a).unwrap();
+        assert_eq!(s.steps_since(0).unwrap().len(), 3, "kept after the account is gone");
+        s.refused("https://www.shop.example/p?x=1", "preview", "HTTP 403").unwrap();
+        assert_eq!(s.refusals_since(0).unwrap(), vec![("shop.example".to_string(), "preview".to_string(), "HTTP 403".to_string(), s.refusals_since(0).unwrap()[0].3)]);
     }
 }

@@ -64,6 +64,7 @@ pub fn route(app: &App, store: &Store, a: &Asked, rest: &[&str]) -> Result<Reply
             }
             None => not_found(app, a),
         },
+        (Method::Get, ["funnel"]) => page("Funnel", funnel(store, a.q("weeks").and_then(|w| w.parse().ok()).unwrap_or(12))?),
         (Method::Get, ["quality"]) => page("Read quality", quality(store, a.q("days").and_then(|d| d.parse().ok()).unwrap_or(7))?),
         (Method::Get, ["mail"]) => page("Mail", mails(app, &a.q("q").unwrap_or_default())),
         (Method::Get, ["billing"]) => page("Billing", billing(app, store, a.q("compare").is_some())?),
@@ -84,6 +85,7 @@ const TABS: &[(&str, &str)] = &[
     ("Admin", "/admin"),
     ("Accounts", "/admin/accounts"),
     ("Watches", "/admin/watches"),
+    ("Funnel", "/admin/funnel"),
     ("Read quality", "/admin/quality"),
     ("Mail", "/admin/mail"),
     ("Billing", "/admin/billing"),
@@ -96,6 +98,67 @@ fn framed(title: &str, a: &Asked, body: &str) -> String {
     let tabs: String = TABS.iter().map(|(name, href)| format!("<a href=\"{href}\"{}>{name}</a>", if *name == title || (title == "Account" && *name == "Accounts") || (title == "Watch" && *name == "Watches") { " class=on" } else { "" })).collect();
     let note = a.q("note").filter(|n| !n.is_empty()).map(|n| format!("<p class=ok>{}</p>", esc(&n))).unwrap_or_default();
     format!("<section class=admin><nav class=tabs>{tabs}</nav>{note}{body}</section>")
+}
+
+/// `/admin/funnel`: where accounts come from and where they stop, week by week of their making.
+fn funnel(store: &Store, weeks: i64) -> Result<String, String> {
+    const STEPS: &[(&str, &str)] = &[("made", "Made"), ("confirmed", "Confirmed"), ("first_watch", "First watch"), ("trial_ended", "Trial ended"), ("subscribed", "Subscribed"), ("cancelled", "Cancelled")];
+    let weeks = weeks.clamp(1, 104);
+    let since = now() - weeks * 7 * 86400;
+    let mut accounts: HashMap<i64, HashMap<String, (i64, String)>> = HashMap::new();
+    for (account, step, at, via) in store.steps_since(since)? {
+        accounts.entry(account).or_default().insert(step, (at, via));
+    }
+    // Weeks from Monday: the epoch began on a Thursday.
+    let week_of = |at: i64| (at + 3 * 86400).div_euclid(7 * 86400);
+    let mut cohorts: std::collections::BTreeMap<i64, [i64; 6]> = std::collections::BTreeMap::new();
+    let mut total = [0i64; 6];
+    for steps in accounts.values() {
+        let Some((made, _)) = steps.get("made") else { continue };
+        let row = cohorts.entry(week_of(*made)).or_default();
+        for (i, (step, _)) in STEPS.iter().enumerate() {
+            if steps.contains_key(*step) {
+                row[i] += 1;
+                total[i] += 1;
+            }
+        }
+    }
+    let cells = |r: &[i64; 6]| -> String {
+        r.iter().enumerate().map(|(i, n)| if i == 0 || r[0] == 0 { format!("<td>{n}</td>") } else { format!("<td>{n} <span class=dim>{:.0} %</span></td>", *n as f64 * 100.0 / r[0] as f64) }).collect()
+    };
+    let rows: String = cohorts.iter().rev().map(|(w, r)| format!("<tr><td class=dim>{}</td>{}</tr>", &crate::serve::time(w * 7 * 86400 - 3 * 86400)[..10], cells(r))).collect();
+    let head: String = STEPS.iter().map(|(_, h)| format!("<td>{h}</td>")).collect();
+    // How the first watch was made, and how many of those went on to subscribe.
+    let mut ways: HashMap<String, (i64, i64)> = HashMap::new();
+    let mut signins: HashMap<String, i64> = HashMap::new();
+    for steps in accounts.values() {
+        if let Some((_, via)) = steps.get("first_watch") {
+            let e = ways.entry(if via.is_empty() { "unknown".into() } else { via.clone() }).or_default();
+            e.0 += 1;
+            if steps.contains_key("subscribed") {
+                e.1 += 1;
+            }
+        }
+        if let Some((_, via)) = steps.get("confirmed") {
+            *signins.entry(if via.is_empty() { "unknown".into() } else { via.clone() }).or_default() += 1;
+        }
+    }
+    let mut ways: Vec<_> = ways.into_iter().collect();
+    ways.sort_by(|x, y| y.1 .0.cmp(&x.1 .0));
+    let way_rows: String = ways.iter().map(|(w, (n, s))| format!("<tr><td>{}</td><td>{n}</td><td>{s} <span class=dim>{:.0} %</span></td></tr>", esc(w), *s as f64 * 100.0 / (*n).max(1) as f64)).collect();
+    let mut signins: Vec<_> = signins.into_iter().collect();
+    signins.sort_by(|x, y| y.1.cmp(&x.1));
+    let signin_rows: String = signins.iter().map(|(w, n)| format!("<tr><td>{}</td><td>{n}</td></tr>", esc(w))).collect();
+    let span: String = [4, 12, 52].iter().map(|w| format!("<a href=\"/admin/funnel?weeks={w}\"{}>{w} weeks</a>", if *w == weeks { " class=on" } else { "" })).collect::<Vec<_>>().join(" · ");
+    Ok(format!(
+        "<h1>Funnel</h1><p class=dim>Accounts made over the last {span}, by the week they were made, and how far each got; the shares are of those made. Accounts made before steps were kept show \"before\" as their way. Admin-made free accounts count as made, not as subscribed.</p>\
+         <div class=scroll><table><tr><td>Week</td>{head}</tr><tr><td><b>All</b></td>{}</tr>{rows}</table></div>\
+         <h2>How the first watch was made</h2><p class=dim>On the site (web), with an API key (api), or by the app that connected by OAuth, by its name; and how many of them subscribed.</p>{}\
+         <h2>How accounts signed in first</h2>{}",
+        cells(&total),
+        if way_rows.is_empty() { "<p class=dim>None yet.</p>".to_string() } else { format!("<table><tr><td>Way</td><td>First watches</td><td>Subscribed</td></tr>{way_rows}</table>") },
+        if signin_rows.is_empty() { "<p class=dim>None yet.</p>".to_string() } else { format!("<table>{signin_rows}</table>") },
+    ))
 }
 
 fn account_of(store: &Store, id: &str) -> Result<Option<Account>, String> {
@@ -521,12 +584,28 @@ fn quality(store: &Store, days: i64) -> Result<String, String> {
     let mut reasons: Vec<_> = reasons.into_iter().collect();
     reasons.sort_by(|x, y| y.1.cmp(&x.1));
     let reason_rows: String = reasons.iter().take(20).map(|(r, n)| format!("<tr><td>{n}</td><td>{}</td></tr>", esc(r))).collect();
+    // Pages that could not be read when somebody wanted to watch them: no watch keeps these.
+    let mut refused: HashMap<String, (i64, Vec<String>, String)> = HashMap::new();
+    for (host, what, why, _) in store.refusals_since(since)? {
+        let e = refused.entry(host).or_default();
+        e.0 += 1;
+        if !e.1.contains(&what) {
+            e.1.push(what);
+        }
+        if e.2.is_empty() {
+            e.2 = reason(&why);
+        }
+    }
+    let mut refused: Vec<_> = refused.into_iter().collect();
+    refused.sort_by(|x, y| y.1 .0.cmp(&x.1 .0));
+    let refused_rows: String = refused.iter().take(100).map(|(h, (n, whats, why))| format!("<tr><td>{}</td><td>{n}</td><td class=dim>{}</td><td class=dim>{}</td></tr>", esc(h), esc(&whats.join(", ")), esc(why))).collect();
     let span: String = [1, 7, 30].iter().map(|d| format!("<a href=\"/admin/quality?days={d}\"{}>{d} days</a>", if *d == days { " class=on" } else { "" })).collect::<Vec<_>>().join(" · ");
     Ok(format!(
         "<h1>Read quality</h1><p class=dim>Where reading goes wrong, by site, over {span}. Failed: the page could not be read (blocked, an error, too large, not a web page). Unclear: the marked place was not found with certainty. Gone: it is no longer there.</p>\
-         <h2>Sites</h2>{}<h2>Why reading failed</h2>{}",
+         <h2>Sites</h2>{}<h2>Why reading failed</h2>{}<h2>Not watchable when tried</h2><p class=dim>Pages a person or an agent wanted to watch and Zetlyn could not read: in a preview, read_place, a new watch, or marking on the site.</p>{}",
         if rows.is_empty() { "<p class=dim>Nothing went wrong.</p>".to_string() } else { format!("<div class=scroll><table><tr><td>Site</td><td>Checks</td><td>Failed</td><td>Unclear</td><td>Gone</td><td>Share</td><td>Last reason</td></tr>{rows}</table></div>") },
-        if reason_rows.is_empty() { "<p class=dim>None.</p>".to_string() } else { format!("<table>{reason_rows}</table>") }
+        if reason_rows.is_empty() { "<p class=dim>None.</p>".to_string() } else { format!("<table>{reason_rows}</table>") },
+        if refused_rows.is_empty() { "<p class=dim>None.</p>".to_string() } else { format!("<div class=scroll><table><tr><td>Site</td><td>Times</td><td>In</td><td>Last reason</td></tr>{refused_rows}</table></div>") }
     ))
 }
 

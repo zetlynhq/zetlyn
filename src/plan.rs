@@ -87,6 +87,10 @@ impl Plan {
 
     /// The account pays now: every watch it confirmed runs, with no end.
     pub fn paid(&self, store: &Store, account: i64) -> Result<(), String> {
+        // An account made free in the admin did not subscribe.
+        if !store.account_by_id(account)?.is_some_and(|a| a.free) {
+            store.step(account, "subscribed", "")?;
+        }
         for w in store.watches_of(account)? {
             if w.state != "pending" {
                 store.set_state(w.id, "running", None)?;
@@ -128,6 +132,7 @@ impl Plan {
 
     /// The account no longer pays: its watches end. Stripe tells the customer itself.
     pub fn stopped(&self, store: &Store, account: i64) -> Result<(), String> {
+        store.step(account, "cancelled", "")?;
         for w in store.watches_of(account)? {
             if w.state == "running" || w.state == "waiting" {
                 store.set_state(w.id, "ended", None)?;
@@ -165,6 +170,7 @@ impl Plan {
         }
         for w in store.expired(at)? {
             store.set_state(w.id, "ended", w.until)?;
+            store.step(w.account, "trial_ended", "")?;
             said.push(format!("{:>5} ended    {}", w.id, w.url));
             if let Some(a) = store.account_by_id(w.account)? {
                 let link = h.door(store, a.id, "/subscribe")?;

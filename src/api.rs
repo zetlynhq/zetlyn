@@ -78,6 +78,10 @@ fn preview(_c: &Caller, url: &str, find: Option<&str>) -> Answer {
     };
     let find = find.map(str::trim).filter(|f| !f.is_empty());
     let places: Vec<J> = anchor::places(&html, 150, find).into_iter().map(|a| json!({ "selector": a.path, "text": a.text, "beside": a.label })).collect();
+    // A page with nothing on it to mark is said so, as a watch of it would be.
+    if places.is_empty() && find.is_none() {
+        return error(422, check::NO_TEXT);
+    }
     let page_text = crate::text::lines(&html).join("\n");
     let lines = page_text.lines().count();
     (

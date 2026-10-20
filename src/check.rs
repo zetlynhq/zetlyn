@@ -91,6 +91,9 @@ pub fn framed_said(url: &str, frames: &[String]) -> String {
     format!("{url} is made of frames, each a page of its own, so it has no text of its own to watch. Watch one of them instead: {}", frames.join(" , "))
 }
 
+/// What to tell a person when a page shows Zetlyn no text to watch.
+pub const NO_TEXT: &str = "The page shows Zetlyn almost no text, so there is nothing to watch. It may need signing in, or not let programs read it.";
+
 /// What to tell a person when a site will not be read by a program.
 pub fn refused(url: &str) -> String {
     let host = url.split_once("://").map_or(url, |(_, r)| r).split(['/', '?', '#']).next().unwrap_or(url).trim_start_matches("www.");
@@ -168,7 +171,7 @@ pub fn first(url: &str, anchor: Option<Anchor>) -> Result<(Mode, String, bool), 
     match &mode {
         Mode::Place(_) if value.trim().is_empty() => Err("The marked place is empty on the page as Zetlyn reads it, so a change there could never be told. Mark a place with text in it, or watch the whole page.".into()),
         Mode::Page { .. } if value.lines().filter(|l| !l.trim().is_empty()).count() < 3 => {
-            Err("The page shows Zetlyn almost no text, so there is nothing to watch. It may need signing in, or not let programs read it.".into())
+            Err(NO_TEXT.into())
         }
         Mode::Page { .. } if !watchable_whole(&value) => Err(format!(
             "The page is too long to watch whole ({} lines; at most {PAGE_LINES_MAX}). Mark the place on it that matters instead.",

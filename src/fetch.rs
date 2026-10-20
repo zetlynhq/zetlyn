@@ -83,7 +83,7 @@ pub fn get_bytes(url: &str, limit: u64) -> Result<Got, String> {
         let status = response.status().as_u16();
         if (300..400).contains(&status) {
             let location = response.headers().get("location").and_then(|v| v.to_str().ok()).ok_or_else(|| format!("{at}: HTTP {status} without a Location"))?;
-            at = join(&at, location);
+            at = normal(&join(&at, location));
             continue;
         }
         if status >= 400 {
@@ -123,6 +123,8 @@ pub fn post_json(url: &str, body: &str, headers: &[(&str, String)]) -> Result<(u
 /// product is `/dp/<ASIN>`, which Amazon answers where a link out of its search, read by a
 /// program, gets a robot check. Nothing is disguised: the page is the one asked for.
 pub fn clean(url: &str) -> String {
+    let normal = normal(url);
+    let url = normal.as_str();
     let url = url.split('#').next().unwrap_or(url);
     let (front, query) = url.split_once('?').map_or((url, ""), |(f, q)| (f, q));
     let (scheme, rest) = front.split_once("://").unwrap_or(("https", front));
@@ -145,6 +147,101 @@ pub fn clean(url: &str) -> String {
         })
         .collect();
     if kept.is_empty() { front.to_string() } else { format!("{front}?{}", kept.join("&")) }
+}
+
+/// An address as a browser sends it: a host written in other letters than ASCII as Punycode
+/// (`münchen.de` is `xn--mnchen-3ya.de`), and the spaces and other characters an address cannot
+/// carry percent-encoded (`a b` is `a%20b`). What is encoded already stays as it is.
+pub fn normal(url: &str) -> String {
+    let url = url.trim();
+    let Some((scheme, rest)) = url.split_once("://") else { return url.to_string() };
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(end);
+    let (userinfo, hostport) = authority.rsplit_once('@').map_or((None, authority), |(u, h)| (Some(u), h));
+    let (host, port) = match hostport.rsplit_once(':') {
+        Some((h, p)) if !h.is_empty() && p.chars().all(|c| c.is_ascii_digit()) && !hostport.starts_with('[') => (h, Some(p)),
+        _ => (hostport, None),
+    };
+    let host = if host.starts_with('[') {
+        host.to_string()
+    } else {
+        host.split('.')
+            .map(|label| {
+                let label = label.to_lowercase();
+                if label.is_ascii() { label } else { punycode(&label).map(|p| format!("xn--{p}")).unwrap_or(label) }
+            })
+            .collect::<Vec<_>>()
+            .join(".")
+    };
+    let mut tail_out = String::new();
+    for c in tail.chars() {
+        if c.is_ascii() && !matches!(c, ' ' | '"' | '<' | '>' | '`' | '{' | '}' | '|' | '\\' | '^') && !c.is_ascii_control() {
+            tail_out.push(c);
+        } else {
+            let mut buf = [0u8; 4];
+            for b in c.encode_utf8(&mut buf).bytes() {
+                tail_out.push_str(&format!("%{b:02X}"));
+            }
+        }
+    }
+    let userinfo = userinfo.map(|u| format!("{u}@")).unwrap_or_default();
+    let port = port.map(|p| format!(":{p}")).unwrap_or_default();
+    format!("{scheme}://{userinfo}{host}{port}{tail_out}")
+}
+
+/// A label in Punycode, as RFC 3492 encodes it (without the `xn--` before it).
+fn punycode(label: &str) -> Option<String> {
+    const BASE: u32 = 36;
+    const TMIN: u32 = 1;
+    const TMAX: u32 = 26;
+    let adapt = |mut delta: u32, points: u32, first: bool| {
+        delta = if first { delta / 700 } else { delta / 2 };
+        delta += delta / points;
+        let mut k = 0;
+        while delta > ((BASE - TMIN) * TMAX) / 2 {
+            delta /= BASE - TMIN;
+            k += BASE;
+        }
+        k + (BASE - TMIN + 1) * delta / (delta + 38)
+    };
+    let digit = |d: u32| char::from(if d < 26 { b'a' + d as u8 } else { b'0' + (d - 26) as u8 });
+    let input: Vec<u32> = label.chars().map(|c| c as u32).collect();
+    let mut out: String = label.chars().filter(char::is_ascii).collect();
+    let basic = out.chars().count() as u32;
+    if basic > 0 {
+        out.push('-');
+    }
+    let (mut n, mut delta, mut bias, mut h) = (128u32, 0u32, 72u32, basic);
+    while (h as usize) < input.len() {
+        let m = *input.iter().filter(|&&c| c >= n).min()?;
+        delta = delta.checked_add((m - n).checked_mul(h + 1)?)?;
+        n = m;
+        for &c in &input {
+            if c < n {
+                delta = delta.checked_add(1)?;
+            }
+            if c == n {
+                let mut q = delta;
+                let mut k = BASE;
+                loop {
+                    let t = if k <= bias { TMIN } else if k >= bias + TMAX { TMAX } else { k - bias };
+                    if q < t {
+                        break;
+                    }
+                    out.push(digit(t + (q - t) % (BASE - t)));
+                    q = (q - t) / (BASE - t);
+                    k += BASE;
+                }
+                out.push(digit(q));
+                bias = adapt(delta, h + 1, h == basic);
+                delta = 0;
+                h += 1;
+            }
+        }
+        delta += 1;
+        n += 1;
+    }
+    Some(out)
 }
 
 /// `location` read against `base`, as a browser reads a redirect.
@@ -202,5 +299,18 @@ mod tests {
         assert!(decode(&equiv, "text/html").contains('ü'));
         assert_eq!(decode("Grüße".as_bytes(), "text/html"), "Grüße", "UTF-8 stays UTF-8");
         assert_eq!(decode(&[0xef, 0xbb, 0xbf, b'a'], "text/html; charset=iso-8859-1"), "a", "a byte order mark wins");
+    }
+
+    #[test]
+    fn an_address_is_sent_as_a_browser_sends_it() {
+        assert_eq!(punycode("münchen").as_deref(), Some("mnchen-3ya"));
+        assert_eq!(punycode("bücher").as_deref(), Some("bcher-kva"));
+        assert_eq!(punycode("例え").as_deref(), Some("r8jz45g"));
+        assert_eq!(normal("https://münchen.de/"), "https://xn--mnchen-3ya.de/");
+        assert_eq!(normal("https://Bücher.de:8443/Sale Angebote?q=Grüße#x"), "https://xn--bcher-kva.de:8443/Sale%20Angebote?q=Gr%C3%BC%C3%9Fe#x");
+        assert_eq!(normal("https://例え.jp/"), "https://xn--r8jz45g.jp/");
+        assert_eq!(normal("https://example.com/a%20b?x=1"), "https://example.com/a%20b?x=1", "encoded already: as it is");
+        assert_eq!(normal("http://[::1]:4851/"), "http://[::1]:4851/");
+        assert_eq!(clean("https://www.rust-lang.org/le arn"), "https://www.rust-lang.org/le%20arn");
     }
 }

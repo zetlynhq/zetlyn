@@ -133,13 +133,16 @@ fn read_place(_c: &Caller, url: &str, selectors: &[String]) -> Answer {
     let again = check::read_as(&url, rendered).ok();
     let places: Vec<J> = selectors
         .iter()
-        .map(|css| match anchor::at(&html, css.trim()) {
-            Err(e) => json!({ "selector": css, "error": format!("marks nothing on the page: {e}") }),
-            Ok(a) => {
+        .map(|css| match anchor::at_counted(&html, css.trim()) {
+            Err(e) => json!({ "selector": css, "error": e }),
+            Ok((a, n)) => {
                 let mode = Mode::Place(a.clone());
                 let now = check::value(&mode, &html).map(|(v, _)| v).unwrap_or_default();
                 let then = again.as_deref().and_then(|h| check::value(&mode, h).ok()).map(|(v, _)| v);
-                let mut out = json!({ "selector": css, "text": now.chars().take(2000).collect::<String>(), "beside": a.label, "empty": now.trim().is_empty() });
+                let mut out = json!({ "selector": css, "text": now.chars().take(2000).collect::<String>(), "beside": a.label, "empty": now.trim().is_empty(), "matches": n });
+                if n > 1 {
+                    out["note"] = J::String(anchor::many_said(css.trim(), n));
+                }
                 match then {
                     Some(t) if t == now => out["steady"] = J::Bool(true),
                     Some(t) => {
@@ -226,6 +229,7 @@ fn update(c: &Caller, id: &str, selector: Option<&str>, whole_page: bool, every:
     // The condition the watch will have, weighed on what its place will say: refused before anything changes.
     let wanted = condition.clone().unwrap_or_else(|| w.condition.clone());
     let mut note = Vec::new();
+    let mut many: Option<String> = None;
     if selector.is_none() && !whole_page {
         if let Some(Err(e)) = condition.as_ref().and_then(|k| k.as_ref()).map(|k| k.fits(w.last_value.as_deref().unwrap_or(""))) {
             return error(422, &e);
@@ -233,8 +237,13 @@ fn update(c: &Caller, id: &str, selector: Option<&str>, whole_page: bool, every:
     }
     if selector.is_some() || whole_page {
         let anchor = match selector {
-            Some(css) => match check::seen(&w.url).and_then(|(html, _)| anchor::at(&html, css)) {
-                Ok(a) => Some(a),
+            Some(css) => match check::seen(&w.url).and_then(|(html, _)| anchor::at_counted(&html, css)) {
+                Ok((a, n)) => {
+                    if n > 1 {
+                        many = Some(anchor::many_said(css, n));
+                    }
+                    Some(a)
+                }
                 Err(e) => return error(422, &format!("The selector marks nothing on the page: {e}. Call preview_page or read_place for the places there are.")),
             },
             None => None,
@@ -273,7 +282,7 @@ fn update(c: &Caller, id: &str, selector: Option<&str>, whole_page: bool, every:
         }
     }
     let Some(w) = c.store.watch(w.id).ok().flatten() else { return error(500, "the watch is not there") };
-    (200, json!({ "watch": watch_json(&w), "note": note.join(" ") }))
+    (200, json!({ "watch": watch_json(&w), "note": with_many(note.join(" "), &many) }))
 }
 
 /// The changes on all of the account's watches since a moment (the last 7 days without one),
@@ -358,9 +367,16 @@ fn watch(c: &Caller, url: &str, selector: Option<&str>, every: Option<i64>, conf
         Ok(u) => u,
         Err(e) => return error(400, &e),
     };
+    // A selector that matches more than one place is said so with the answer.
+    let mut many: Option<String> = None;
     let anchor = match selector.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(css) => match check::seen(&url).and_then(|(html, _)| anchor::at(&html, css)) {
-            Ok(a) => Some(a),
+        Some(css) => match check::seen(&url).and_then(|(html, _)| anchor::at_counted(&html, css)) {
+            Ok((a, n)) => {
+                if n > 1 {
+                    many = Some(anchor::many_said(css, n));
+                }
+                Some(a)
+            }
             Err(e) => return error(422, &format!("The selector marks nothing on the page: {e}. Call preview for the places there are.")),
         },
         None => None,
@@ -375,7 +391,7 @@ fn watch(c: &Caller, url: &str, selector: Option<&str>, every: Option<i64>, conf
     let store = c.store;
     let Some(h) = c.hosted else {
         return match store.add_watch(c.account.id, &url, &mode, every, None, &value).and_then(|id| store.set_render(id, render).and_then(|_| store.set_condition(id, condition.as_ref())).map(|_| id)) {
-            Ok(id) => created(c, id, "Watching.".into()),
+            Ok(id) => created(c, id, with_many("Watching.".into(), &many)),
             Err(e) => error(500, &e),
         };
     };
@@ -384,9 +400,17 @@ fn watch(c: &Caller, url: &str, selector: Option<&str>, every: Option<i64>, conf
         Err(e) => return error(500, &e),
     };
     match life::start(store, h, c.plan, c.account.id, id) {
-        Ok(crate::plan::Start::Running { note, .. }) => created(c, id, note),
-        Ok(crate::plan::Start::Waiting { note, go }) => created(c, id, format!("{note} {}{go}", c.base)),
+        Ok(crate::plan::Start::Running { note, .. }) => created(c, id, with_many(note, &many)),
+        Ok(crate::plan::Start::Waiting { note, go }) => created(c, id, with_many(format!("{note} {}{go}", c.base), &many)),
         Err(e) => error(500, &e),
+    }
+}
+
+/// A note, and what there is to say of a selector that matched more than one place.
+fn with_many(note: String, many: &Option<String>) -> String {
+    match many {
+        Some(m) => format!("{note} {m}"),
+        None => note,
     }
 }
 

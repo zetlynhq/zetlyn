@@ -142,10 +142,22 @@ pub fn steadied(html: &str, a: &Anchor) -> Option<Anchor> {
 /// The place a CSS selector names on a page, described as a click on it in the frame describes
 /// it: what a script or a person who knows the page can mark without the frame.
 pub fn at(html: &str, css: &str) -> Result<Anchor, String> {
-    let sel = Selector::parse(css).map_err(|e| format!("{css}: {e:?}"))?;
+    at_counted(html, css).map(|(a, _)| a)
+}
+
+/// The place the first element a selector matches is, and how many elements it matches: more
+/// than one, and it is the first of them that is watched.
+pub fn at_counted(html: &str, css: &str) -> Result<(Anchor, usize), String> {
+    let sel = Selector::parse(css).map_err(|e| format!("{css} is not a valid CSS selector ({e:?})"))?;
     let doc = Html::parse_document(html);
-    let el = doc.select(&sel).next().ok_or_else(|| format!("{css}: nothing on the page matches"))?;
-    Ok(describe(el))
+    let mut all = doc.select(&sel);
+    let el = all.next().ok_or_else(|| format!("{css}: nothing on the page matches"))?;
+    Ok((describe(el), 1 + all.count()))
+}
+
+/// What to say of a selector that matches more than one place.
+pub fn many_said(css: &str, n: usize) -> String {
+    format!("The selector {css} matches {n} places on the page; the first of them is the one watched. For exactly the place meant, use the selector preview_page gives for it.")
 }
 
 pub fn describe(el: ElementRef) -> Anchor {
@@ -392,6 +404,15 @@ mod tests {
         a.path = "html > body > p".into();
         let tomorrow = PAGE.replace("<h2>Starter</h2>", "<h2>Pro</h2>");
         assert_eq!(find(&tomorrow, &a), Found::Unclear);
+    }
+
+    #[test]
+    fn a_selector_says_how_many_places_it_matches() {
+        let page = r#"<html><body><p>one</p><p>two</p><p class=x>three</p></body></html>"#;
+        assert_eq!(at_counted(page, "p").unwrap().1, 3);
+        assert_eq!(at_counted(page, "p.x").unwrap().1, 1);
+        assert!(at_counted(page, "div[").unwrap_err().contains("is not a valid CSS selector"));
+        assert!(at_counted(page, "#nope").unwrap_err().contains("nothing on the page matches"));
     }
 
     #[test]

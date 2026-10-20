@@ -106,6 +106,9 @@ pub fn said(url: &str, e: &str) -> String {
         let host = url.split_once("://").map_or(url, |(_, r)| r).split(['/', '?', '#']).next().unwrap_or(url).trim_start_matches("www.");
         return format!("{host} refused to answer Zetlyn ({}): it does not let programs read this page, or not just now. Zetlyn does not get around that; another site with the same information may work.", e.rsplit(": ").next().unwrap_or(e));
     }
+    if e.ends_with(" HTTP 404") || e.ends_with(" HTTP 410") {
+        return format!("{url}: there is no page at this address (HTTP {}). Check the address, or start from the site's home page.", &e[e.len() - 3..]);
+    }
     if e.contains("timeout") {
         let host = url.split_once("://").map_or(url, |(_, r)| r).split(['/', '?', '#']).next().unwrap_or(url).trim_start_matches("www.");
         return format!("{host} took longer than 20 seconds to send the page: it is very large, or the site is slow just now. Try again later, or watch a smaller page with the same information.");
@@ -479,6 +482,7 @@ mod tests {
         assert!(said.starts_with("amazon.de refused to answer Zetlyn (HTTP 503)"), "{said}");
         assert_eq!(super::said("https://a.example/", "a.example: that name does not resolve"), "a.example: that name does not resolve");
         assert!(super::said("https://html.spec.whatwg.org/", "https://html.spec.whatwg.org/: timeout: global").starts_with("html.spec.whatwg.org took longer than 20 seconds"));
+        assert!(super::said("https://a.example/x", "https://a.example/x: HTTP 404").contains("there is no page at this address (HTTP 404)"));
     }
 
     fn watch(mode: Mode, last: &str) -> Watch {

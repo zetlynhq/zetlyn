@@ -81,9 +81,11 @@ pub fn get_bytes(url: &str, limit: u64) -> Result<Got, String> {
         crate::outbound::public_target(&at)?;
         let mut response = agent.get(&at).call().map_err(|e| format!("{at}: {e}"))?;
         let status = response.status().as_u16();
-        if (300..400).contains(&status) {
-            let location = response.headers().get("location").and_then(|v| v.to_str().ok()).ok_or_else(|| format!("{at}: HTTP {status} without a Location"))?;
-            at = normal(&join(&at, location));
+        // A redirect goes on; "300 Multiple Choices" with nowhere named is an answer with a body.
+        let location = response.headers().get("location").and_then(|v| v.to_str().ok()).map(str::to_string);
+        if (300..400).contains(&status) && !(status == 300 && location.is_none()) {
+            let location = location.ok_or_else(|| format!("{at}: HTTP {status} without a Location"))?;
+            at = normal(&join(&at, &location));
             continue;
         }
         if status >= 400 {

@@ -47,6 +47,20 @@ pub fn walled(html: &str) -> bool {
         "px-captcha",
         "Please verify you are a human",
         "Access to this page has been denied",
+        // Cloudflare's block, not its check.
+        "Sorry, you have been blocked",
+        "cf-error-details",
+        // Akamai: its "Access Denied … Reference #" page, and the page it shows a browser it will
+        // not serve (seen on zalando.de).
+        "errors.edgesuite.net",
+        "Send error report",
+        // Imperva (Incapsula), Distil and Sucuri.
+        "Incapsula incident ID",
+        "_Incapsula_Resource",
+        "Pardon Our Interruption",
+        "Sucuri WebSite Firewall",
+        // Sites that say it in their own words (time.is).
+        "Please do not scrape",
     ];
     // A wall is a short page; a long one that only carries a captcha form somewhere is a page.
     html.len() < 60_000 && WALLS.iter().any(|w| html.contains(w))
@@ -332,6 +346,11 @@ mod tests {
         assert!(walled(amazon));
         assert!(walled("<html><head><title>Just a moment...</title></head><body></body></html>"), "Cloudflare's check");
         assert!(!walled("<html><body><h1>Prices</h1><p>Pro 499 €</p><form class=contact><div class=g-recaptcha></div></form></body></html>"), "a page with a captcha in its contact form is a page");
+        assert!(walled(r#"<html><body><h1 style="font-family:sans-serif;padding:20px">Please do not scrape our pages! Thanks!</h1></body></html>"#), "time.is");
+        assert!(walled("<html><body><h1>Site can’t be reached right now</h1><button>Refresh</button><a>Send error report</a></body></html>"), "Akamai, as zalando.de showed it");
+        assert!(walled("<html><body><h1>Access Denied</h1>Reference #18.6f2d1402 <a href=https://errors.edgesuite.net/18.6f2d1402>more</a></body></html>"));
+        let shop = format!("<html><body>{}<script>var t = \"Send error report\";</script></body></html>", "<p>A long page of products.</p>".repeat(3000));
+        assert!(!walled(&shop), "a long page that carries the words in its scripts is a page");
         let said = said("https://www.amazon.de/dp/B0", "https://www.amazon.de/dp/B0: HTTP 503");
         assert!(said.starts_with("amazon.de refused to answer Zetlyn (HTTP 503)"), "{said}");
         assert_eq!(super::said("https://a.example/", "a.example: that name does not resolve"), "a.example: that name does not resolve");

@@ -10,5 +10,9 @@
       "type": "streamable-http",
       "url": "https://zetlyn.com/mcp"
     }
-  ]
+  ],
+  "repository": {
+    "url": "https://github.com/zetlynhq/zetlyn",
+    "source": "github"
+  }
 }

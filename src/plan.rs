@@ -1,6 +1,6 @@
-//! What Zetlyn charges and how a watch lives by it: an account's first watch runs free for 24
-//! hours; with a subscription at Stripe (9.99 € a month, up to 10 watches, 0.50 € for each one
-//! more, VAT included) its watches run without an end. Two hours before a free day ends the
+//! What Zetlyn charges and how a watch lives by it: an account's first watch runs free for three
+//! days; with a subscription at Stripe (9.99 € a month, up to 10 watches, 0.50 € for each one
+//! more, VAT included) its watches run without an end. A day before a free trial ends the
 //! account is told, and when it has. An account that never paid goes 30 days after its last watch
 //! ended. Without Stripe's settings an instance runs the same, and nothing can be bought.
 
@@ -11,8 +11,8 @@ use crate::life::Hosted;
 use crate::mail;
 use crate::store::{now, Account, Store};
 
-pub const TRIAL: i64 = 24 * 3600;
-pub const REMIND: i64 = 2 * 3600;
+pub const TRIAL: i64 = 3 * 86400;
+pub const REMIND: i64 = 86400;
 
 /// How a confirmed watch starts.
 pub enum Start {
@@ -45,13 +45,13 @@ pub struct Plan {
 }
 
 pub const PRICING: &str = r#"<section class="block pricing"><p class=overline>Pricing</p><h2>One day free.<br><span>Then 9.99 € a month.</span></h2><div class=plans>
-<div class=plan><h3>Try it</h3><p class=price>Free</p><p>One watch for 24 hours, checked every hour. No card.</p></div>
+<div class=plan><h3>Try it</h3><p class=price>Free</p><p>One watch for 3 days, checked every hour. No card.</p></div>
 <div class="plan main"><h3>Subscription</h3><p class=price>9.99 € <span>a month</span></p><p>Up to 10 watches, as long as you like, checked as often as every minute. 0.50 € a month for each watch more. VAT included. Cancel any time.</p></div>
 </div></section>"#;
 
-pub const HERO_NOTE: &str = "The first 24 hours are free.";
-pub const MARK_NOTE: &str = "Checked every hour. The first 24 hours are free.";
-pub const CONFIRM_NOTE: &str = "The first 24 hours are free. ";
+pub const HERO_NOTE: &str = "The first 3 days are free.";
+pub const MARK_NOTE: &str = "Checked every hour. The first 3 days are free.";
+pub const CONFIRM_NOTE: &str = "The first 3 days are free. ";
 
 /// How often a watch can be checked, in minutes: every hour for everyone, more often with a
 /// subscription.
@@ -68,7 +68,7 @@ impl Plan {
         Plan { stripe: Stripe::from_env() }
     }
 
-    /// A watch whose address was confirmed starts: with no end while its account pays, for a day
+    /// A watch whose address was confirmed starts: with no end while its account pays, for three days
     /// on the account's one free trial, and otherwise it waits for a subscription.
     pub fn start(&self, store: &Store, account: &Account, watch: i64) -> Result<Start, String> {
         if account.paid {
@@ -79,7 +79,7 @@ impl Plan {
         if store.take_trial(account.id)? {
             let until = now() + TRIAL;
             store.set_state(watch, "running", Some(until))?;
-            return Ok(Start::Running { until: Some(until), note: "Watching. This is the account's free trial: it runs for 24 hours.".into() });
+            return Ok(Start::Running { until: Some(until), note: "Watching. This is the account's free trial: it runs for 3 days.".into() });
         }
         store.set_state(watch, "waiting", None)?;
         Ok(Start::Waiting { note: "Made, but not watching yet: the free trial is used. It starts once the account subscribes at".into(), go: "/subscribe".into() })
@@ -114,7 +114,7 @@ impl Plan {
         Ok(paid)
     }
 
-    /// A free day's watch ended in its first quarter hour, before anything changed: the free day
+    /// A free trial's watch ended in its first quarter hour, before anything changed: the free trial
     /// comes back. Trying a page that turns out not to work should not cost it. Before the watch
     /// is deleted.
     pub fn ended_early(&self, store: &Store, w: &crate::store::Watch) -> Result<bool, String> {
@@ -150,7 +150,7 @@ impl Plan {
         }
     }
 
-    /// Once a minute, before the checks: free days ending soon are said, those that ended end, and
+    /// Once a minute, before the checks: free trials ending soon are said, those that ended end, and
     /// what was never paid for is cleaned away.
     pub fn tick(&self, store: &Store, h: &Hosted, at: i64) -> Result<Vec<String>, String> {
         let mut said = Vec::new();
@@ -271,7 +271,7 @@ impl Plan {
 <h1>Keep watching, without an end.</h1>
 <p class=lead>One subscription for up to 10 pages, checked as often as you like. Cancel any time.</p>
 <div class=tiers>
-  <div class=tier><h2>Free trial</h2><p class=price>0 €</p><ul class="ticks plain"><li>One watch</li><li>For 24 hours</li><li>Checked every hour</li></ul><p class=dim>{trial}</p></div>
+  <div class=tier><h2>Free trial</h2><p class=price>0 €</p><ul class="ticks plain"><li>One watch</li><li>For 3 days</li><li>Checked every hour</li></ul><p class=dim>{trial}</p></div>
   <div class="tier main"><h2>Subscription</h2><p class=price>9.99 € <span>a month</span></p><ul class=ticks><li>Up to 10 watches, for as long as you like</li><li>0.50 € a month for each watch more</li><li>Checked as often as every minute</li><li>For programs and LLMs: the API and MCP</li><li>Cancel any time, to the end of the month</li></ul>{ask}</div>
 </div>
 <div class=qa>

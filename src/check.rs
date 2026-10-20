@@ -212,7 +212,7 @@ pub fn value(mode: &Mode, html: &str) -> Result<(String, bool), &'static str> {
 pub fn first(url: &str, anchor: Option<Anchor>) -> Result<(Mode, String, bool), String> {
     let (mode, value, render) = first_read(url, anchor)?;
     // A watch of nothing would never say anything: refused here, before it is made or costs a
-    // free day.
+    // free trial.
     match &mode {
         Mode::Place(_) if value.trim().is_empty() => Err("The marked place is empty on the page as Zetlyn reads it, so a change there could never be told. Mark a place with text in it, or watch the whole page.".into()),
         Mode::Page { .. } if value.lines().filter(|l| !l.trim().is_empty()).count() < 3 => {

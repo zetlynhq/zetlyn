@@ -1,7 +1,7 @@
 //! Zetlyn: a URL in, its changes out.
 //!
 //! Everything the product does lives here, in one application: accounts, watches, reading
-//! pages, finding a marked place again, comparing, the mails, the free day and the subscription
+//! pages, finding a marked place again, comparing, the mails, the free trial and the subscription
 //! (`plan.rs`), the site with its legal pages, the API and MCP. The service at zetlyn.com is this
 //! application on our servers, an instance per server, with one SQLite file each.
 

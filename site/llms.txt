@@ -54,7 +54,7 @@ the key in a page, a commit or a message to anyone else.
   its scripts make is read in a browser on Zetlyn's server (a watch's `rendered` says so). Pages
   behind a login, a paywall or a captcha are not read, and a site that refuses Zetlyn is not
   worked around.
-- The account's **first watch is free for 24 hours**. After that, and for a second watch, the
+- The account's **first watch is free for 3 days**. After that, and for a second watch, the
   person needs a subscription: 9.99 € a month for up to 10 watches, 0.50 € a month for each one
   more, VAT included. Get a link for them with `subscribe_link` (an hour long, it opens the
   subscription for their account without signing in) and give it to them with the price; they

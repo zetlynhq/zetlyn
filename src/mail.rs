@@ -361,9 +361,9 @@ mod tests {
 }
 pub fn trial_ending(url: &str, checks: i64, value: &str, link: &str) -> Letter {
     Letter {
-        subject: format!("Your free watch of {} ends in two hours", short(url)),
+        subject: format!("Your free watch of {} ends tomorrow", short(url)),
         body: format!(
-            "Hello,\n\nZetlyn has checked\n\n  {url}\n\n{checks} times so far. It reads now:\n\n  {}\n\nTo keep watching, subscribe: 9.99 € a month for up to 10 watches, 0.50 € for each one more, VAT included.\n\n  {link}\n\nWithout a subscription the watch ends in two hours.\n{SIGNATURE}",
+            "Hello,\n\nZetlyn has checked\n\n  {url}\n\n{checks} times so far. It reads now:\n\n  {}\n\nTo keep watching, subscribe: 9.99 € a month for up to 10 watches, 0.50 € for each one more, VAT included.\n\n  {link}\n\nWithout a subscription the watch ends tomorrow.\n{SIGNATURE}",
             clip(value.lines().next().unwrap_or(""), 200)
         ),
     }
@@ -372,6 +372,6 @@ pub fn trial_ending(url: &str, checks: i64, value: &str, link: &str) -> Letter {
 pub fn ended(url: &str, link: &str) -> Letter {
     Letter {
         subject: format!("Your watch of {} has ended", short(url)),
-        body: format!("Hello,\n\nthe free 24 hours are over and Zetlyn no longer watches\n\n  {url}\n\nTo start again with a subscription (9.99 € a month for up to 10 watches, VAT included):\n\n  {link}\n{SIGNATURE}"),
+        body: format!("Hello,\n\nthe free three days are over and Zetlyn no longer watches\n\n  {url}\n\nTo start again with a subscription (9.99 € a month for up to 10 watches, VAT included):\n\n  {link}\n{SIGNATURE}"),
     }
 }

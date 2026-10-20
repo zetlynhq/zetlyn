@@ -230,7 +230,7 @@
       "post": {
         "operationId": "watchPage",
         "summary": "Start watching a place on a page, or the whole page",
-        "description": "Without a selector the whole page is watched. The account's first watch is free for 24 hours; after that a watch waits in state `waiting` until the person subscribes (see /subscribe-link). A watch beyond the subscription's 10 costs 0.50 € a month and is refused with 402 until confirm_cost is true.",
+        "description": "Without a selector the whole page is watched. The account's first watch is free for 3 days; after that a watch waits in state `waiting` until the person subscribes (see /subscribe-link). A watch beyond the subscription's 10 costs 0.50 € a month and is refused with 402 until confirm_cost is true.",
         "requestBody": {
           "required": true,
           "content": {

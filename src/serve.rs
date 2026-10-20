@@ -1440,8 +1440,8 @@ fn plan_state(acc: &Account, watches: &[Watch]) -> (&'static str, String) {
             "Free trial",
             match until {
                 Some(u) => format!("One watch, free until {}", when(u)),
-                None if acc.trial_used => "Your free day is used".into(),
-                None => "One watch, free for 24 hours".into(),
+                None if acc.trial_used => "Your free trial is used".into(),
+                None => "One watch, free for 3 days".into(),
             },
         )
     }

@@ -28,7 +28,7 @@ under 5 KB).
   a login, a paywall or a captcha are not read, and sites that refuse programs are not worked
   around.
 
-  The first watch is free for 24 hours. A subscription is 9.99 € a month for 10 watches
+  The first watch is free for 3 days. A subscription is 9.99 € a month for 10 watches
   (0.50 € for each one more), VAT included; Claude gives you a link to subscribe, and you pay at
   Stripe yourself.
 

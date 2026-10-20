@@ -8,7 +8,7 @@ const HELP: &str = "zetlyn: a URL in, its changes out
 
   serve [--bind 127.0.0.1:4848] [--every 60]   the app, and the checks as they fall due: as on
         [--base https://zetlyn.com]           zetlyn.com, accounts by mail link, mails on change,
-                                              the free day, the subscription
+                                              the free trial, the subscription
         [--local]                             instead one account nobody signs in to, no mail, no
                                               payment (--hosted is the default and may be given)
 

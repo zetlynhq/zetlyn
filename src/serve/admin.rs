@@ -255,7 +255,7 @@ fn account(app: &App, store: &Store, acc: &Account) -> Result<String, String> {
     if app.hosted.is_some() {
         actions.push_str(&button("link", "Mail a sign-in link"));
     }
-    actions.push_str(&if acc.trial_used { button("trial", "Give the free day again") } else { button("trial-used", "Mark the free day used") });
+    actions.push_str(&if acc.trial_used { button("trial", "Give the free trial again") } else { button("trial-used", "Mark the free trial used") });
     actions.push_str(&if acc.free { button("unfree", "No longer free") } else { button("free", "Make free (no Stripe)") });
     actions.push_str(&if acc.blocked { button("unblock", "Unblock") } else { button("block", "Block") });
     actions.push_str(&button("access", "End sessions and API keys"));
@@ -289,11 +289,11 @@ fn act_on_account(app: &App, store: &Store, acc: &Account, action: &str, a: &Ask
         }
         "trial" => {
             store.set_trial_used(acc.id, false)?;
-            said("The free day can be used again.")
+            said("The free trial can be used again.")
         }
         "trial-used" => {
             store.set_trial_used(acc.id, true)?;
-            said("The free day is marked used.")
+            said("The free trial is marked used.")
         }
         "free" => {
             store.set_free(acc.id, true)?;

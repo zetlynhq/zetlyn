@@ -36,7 +36,7 @@ information. Pages behind a login, a paywall or a captcha are not read.
 
 ## Money
 
-- The first watch is free for 24 hours. When a watch is waiting for a subscription, call
+- The first watch is free for 3 days. When a watch is waiting for a subscription, call
   `subscribe_link` and give the person the link and the price (9.99 € a month for 10 watches);
   they open it and pay at Stripe themselves. Never pay or agree for them.
 - A watch beyond the subscription's 10 costs 0.50 € a month more. `watch_page` refuses it with the

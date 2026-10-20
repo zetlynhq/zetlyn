@@ -5,7 +5,7 @@ price, a version, a date), and tells you when it changes: the value before and t
 email, Telegram, Slack, Discord or a signed webhook, or only when a condition comes true (a price
 below a mark, "In stock" appearing). It is one Rust program with one SQLite file.
 
-- **Hosted:** [zetlyn.com](https://zetlyn.com), the first watch free for a day.
+- **Hosted:** [zetlyn.com](https://zetlyn.com), the first watch free for 3 days.
 - **For LLMs and agents:** an MCP server at `/mcp` (OAuth 2.1, so Claude, ChatGPT and others
   connect by its address alone) and a JSON API at `/api/v1`, described in
   [`site/llms.txt`](site/llms.txt), [`/docs`](https://zetlyn.com/docs) and
@@ -23,7 +23,7 @@ How it reads pages:
 - Pages their scripts make are read in a headless Chrome, driven over a pipe; nothing that is not
   on the public internet is ever fetched (`src/outbound.rs`).
 - Accounts are an email address and a link (or Google, Apple), no password. On zetlyn.com the
-  first watch is free for 24 hours; a subscription at Stripe keeps up to 10 watches running.
+  first watch is free for 3 days; a subscription at Stripe keeps up to 10 watches running.
 
 ## Quick start
 
@@ -52,7 +52,7 @@ mark a place, press "Watch it": an email address is asked for, the account comes
 and the watch waits until the address is confirmed. Without SMTP settings no mail is sent: each
 one is written to `./data/outbox/*.eml`. Open the newest and follow its link (it points at
 `http://127.0.0.1:4848/c/…`) to confirm, start the watch and sign in; signed in, further watches
-start without a mail. Without Stripe settings the free day works and subscribing says "not set
+start without a mail. Without Stripe settings the free trial works and subscribing says "not set
 up". The data is in `./data/zetlyn.db`.
 
 Useful while trying it:
@@ -65,7 +65,7 @@ grep -ho 'http://127.0.0.1:4848/[cs]/[0-9a-f]*' data/outbox/*.eml  # its links
 ### Admin
 
 The accounts `ZETLYN_ADMINS` names (by commas) see "Admin" in the header, `/admin`: figures,
-accounts (sign-in link, free day, make free without Stripe, watches in the plan, block, end
+accounts (sign-in link, free trial, make free without Stripe, watches in the plan, block, end
 sessions and keys, delete), every watch (check now, interval, end, delete), read quality by site,
 the mail log, billing compared with Stripe, system and a notice over every page, and the log of
 everything done there. Anybody else gets "Not here".
@@ -117,7 +117,7 @@ or Apple where they are set up), and each sees only their own watches. What it n
    to write: put `legal.html`, `privacy.html`, `terms.html` and `withdrawal.html` in
    `<data>/site/` and they are shown at `/legal` and the rest. Until then those pages say that
    they are not written yet. (zetlyn.com's own are in `site/` and shown only on zetlyn.com.)
-4. **Payment, if any.** Without Stripe settings every account has the free day and nothing can be
+4. **Payment, if any.** Without Stripe settings every account has the free trial and nothing can be
    bought; `ZETLYN_ADMINS` can make accounts free without Stripe in `/admin`.
 
 The units in `deploy/` (systemd with `DynamicUser`, no access to private networks, an alarm) are
@@ -184,7 +184,7 @@ On zetlyn.com the same trial runs under the instance's local account.
 | `src/anchor.rs` | a marked place: described, found again, the places on a page (`outline`) |
 | `src/check.rs`, `src/text.rs`, `src/fetch.rs`, `src/render.rs`, `src/page.rs`, `src/outbound.rs` | reading a page, as served or rendered in Chrome (never a private address), comparing, the frame to mark in |
 | `src/store.rs` | the SQLite file: accounts, watches, checks, changes, links, sessions, API keys |
-| `src/life.rs`, `src/plan.rs`, `src/billing.rs` | a watch's life, the free day and the subscription, Stripe |
+| `src/life.rs`, `src/plan.rs`, `src/billing.rs` | a watch's life, the free trial and the subscription, Stripe |
 | `src/when.rs`, `src/tell.rs` | conditions for telling a change; Telegram, Slack, Discord and webhooks |
 | `src/mail.rs` | SMTP and the mails |
 | `src/serve.rs`, `src/serve/admin.rs`, `src/serve/authz.rs`, `src/api.rs`, `src/docs.rs` | the site, the admin pages, OAuth for MCP clients, the API and MCP, `/docs` and `/openapi.json` |

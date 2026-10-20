@@ -203,7 +203,7 @@ fn interval(c: &Caller, every: i64) -> Result<i64, Answer> {
 }
 
 /// A watch changed in place: another place on its page (or the whole page), how often it is
-/// checked, or both. Its id and history stay; the free day is not spent again.
+/// checked, or both. Its id and history stay; the free trial is not spent again.
 fn update(c: &Caller, id: &str, selector: Option<&str>, whole_page: bool, every: Option<i64>, notify_when: Option<&J>) -> Answer {
     let Some(w) = own(c, id) else { return error(404, "No such watch on this account.") };
     let selector = selector.map(str::trim).filter(|s| !s.is_empty());
@@ -452,7 +452,7 @@ fn end(c: &Caller, id: &str) -> Answer {
         let _ = h;
         c.plan.sync(c.store, c.account.id);
     }
-    let note = if back { "Ended within its first quarter hour, before anything changed: the free day is back for another page." } else { "Ended; it is deleted with its history." };
+    let note = if back { "Ended within its first quarter hour, before anything changed: the free trial is back for another page." } else { "Ended; it is deleted with its history." };
     (200, json!({ "ended": w.key, "url": w.url, "note": note }))
 }
 
@@ -517,7 +517,7 @@ pub fn iso(t: i64) -> String {
 
 const PROTOCOLS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
-const INSTRUCTIONS: &str = "Zetlyn watches public web pages for a person and tells them by email when something changes. To watch a page: call preview_page with the address, choose the place that matters from the places it lists (a price, an availability, a version, a date) and call watch_page with that place's selector; without a selector the whole page is watched. Before watching, look at what preview_page found: if it says the site does not let programs read the page, or the places are only menus and navigation with nothing of what the person asked about, the page cannot be watched; tell the person so and suggest another site with the same information instead of making a watch. To try places before watching, call read_place with their selectors; it watches nothing and says whether each place is steady or flips on its own between reads. Never make and end watches to try selectors. To change what a watch watches or how often, call update_watch; it keeps the watch and its history. A watch that reads nothing is refused. When the person cares about a threshold or a word (a price under a mark, back in stock, a sold-out notice gone), set notify_when instead of reporting every change; condition_met_now on the watch says whether it holds already, so tell them if it does. Changes go by email to the account's address; list_watches and get_watch show what was read and what changed, list_changes the changes across all watches since a moment. The account's first watch is free for a day; ending it within a quarter hour, before anything changed, gives the free day back. When a watch cannot start yet (after the free day, without a subscription), call subscribe_link and give the person the link and the price; they pay themselves at Stripe, never you. A watch beyond the subscription's 10 costs 0.50 € a month more: watch_page refuses it with the price until the person has agreed and you pass confirm_cost: true.";
+const INSTRUCTIONS: &str = "Zetlyn watches public web pages for a person and tells them by email when something changes. To watch a page: call preview_page with the address, choose the place that matters from the places it lists (a price, an availability, a version, a date) and call watch_page with that place's selector; without a selector the whole page is watched. Before watching, look at what preview_page found: if it says the site does not let programs read the page, or the places are only menus and navigation with nothing of what the person asked about, the page cannot be watched; tell the person so and suggest another site with the same information instead of making a watch. To try places before watching, call read_place with their selectors; it watches nothing and says whether each place is steady or flips on its own between reads. Never make and end watches to try selectors. To change what a watch watches or how often, call update_watch; it keeps the watch and its history. A watch that reads nothing is refused. When the person cares about a threshold or a word (a price under a mark, back in stock, a sold-out notice gone), set notify_when instead of reporting every change; condition_met_now on the watch says whether it holds already, so tell them if it does. Changes go by email to the account's address; list_watches and get_watch show what was read and what changed, list_changes the changes across all watches since a moment. The account's first watch is free for three days; ending it within a quarter hour, before anything changed, gives the free trial back. When a watch cannot start yet (after the free trial, without a subscription), call subscribe_link and give the person the link and the price; they pay themselves at Stripe, never you. A watch beyond the subscription's 10 costs 0.50 € a month more: watch_page refuses it with the price until the person has agreed and you pass confirm_cost: true.";
 
 /// The tools, each with a title and with hints a client weighs before calling it: whether it only
 /// reads, whether it can undo something (`end_watch` deletes), whether calling it twice is the
@@ -575,7 +575,7 @@ fn tool_list() -> J {
         },
         {
             "name": "update_watch",
-            "description": "Change a watch in place: watch another place on the same page (selector), the whole page (whole_page: true), or check it at another interval (every_minutes). The watch keeps its id and history and does not start a new free day. To watch a different page, make a new watch.",
+            "description": "Change a watch in place: watch another place on the same page (selector), the whole page (whole_page: true), or check it at another interval (every_minutes). The watch keeps its id and history and does not start a new free trial. To watch a different page, make a new watch.",
             "inputSchema": { "type": "object", "properties": {
                 "id": { "type": "string", "description": "The watch's id, as list_watches gives it." },
                 "selector": { "type": "string", "description": "The new place's selector, from preview_page or read_place." },

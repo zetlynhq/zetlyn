@@ -300,7 +300,7 @@ fn changes(c: &Caller, since: Option<&str>) -> Answer {
             200,
             json!({
                 "since": iso(since),
-                "changes": all.iter().map(|(key, url, ch)| json!({ "watch": key, "url": url, "at": iso(ch.at), "before": ch.before, "after": ch.after })).collect::<Vec<_>>(),
+                "changes": all.iter().map(|(key, url, ch)| { let mut j = change_json(ch); j["watch"] = J::from(key.as_str()); j["url"] = J::from(url.as_str()); j }).collect::<Vec<_>>(),
             }),
         ),
         Err(e) => error(500, &e),
@@ -437,9 +437,9 @@ fn own(c: &Caller, id: &str) -> Option<Watch> {
 
 fn get(c: &Caller, id: &str) -> Answer {
     let Some(w) = own(c, id) else { return error(404, "No such watch on this account.") };
-    let changes: Vec<J> = c.store.changes(w.id, 20).unwrap_or_default().iter().map(|ch| json!({ "at": iso(ch.at), "before": ch.before, "after": ch.after })).collect();
+    let changes: Vec<J> = c.store.changes(w.id, 20).unwrap_or_default().iter().map(|ch| change_json(ch)).collect();
     let checks: Vec<J> = c.store.checks(w.id, 10).unwrap_or_default().iter().map(|ch| json!({ "at": iso(ch.at), "outcome": ch.outcome, "found_again": ch.moved })).collect();
-    (200, json!({ "watch": watch_json(&w), "changes": changes, "recent_checks": checks }))
+    (200, json!({ "watch": watch_json_up_to(&w, VALUE_IN_ONE), "changes": changes, "recent_checks": checks }))
 }
 
 fn end(c: &Caller, id: &str) -> Answer {
@@ -456,7 +456,31 @@ fn end(c: &Caller, id: &str) -> Answer {
     (200, json!({ "ended": w.key, "url": w.url, "note": note }))
 }
 
+/// A change as an answer carries it: before and after (each at most `VALUE_IN_LISTS`, and said
+/// whether whole), and for a value of many lines the lines that went and came.
+fn change_json(ch: &crate::store::Change) -> J {
+    let cut = |s: &str| s.chars().take(VALUE_IN_LISTS).collect::<String>();
+    let whole = ch.before.chars().count() <= VALUE_IN_LISTS && ch.after.chars().count() <= VALUE_IN_LISTS;
+    let mut j = json!({ "at": iso(ch.at), "before": cut(&ch.before), "after": cut(&ch.after), "complete": whole });
+    if ch.before.contains('\n') || ch.after.contains('\n') {
+        let (gone, came) = crate::text::diff(&ch.before, &ch.after);
+        j["gone"] = json!(gone.into_iter().take(100).collect::<Vec<_>>());
+        j["came"] = json!(came.into_iter().take(100).collect::<Vec<_>>());
+    }
+    j
+}
+
+/// How much of a watch's value an answer carries: a list of watches stays small, one watch says
+/// more; either says how long the value is and whether all of it is there.
+const VALUE_IN_LISTS: usize = 2_000;
+const VALUE_IN_ONE: usize = 20_000;
+
 fn watch_json(w: &Watch) -> J {
+    watch_json_up_to(w, VALUE_IN_LISTS)
+}
+
+fn watch_json_up_to(w: &Watch, most: usize) -> J {
+    let length = w.last_value.as_deref().map_or(0, |v| v.chars().count());
     let (selector, beside) = match &w.mode {
         Mode::Place(a) => (J::String(a.path.clone()), J::String(a.label.clone())),
         Mode::Page { .. } => (J::Null, J::Null),
@@ -469,7 +493,9 @@ fn watch_json(w: &Watch) -> J {
         "beside": beside,
         "state": w.state,
         "last_outcome": w.status,
-        "value": w.last_value.as_deref().map(|v| v.chars().take(2000).collect::<String>()),
+        "value": w.last_value.as_deref().map(|v| v.chars().take(most).collect::<String>()),
+        "value_length": length,
+        "value_complete": length <= most,
         "checked_every_minutes": w.interval_min,
         "notify_when": w.condition.as_ref().map(|k| k.json()),
         "condition_met_now": w.condition.as_ref().map(|k| k.met(w.last_value.as_deref().unwrap_or(""))),
@@ -734,6 +760,21 @@ mod tests {
         assert_eq!(moment("2026-10-18"), Some(1_792_281_600));
         assert_eq!(moment("yesterday"), None);
         assert_eq!(moment("2026-13-01"), None);
+    }
+
+    #[test]
+    fn a_long_value_is_cut_and_said_to_be() {
+        let store = Store::in_memory();
+        let c = caller(&store);
+        let long = "a line of the page\n".repeat(500);
+        let w = store.add_watch(c.account.id, "https://example.org/", &Mode::Page { volatile: vec![] }, 60, None, &long).unwrap();
+        store.record(w, crate::store::now(), "changed", false, "x", Some((&long, &format!("{long}a new line")))).unwrap();
+        let listed = &rest(&c, "GET", &["watches"], &J::Null).1["watches"][0];
+        assert_eq!((listed["value"].as_str().unwrap().chars().count(), listed["value_complete"].as_bool()), (2000, Some(false)));
+        let one = rest(&c, "GET", &["watches", &w.to_string()], &J::Null).1;
+        assert_eq!(one["watch"]["value_complete"], true, "one watch says up to 20,000 characters");
+        assert_eq!(one["changes"][0]["came"], json!(["a new line"]));
+        assert_eq!(one["changes"][0]["complete"], false);
     }
 
     #[test]

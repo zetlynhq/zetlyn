@@ -101,7 +101,7 @@ Base: `https://zetlyn.com/api/v1`. JSON in, JSON out. An error has a status ≥ 
 | `POST /read` | `{"url": "…", "selectors": ["…"]}` | `places`: `[{"selector", "text", "beside", "steady", "second_read"}]`; nothing is watched |
 | `POST /watches` | `{"url": "…", "selector": "…", "every_minutes": 60, "notify_when": {"below": 400}}` (all but url optional; 15, 5 or 1 need a subscription, else 403; a watch beyond the plan needs `"confirm_cost": true`, else 402) | 201 `{"watch": {…}, "note": "…"}` |
 | `GET /watches` | – | `{"watches": [ … ]}` |
-| `GET /watches/{id}` | – | `{"watch", "changes": [{"at", "before", "after"}], "recent_checks"}` |
+| `GET /watches/{id}` | – | `{"watch", "changes": [{"at", "before", "after", "complete", "gone", "came"}], "recent_checks"}` (before and after at most 2,000 characters each; `gone` and `came`: the lines that went and came, for values of many lines) |
 | `PATCH /watches/{id}` | `{"selector": "…"}` or `{"whole_page": true}`, and/or `{"every_minutes": 15}`, `{"notify_when": …}` | `{"watch", "note"}` |
 | `GET /changes?since=…` | – | `{"since", "changes": [{"watch", "url", "at", "before", "after"}]}` |
 | `POST /subscribe-link` | – | `{"url", "price", "expires_in_minutes"}`, or `{"subscribed": true, "billing_url"}` |
@@ -109,7 +109,7 @@ Base: `https://zetlyn.com/api/v1`. JSON in, JSON out. An error has a status ≥ 
 
 A watch: `id` (a short string such as `k3x9tq2mfa`), `url`, `what`, `selector` (null for the whole page), `beside`, `state`
 (`pending`, `waiting`, `running`, `ended`), `last_outcome` (`same`, `changed`, `unclear`, `gone`,
-`failed`), `value` (what it read last), `checked_every_minutes`, `notify_when`, `condition_met_now`, `rendered`, `learned_flips`, `free_until`, `last_checked`,
+`failed`), `value` (what it read last: up to 2,000 characters in lists, 20,000 for one watch; `value_length` and `value_complete` say whether all of it is there), `checked_every_minutes`, `notify_when`, `condition_met_now`, `rendered`, `learned_flips`, `free_until`, `last_checked`,
 `created`. Times are RFC 3339 in UTC.
 
 `unclear` or `gone` means the page was rebuilt and Zetlyn cannot be sure where the place is now;

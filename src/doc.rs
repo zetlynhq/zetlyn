@@ -40,6 +40,10 @@ const MOST: usize = crate::check::PAGE_LINES_MAX;
 /// None for what has no text to watch (a PDF, an image).
 pub fn kind(content_type: &str, body: &str) -> Option<Kind> {
     let ct = content_type.to_ascii_lowercase();
+    // An image is drawn, not written, though SVG is XML.
+    if ct.starts_with("image/") {
+        return None;
+    }
     let start = body.trim_start();
     if ct.contains("json") {
         return Some(Kind::Json);
@@ -292,6 +296,7 @@ mod tests {
         assert_eq!(kind("text/csv", "a,b\n1,2"), Some(Kind::Text));
         assert_eq!(kind("application/pdf", "%PDF"), None);
         assert_eq!(kind("image/png", ""), None);
+        assert_eq!(kind("image/svg+xml", "<svg/>"), None, "SVG is XML, but a picture");
     }
 
     #[test]

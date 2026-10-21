@@ -82,24 +82,41 @@ pub fn route(app: &App, store: &Store, a: &Asked, rest: &[&str]) -> Result<Reply
     })
 }
 
-const TABS: &[(&str, &str)] = &[
-    ("Admin", "/admin"),
-    ("Accounts", "/admin/accounts"),
-    ("Watches", "/admin/watches"),
-    ("Traffic", "/admin/traffic"),
-    ("Funnel", "/admin/funnel"),
-    ("Read quality", "/admin/quality"),
-    ("Mail", "/admin/mail"),
-    ("Billing", "/admin/billing"),
-    ("System", "/admin/system"),
-    ("Admin log", "/admin/log"),
+/// The admin's pages, in groups: (group, the page's title, its address). A page's title names its
+/// entry, and the overview is "Admin".
+const TABS: &[(&str, &str, &str)] = &[
+    ("", "Admin", "/admin"),
+    ("People", "Accounts", "/admin/accounts"),
+    ("People", "Watches", "/admin/watches"),
+    ("Use", "Traffic", "/admin/traffic"),
+    ("Use", "Funnel", "/admin/funnel"),
+    ("Use", "Read quality", "/admin/quality"),
+    ("Running", "Mail", "/admin/mail"),
+    ("Running", "Billing", "/admin/billing"),
+    ("Running", "System", "/admin/system"),
+    ("Running", "Admin log", "/admin/log"),
 ];
 
-/// The admin's tabs over a page, and the note an action left.
+/// The admin's pages beside a page, and the note an action left.
 fn framed(title: &str, a: &Asked, body: &str) -> String {
-    let tabs: String = TABS.iter().map(|(name, href)| format!("<a href=\"{href}\"{}>{name}</a>", if *name == title || (title == "Account" && *name == "Accounts") || (title == "Watch" && *name == "Watches") { " class=on" } else { "" })).collect();
+    let current = match title {
+        "Account" => "Accounts",
+        "Watch" => "Watches",
+        "Reviewer link" => "Accounts",
+        t => t,
+    };
+    let mut nav = String::new();
+    let mut group = "";
+    for (g, name, href) in TABS {
+        if *g != group {
+            nav.push_str(&format!("<p class=group>{g}</p>"));
+            group = g;
+        }
+        let label = if *name == "Admin" { "Overview" } else { name };
+        nav.push_str(&format!("<a href=\"{href}\"{}>{label}</a>", if *name == current { " class=on" } else { "" }));
+    }
     let note = a.q("note").filter(|n| !n.is_empty()).map(|n| format!("<p class=ok>{}</p>", esc(&n))).unwrap_or_default();
-    format!("<section class=admin><nav class=tabs>{tabs}</nav>{note}{body}</section>")
+    format!("<div class=admin-shell><aside class=admin-nav><p class=overline>Admin</p><nav>{nav}</nav></aside><section class=admin>{note}{body}</section></div>")
 }
 
 /// `/admin/traffic`: who looks at the public pages, counted without cookies (`visits.rs`). A
@@ -310,7 +327,7 @@ fn funnel(store: &Store, weeks: i64) -> Result<String, String> {
          <h2>How accounts signed in first</h2>{}",
         cells(&total),
         if way_rows.is_empty() { "<p class=dim>None yet.</p>".to_string() } else { format!("<table><tr><td>Way</td><td>First watches</td><td>Subscribed</td></tr>{way_rows}</table>") },
-        if signin_rows.is_empty() { "<p class=dim>None yet.</p>".to_string() } else { format!("<table>{signin_rows}</table>") },
+        if signin_rows.is_empty() { "<p class=dim>None yet.</p>".to_string() } else { format!("<table class=plain>{signin_rows}</table>") },
     ))
 }
 
@@ -466,7 +483,7 @@ fn account(app: &App, store: &Store, acc: &Account) -> Result<String, String> {
     ];
     let info: String = info.iter().map(|(k, v)| format!("<tr><td class=dim>{k}</td><td>{v}</td></tr>")).collect();
     let id = acc.id;
-    let button = |action: &str, label: &str| format!("<form method=post action=\"/admin/a/{id}/{action}\"><button>{label}</button></form>");
+    let button = |action: &str, label: &str| format!("<form method=post action=\"/admin/a/{id}/{action}\"><button{}>{label}</button></form>", if ["block", "access"].contains(&action) { " class=danger" } else { "" });
     let mut actions = String::new();
     if app.hosted.is_some() {
         actions.push_str(&button("link", "Mail a sign-in link"));
@@ -483,11 +500,11 @@ fn account(app: &App, store: &Store, acc: &Account) -> Result<String, String> {
     }
     let quota = format!("<form method=post action=\"/admin/a/{id}/quota\" class=row><label class=dim for=n>Watches in the plan</label><input id=n name=n type=number min=0 max=10000 value={} class=short><button>Set</button></form>", acc.quota);
     let delete = format!(
-        "<form method=post action=\"/admin/a/{id}/delete\" class=row><input name=confirm placeholder=\"Type {} to delete\" autocomplete=off><button>Delete the account and everything in it</button></form>",
+        "<form method=post action=\"/admin/a/{id}/delete\" class=row><input name=confirm placeholder=\"Type {} to delete\" autocomplete=off><button class=danger>Delete the account and everything in it</button></form>",
         esc(&acc.email)
     );
     Ok(format!(
-        "<h1 class=url>{}</h1><table>{info}</table><h2>Do</h2><div class=actions>{actions}</div>{quota}<h2>Watches</h2>{}<h2>Delete</h2><p class=dim>For a request to be forgotten: the watches with their checks and changes, the links, sessions and keys. A subscription at Stripe is not cancelled by this; cancel it there first.</p>{delete}",
+        "<h1 class=url>{}</h1><table class=kv>{info}</table><h2>Actions</h2><div class=actions>{actions}{quota}</div><h2>Watches</h2>{}<h2>Delete</h2><p class=dim>For a request to be forgotten: the watches with their checks and changes, the links, sessions and keys. A subscription at Stripe is not cancelled by this; cancel it there first.</p>{delete}",
         esc(&acc.email),
         watch_rows(store, &watches, false)?
     ))
@@ -669,9 +686,9 @@ fn watch(store: &Store, w: &Watch) -> Result<String, String> {
         "<h1 class=url><a href=\"{u}\" target=_blank rel=noopener>{u}</a></h1><p>{what} · {state} · checked {every}{rendered} · last check {last} · made {made}{until}</p><p>Account: {owner}</p>\
          <div class=actions><form method=post action=\"/admin/w/{id}/check\"><button>Check now</button></form>\
          <form method=post action=\"/admin/w/{id}/every\" class=row><select name=minutes>{options}</select><button>Set</button></form>\
-         <form method=post action=\"/admin/w/{id}/end\"><button>End</button></form>\
-         <form method=post action=\"/admin/w/{id}/delete\" class=row><label class=dim><input type=checkbox name=sure value=1> sure</label><button>Delete</button></form></div>\
-         <h2>Now</h2><pre>{value}</pre><h2>Changes</h2>{changes}<h2>Checks</h2><div class=scroll><table>{checks}</table></div>",
+         <form method=post action=\"/admin/w/{id}/end\"><button class=danger>End</button></form>\
+         <form method=post action=\"/admin/w/{id}/delete\" class=row><label class=dim><input type=checkbox name=sure value=1> sure</label><button class=danger>Delete</button></form></div>\
+         <h2>Now</h2><pre>{value}</pre><h2>Changes</h2>{changes}<h2>Checks</h2><div class=scroll><table class=plain>{checks}</table></div>",
         u = esc(&w.url),
         what = esc(&life::what(w)),
         state = esc(&w.state),
@@ -792,7 +809,7 @@ fn quality(store: &Store, days: i64) -> Result<String, String> {
         "<h1>Read quality</h1><p class=dim>Where reading goes wrong, by site, over {span}. Failed: the page could not be read (blocked, an error, too large, not a web page). Unclear: the marked place was not found with certainty. Gone: it is no longer there.</p>\
          <h2>Sites</h2>{}<h2>Why reading failed</h2>{}<h2>Not watchable when tried</h2><p class=dim>Pages a person or an agent wanted to watch and Zetlyn could not read: in a preview, read_place, a new watch, or marking on the site.</p>{}",
         if rows.is_empty() { "<p class=dim>Nothing went wrong.</p>".to_string() } else { format!("<div class=scroll><table><tr><td>Site</td><td>Checks</td><td>Failed</td><td>Unclear</td><td>Gone</td><td>Share</td><td>Last reason</td></tr>{rows}</table></div>") },
-        if reason_rows.is_empty() { "<p class=dim>None.</p>".to_string() } else { format!("<table>{reason_rows}</table>") },
+        if reason_rows.is_empty() { "<p class=dim>None.</p>".to_string() } else { format!("<table class=plain>{reason_rows}</table>") },
         if refused_rows.is_empty() { "<p class=dim>None.</p>".to_string() } else { format!("<div class=scroll><table><tr><td>Site</td><td>Times</td><td>In</td><td>Last reason</td></tr>{refused_rows}</table></div>") }
     ))
 }
@@ -873,7 +890,7 @@ fn billing(app: &App, store: &Store, compare: bool) -> Result<String, String> {
         stat("a month, VAT incl.", euros(total), ""),
         stat("accounts", accounts.len(), ""),
         if rows.is_empty() { "<p class=dim>None yet.</p>".to_string() } else { format!("<div class=scroll><table><tr><td>Account</td><td>State</td><td>Running / plan</td><td>Extra</td><td>A month</td><td>Subscription</td><td>{}</td></tr>{rows}</table></div>", if compare { "At Stripe" } else { "" }) },
-        if events.is_empty() { "<p class=dim>None yet.</p>".to_string() } else { format!("<div class=scroll><table>{events}</table></div>") }
+        if events.is_empty() { "<p class=dim>None yet.</p>".to_string() } else { format!("<div class=scroll><table class=plain>{events}</table></div>") }
     ))
 }
 
@@ -914,17 +931,17 @@ fn system(app: &App, store: &Store) -> Result<String, String> {
     let info: String = info.iter().map(|(k, v)| format!("<tr><td class=dim>{k}</td><td>{v}</td></tr>")).collect();
     let banner = app.banner.lock().map(|b| b.clone()).unwrap_or_default();
     Ok(format!(
-        "<h1>System</h1><table>{info}</table><h2>Notice</h2><p class=dim>Shown over every page, e.g. before maintenance. Empty: none.</p><form method=post action=/admin/banner class=field><input name=banner value=\"{}\" maxlength=300 placeholder=\"Zetlyn is updated tonight at 22:00 CET for a few minutes.\"><button>Save</button></form>\
+        "<h1>System</h1><table class=kv>{info}</table><h2>Notice</h2><p class=dim>Shown over every page, e.g. before maintenance. Empty: none.</p><form method=post action=/admin/banner class=field><input name=banner value=\"{}\" maxlength=300 placeholder=\"Zetlyn is updated tonight at 22:00 CET for a few minutes.\"><button>Save</button></form>\
          <h2>Busiest addresses, last hour</h2><p class=dim>Requests counted against the limits (reading a page to mark, new watches, sign-in links, the API), by kind and address.</p>{}\
          <p class=dim>The alarm runs on the server by its own timer (<code>zetlyn-alert.timer</code>) and mails when something is wrong. Backups are Hetzner's daily backups of the whole server, the last seven.</p>",
         esc(&banner),
-        if limit_rows.is_empty() { "<p class=dim>None.</p>".to_string() } else { format!("<table>{limit_rows}</table>") }
+        if limit_rows.is_empty() { "<p class=dim>None.</p>".to_string() } else { format!("<table class=plain>{limit_rows}</table>") }
     ))
 }
 
 fn log(store: &Store) -> Result<String, String> {
     let rows: String = store.admin_log(300)?.iter().map(|(at, who, action, target)| format!("<tr><td class=dim>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>", time(*at), esc(who), esc(action), esc(target))).collect();
-    Ok(format!("<h1>Admin log</h1><p class=dim>Every change made on these pages, newest first.</p>{}", if rows.is_empty() { "<p class=dim>Nothing yet.</p>".to_string() } else { format!("<div class=scroll><table>{rows}</table></div>") }))
+    Ok(format!("<h1>Admin log</h1><p class=dim>Every change made on these pages, newest first.</p>{}", if rows.is_empty() { "<p class=dim>Nothing yet.</p>".to_string() } else { format!("<div class=scroll><table class=plain>{rows}</table></div>") }))
 }
 
 fn clip(s: &str, n: usize) -> String {

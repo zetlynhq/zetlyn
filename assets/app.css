@@ -601,3 +601,60 @@ details.change-address p{font-size:13px;margin:0}
 .pager a{text-decoration:none;color:var(--muted)}
 .pager a.on{color:var(--ink);text-decoration:underline;text-decoration-color:var(--signal)}
 .pager a:hover{color:var(--ink)}
+/* The admin: its pages in a column beside the page, quieter headings, compact tables, figures in a
+   grid, actions in one bar, and what cannot be undone in red. */
+.admin-shell{display:grid;grid-template-columns:184px minmax(0,1fr);gap:44px;padding-top:30px;align-items:start}
+.admin-nav{position:sticky;top:calc(env(safe-area-inset-top,0px) + 20px)}
+.admin-nav .overline{color:var(--muted);margin:0 0 10px 12px}
+.admin-nav nav{display:flex;flex-direction:column;gap:1px}
+.admin-nav .group{font:10px var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin:16px 0 4px 12px}
+.admin-nav a{padding:7px 12px;text-decoration:none;color:var(--ink-2);border-left:2px solid transparent;font-size:14px}
+.admin-nav a:hover{background:var(--hover);color:var(--ink)}
+.admin-nav a.on{color:var(--ink);font-weight:600;border-left-color:var(--signal);background:var(--white)}
+.admin{padding-top:0;min-width:0}
+.admin h1{font-size:30px;letter-spacing:-.035em;margin:0 0 8px}
+.admin h1.url{font-size:22px;letter-spacing:-.02em;overflow-wrap:anywhere}
+.admin h1.url a{text-decoration:none}
+.admin h1.url a:hover{color:var(--signal)}
+.admin h1+p,.admin h1+p.dim{max-width:760px}
+.admin h2{font-size:17px;letter-spacing:-.01em;font-weight:650;margin:38px 0 12px}
+.admin h3{font-size:14px;font-weight:600;margin:24px 0 8px;color:var(--ink-2)}
+.admin p.dim{font-size:13.5px;max-width:760px}
+.admin table{font-size:14px;margin:0 0 6px}
+.admin td{padding:8px 12px;vertical-align:middle;font-variant-numeric:tabular-nums}
+.admin table:not(.kv):not(.plain) tr:first-child td{font:10.5px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted);background:var(--paper);border-bottom:1px solid var(--line-2);padding:9px 12px}
+.admin table:not(.kv):not(.plain) tr:not(:first-child):hover td,.admin table.plain tr:hover td{background:var(--hover)}
+.admin table.kv td:first-child{width:200px;color:var(--muted);font-size:13px}
+.admin td.dim,.admin td .dim{font-size:13px}
+.admin .stats{grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;padding:0;margin:0 0 6px}
+.admin .stats div{margin:0;border:1px solid var(--line-2);padding:14px 16px 12px}
+.admin .stats b{font-size:24px}
+.admin .stats span{font-size:13px;margin-top:2px}
+.admin .actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:14px 0;padding:12px;background:var(--white);border:1px solid var(--line-2)}
+.admin .actions form,.admin form.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:0}
+.admin form.row{margin:12px 0}
+.admin .actions form.row{margin:0}
+.admin button,.admin .button{padding:0 14px;height:36px;font-size:13.5px;line-height:34px}
+.admin .row input:not([type=checkbox]),.admin .row select,.admin .actions select,.admin .actions input:not([type=checkbox]){height:36px;padding:0 10px;font:14px var(--mono);border:1px solid var(--line-2);background:var(--paper);color:var(--ink);border-radius:0}
+.admin label.dim{display:inline-flex;gap:6px;align-items:center;font-size:13px}
+.admin pre{background:var(--white);border:1px solid var(--line-2);padding:12px 14px;min-height:44px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}
+.admin p.ok{border-left:3px solid var(--good);background:var(--white);padding:10px 14px;font-size:14px}
+.admin .tabs{border-bottom:0;padding-bottom:4px}
+@media (max-width:860px){
+  .admin-shell{grid-template-columns:1fr;gap:16px;padding-top:18px}
+  .admin-nav{position:static}
+  .admin-nav nav{flex-direction:row;flex-wrap:wrap;gap:2px 4px;border-bottom:1px solid var(--line);padding-bottom:8px}
+  .admin-nav .group{display:none}
+  .admin-nav a{border-left:0;border-bottom:2px solid transparent;padding:6px 8px}
+  .admin-nav a.on{border-bottom-color:var(--signal);background:none}
+  .admin table.kv td:first-child{width:auto}
+}
+.admin-nav nav{margin-left:0;align-items:stretch;font-size:14px}
+.admin-nav a{text-align:left}
+.admin .stats{grid-template-columns:repeat(auto-fill,minmax(140px,1fr))}
+.admin h1+p:not(.dim){font-size:14px;color:var(--ink-2)}
+.admin .dot{margin-right:7px}
+.admin .field{max-width:640px;margin:10px 0}
+.admin .field input{padding:0 12px;height:40px;font-size:14px}
+.admin .field button{height:40px;line-height:38px}
+@media (max-width:860px){.admin-nav nav{align-items:center}}

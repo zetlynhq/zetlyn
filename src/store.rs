@@ -213,6 +213,13 @@ CREATE TABLE IF NOT EXISTS refusals (
   reason TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS refusals_at ON refusals(at);
+CREATE TABLE IF NOT EXISTS views (
+  at INTEGER NOT NULL,
+  path TEXT NOT NULL,
+  source TEXT NOT NULL,
+  visitor TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS views_at ON views(at);
 CREATE INDEX IF NOT EXISTS oauth_grants_account ON oauth_grants(account, client);
 CREATE INDEX IF NOT EXISTS checks_watch ON checks(watch, at);
 CREATE INDEX IF NOT EXISTS checks_at ON checks(at);
@@ -367,6 +374,34 @@ impl Store {
         let mut st = self.conn.prepare("SELECT host, what, reason, at FROM refusals WHERE at >= ?1 ORDER BY at DESC").map_err(e)?;
         let rows = st.query_map([since], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).map_err(e)?;
         rows.collect::<Result<_, _>>().map_err(e)
+    }
+
+    /// A view of a public page (`visits.rs`). Views older than `visits::KEPT` go.
+    pub fn view(&self, at: i64, path: &str, source: &str, visitor: &str) -> Result<(), String> {
+        self.conn.execute("INSERT INTO views (at, path, source, visitor) VALUES (?1, ?2, ?3, ?4)", params![at, path, source, visitor]).map_err(e)?;
+        self.conn.execute("DELETE FROM views WHERE at < ?1", [at - crate::visits::KEPT]).map(|_| ()).map_err(e)
+    }
+
+    /// The views since `since`: (at, path, source, visitor), oldest first.
+    pub fn views_since(&self, since: i64) -> Result<Vec<(i64, String, String, String)>, String> {
+        let mut st = self.conn.prepare("SELECT at, path, source, visitor FROM views WHERE at >= ?1 ORDER BY at").map_err(e)?;
+        let rows = st.query_map([since], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).map_err(e)?;
+        rows.collect::<Result<_, _>>().map_err(e)
+    }
+
+    /// The secret that tells visitors apart on `day` (days since the epoch): drawn the first time
+    /// it is asked for on that day, and the day before's overwritten, so a mark of one day cannot
+    /// be matched to another.
+    pub fn visit_secret(&self, day: i64) -> Result<String, String> {
+        let kept = self.meta("visit_secret");
+        if let Some((d, secret)) = kept.split_once(':') {
+            if d == day.to_string() {
+                return Ok(secret.to_string());
+            }
+        }
+        let secret = crate::crypto::token();
+        self.set_meta("visit_secret", &format!("{day}:{secret}"))?;
+        Ok(secret)
     }
 
     /// The name of the app an OAuth access token was given to.

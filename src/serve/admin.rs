@@ -64,6 +64,7 @@ pub fn route(app: &App, store: &Store, a: &Asked, rest: &[&str]) -> Result<Reply
             }
             None => not_found(app, a),
         },
+        (Method::Get, ["traffic"]) => page("Traffic", traffic(store, a.q("days").and_then(|d| d.parse().ok()).unwrap_or(30))?),
         (Method::Get, ["funnel"]) => page("Funnel", funnel(store, a.q("weeks").and_then(|w| w.parse().ok()).unwrap_or(12))?),
         (Method::Get, ["quality"]) => page("Read quality", quality(store, a.q("days").and_then(|d| d.parse().ok()).unwrap_or(7))?),
         (Method::Get, ["mail"]) => page("Mail", mails(app, &a.q("q").unwrap_or_default())),
@@ -85,6 +86,7 @@ const TABS: &[(&str, &str)] = &[
     ("Admin", "/admin"),
     ("Accounts", "/admin/accounts"),
     ("Watches", "/admin/watches"),
+    ("Traffic", "/admin/traffic"),
     ("Funnel", "/admin/funnel"),
     ("Read quality", "/admin/quality"),
     ("Mail", "/admin/mail"),
@@ -98,6 +100,91 @@ fn framed(title: &str, a: &Asked, body: &str) -> String {
     let tabs: String = TABS.iter().map(|(name, href)| format!("<a href=\"{href}\"{}>{name}</a>", if *name == title || (title == "Account" && *name == "Accounts") || (title == "Watch" && *name == "Watches") { " class=on" } else { "" })).collect();
     let note = a.q("note").filter(|n| !n.is_empty()).map(|n| format!("<p class=ok>{}</p>", esc(&n))).unwrap_or_default();
     format!("<section class=admin><nav class=tabs>{tabs}</nav>{note}{body}</section>")
+}
+
+/// `/admin/traffic`: who looks at the public pages, counted without cookies (`visits.rs`). A
+/// visitor is told apart within a day only, so over several days the visitors are visitor-days.
+fn traffic(store: &Store, days: i64) -> Result<String, String> {
+    let days = days.clamp(1, 90);
+    let at = now();
+    let today = at.div_euclid(86400);
+    let views = store.views_since((today - days.max(30) + 1) * 86400)?;
+    // Visitors of a span: the distinct marks per day, added up.
+    let tally = |from_day: i64, to_day: i64| -> (usize, usize) {
+        let seen: std::collections::HashSet<(i64, &str)> = views.iter().filter(|v| (from_day..=to_day).contains(&v.0.div_euclid(86400))).map(|v| (v.0.div_euclid(86400), v.3.as_str())).collect();
+        (seen.len(), views.iter().filter(|v| (from_day..=to_day).contains(&v.0.div_euclid(86400))).count())
+    };
+    let box_of = |label: &str, (visitors, views): (usize, usize)| stat(label, visitors, &format!("{views} views"));
+    // Who is here now: each visitor of the last five minutes, at the page they saw last.
+    let mut now_at: HashMap<&str, &str> = HashMap::new();
+    for v in views.iter().filter(|v| v.0 >= at - 300) {
+        now_at.insert(v.3.as_str(), v.1.as_str());
+    }
+    let mut here: HashMap<&str, usize> = HashMap::new();
+    for page in now_at.values() {
+        *here.entry(page).or_default() += 1;
+    }
+    let mut here: Vec<_> = here.into_iter().collect();
+    here.sort_by(|x, y| y.1.cmp(&x.1).then(x.0.cmp(y.0)));
+    let here_rows: String = here.iter().map(|(p, n)| format!("<tr><td>{}</td><td>{n}</td></tr>", esc(&page_name(p)))).collect();
+    // The span asked for: by day, by page, and where visitors came from (the first view of their
+    // day that did not come from another of the site's pages).
+    let from = today - days + 1;
+    let span: Vec<_> = views.iter().filter(|v| v.0.div_euclid(86400) >= from).collect();
+    let mut by_day: std::collections::BTreeMap<i64, (std::collections::HashSet<&str>, usize)> = (from..=today).map(|d| (d, Default::default())).collect();
+    let mut by_page: HashMap<&str, (std::collections::HashSet<(i64, &str)>, usize)> = HashMap::new();
+    let mut entry: HashMap<(i64, &str), &str> = HashMap::new();
+    for v in &span {
+        let day = v.0.div_euclid(86400);
+        let d = by_day.entry(day).or_default();
+        d.0.insert(v.3.as_str());
+        d.1 += 1;
+        let p = by_page.entry(v.1.as_str()).or_default();
+        p.0.insert((day, v.3.as_str()));
+        p.1 += 1;
+        let first = entry.entry((day, v.3.as_str())).or_insert(v.2.as_str());
+        if *first == crate::visits::INSIDE && v.2 != crate::visits::INSIDE {
+            *first = v.2.as_str();
+        }
+    }
+    let most = by_day.values().map(|d| d.0.len()).max().unwrap_or(0).max(1);
+    let day_rows: String = by_day
+        .iter()
+        .rev()
+        .map(|(d, (seen, n))| format!("<tr><td class=dim>{}</td><td>{}</td><td>{n}</td><td><span class=bar style=\"width:{}px\"></span></td></tr>", &crate::serve::time(d * 86400)[..10], seen.len(), seen.len() * 160 / most))
+        .collect();
+    let mut pages: Vec<_> = by_page.iter().map(|(p, (seen, n))| (*p, seen.len(), *n)).collect();
+    pages.sort_by(|x, y| y.1.cmp(&x.1).then(y.2.cmp(&x.2)).then(x.0.cmp(y.0)));
+    let page_rows: String = pages.iter().map(|(p, seen, n)| format!("<tr><td>{}</td><td>{seen}</td><td>{n}</td></tr>", esc(&page_name(p)))).collect();
+    let mut sources: HashMap<&str, usize> = HashMap::new();
+    for s in entry.values() {
+        *sources.entry(if *s == crate::visits::INSIDE { "direct" } else { s }).or_default() += 1;
+    }
+    let mut sources: Vec<_> = sources.into_iter().collect();
+    sources.sort_by(|x, y| y.1.cmp(&x.1).then(x.0.cmp(y.0)));
+    let source_rows: String = sources.iter().map(|(s, n)| format!("<tr><td>{}</td><td>{n}</td></tr>", esc(s))).collect();
+    let choose: String = [7, 30, 90].iter().map(|d| format!("<a href=\"/admin/traffic?days={d}\"{}>{d} days</a>", if *d == days { " class=on" } else { "" })).collect::<Vec<_>>().join(" · ");
+    let table = |head: &str, rows: &str| if rows.is_empty() { "<p class=dim>None yet.</p>".to_string() } else { format!("<div class=scroll><table><tr>{head}</tr>{rows}</table></div>") };
+    Ok(format!(
+        "<h1>Traffic</h1><p class=dim>Views of the public pages by people, counted without cookies; programs, link previews and the admins are left out. A visitor is told apart within one day only, so a visitor who comes back on another day counts again.</p>\
+         <h2>Now</h2><div class=stats>{}</div>{}\
+         <h2>Visitors</h2><div class=stats>{}{}{}{}</div>\
+         <h2>The last {choose}</h2><h3>By day</h3>{}<h3>Pages</h3>{}<h3>Where they came from</h3><p class=dim>The site that linked to the first page of a visitor's day, or what a tagged link said (<code>?ref=</code>, <code>?utm_source=</code>); direct when nothing did.</p>{}",
+        stat("here in the last 5 minutes", now_at.len(), ""),
+        table("<td>At</td><td>Visitors</td>", &here_rows),
+        box_of("today", tally(today, today)),
+        box_of("yesterday", tally(today - 1, today - 1)),
+        box_of("last 7 days", tally(today - 6, today)),
+        box_of("last 30 days", tally(today - 29, today)),
+        table("<td>Day</td><td>Visitors</td><td>Views</td><td></td>", &day_rows),
+        table("<td>Page</td><td>Visitors</td><td>Views</td>", &page_rows),
+        table("<td>From</td><td>Visitors</td>", &source_rows),
+    ))
+}
+
+/// A counted path as the admin knows it: the start of marking by what it is.
+fn page_name(path: &str) -> String {
+    if path == "/mark" { "/mark (started marking a page)".to_string() } else { path.to_string() }
 }
 
 /// `/admin/funnel`: where accounts come from and where they stop, week by week of their making.
@@ -741,4 +828,32 @@ fn log(store: &Store) -> Result<String, String> {
 
 fn clip(s: &str, n: usize) -> String {
     if s.chars().count() > n { format!("{}…", s.chars().take(n - 1).collect::<String>()) } else { s.to_string() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn traffic_counts_visitors_per_day_and_where_they_came_from() {
+        let store = Store::in_memory();
+        let t = now();
+        let yesterday = t - 86400;
+        store.view(yesterday, "/", "reddit", "a").unwrap();
+        store.view(t - 60, "/", "google", "a").unwrap();
+        store.view(t - 50, "/price-drop-alert", crate::visits::INSIDE, "a").unwrap();
+        store.view(t - 40, "/", crate::visits::INSIDE, "b").unwrap();
+        store.view(t - 30, "/mark", "reddit", "b").unwrap();
+        let page = traffic(&store, 30).unwrap();
+        // Today two visitors, four views; yesterday one; on the seven days three visitor-days.
+        assert!(page.contains("<b>2</b><span>today</span><small>4 views</small>"), "{page}");
+        assert!(page.contains("<b>1</b><span>yesterday</span>"), "{page}");
+        assert!(page.contains("<b>3</b><span>last 7 days</span>"), "{page}");
+        assert!(page.contains("<b>2</b><span>here in the last 5 minutes</span>"));
+        assert!(page.contains("<tr><td>/price-drop-alert</td><td>1</td></tr>"), "a's last page: {page}");
+        assert!(page.contains("<tr><td>/mark (started marking a page)</td><td>1</td></tr>"), "b's last page");
+        // Where they came from: a's day began at google, yesterday at reddit; b's at reddit,
+        // after a first view from inside the site.
+        assert!(page.contains("<tr><td>reddit</td><td>2</td></tr><tr><td>google</td><td>1</td></tr>"), "{page}");
+    }
 }

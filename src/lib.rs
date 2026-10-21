@@ -29,4 +29,5 @@ pub mod serve;
 pub mod store;
 pub mod tell;
 pub mod text;
+pub mod visits;
 pub mod when;

@@ -584,3 +584,4 @@ details.change-address p{font-size:13px;margin:0}
 .uc-json .uc-swap:not(.marked) .uc-new{color:inherit}
 .uc-chat .uc-convo{min-height:250px}
 .uc-compare td{vertical-align:top}
+.admin .bar{display:inline-block;height:8px;background:var(--signal);vertical-align:middle}

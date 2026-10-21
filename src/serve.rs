@@ -171,6 +171,12 @@ fn answer(app: &App, store: &Store, mut req: Request) -> Result<(), String> {
     let forwarded = header("X-Forwarded-For");
     let ip = forwarded.split(',').next().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).unwrap_or_else(|| req.remote_addr().map(|a| a.ip().to_string()).unwrap_or_default());
     let session = header("Cookie").split(';').filter_map(|c| c.trim().split_once('=')).find(|(k, _)| *k == "z").map(|(_, v)| v.to_string());
+    // A view of a public page by a person is counted (`visits.rs`); a browser's guess ahead
+    // (prefetch) is not, nor the admins' own.
+    let agent = header("User-Agent");
+    let referer = header("Referer");
+    let ahead = header("Sec-Purpose").contains("prefetch") || header("Purpose").contains("prefetch");
+    let looked = *req.method() == Method::Get && !ahead;
     // HEAD is answered as GET would be, without the body (tiny_http leaves it out): link checkers
     // and previews ask that way, and a 404 to them is a page that looks broken.
     let method = if *req.method() == Method::Head { Method::Get } else { req.method().clone() };
@@ -189,6 +195,11 @@ fn answer(app: &App, store: &Store, mut req: Request) -> Result<(), String> {
         eprintln!("{} {}: {e}", asked.method, asked.path);
         page_reply(app, &asked, "Something went wrong", "<section class=narrow><h1>Something went wrong</h1><p>Zetlyn could not finish this just now. Please try again in a moment; if it keeps happening, write to hello@zetlyn.com.</p><p><a href=\"/\">Back to the front page</a></p></section>", 500)
     });
+    if looked && reply.status_code().0 == 200 && app.hosted.is_some() && admin_of(app, &asked).is_none() && crate::visits::counted(&asked.path) && !crate::visits::is_bot(&agent) {
+        if let Err(e) = count_view(app, store, &asked, &agent, &referer) {
+            eprintln!("counting a view of {}: {e}", asked.path);
+        }
+    }
     req.respond(reply).map_err(|e| e.to_string())
 }
 
@@ -2139,4 +2150,12 @@ fn take_new_address(app: &App, store: &Store, a: &Asked, token: &str) -> Result<
     h.tell_soon(&old, mail::address_changed(&new));
     let session = store.new_session(id)?;
     Ok(redirect("/account").with_header(cookie(app, &session)))
+}
+
+/// Keeps a view of a public page: its path, where it came from, and the visitor's mark of today.
+fn count_view(app: &App, store: &Store, a: &Asked, agent: &str, referer: &str) -> Result<(), String> {
+    let at = crate::store::now();
+    let secret = store.visit_secret(at.div_euclid(86400))?;
+    let source = crate::visits::source(referer, &a.query, &host_of(&public_base(app, a)));
+    store.view(at, &crate::seo::canonical_path(&a.path), &source, &crate::visits::visitor(&secret, &a.ip, agent))
 }

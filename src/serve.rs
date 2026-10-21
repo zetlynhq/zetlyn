@@ -696,12 +696,12 @@ fn home(app: &App, a: &Asked) -> Result<String, String> {
     let field = format!(
         "<form class=field action=/mark><input name=url placeholder=\"https://example.com/pricing\" aria-label=\"The address of the page to watch\" autofocus required><button class=primary>Watch it</button></form>{error}"
     );
-    Ok(layout(app, a, "Zetlyn: hear when a web page changes", &format!("{}{LANDING}{}{FAQ}", hero(&field, crate::plan::HERO_NOTE), crate::plan::PRICING)))
+    Ok(layout(app, a, "Zetlyn: website change monitor, get told when a page changes", &format!("{}{LANDING}{}{FAQ}", hero(&field, crate::plan::HERO_NOTE), crate::plan::PRICING)))
 }
 
 fn hero(field: &str, note: &str) -> String {
     format!(
-        "<section class=hero><div><p class=overline>Any public page · one place on it · notify when it changes</p><h1>Paste a URL.<br><span>Hear when it changes.</span></h1><p class=lead>Zetlyn watches a web page, or one place on it, and tells you what it said before and what it says now. No password, no dashboard to learn.</p>{field}<p class=dim>{note}</p></div>{HERO_CARD}</section>"
+        "<section class=hero><div><p class=overline>A price · stock · a version · or the whole page</p><h1>Get told when a<br><span>web page changes.</span></h1><p class=lead>Zetlyn watches a web page, or one place on it, and tells you what it said before and what it says now. No password, no dashboard to learn.</p>{field}<p class=dim>{note}</p></div>{HERO_CARD}</section>"
     )
 }
 
@@ -737,10 +737,10 @@ const LANDING: &str = r#"<section class=block><p class=overline>How it works</p>
 <div><h3>Get notified</h3><p>When it changes you get the value before and now, with a link to the page.</p></div>
 </div></section>
 <section class="block split">
-<div><p class=overline>Not a diff</p><h2>The value.<br><span>Not forty lines of HTML.</span></h2></div>
+<div><p class=overline>Not a diff</p><h2>Watch one place, or the whole page.<br><span>Get the value, not forty lines of HTML.</span></h2></div>
 <div><p>Other tools email you every changed line. Zetlyn tells you what moved: <b>Out of stock → In stock</b>. Clocks, counters and adverts that change on every visit are recognised when you start and never reported.</p><p>When a page is rebuilt, Zetlyn finds your place again by what stands beside it. If it cannot be sure, it asks you to mark it again rather than send a change that is not one.</p></div>
 </section>
-<section class="block uses"><p class=overline>What people watch</p><h2>Anything a page says.<br><span>Wherever it says it.</span></h2><ul>
+<section class="block uses"><p class=overline>What people watch</p><h2>Price drops, back in stock, new versions.<br><span>Anything a page says.</span></h2><ul>
 <li><b>Prices</b> of a competitor, a product, a plan</li>
 <li><b>Releases</b> of software they depend on</li>
 <li><b>Terms</b> and privacy policies of services they use</li>
@@ -748,6 +748,9 @@ const LANDING: &str = r#"<section class=block><p class=overline>How it works</p>
 <li><b>Status pages</b> and notices</li>
 <li><b>Job pages</b>, calls and tenders</li>
 </ul></section>
+<section class=block><p class=overline>For agents and code</p><h2>From Claude, ChatGPT and your own code.<br><span>One address: zetlyn.com/mcp.</span></h2>
+<p class=lead>Add Zetlyn to Claude, ChatGPT, Cursor or any MCP client with that address, sign in once, and ask it to watch a page for you. Programs use the HTTP API and signed webhooks. <a href="/docs">How to connect</a>.</p>
+</section>
 "#;
 
 const FAQ: &str = r#"<section class="block faq"><p class=overline>Questions</p><h2>Before you paste.</h2>

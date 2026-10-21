@@ -5,12 +5,14 @@ price, a version, a date), and tells you when it changes: the value before and t
 email, Telegram, Slack, Discord or a signed webhook, or only when a condition comes true (a price
 below a mark, "In stock" appearing). It is one Rust program with one SQLite file.
 
-- **Hosted:** [zetlyn.com](https://zetlyn.com), the first watch free for 3 days.
+- **Hosted:** [zetlyn.com](https://zetlyn.com), the first watch free for 3 days. What people use
+  it for: [use cases](https://zetlyn.com/use-cases).
 - **For LLMs and agents:** an MCP server at `/mcp` (OAuth 2.1, so Claude, ChatGPT and others
   connect by its address alone) and a JSON API at `/api/v1`, described in
   [`site/llms.txt`](site/llms.txt), [`/docs`](https://zetlyn.com/docs) and
   [`/openapi.json`](https://zetlyn.com/openapi.json). Listed in the MCP registry as
-  `com.zetlyn/zetlyn`.
+  `com.zetlyn/zetlyn`. Setting it up: [Claude](https://zetlyn.com/docs/claude),
+  [ChatGPT](https://zetlyn.com/docs/chatgpt), [Cursor](https://zetlyn.com/docs/cursor).
 - **Yours to run:** MIT licensed. A single binary, or the Docker image.
 
 How it reads pages:

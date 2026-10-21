@@ -104,8 +104,9 @@ fn framed(title: &str, a: &Asked, body: &str) -> String {
 
 /// `/admin/traffic`: who looks at the public pages, counted without cookies (`visits.rs`). A
 /// visitor is told apart within a day only, so over several days the visitors are visitor-days.
+/// `days` 1 is the last 24 hours, hour by hour; 7 is in quarters of a day; more, day by day.
 fn traffic(store: &Store, days: i64) -> Result<String, String> {
-    let days = days.clamp(1, 90);
+    let days = [1, 7, 30, 90].into_iter().find(|d| *d >= days).unwrap_or(90);
     let at = now();
     let today = at.div_euclid(86400);
     let views = store.views_since((today - days.max(30) + 1) * 86400)?;
@@ -127,32 +128,35 @@ fn traffic(store: &Store, days: i64) -> Result<String, String> {
     let mut here: Vec<_> = here.into_iter().collect();
     here.sort_by(|x, y| y.1.cmp(&x.1).then(x.0.cmp(y.0)));
     let here_rows: String = here.iter().map(|(p, n)| format!("<tr><td>{}</td><td>{n}</td></tr>", esc(&page_name(p)))).collect();
-    // The span asked for: by day, by page, and where visitors came from (the first view of their
-    // day that did not come from another of the site's pages).
-    let from = today - days + 1;
-    let span: Vec<_> = views.iter().filter(|v| v.0.div_euclid(86400) >= from).collect();
-    let mut by_day: std::collections::BTreeMap<i64, (std::collections::HashSet<&str>, usize)> = (from..=today).map(|d| (d, Default::default())).collect();
+    // The span asked for, in steps: hours, quarters of a day, or days.
+    let (step, steps) = match days {
+        1 => (3600, 24),
+        7 => (6 * 3600, 28),
+        d => (86400, d as usize),
+    };
+    let since = (at.div_euclid(step) - steps as i64 + 1) * step;
+    let span: Vec<_> = views.iter().filter(|v| v.0 >= since).collect();
+    let mut by_step: Vec<(std::collections::HashSet<&str>, usize)> = vec![Default::default(); steps];
     let mut by_page: HashMap<&str, (std::collections::HashSet<(i64, &str)>, usize)> = HashMap::new();
     let mut entry: HashMap<(i64, &str), &str> = HashMap::new();
     for v in &span {
         let day = v.0.div_euclid(86400);
-        let d = by_day.entry(day).or_default();
-        d.0.insert(v.3.as_str());
-        d.1 += 1;
+        if let Some(s) = by_step.get_mut(((v.0 - since) / step) as usize) {
+            s.0.insert(v.3.as_str());
+            s.1 += 1;
+        }
         let p = by_page.entry(v.1.as_str()).or_default();
         p.0.insert((day, v.3.as_str()));
         p.1 += 1;
+        // Where a visitor came from: the first view of their day that did not come from another
+        // of the site's pages.
         let first = entry.entry((day, v.3.as_str())).or_insert(v.2.as_str());
         if *first == crate::visits::INSIDE && v.2 != crate::visits::INSIDE {
             *first = v.2.as_str();
         }
     }
-    let most = by_day.values().map(|d| d.0.len()).max().unwrap_or(0).max(1);
-    let day_rows: String = by_day
-        .iter()
-        .rev()
-        .map(|(d, (seen, n))| format!("<tr><td class=dim>{}</td><td>{}</td><td>{n}</td><td><span class=bar style=\"width:{}px\"></span></td></tr>", &crate::serve::time(d * 86400)[..10], seen.len(), seen.len() * 160 / most))
-        .collect();
+    let points: Vec<(i64, usize, usize)> = by_step.iter().enumerate().map(|(i, (seen, n))| (since + i as i64 * step, seen.len(), *n)).collect();
+    let chart = timeline(&points, step);
     let mut pages: Vec<_> = by_page.iter().map(|(p, (seen, n))| (*p, seen.len(), *n)).collect();
     pages.sort_by(|x, y| y.1.cmp(&x.1).then(y.2.cmp(&x.2)).then(x.0.cmp(y.0)));
     let page_rows: String = pages.iter().map(|(p, seen, n)| format!("<tr><td>{}</td><td>{seen}</td><td>{n}</td></tr>", esc(&page_name(p)))).collect();
@@ -163,23 +167,85 @@ fn traffic(store: &Store, days: i64) -> Result<String, String> {
     let mut sources: Vec<_> = sources.into_iter().collect();
     sources.sort_by(|x, y| y.1.cmp(&x.1).then(x.0.cmp(y.0)));
     let source_rows: String = sources.iter().map(|(s, n)| format!("<tr><td>{}</td><td>{n}</td></tr>", esc(s))).collect();
-    let choose: String = [7, 30, 90].iter().map(|d| format!("<a href=\"/admin/traffic?days={d}\"{}>{d} days</a>", if *d == days { " class=on" } else { "" })).collect::<Vec<_>>().join(" · ");
+    let choose: String = [(1, "24 hours"), (7, "7 days"), (30, "30 days"), (90, "90 days")]
+        .iter()
+        .map(|(d, name)| format!("<a href=\"/admin/traffic?days={d}\"{}>{name}</a>", if *d == days { " class=on" } else { "" }))
+        .collect::<Vec<_>>()
+        .join(" · ");
     let table = |head: &str, rows: &str| if rows.is_empty() { "<p class=dim>None yet.</p>".to_string() } else { format!("<div class=scroll><table><tr>{head}</tr>{rows}</table></div>") };
     Ok(format!(
         "<h1>Traffic</h1><p class=dim>Views of the public pages by people, counted without cookies; programs, link previews and the admins are left out. A visitor is told apart within one day only, so a visitor who comes back on another day counts again.</p>\
          <h2>Now</h2><div class=stats>{}</div>{}\
          <h2>Visitors</h2><div class=stats>{}{}{}{}</div>\
-         <h2>The last {choose}</h2><h3>By day</h3>{}<h3>Pages</h3>{}<h3>Where they came from</h3><p class=dim>The site that linked to the first page of a visitor's day, or what a tagged link said (<code>?ref=</code>, <code>?utm_source=</code>); direct when nothing did.</p>{}",
+         <h2>Over time</h2><p class=tabs>{choose}</p>{chart}\
+         <h3>Pages</h3>{}<h3>Where they came from</h3><p class=dim>The site that linked to the first page of a visitor's day, or what a tagged link said (<code>?ref=</code>, <code>?utm_source=</code>); direct when nothing did.</p>{}",
         stat("here in the last 5 minutes", now_at.len(), ""),
         table("<td>At</td><td>Visitors</td>", &here_rows),
         box_of("today", tally(today, today)),
         box_of("yesterday", tally(today - 1, today - 1)),
         box_of("last 7 days", tally(today - 6, today)),
         box_of("last 30 days", tally(today - 29, today)),
-        table("<td>Day</td><td>Visitors</td><td>Views</td><td></td>", &day_rows),
         table("<td>Page</td><td>Visitors</td><td>Views</td>", &page_rows),
         table("<td>From</td><td>Visitors</td>", &source_rows),
     ))
+}
+
+/// Visitors and views over time, drawn: (start of the step, visitors, views) for each step of
+/// `step` seconds. Visitors are the area, views the dashed line; over each step its numbers.
+fn timeline(points: &[(i64, usize, usize)], step: i64) -> String {
+    const W: f64 = 900.0;
+    const H: f64 = 240.0;
+    const LEFT: f64 = 44.0;
+    const BOTTOM: f64 = 28.0;
+    const TOP: f64 = 12.0;
+    if points.is_empty() {
+        return String::new();
+    }
+    let most = points.iter().map(|p| p.1.max(p.2)).max().unwrap_or(0);
+    // A top the grid divides evenly: 2, 4, 6, 8, 10, 20, 40 …
+    let mut unit = 1usize;
+    let top = loop {
+        if let Some(t) = [2, 4, 6, 8, 10].iter().map(|m| m * unit).find(|t| *t >= most) {
+            break t;
+        }
+        unit *= 10;
+    };
+    let wide = (W - LEFT - 8.0) / points.len() as f64;
+    let x = |i: usize| LEFT + wide * (i as f64 + 0.5);
+    let y = |n: usize| TOP + (H - TOP - BOTTOM) * (1.0 - n as f64 / top as f64);
+    let line = |pick: fn(&(i64, usize, usize)) -> usize| points.iter().enumerate().map(|(i, p)| format!("{:.1},{:.1}", x(i), y(pick(p)))).collect::<Vec<_>>().join(" ");
+    let area = format!("{:.1},{:.1} {} {:.1},{:.1}", x(0), y(0), line(|p| p.1), x(points.len() - 1), y(0));
+    let grid: String = [0, top / 2, top]
+        .iter()
+        .map(|n| format!("<line class=grid x1=\"{LEFT}\" x2=\"{:.0}\" y1=\"{:.1}\" y2=\"{:.1}\"/><text x=\"{:.0}\" y=\"{:.1}\" text-anchor=end>{n}</text>", W - 8.0, y(*n), y(*n), LEFT - 8.0, y(*n) + 4.0))
+        .collect();
+    let when = |at: i64, day: bool| {
+        let t = crate::serve::time(at);
+        let month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][t[5..7].parse::<usize>().unwrap_or(1) - 1];
+        if day { format!("{} {month}", t[8..10].trim_start_matches('0')) } else { t[11..16].to_string() }
+    };
+    // Labels under the steps that begin a day, or every few hours within one day.
+    let every = (points.len() / 7).max(1);
+    let labels: String = points
+        .iter()
+        .enumerate()
+        .filter(|(i, p)| if step >= 86400 { i % every == 0 } else if step > 3600 { p.0 % 86400 == 0 } else { i % 4 == 0 })
+        .map(|(i, p)| format!("<text x=\"{:.1}\" y=\"{:.0}\" text-anchor=middle>{}</text>", x(i), H - 8.0, when(p.0, step > 3600)))
+        .collect();
+    let hits: String = points
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let name = if step >= 86400 { when(p.0, true) } else { format!("{}, {}–{}", when(p.0, true), when(p.0, false), when(p.0 + step, false)) };
+            format!("<rect class=hit x=\"{:.1}\" y=\"{TOP}\" width=\"{:.1}\" height=\"{:.1}\"><title>{name}: {} visitors, {} views</title></rect>", x(i) - wide / 2.0, wide, H - TOP - BOTTOM, p.1, p.2)
+        })
+        .collect();
+    format!(
+        "<figure class=chart><svg viewBox=\"0 0 {W} {H}\" role=img aria-label=\"Visitors and views over time\">{grid}<polygon class=area points=\"{area}\"/><polyline class=visitors points=\"{}\"/><polyline class=views points=\"{}\"/>{labels}{hits}</svg>\
+         <figcaption><span class=key-visitors></span> Visitors <span class=key-views></span> Views <span class=dim>· hover a point for its numbers · times in UTC</span></figcaption></figure>",
+        line(|p| p.1),
+        line(|p| p.2)
+    )
 }
 
 /// A counted path as the admin knows it: the start of marking by what it is.
@@ -855,5 +921,11 @@ mod tests {
         // Where they came from: a's day began at google, yesterday at reddit; b's at reddit,
         // after a first view from inside the site.
         assert!(page.contains("<tr><td>reddit</td><td>2</td></tr><tr><td>google</td><td>1</td></tr>"), "{page}");
+        // Over time: one point an hour over 24 hours, one a quarter of a day over 7 days, one a day
+        // beyond; each with its numbers.
+        assert_eq!(traffic(&store, 1).unwrap().matches("<rect class=hit").count(), 24);
+        assert_eq!(traffic(&store, 7).unwrap().matches("<rect class=hit").count(), 28);
+        assert_eq!(page.matches("<rect class=hit").count(), 30);
+        assert!(page.contains(": 2 visitors, 4 views</title>"), "{page}");
     }
 }

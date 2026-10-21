@@ -584,4 +584,16 @@ details.change-address p{font-size:13px;margin:0}
 .uc-json .uc-swap:not(.marked) .uc-new{color:inherit}
 .uc-chat .uc-convo{min-height:250px}
 .uc-compare td{vertical-align:top}
-.admin .bar{display:inline-block;height:8px;background:var(--signal);vertical-align:middle}
+/* The admin's traffic over time: visitors as an area, views as a dashed line. */
+.chart{margin:8px 0 26px;background:var(--white);border:1px solid var(--line-2);padding:12px 12px 8px}
+.chart svg{display:block;width:100%;height:auto}
+.chart .grid{stroke:var(--line)}
+.chart text{font:11px var(--mono);fill:var(--muted)}
+.chart .area{fill:var(--wash)}
+.chart .visitors{fill:none;stroke:var(--signal);stroke-width:2;stroke-linejoin:round}
+.chart .views{fill:none;stroke:var(--ink-2);stroke-width:1.5;stroke-dasharray:4 3;stroke-linejoin:round}
+.chart .hit{fill:transparent}
+.chart .hit:hover{fill:var(--hover)}
+.chart figcaption{font-size:13px;color:var(--ink-2);display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px}
+.chart .key-visitors,.chart .key-views{display:inline-block;width:18px;height:0;border-top:2px solid var(--signal)}
+.chart .key-views{border-top:2px dashed var(--ink-2);margin-left:10px}

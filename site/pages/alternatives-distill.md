@@ -1,5 +1,7 @@
 title: Zetlyn and Distill compared
 description: Zetlyn and Distill side by side: browser extension or server, prices, check intervals, notifications, API and AI assistants. Facts from both pricing pages, 21 October 2026.
+layout: compare
+kicker: Compared
 name: Distill
 card: A browser extension, or a server that reads for you.
 ---

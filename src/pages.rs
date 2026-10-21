@@ -4,7 +4,8 @@
 //!
 //! The fields: `title` and `description` for the head and search results; `name` and `card` for
 //! the card that links to the page; `tile`, the small picture on that card; `demo` and `kicker`,
-//! the picture and the line above the title at the top of the page. A line of its own starting
+//! the picture and the line above the title at the top of the page; `layout: compare` for a page
+//! whose table sets Zetlyn beside another service. A line of its own starting
 //! with `::` places a part that is not text: `::cards /a /b` the cards of those pages,
 //! `::channels` where a message can go.
 
@@ -32,6 +33,14 @@ const SOURCES: &[(&str, &str)] = &[
 fn art(name: &str) -> Option<&'static str> {
     Some(match name {
         "price" => include_str!("../site/pages/art/price.html"),
+        "stock" => include_str!("../site/pages/art/stock.html"),
+        "release" => include_str!("../site/pages/art/release.html"),
+        "change" => include_str!("../site/pages/art/change.html"),
+        "json" => include_str!("../site/pages/art/json.html"),
+        "feed" => include_str!("../site/pages/art/feed.html"),
+        "chat-claude" => include_str!("../site/pages/art/chat-claude.html"),
+        "chat-chatgpt" => include_str!("../site/pages/art/chat-chatgpt.html"),
+        "chat-cursor" => include_str!("../site/pages/art/chat-cursor.html"),
         "tile-price" => include_str!("../site/pages/art/tile-price.html"),
         "tile-stock" => include_str!("../site/pages/art/tile-stock.html"),
         "tile-release" => include_str!("../site/pages/art/tile-release.html"),
@@ -84,7 +93,7 @@ pub fn html(page: &Page) -> String {
     };
     let rest = rest.trim_start_matches('\n');
     let (lead, rest) = match rest.split_once("\n\n") {
-        Some((lead, rest)) if !lead.starts_with(['#', '-', '|', ':', ' ']) => (lead, rest),
+        Some((lead, rest)) if !lead.starts_with(['#', '-', '|', ':', ' ']) && !lead.ends_with(':') => (lead, rest),
         _ => ("", rest),
     };
     let lead = if lead.is_empty() { String::new() } else { format!("<p class=lead>{}</p>", crate::docs::html(lead).trim_start_matches("<p>").trim_end_matches("</p>")) };
@@ -94,7 +103,8 @@ pub fn html(page: &Page) -> String {
         None => format!("<section class=uc-top>{kicker}<h1>{}</h1>{lead}</section>", esc(title)),
     };
     format!(
-        "{top}<article class=\"docs page uc-body\">{}</article><section class=uc-cta><h2>Watch your first page.<br><span>{}</span></h2>{}</section>",
+        "{top}<article class=\"docs page uc-body{}\">{}</article><section class=uc-cta><h2>Watch your first page.<br><span>{}</span></h2>{}</section>",
+        page.field("layout").map(|l| format!(" uc-{l}")).unwrap_or_default(),
         parts(rest),
         crate::plan::HERO_NOTE,
         start()
@@ -168,6 +178,7 @@ mod tests {
             let html = html(&page);
             assert_eq!(html.matches("<h1>").count(), 1, "{path}");
             assert!(!html.contains("](") && !html.contains("*\"") && !html.contains("<p>::"), "{path}: no markup left as text");
+            assert!(!html.contains(":</p><form") && !html.contains(":</p></section>"), "{path}: the lead does not point at what comes after it");
         }
         assert!(find("/nope").is_none());
         let p = find("/price-drop-alert").unwrap();

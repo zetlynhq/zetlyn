@@ -1,5 +1,7 @@
 title: Get told when a new software version is released
 description: Watch a release page, a GitHub releases feed or a JSON API and get one message when a new version appears. Works with HTML pages, RSS and Atom feeds and JSON. Three days free.
+demo: release
+kicker: A release page · a feed · an API
 name: New releases
 card: A new version on a download page, a feed or an API.
 tile: tile-release

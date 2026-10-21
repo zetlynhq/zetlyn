@@ -1,10 +1,15 @@
 title: Monitor a JSON API for changes
 description: Watch one field of a JSON API, or the whole response, and get a message or a signed webhook when it changes or meets a condition. With an HTTP API and MCP server.
+demo: json
+kicker: One field · the whole response · a webhook
 name: JSON APIs
 card: One field of a response, or all of it, to a signed webhook.
 tile: tile-json
 ---
 # Monitor a JSON API for changes
+
+Watch one field of a JSON API, or the whole response, and get the value before and the value
+now by email, Telegram, Slack, Discord or a signed webhook when it changes.
 
 Zetlyn reads a JSON response as one line per value, each with its path beside it:
 

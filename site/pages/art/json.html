@@ -1,0 +1,19 @@
+<div class="demo uc-demo" aria-label="An example: one field of a JSON API, watched, and the signed webhook Zetlyn sends when it changes">
+<div class=browser>
+<div class=browser-bar><i></i><i></i><i></i><span>api.example/tool/releases/latest</span></div>
+<div class="uc-page uc-json">
+<p>{</p>
+<p>&nbsp; "tag_name": <b class="marked uc-swap"><span class=uc-old>"v1.8.2"</span><span class=uc-new>"v1.9.0"</span></b>,</p>
+<p>&nbsp; "name": <span class=uc-swap><span class=uc-old>"Tool 1.8.2"</span><span class=uc-new>"Tool 1.9.0"</span></span>,</p>
+<p>&nbsp; "draft": false,</p>
+<p>&nbsp; "prerelease": false</p>
+<p>}</p>
+</div>
+</div>
+<div class="card demo-card">
+<div class=card-head><span>tag_name <b>api.example</b></span><span class=uc-swap><span class=uc-old>watching</span><span class=uc-new>sent</span></span></div>
+<div class=card-row><span>Before</span><s class=uc-swap><span class=uc-old>–</span><span class=uc-new>v1.8.2</span></s></div>
+<div class="card-row uc-hotrow"><span>Now</span><b class=uc-swap><span class=uc-old>v1.8.2</span><span class=uc-new>v1.9.0</span></b></div>
+<div class=card-row><span>To</span>your webhook, signed</div>
+</div>
+</div>

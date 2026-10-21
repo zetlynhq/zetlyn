@@ -1,5 +1,7 @@
 title: Back in stock alert for any product page
 description: Get told when a sold-out product is available again: Zetlyn watches the availability on the product page and sends one message when "In stock" appears. Three days free.
+demo: stock
+kicker: Sold out · in stock · one message
 name: Back in stock
 card: When "Sold out" goes, or "In stock" appears.
 tile: tile-stock

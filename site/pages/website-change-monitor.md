@@ -1,5 +1,7 @@
 title: Website change monitor
 description: Watch any public web page, or one place on it, and get the value before and after when it changes: competitors' pages, terms and privacy policies, status pages, job pages, notices.
+demo: change
+kicker: Terms · competitors · status pages
 name: Any page that changes
 card: Terms, competitors, status and job pages: before and now.
 tile: tile-change

@@ -1,5 +1,7 @@
 title: RSS and Atom feed monitor
 description: Watch an RSS or Atom feed and get one message per new entry, by email, Telegram, Slack, Discord or webhook. Entries that drop off the feed are not reported.
+demo: feed
+kicker: RSS · Atom · one message per entry
 name: RSS and Atom feeds
 card: One message for each new entry, not for the whole feed.
 tile: tile-feed

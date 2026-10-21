@@ -1,5 +1,7 @@
 title: Use Zetlyn in ChatGPT
 description: Add Zetlyn to ChatGPT as an MCP connector with its address alone, sign in once, and ask ChatGPT to watch web pages, prices and releases for you.
+demo: chat-chatgpt
+kicker: Guide · ChatGPT
 name: ChatGPT
 card: As a connector, with its address alone.
 ---

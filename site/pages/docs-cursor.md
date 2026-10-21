@@ -1,9 +1,15 @@
 title: Use Zetlyn in Cursor and other MCP clients
 description: Add Zetlyn's MCP server to Cursor, VS Code or any MCP client by its URL, sign in once, and let your editor's agent watch pages, feeds and APIs for you.
+demo: chat-cursor
+kicker: Guide · Cursor and MCP clients
 name: Cursor and other MCP clients
 card: VS Code, or any client that speaks MCP.
 ---
 # Use Zetlyn in Cursor and other MCP clients
+
+Zetlyn is an MCP server at `https://zetlyn.com/mcp`. Cursor, VS Code and other MCP clients
+connect with that address alone and sign you in to Zetlyn once; then the agent in your editor can
+watch pages, feeds and APIs for you.
 
 Add an MCP server with the URL `https://zetlyn.com/mcp`. In Cursor that is an entry in `mcp.json`:
 

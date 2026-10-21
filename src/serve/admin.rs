@@ -565,6 +565,9 @@ fn act_on_account(app: &App, store: &Store, acc: &Account, action: &str, a: &Ask
     }
 }
 
+/// Watches shown on one page of `/admin/watches`.
+const PER_PAGE: usize = 50;
+
 fn watches(store: &Store, a: &Asked) -> Result<String, String> {
     let state = a.q("state").unwrap_or_default();
     let outcome = a.q("outcome").unwrap_or_default();
@@ -579,19 +582,51 @@ fn watches(store: &Store, a: &Asked) -> Result<String, String> {
         .collect();
     list.sort_by(|x, y| y.id.cmp(&x.id));
     let total = list.len();
-    list.truncate(500);
+    let pages = total.div_ceil(PER_PAGE).max(1);
+    let page = a.q("page").and_then(|p| p.parse::<usize>().ok()).unwrap_or(1).clamp(1, pages);
+    let shown: Vec<Watch> = list.into_iter().skip((page - 1) * PER_PAGE).take(PER_PAGE).collect();
     let select = |name: &str, options: &[&str], current: &str| {
         let o: String = std::iter::once("").chain(options.iter().copied()).map(|v| format!("<option value=\"{v}\"{}>{}</option>", if v == current { " selected" } else { "" }, if v.is_empty() { "any" } else { v })).collect();
         format!("<label class=dim>{name} <select name={name}>{o}</select></label>")
     };
+    let filters = format!("state={}&outcome={}&q={}", enc(&state), enc(&outcome), enc(&q));
+    let pager = pager(&format!("/admin/watches?{filters}"), page, pages);
+    let from = if total == 0 { 0 } else { (page - 1) * PER_PAGE + 1 };
     Ok(format!(
-        "<h1>Watches</h1><form action=/admin/watches class=row>{}{}<input name=q value=\"{}\" placeholder=\"Part of an address or URL\"><button>Show</button></form><p class=dim>{total} found{}.</p>{}",
+        "<h1>Watches</h1><form action=/admin/watches class=row>{}{}<input name=q value=\"{}\" placeholder=\"Part of an address or URL\"><button>Show</button></form><p class=dim>{total} found{}.</p>{pager}{}{pager}",
         select("state", &["running", "waiting", "pending", "ended"], &state),
         select("outcome", &["new", "same", "changed", "unclear", "gone", "failed"], &outcome),
         esc(&q),
-        if total > 500 { ", the newest 500 shown" } else { "" },
-        watch_rows(store, &list, true)?
+        if pages > 1 { format!(", {from}–{} shown, newest first", from + shown.len() - 1) } else { String::new() },
+        watch_rows(store, &shown, true)?
     ))
+}
+
+/// Links to the other pages of a list: the first, the one before, those near this one, the one
+/// after and the last. `base` is the list's address with its filters; nothing when it fits on one.
+fn pager(base: &str, page: usize, pages: usize) -> String {
+    if pages <= 1 {
+        return String::new();
+    }
+    let link = |p: usize, text: &str| format!("<a href=\"{base}&page={p}\"{}>{text}</a>", if p == page { " class=on" } else { "" });
+    let mut parts = Vec::new();
+    if page > 1 {
+        parts.push(link(page - 1, "← Newer"));
+    }
+    let mut last = 0;
+    for p in 1..=pages {
+        if p == 1 || p == pages || p.abs_diff(page) <= 2 {
+            if last != 0 && p > last + 1 {
+                parts.push("<span class=dim>…</span>".to_string());
+            }
+            parts.push(link(p, &p.to_string()));
+            last = p;
+        }
+    }
+    if page < pages {
+        parts.push(link(page + 1, "Older →"));
+    }
+    format!("<nav class=pager>{}</nav>", parts.join(""))
 }
 
 fn watch_rows(store: &Store, list: &[Watch], with_account: bool) -> Result<String, String> {
@@ -899,6 +934,15 @@ fn clip(s: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_long_list_is_shown_a_page_at_a_time() {
+        assert_eq!(pager("/admin/watches?q=", 1, 1), "", "one page needs no links");
+        let p = pager("/admin/watches?q=x", 5, 12);
+        assert!(p.starts_with("<nav class=pager><a href=\"/admin/watches?q=x&page=4\">← Newer</a><a href=\"/admin/watches?q=x&page=1\">1</a><span class=dim>…</span><a href=\"/admin/watches?q=x&page=3\">3</a>"), "{p}");
+        assert!(p.contains("<a href=\"/admin/watches?q=x&page=5\" class=on>5</a>"));
+        assert!(p.ends_with("<a href=\"/admin/watches?q=x&page=7\">7</a><span class=dim>…</span><a href=\"/admin/watches?q=x&page=12\">12</a><a href=\"/admin/watches?q=x&page=6\">Older →</a></nav>"), "{p}");
+    }
 
     #[test]
     fn traffic_counts_visitors_per_day_and_where_they_came_from() {

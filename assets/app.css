@@ -597,3 +597,7 @@ details.change-address p{font-size:13px;margin:0}
 .chart figcaption{font-size:13px;color:var(--ink-2);display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px}
 .chart .key-visitors,.chart .key-views{display:inline-block;width:18px;height:0;border-top:2px solid var(--signal)}
 .chart .key-views{border-top:2px dashed var(--ink-2);margin-left:10px}
+.pager{display:flex;flex-wrap:wrap;gap:4px 14px;align-items:baseline;margin:10px 0;font:13px var(--mono)}
+.pager a{text-decoration:none;color:var(--muted)}
+.pager a.on{color:var(--ink);text-decoration:underline;text-decoration-color:var(--signal)}
+.pager a:hover{color:var(--ink)}

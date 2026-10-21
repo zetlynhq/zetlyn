@@ -1,5 +1,7 @@
 title: Zetlyn and Visualping compared
 description: Zetlyn and Visualping side by side: prices, free plan, how often pages are checked, notifications, API and MCP, self-hosting. Facts from both pricing pages, 21 October 2026.
+name: Visualping
+card: Prices, intervals, notifications, API and MCP.
 ---
 # Zetlyn and Visualping compared
 

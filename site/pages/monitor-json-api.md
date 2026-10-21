@@ -1,5 +1,8 @@
 title: Monitor a JSON API for changes
 description: Watch one field of a JSON API, or the whole response, and get a message or a signed webhook when it changes or meets a condition. With an HTTP API and MCP server.
+name: JSON APIs
+card: One field of a response, or all of it, to a signed webhook.
+tile: tile-json
 ---
 # Monitor a JSON API for changes
 
@@ -39,5 +42,4 @@ Under Notifications, add a webhook: each change is posted to your address as JSO
 
 Only public addresses are read; an API that needs a key of yours is not.
 
-[RSS feed monitor](/rss-feed-monitor) · [Release monitor](/release-monitor) ·
-[All use cases](/use-cases)
+::cards /release-monitor /rss-feed-monitor /website-change-monitor

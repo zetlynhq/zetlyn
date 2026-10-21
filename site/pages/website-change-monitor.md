@@ -1,5 +1,8 @@
 title: Website change monitor
 description: Watch any public web page, or one place on it, and get the value before and after when it changes: competitors' pages, terms and privacy policies, status pages, job pages, notices.
+name: Any page that changes
+card: Terms, competitors, status and job pages: before and now.
+tile: tile-change
 ---
 # Website change monitor
 
@@ -33,5 +36,4 @@ Every hour. With a subscription, every 15, 5 or 1 minutes, chosen per watch.
 Some pages only show their content once their scripts have run. Zetlyn reads those in a browser on
 its own servers, in Germany. Pages behind a login, a paywall or a captcha are not read.
 
-[Price drop alerts](/price-drop-alert) · [Release monitor](/release-monitor) ·
-[All use cases](/use-cases)
+::cards /price-drop-alert /release-monitor /monitor-json-api

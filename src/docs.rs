@@ -103,9 +103,21 @@ pub fn html(md: &str) -> String {
                 out.push_str(&format!("<li>{}</li>", inline(&item.join(" "))));
             }
             out.push_str("</ul>");
+        } else if numbered(l).is_some() {
+            out.push_str("<ol>");
+            while let Some(first) = lines.get(i).and_then(|l| numbered(l)) {
+                let mut item = vec![first];
+                i += 1;
+                while i < lines.len() && lines[i].starts_with("  ") && !lines[i].trim().is_empty() {
+                    item.push(lines[i].trim());
+                    i += 1;
+                }
+                out.push_str(&format!("<li>{}</li>", inline(&item.join(" "))));
+            }
+            out.push_str("</ol>");
         } else {
             let mut para = Vec::new();
-            while i < lines.len() && !lines[i].trim().is_empty() && !["# ", "## ", "- ", "|", "    ", "```", "> "].iter().any(|p| lines[i].starts_with(p)) {
+            while i < lines.len() && !lines[i].trim().is_empty() && numbered(lines[i]).is_none() && !["# ", "## ", "- ", "|", "    ", "```", "> "].iter().any(|p| lines[i].starts_with(p)) {
                 para.push(lines[i].trim());
                 i += 1;
             }
@@ -117,6 +129,12 @@ pub fn html(md: &str) -> String {
 
 fn slug(s: &str) -> String {
     s.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect::<String>().split('-').filter(|p| !p.is_empty()).collect::<Vec<_>>().join("-")
+}
+
+/// The text of a numbered list's item ("1. Paste the address"), if the line is one.
+fn numbered(l: &str) -> Option<&str> {
+    let (n, rest) = l.split_once(". ")?;
+    (!n.is_empty() && n.len() <= 2 && n.bytes().all(|b| b.is_ascii_digit())).then_some(rest)
 }
 
 /// `code`, **bold**, *italic* and links in a line of text; the rest escaped.
@@ -184,6 +202,7 @@ mod tests {
         assert!(h.contains("<h1>Zetlyn</h1><p class=lead>One two</p><h2 id=\"how-to-connect\">How to connect</h2>"), "{h}");
         assert!(h.contains("<code>x</code> at <a href=\"https://zetlyn.com/mcp\">https://zetlyn.com/mcp</a>, <b>now</b>."), "{h}");
         assert!(h.contains("<ul><li>a b</li><li>c</li></ul>"));
+        assert_eq!(html("Do this:\n1. Paste\n2. Click\n   it\n"), "<p>Do this:</p><ol><li>Paste</li><li>Click it</li></ol>");
         assert!(h.contains("<tr><th>A</th><th>B</th></tr><tr><td><code>x</code></td><td>y</td></tr>"));
         assert!(h.contains("<pre><code>code &lt;b&gt;</code></pre>"));
         assert!(links("see https://stripe.com/x.").contains("target=_blank"));

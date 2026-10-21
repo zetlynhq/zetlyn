@@ -1,5 +1,8 @@
 title: Get told when a new software version is released
 description: Watch a release page, a GitHub releases feed or a JSON API and get one message when a new version appears. Works with HTML pages, RSS and Atom feeds and JSON. Three days free.
+name: New releases
+card: A new version on a download page, a feed or an API.
+tile: tile-release
 ---
 # Get told when a new software version is released
 
@@ -40,5 +43,4 @@ to be told only when the version moves on.
 A signed webhook sends each new release as JSON to your own address, for a deploy pipeline, n8n,
 Zapier or Make. See [the docs](/docs) for the format.
 
-[Monitor a JSON API](/monitor-json-api) · [RSS feed monitor](/rss-feed-monitor) ·
-[All use cases](/use-cases)
+::cards /monitor-json-api /rss-feed-monitor /website-change-monitor

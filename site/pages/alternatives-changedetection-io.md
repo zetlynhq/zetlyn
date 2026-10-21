@@ -1,5 +1,7 @@
 title: Zetlyn and changedetection.io compared
 description: Zetlyn and changedetection.io side by side: hosted price, self-hosting, check intervals, notifications, JSON and feeds, AI assistants. Facts from both sites, 21 October 2026.
+name: changedetection.io
+card: Hosted or self-hosted, open source on both sides.
 ---
 # Zetlyn and changedetection.io compared
 

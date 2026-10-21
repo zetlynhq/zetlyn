@@ -1,5 +1,10 @@
 title: Price drop alert for any shop page
 description: Get an email, Telegram or Slack message when a price on any web page falls below the mark you set. No browser extension, no account to set up first. Three days free.
+name: Price drop alerts
+card: When a price falls below the mark you set.
+tile: tile-price
+demo: price
+kicker: A price · a mark · one message
 ---
 # Price drop alert for any shop page
 
@@ -26,6 +31,8 @@ price has gone back above the mark, the next drop is told again.
 By email, and if you like to Telegram, Slack, Discord or your own webhook. Every change is also kept
 in the watch's history.
 
+::channels
+
 ## From Claude or ChatGPT
 
 With Zetlyn connected as an MCP server you can ask in plain words: *"Tell me when the PS5 Pro on
@@ -37,4 +44,4 @@ this page drops below 700 €."* The assistant finds the price on the page and m
 Pages behind a login, a paywall or a captcha are not read, and Zetlyn does not get around a site
 that refuses programs. Some large shops do; Zetlyn says so when you try.
 
-[Back in stock alerts](/back-in-stock-alert) · [All use cases](/use-cases)
+::cards /back-in-stock-alert /release-monitor /website-change-monitor

@@ -1,5 +1,8 @@
 title: Back in stock alert for any product page
 description: Get told when a sold-out product is available again: Zetlyn watches the availability on the product page and sends one message when "In stock" appears. Three days free.
+name: Back in stock
+card: When "Sold out" goes, or "In stock" appears.
+tile: tile-stock
 ---
 # Back in stock alert for any product page
 
@@ -34,4 +37,4 @@ Email, Telegram, Slack, Discord or a signed webhook, as you choose under Notific
 The first watch is free for three days. Then 9.99 € a month for up to ten watches, 0.50 € for each
 one more, VAT included. Cancel any time.
 
-[Price drop alerts](/price-drop-alert) · [All use cases](/use-cases)
+::cards /price-drop-alert /website-change-monitor /rss-feed-monitor

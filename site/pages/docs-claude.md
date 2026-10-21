@@ -1,5 +1,7 @@
 title: Use Zetlyn in Claude
 description: Connect Zetlyn to Claude as a custom connector or in Claude Code, sign in once, and ask Claude to watch web pages for you: prices, stock, versions, whole pages.
+name: Claude
+card: As a custom connector, or in Claude Code.
 ---
 # Use Zetlyn in Claude
 

@@ -1,26 +1,21 @@
 title: What Zetlyn watches
 description: Price drops, back in stock, new releases, changed terms, JSON APIs and RSS feeds: what Zetlyn watches, how to set it up, and how it compares.
+kicker: Use cases
 ---
 # What Zetlyn watches
 
-## Use cases
+Paste a page's address, mark the place that matters, and get told when it changes, with what it
+said before and what it says now.
 
-- [Price drop alerts](/price-drop-alert): when a price falls below your mark.
-- [Back in stock alerts](/back-in-stock-alert): when "In stock" appears.
-- [Release monitor](/release-monitor): new versions on download pages, feeds and APIs.
-- [Website change monitor](/website-change-monitor): competitors, terms, status and job pages.
-- [Monitor a JSON API](/monitor-json-api): one field, or the whole response, with a webhook.
-- [RSS and Atom feed monitor](/rss-feed-monitor): one message per new entry.
+::cards /price-drop-alert /back-in-stock-alert /release-monitor /website-change-monitor /monitor-json-api /rss-feed-monitor
 
-## From AI assistants
+## From an AI assistant
 
-- [Claude](/docs/claude)
-- [ChatGPT](/docs/chatgpt)
-- [Cursor and other MCP clients](/docs/cursor)
-- [The API and the MCP tools](/docs)
+Connect Zetlyn once and ask in plain words. The [API and the MCP tools](/docs) are described in
+full.
+
+::cards /docs/claude /docs/chatgpt /docs/cursor
 
 ## Compared
 
-- [Zetlyn and Visualping](/alternatives/visualping)
-- [Zetlyn and changedetection.io](/alternatives/changedetection-io)
-- [Zetlyn and Distill](/alternatives/distill)
+::cards /alternatives/visualping /alternatives/changedetection-io /alternatives/distill

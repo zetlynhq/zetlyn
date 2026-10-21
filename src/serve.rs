@@ -413,7 +413,12 @@ fn fallback(app: &App, store: &Store, a: &Asked) -> Result<Reply, String> {
         (Method::Get, "openapi.json") => Response::from_string(crate::docs::openapi(&public_base(app, a))).with_header(header("Content-Type", "application/json")).with_header(header("Access-Control-Allow-Origin", "*")).with_header(header("Cache-Control", "public, max-age=3600")),
         (Method::Get, "docs") => page_reply(app, a, "Docs — Zetlyn", &crate::docs::page(&public_base(app, a)), 200),
         (Method::Get, "robots.txt") => Response::from_string(format!("{ROBOTS}Sitemap: {}/sitemap.xml\n", public_base(app, a))).with_header(header("Content-Type", "text/plain; charset=utf-8")).with_header(header("Cache-Control", "public, max-age=3600")),
-        (Method::Get, "sitemap.xml") => Response::from_string(crate::seo::sitemap(&public_base(app, a), &[])).with_header(header("Content-Type", "application/xml; charset=utf-8")).with_header(header("Cache-Control", "public, max-age=3600")),
+        (Method::Get, "sitemap.xml") => Response::from_string(crate::seo::sitemap(&public_base(app, a), &crate::pages::paths())).with_header(header("Content-Type", "application/xml; charset=utf-8")).with_header(header("Cache-Control", "public, max-age=3600")),
+        // The pages that answer what people search for (`pages.rs`).
+        (Method::Get, p) if crate::pages::find(&format!("/{p}")).is_some() => {
+            let page = crate::pages::find(&format!("/{p}")).expect("just found");
+            page_reply(app, a, page.title, &crate::pages::html(&page), 200)
+        }
         _ => not_found(app, a),
     })
 }
@@ -443,7 +448,7 @@ fn operator_page(app: &App, name: &str, zetlyn_com: &str) -> String {
 }
 /// The pages for one person (marking, the account, links from mails) are nobody's to index.
 const ROBOTS: &str = "User-agent: *\nAllow: /\nDisallow: /mark\nDisallow: /frame\nDisallow: /r\nDisallow: /account\nDisallow: /w/\nDisallow: /s/\nDisallow: /c/\nDisallow: /sent\nDisallow: /api/\nDisallow: /mcp\nDisallow: /keys\nDisallow: /admin\nDisallow: /oauth\nDisallow: /review/\nDisallow: /watches\nDisallow: /subscribe\n";
-const FOOTER: &str = r#"<a href="/legal">Legal notice</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a><a href="/withdrawal">Withdrawal</a><a href="/docs">Docs</a><a href="/llms.txt">For LLMs</a><span>Servers in the EU</span>"#;
+const FOOTER: &str = r#"<a href="/legal">Legal notice</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a><a href="/withdrawal">Withdrawal</a><a href="/use-cases">Use cases</a><a href="/docs">Docs</a><a href="/llms.txt">For LLMs</a><span>Servers in the EU</span>"#;
 
 /// Where a started watch sends its owner: their watches, or the page that makes it start.
 fn started(start: Start, key: &str) -> String {

@@ -1,8 +1,9 @@
 //! `/docs`, `/llms-full.txt` and `/openapi.json`: how programs and LLMs use Zetlyn, made from one
 //! source, `site/llms.txt`, so that what a person reads and what a model reads cannot part.
 //!
-//! The markdown here is the little that file uses: headings, paragraphs, lists, tables, indented
-//! code, `code`, **bold** and addresses; anything else is shown as the text it is.
+//! The markdown here is the little that file and `site/pages` use: headings, paragraphs, lists,
+//! tables, indented code, `code`, **bold**, *italic*, links and addresses; anything else is shown
+//! as the text it is.
 
 use crate::serve::esc;
 
@@ -118,7 +119,7 @@ fn slug(s: &str) -> String {
     s.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect::<String>().split('-').filter(|p| !p.is_empty()).collect::<Vec<_>>().join("-")
 }
 
-/// `code`, **bold** and addresses in a line of text; the rest escaped.
+/// `code`, **bold**, *italic* and links in a line of text; the rest escaped.
 fn inline(s: &str) -> String {
     let mut out = String::new();
     for (n, part) in s.split('`').enumerate() {
@@ -128,7 +129,7 @@ fn inline(s: &str) -> String {
         }
         let mut text = String::new();
         for (m, piece) in part.split("**").enumerate() {
-            let linked = links(&esc(piece));
+            let linked: String = piece.split('*').enumerate().map(|(k, p)| if k % 2 == 1 { format!("<em>{}</em>", links(&esc(p))) } else { links(&esc(p)) }).collect();
             text.push_str(&if m % 2 == 1 { format!("<b>{linked}</b>") } else { linked });
         }
         out.push_str(&text);
@@ -136,8 +137,26 @@ fn inline(s: &str) -> String {
     out
 }
 
-/// Addresses in escaped text made links: to zetlyn.com in the same tab, elsewhere in a new one.
+/// Written links (`[text](/path)`) and bare addresses in escaped text made links: to zetlyn.com
+/// and its own paths in the same tab, elsewhere in a new one.
 fn links(s: &str) -> String {
+    let written = regex::Regex::new(r"\[([^\]]+)\]\(([^)\s]+)\)").expect("a fixed pattern");
+    let mut out = String::new();
+    let mut last = 0;
+    for m in written.captures_iter(s) {
+        let whole = m.get(0).expect("the match");
+        out.push_str(&bare_links(&s[last..whole.start()]));
+        let (text, href) = (&m[1], &m[2]);
+        let own = href.starts_with('/') || href.starts_with("https://zetlyn.com");
+        out.push_str(&format!("<a href=\"{href}\"{}>{text}</a>", if own { "" } else { " target=_blank rel=noopener" }));
+        last = whole.end();
+    }
+    out.push_str(&bare_links(&s[last..]));
+    out
+}
+
+/// Bare addresses in escaped text made links.
+fn bare_links(s: &str) -> String {
     let mut out = String::new();
     let mut rest = s;
     while let Some(at) = rest.find("https://") {
@@ -168,6 +187,7 @@ mod tests {
         assert!(h.contains("<tr><th>A</th><th>B</th></tr><tr><td><code>x</code></td><td>y</td></tr>"));
         assert!(h.contains("<pre><code>code &lt;b&gt;</code></pre>"));
         assert!(links("see https://stripe.com/x.").contains("target=_blank"));
+        assert_eq!(inline("ask: *\"Tell me\"* or **so**"), "ask: <em>&quot;Tell me&quot;</em> or <b>so</b>");
     }
 
     #[test]

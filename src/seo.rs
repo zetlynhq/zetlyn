@@ -12,6 +12,9 @@ pub const PUBLIC: &[&str] = &["/", "/docs", "/terms", "/privacy", "/legal", "/wi
 
 /// What a page is about, in a sentence or two: the text under its title in a search result.
 pub fn description(path: &str) -> &'static str {
+    if let Some(page) = crate::pages::find(path) {
+        return page.description;
+    }
     match path {
         "/docs" => "How to use Zetlyn from Claude, ChatGPT and other MCP clients, and through its HTTP API: watching a place on a page or the whole page, conditions, JSON and feeds, webhooks.",
         "/terms" => "The terms for using Zetlyn: the free trial, the subscription, what Zetlyn reads and what it does not, cancelling.",

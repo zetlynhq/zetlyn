@@ -23,6 +23,7 @@ pub mod oauth;
 pub mod page;
 pub mod plan;
 pub mod render;
+pub mod seo;
 pub mod serve;
 pub mod store;
 pub mod tell;

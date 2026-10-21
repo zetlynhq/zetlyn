@@ -171,7 +171,9 @@ fn answer(app: &App, store: &Store, mut req: Request) -> Result<(), String> {
     let forwarded = header("X-Forwarded-For");
     let ip = forwarded.split(',').next().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).unwrap_or_else(|| req.remote_addr().map(|a| a.ip().to_string()).unwrap_or_default());
     let session = header("Cookie").split(';').filter_map(|c| c.trim().split_once('=')).find(|(k, _)| *k == "z").map(|(_, v)| v.to_string());
-    let method = req.method().clone();
+    // HEAD is answered as GET would be, without the body (tiny_http leaves it out): link checkers
+    // and previews ask that way, and a 404 to them is a page that looks broken.
+    let method = if *req.method() == Method::Head { Method::Get } else { req.method().clone() };
     let mut body = Vec::new();
     if method == Method::Post || method == Method::Patch {
         req.as_reader().take(1024 * 1024).read_to_end(&mut body).map_err(|e| e.to_string())?;
@@ -206,6 +208,7 @@ fn route(app: &App, store: &Store, a: &Asked) -> Result<Reply, String> {
         (_, ["admin", rest @ ..]) => admin::route(app, store, a, rest)?,
         (Method::Get, ["mark.png"]) => image(MARK),
         (Method::Get, ["favicon.png"]) => image(FAVICON),
+        (Method::Get, ["og.png"]) => image(OG),
         (Method::Get, ["mark"]) => mark_page(app, store, a)?,
         (Method::Get, ["frame"]) => frame(&a.q("url").unwrap_or_default(), &origin(app, a), a.q("browser").is_some()),
         (Method::Get, ["r"]) => through(&a.q("u").unwrap_or_default(), &a.q("s").unwrap_or_default(), &origin(app, a)),
@@ -395,7 +398,7 @@ fn fallback(app: &App, store: &Store, a: &Asked) -> Result<Reply, String> {
         (Method::Get, "privacy") => page_reply(app, a, "Privacy — Zetlyn", &operator_page(app, "privacy.html", SITE_PRIVACY), 200),
         (Method::Get, "terms") => page_reply(app, a, "Terms — Zetlyn", &operator_page(app, "terms.html", SITE_TERMS), 200),
         (Method::Get, "withdrawal") => page_reply(app, a, "Cancellation policy — Zetlyn", &operator_page(app, "withdrawal.html", SITE_WITHDRAWAL), 200),
-        (Method::Get, "llms.txt") => Response::from_string(crate::docs::guide(&public_base(app, a))).with_header(header("Content-Type", "text/markdown; charset=utf-8")),
+        (Method::Get, "llms.txt") => Response::from_string(crate::docs::guide(&public_base(app, a))).with_header(header("Content-Type", "text/markdown; charset=utf-8")).with_header(header("Cache-Control", "public, max-age=3600")),
         // Proof for the MCP registry that zetlyn.com publishes com.zetlyn/* (`server.json`).
         (Method::Get, ".well-known/mcp-registry-auth") => match own_file(app, "mcp-registry-auth", include_str!("../site/mcp-registry-auth")) {
             Some(proof) => Response::from_string(proof.trim().to_string()).with_header(header("Content-Type", "text/plain; charset=utf-8")),
@@ -406,10 +409,11 @@ fn fallback(app: &App, store: &Store, a: &Asked) -> Result<Reply, String> {
             Some(t) => Response::from_string(t.trim().to_string()).with_header(header("Content-Type", "text/plain; charset=utf-8")),
             None => not_found(app, a),
         },
-        (Method::Get, "llms-full.txt") => Response::from_string(crate::docs::llms_full(&public_base(app, a))).with_header(header("Content-Type", "text/markdown; charset=utf-8")),
-        (Method::Get, "openapi.json") => Response::from_string(crate::docs::openapi(&public_base(app, a))).with_header(header("Content-Type", "application/json")).with_header(header("Access-Control-Allow-Origin", "*")),
+        (Method::Get, "llms-full.txt") => Response::from_string(crate::docs::llms_full(&public_base(app, a))).with_header(header("Content-Type", "text/markdown; charset=utf-8")).with_header(header("Cache-Control", "public, max-age=3600")),
+        (Method::Get, "openapi.json") => Response::from_string(crate::docs::openapi(&public_base(app, a))).with_header(header("Content-Type", "application/json")).with_header(header("Access-Control-Allow-Origin", "*")).with_header(header("Cache-Control", "public, max-age=3600")),
         (Method::Get, "docs") => page_reply(app, a, "Docs — Zetlyn", &crate::docs::page(&public_base(app, a)), 200),
-        (Method::Get, "robots.txt") => Response::from_string(ROBOTS).with_header(header("Content-Type", "text/plain; charset=utf-8")),
+        (Method::Get, "robots.txt") => Response::from_string(format!("{ROBOTS}Sitemap: {}/sitemap.xml\n", public_base(app, a))).with_header(header("Content-Type", "text/plain; charset=utf-8")).with_header(header("Cache-Control", "public, max-age=3600")),
+        (Method::Get, "sitemap.xml") => Response::from_string(crate::seo::sitemap(&public_base(app, a), &[])).with_header(header("Content-Type", "application/xml; charset=utf-8")).with_header(header("Cache-Control", "public, max-age=3600")),
         _ => not_found(app, a),
     })
 }
@@ -438,7 +442,7 @@ fn operator_page(app: &App, name: &str, zetlyn_com: &str) -> String {
     })
 }
 /// The pages for one person (marking, the account, links from mails) are nobody's to index.
-const ROBOTS: &str = "User-agent: *\nAllow: /\nDisallow: /mark\nDisallow: /frame\nDisallow: /r\nDisallow: /account\nDisallow: /w/\nDisallow: /s/\nDisallow: /c/\nDisallow: /sent\nDisallow: /api/\nDisallow: /mcp\nDisallow: /keys\nDisallow: /admin\nDisallow: /oauth\nDisallow: /review/\n";
+const ROBOTS: &str = "User-agent: *\nAllow: /\nDisallow: /mark\nDisallow: /frame\nDisallow: /r\nDisallow: /account\nDisallow: /w/\nDisallow: /s/\nDisallow: /c/\nDisallow: /sent\nDisallow: /api/\nDisallow: /mcp\nDisallow: /keys\nDisallow: /admin\nDisallow: /oauth\nDisallow: /review/\nDisallow: /watches\nDisallow: /subscribe\n";
 const FOOTER: &str = r#"<a href="/legal">Legal notice</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a><a href="/withdrawal">Withdrawal</a><a href="/docs">Docs</a><a href="/llms.txt">For LLMs</a><span>Servers in the EU</span>"#;
 
 /// Where a started watch sends its owner: their watches, or the page that makes it start.
@@ -1127,9 +1131,12 @@ fn layout(app: &App, a: &Asked, title: &str, main: &str) -> String {
     let banner = if banner.trim().is_empty() { String::new() } else { format!("<p class=banner>{}</p>", esc(&banner)) };
     let links = FOOTER;
     let footer = format!("<footer><span>© Zetlyn</span><div>{links}</div></footer>");
+    // In the tab and in a search result the page says it is Zetlyn's.
+    let title = if title.contains("Zetlyn") { title.to_string() } else { format!("{title} — Zetlyn") };
+    let seo = crate::seo::head(&public_base(app, a), &a.path, &title, FAQ);
     format!(
-        "<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><meta name=theme-color content=\"#f2efe7\"><title>{}</title><link rel=icon href=\"/favicon.png\" type=image/png><style>{CSS}</style></head><body><header><a href=\"/\" class=brand><img src=\"/mark.png\" alt=\"\">Zetlyn</a><nav>{nav}</nav></header>{banner}<main>{main}</main>{footer}<script>{LOCAL_TIME}</script></body></html>",
-        esc(title)
+        "<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><meta name=theme-color content=\"#f2efe7\"><title>{}</title>{seo}<link rel=icon href=\"/favicon.png\" type=image/png><style>{CSS}</style></head><body><header><a href=\"/\" class=brand><img src=\"/mark.png\" alt=\"\">Zetlyn</a><nav>{nav}</nav></header>{banner}<main>{main}</main>{footer}<script>{LOCAL_TIME}</script></body></html>",
+        esc(&title)
     )
 }
 
@@ -1237,6 +1244,8 @@ mod tests {
 /// The mark: a river through a round, drawn for the first Zetlyn and kept.
 const MARK: &[u8] = include_bytes!("../assets/mark.png");
 const FAVICON: &[u8] = include_bytes!("../assets/favicon.png");
+/// The card a shared link shows (Open Graph), 1200 × 630; made from `assets/src/og.html`.
+const OG: &[u8] = include_bytes!("../assets/og.png");
 
 fn image(bytes: &'static [u8]) -> Reply {
     Response::from_data(bytes).with_header(header("Content-Type", "image/png")).with_header(header("Cache-Control", "public, max-age=86400"))

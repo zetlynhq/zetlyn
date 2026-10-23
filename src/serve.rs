@@ -171,12 +171,10 @@ fn answer(app: &App, store: &Store, mut req: Request) -> Result<(), String> {
     let forwarded = header("X-Forwarded-For");
     let ip = forwarded.split(',').next().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).unwrap_or_else(|| req.remote_addr().map(|a| a.ip().to_string()).unwrap_or_default());
     let session = header("Cookie").split(';').filter_map(|c| c.trim().split_once('=')).find(|(k, _)| *k == "z").map(|(_, v)| v.to_string());
-    // A view of a public page by a person is counted (`visits.rs`); a browser's guess ahead
-    // (prefetch) is not, nor the admins' own.
+    // A view of a public page by a person is counted (`visits.rs`) when the page, shown in a
+    // browser, says so (`SEEN`): not when it is only fetched, nor the admins' own.
     let agent = header("User-Agent");
-    let referer = header("Referer");
-    let ahead = header("Sec-Purpose").contains("prefetch") || header("Purpose").contains("prefetch");
-    let looked = *req.method() == Method::Get && !ahead;
+    let origin_said = header("Origin");
     // HEAD is answered as GET would be, without the body (tiny_http leaves it out): link checkers
     // and previews ask that way, and a 404 to them is a page that looks broken.
     let method = if *req.method() == Method::Head { Method::Get } else { req.method().clone() };
@@ -195,9 +193,15 @@ fn answer(app: &App, store: &Store, mut req: Request) -> Result<(), String> {
         eprintln!("{} {}: {e}", asked.method, asked.path);
         page_reply(app, &asked, "Something went wrong", "<section class=narrow><h1>Something went wrong</h1><p>Zetlyn could not finish this just now. Please try again in a moment; if it keeps happening, write to hello@zetlyn.com.</p><p><a href=\"/\">Back to the front page</a></p></section>", 500)
     });
-    if looked && reply.status_code().0 == 200 && app.hosted.is_some() && admin_of(app, &asked).is_none() && crate::visits::counted(&asked.path) && !crate::visits::is_bot(&agent) {
-        if let Err(e) = count_view(app, store, &asked, &agent, &referer) {
-            eprintln!("counting a view of {}: {e}", asked.path);
+    if asked.method == Method::Post && asked.path == "/seen" && app.hosted.is_some() && admin_of(app, &asked).is_none() && !crate::visits::is_bot(&agent) {
+        let said: std::collections::HashMap<String, String> = form_urlencoded::parse(asked.form.as_bytes()).into_owned().collect();
+        let path = said.get("path").cloned().unwrap_or_default();
+        let ours = origin_said.is_empty() || host_of(&origin_said) == host_of(&public_base(app, &asked));
+        if ours && crate::visits::counted(&path) {
+            let (referer, query) = (said.get("ref").map_or("", String::as_str), said.get("q").map_or("", String::as_str));
+            if let Err(e) = count_view(app, store, &asked, &path, query, &agent, referer) {
+                eprintln!("counting a view of {path}: {e}");
+            }
         }
     }
     req.respond(reply).map_err(|e| e.to_string())
@@ -247,6 +251,8 @@ fn route(app: &App, store: &Store, a: &Asked) -> Result<Reply, String> {
             }
             _ => redirect("/signin?expired=1"),
         },
+        // A page's word that a browser showed it; counted, if at all, in `answer`.
+        (Method::Post, ["seen"]) => Response::from_string("").with_status_code(204),
         (Method::Post, ["signout"]) => {
             if let Some(t) = &a.session {
                 store.end_session(t)?;
@@ -951,8 +957,9 @@ $('whole').onclick = () => {{
         mark_note = crate::plan::MARK_NOTE,
     );
     Ok(html(format!(
-        "<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><meta name=theme-color content=\"#f2efe7\"><title>{}</title><link rel=icon href=\"/favicon.png\" type=image/png><style>{CSS}</style></head><body class=marking>{body}</body></html>",
-        esc(title)
+        "<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><meta name=theme-color content=\"#f2efe7\"><title>{}</title><link rel=icon href=\"/favicon.png\" type=image/png><style>{CSS}</style></head><body class=marking>{body}{seen}</body></html>",
+        esc(title),
+        seen = seen(app, a),
     )))
 }
 
@@ -1169,8 +1176,9 @@ fn layout(app: &App, a: &Asked, title: &str, main: &str) -> String {
     // In the tab and in a search result the page says it is Zetlyn's.
     let title = if title.contains("Zetlyn") { title.to_string() } else { format!("{title} — Zetlyn") };
     let seo = crate::seo::head(&public_base(app, a), &a.path, &title, FAQ);
+    let seen = seen(app, a);
     format!(
-        "<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><meta name=theme-color content=\"#f2efe7\"><title>{}</title>{seo}<link rel=icon href=\"/favicon.png\" type=image/png><style>{CSS}</style></head><body><header><a href=\"/\" class=brand><img src=\"/mark.png\" alt=\"\">Zetlyn</a><nav>{nav}</nav></header>{banner}<main>{main}</main>{footer}<script>{LOCAL_TIME}</script></body></html>",
+        "<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><meta name=theme-color content=\"#f2efe7\"><title>{}</title>{seo}<link rel=icon href=\"/favicon.png\" type=image/png><style>{CSS}</style></head><body><header><a href=\"/\" class=brand><img src=\"/mark.png\" alt=\"\">Zetlyn</a><nav>{nav}</nav></header>{banner}<main>{main}</main>{footer}<script>{LOCAL_TIME}</script>{seen}</body></html>",
         esc(&title)
     )
 }
@@ -2169,9 +2177,18 @@ fn take_new_address(app: &App, store: &Store, a: &Asked, token: &str) -> Result<
 }
 
 /// Keeps a view of a public page: its path, where it came from, and the visitor's mark of today.
-fn count_view(app: &App, store: &Store, a: &Asked, agent: &str, referer: &str) -> Result<(), String> {
+fn count_view(app: &App, store: &Store, a: &Asked, path: &str, query: &str, agent: &str, referer: &str) -> Result<(), String> {
     let at = crate::store::now();
     let secret = store.visit_secret(at.div_euclid(86400))?;
-    let source = crate::visits::source(referer, &a.query, &host_of(&public_base(app, a)));
-    store.view(at, &crate::seo::canonical_path(&a.path), &source, &crate::visits::visitor(&secret, &a.ip, agent))
+    let source = crate::visits::source(referer, query, &host_of(&public_base(app, a)));
+    store.view(at, &crate::seo::canonical_path(path), &source, &crate::visits::visitor(&secret, &a.ip, agent))
+}
+
+/// What a counted page says once a browser shows it (prerendered, once it is shown): programs
+/// that fetch pages without running them, most crawlers and scrapers, never say it.
+const SEEN: &str = "<script>(() => { const say = () => navigator.sendBeacon('/seen', new URLSearchParams({ path: location.pathname, ref: document.referrer, q: location.search.slice(1) })); if (document.prerendering) document.addEventListener('prerenderingchange', say, { once: true }); else say(); })();</script>";
+
+/// `SEEN` on the pages whose views are counted, on the hosted service, for all but its admins.
+fn seen(app: &App, a: &Asked) -> &'static str {
+    if app.hosted.is_some() && admin_of(app, a).is_none() && crate::visits::counted(&a.path) { SEEN } else { "" }
 }

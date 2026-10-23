@@ -872,24 +872,28 @@ fn mark_page(app: &App, store: &Store, a: &Asked) -> Result<Reply, String> {
   <iframe id=frame src="/frame?{browser}url={q}" sandbox="allow-scripts" referrerpolicy="no-referrer" title="The page"></iframe>
   <div class=loading id=loading><div class=spinner></div><p>Reading <b>{h}</b></p><p class=dim id=slow hidden>Still reading: this page builds itself with scripts, which takes a few seconds.</p></div>
 </div>
-<aside class=panel id=panel>
+<aside class="panel step-pick" id=panel>
   <div class=panel-head><h2>{title}</h2><span><button type=button class=link id=side title="Move to the other side">⇆</button><button type=button class=link id=fold title="Fold away">–</button></span></div>
   <div class=panel-body>
   <p id=hint>Click the place on the page that matters, or watch the whole page.</p>
   <div class=picked><div class=dim id=label>Nothing marked yet</div><div id=text></div></div>
-  <p class=row><button type=button id=bigger disabled>Larger</button><button type=button id=whole>Whole page</button></p>
+  <p class="row choose"><button type=button id=smaller disabled>Smaller</button><button type=button id=bigger disabled>Larger</button><button type=button id=whole>Whole page</button></p>
+  <button type=button class="primary next" id=next>Next</button>
   <p class=dim id=cleared hidden></p>
+  <details class=more id=more open><summary>Page looks wrong?</summary>
   <p class=dim>Something over the page in the way? <button type=button class=link id=remove>Remove it</button></p>
   {fuller}
+  </details>
   {error}
   <form method=post action=/watch>
+    <p class=back><button type=button class=link id=back>← Mark another place</button></p>
     <input type=hidden name=anchor id=anchor><input type=hidden name=watch value="{w}"><input type=hidden name=url value="{u}">
     {tell}
     {email}
     <button class=primary id=go disabled>{button}</button>
     {others}
   </form>
-  <p class=dim>{mark_note}</p>
+  <p class="dim note">{mark_note}</p>
   </div>
 </aside>
 <script>
@@ -898,6 +902,14 @@ const slow = setTimeout(() => {{ $('slow').hidden = false; }}, 3500);
 frame.addEventListener('load', () => {{ clearTimeout(slow); $('loading').hidden = true; }});
 $('fold').onclick = () => {{ const f = $('panel').classList.toggle('folded'); $('fold').textContent = f ? '+' : '–'; $('fold').title = f ? 'Open' : 'Fold away'; }};
 $('side').onclick = () => $('panel').classList.toggle('left');
+// On a phone the panel goes step by step (mark, size it, send) and takes the page's room only
+// as it needs it; the marked place is then brought back into view above it.
+const narrow = matchMedia('(max-width: 860px)').matches;
+if (narrow) $('more').open = false;
+if (matchMedia('(pointer: coarse)').matches) $('hint').textContent = 'Tap the place on the page that matters, or watch the whole page.';
+const step = s => {{ $('panel').classList.remove('step-pick', 'step-picked', 'step-send'); $('panel').classList.add('step-' + s); requestAnimationFrame(() => frame.contentWindow.postMessage('reveal', '*')); }};
+$('next').onclick = () => step('send');
+$('back').onclick = () => step($('anchor').value ? 'picked' : 'pick');
 window.addEventListener('message', e => {{
   if (e.source !== frame.contentWindow || !e.data) return;
   if (e.data.zetlyn === 'cleared') {{ if (e.data.count > 0) {{ $('cleared').textContent = (e.data.count === 1 ? 'One box' : e.data.count + ' boxes') + ' over the page, such as a cookie notice, hidden. Zetlyn reads the page beneath them.'; $('cleared').hidden = false; }} return; }}
@@ -907,19 +919,23 @@ window.addEventListener('message', e => {{
   $('anchor').value = JSON.stringify(a);
   $('text').textContent = a.text || '(empty)';
   $('label').textContent = a.label ? 'Beside “' + a.label + '”' : 'Marked';
-  $('go').disabled = false; document.querySelectorAll('.needs-mark').forEach(b => {{ b.disabled = false; }}); $('bigger').disabled = false;
+  $('go').disabled = false; document.querySelectorAll('.needs-mark').forEach(b => {{ b.disabled = false; }});
+  $('bigger').disabled = !e.data.larger; $('smaller').disabled = !e.data.smaller;
   numbers(true);
   $('panel').classList.remove('folded'); $('fold').textContent = '–';
+  step('picked');
 }});
 const numbers = on => {{ document.querySelectorAll('#kind option.number').forEach(o => {{ o.disabled = !on; }}); if (!on && $('kind').selectedOptions[0].disabled) {{ $('kind').value = 'any'; $('operand').hidden = true; }} }};
 $('kind').onchange = () => {{ $('operand').hidden = $('kind').value === 'any'; if (!$('operand').hidden) $('operand').focus(); }};
 $('bigger').onclick = () => frame.contentWindow.postMessage('bigger', '*');
+$('smaller').onclick = () => frame.contentWindow.postMessage('smaller', '*');
 $('remove').onclick = () => {{ frame.contentWindow.postMessage('remove', '*'); $('remove').textContent = 'Now click it on the page'; }};
 $('whole').onclick = () => {{
   frame.contentWindow.postMessage('clear', '*');
   $('anchor').value = ''; $('label').textContent = 'The whole page'; $('text').textContent = 'Any change to the text of the page is reported.';
-  $('go').disabled = false; document.querySelectorAll('.needs-mark').forEach(b => {{ b.disabled = false; }}); $('bigger').disabled = true;
+  $('go').disabled = false; document.querySelectorAll('.needs-mark').forEach(b => {{ b.disabled = false; }}); $('bigger').disabled = true; $('smaller').disabled = true;
   numbers(false);
+  step('send');
 }};
 </script>"#,
         u = esc(&url),

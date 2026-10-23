@@ -222,10 +222,30 @@ body.marking{height:100vh;height:100dvh;display:flex;flex-direction:column;overf
 .panel .tell select{flex:1 1 12em}
 .panel .tell input{flex:1 1 8em}
 .panel .error{max-width:none}
+.panel .next,.panel .back,.panel .more summary{display:none}
+.panel .more p{margin:0 0 14px}
+/* On a phone the panel sits under the page, not over it, and shows one step at a time: what to
+   do before anything is marked, the place and its size once it is, then how to be told. */
 @media (max-width:860px){
   .bar{gap:12px;padding:8px 14px}
   #side{display:none}
-  .panel,.panel.left{left:0;right:0;bottom:0;width:auto;max-height:55vh;border-width:1px 0 0;box-shadow:0 -6px 0 var(--shadow);padding:12px 16px}
+  .panel,.panel.left{position:static;flex:none;width:auto;max-height:70vh;max-height:70dvh;border-width:1px 0 0;box-shadow:0 -6px 0 var(--shadow);padding:12px 16px calc(12px + env(safe-area-inset-bottom,0px))}
+  .panel-head h2{font-size:18px}
+  .panel-body p{margin:8px 0}
+  .panel .more summary{display:list-item;font-size:14px;color:var(--muted);cursor:pointer;padding:6px 0}
+  .panel .more p{margin:6px 0 10px}
+  .panel .choose{flex-wrap:nowrap}
+  .panel .choose button{flex:1;padding:12px 8px}
+  .panel .next{display:block;width:100%;margin:10px 0 4px}
+  .panel .back{display:block;margin:0 0 10px}
+  .panel .back button{font-size:14px;padding:6px 0}
+  .panel #text{font-size:17px;max-height:4.6em;overflow:hidden}
+  .panel .tell select,.panel .tell input,.panel .email input{font-size:16px}
+  .panel form button.primary{width:100%}
+  .step-pick .picked,.step-pick #smaller,.step-pick #bigger,.step-pick .next,.step-pick form,.step-pick .note{display:none}
+  .step-pick .choose button{flex:none}
+  .step-picked #hint,.step-picked .more,.step-picked #cleared,.step-picked form,.step-picked .note{display:none}
+  .step-send #hint,.step-send .choose,.step-send .next,.step-send .more,.step-send #cleared{display:none}
 }
 .panel #remove{color:var(--ink);text-decoration:underline;text-decoration-color:var(--signal);text-underline-offset:3px;padding:0;font-size:inherit}
 /* After a link was mailed: one card, the steps, where the watch waits. */
@@ -288,7 +308,20 @@ details.end summary{cursor:pointer;color:var(--bad);font-size:15px}
 .plan-card .plan-name{font-weight:650;font-size:17px;margin-bottom:2px}
 .plan-card .upgrade,.plan-card button.link{display:inline-block;margin-top:10px;font-size:14px;color:var(--ink);text-decoration:underline;text-decoration-color:var(--signal);text-underline-offset:3px;padding:0}
 .plan-card form{margin:0}
-@media (max-width:860px){.plan-card{max-width:none;width:100%}table.list td.value,table.list tr.head td:nth-child(2){display:none}}
+/* On a phone each watch is a card: the page, what it says now, how it stands; all of it a link. */
+@media (max-width:860px){
+  .plan-card{max-width:none;width:100%}
+  table.list,table.list tbody{display:block;border:0;background:none}
+  table.list tr.head{display:none}
+  table.list tr{display:block;position:relative;margin:0 0 10px;padding:14px 16px;background:var(--white);border:1px solid var(--line-2)}
+  table.list tr:hover{border-color:var(--ink)}
+  table.list td{display:block;padding:0;border:0}
+  table.list .host::after{content:"";position:absolute;inset:0}
+  table.list .value{max-width:none;margin:8px 0 10px;font-size:16px;line-height:1.4}
+  table.list .value:empty{display:none}
+  table.list td:last-child{display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;margin-top:8px}
+  table.list td:last-child .dim:empty{display:none}
+}
 /* The account: one section per subject, its name and what it is for beside it. */
 .account{padding-top:30px}
 .account h1{margin-top:4px}

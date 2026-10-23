@@ -214,20 +214,27 @@ const FRAME_SCRIPT: &str = r#"(() => {
     document.documentElement.classList.remove('zt-removing');
     parent.postMessage({ zetlyn: 'removed' }, '*');
   };
+  // Larger walks up from the element clicked, Smaller back down the same way: on a phone a
+  // finger hits what lies under it, rarely the very place meant.
+  let trail = [];
+  const larger = el => el && el.parentElement && el.parentElement.tagName !== 'BODY' ? el.parentElement : null;
   const pick = el => {
     if (current) current.classList.remove('zt-picked');
     current = el;
     el.classList.remove('zt-hover');
     el.classList.add('zt-picked');
-    parent.postMessage({ zetlyn: 'picked', anchor: describe(el) }, '*');
+    parent.postMessage({ zetlyn: 'picked', anchor: describe(el), larger: !!larger(el), smaller: trail.length > 0 }, '*');
   };
-  document.addEventListener('mouseover', e => e.target.classList && e.target.classList.add('zt-hover'));
-  document.addEventListener('mouseout', e => e.target.classList && e.target.classList.remove('zt-hover'));
-  document.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); if (e.target.nodeType === 1) (removing ? remove : pick)(e.target); }, true);
+  // Hover marks only under a mouse; a tap would leave it behind.
+  document.addEventListener('pointerover', e => e.pointerType === 'mouse' && e.target.classList && e.target.classList.add('zt-hover'));
+  document.addEventListener('pointerout', e => e.target.classList && e.target.classList.remove('zt-hover'));
+  document.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); if (e.target.nodeType !== 1) return; if (removing) remove(e.target); else { trail = []; pick(e.target); } }, true);
   window.addEventListener('message', e => {
     if (e.source !== parent) return;
-    if (e.data === 'bigger' && current && current.parentElement && current.parentElement.tagName !== 'BODY') pick(current.parentElement);
-    if (e.data === 'clear' && current) { current.classList.remove('zt-picked'); current = null; }
+    if (e.data === 'bigger' && larger(current)) { trail.push(current); pick(larger(current)); }
+    if (e.data === 'smaller' && trail.length) pick(trail.pop());
+    if (e.data === 'reveal' && current) current.scrollIntoView({ block: 'nearest' });
+    if (e.data === 'clear' && current) { current.classList.remove('zt-picked'); current = null; trail = []; }
     if (e.data === 'remove') { removing = true; document.documentElement.classList.add('zt-removing'); }
   });
   parent.postMessage({ zetlyn: 'cleared', count: clearWay() }, '*');

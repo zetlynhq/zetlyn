@@ -153,14 +153,15 @@ mod recent {
     }
 }
 
-/// `read`, kept for two minutes (`recent`).
+/// `read`, kept for two minutes (`recent`); a read anew counted against its site (`fair`).
 fn read_recent(url: &str) -> Result<String, String> {
-    recent::get_or(format!("served {url}"), || read(url))
+    recent::get_or(format!("served {url}"), || crate::fair::admit(url, crate::fair::Kind::Page).and_then(|()| read(url)))
 }
 
-/// `rendered`, kept for two minutes (`recent`).
+/// `rendered`, kept for two minutes (`recent`); a rendering anew counted against its site and
+/// waiting behind few others (`fair`).
 fn rendered_recent(url: &str) -> Result<String, String> {
-    recent::get_or(format!("rendered {url}"), || rendered(url))
+    recent::get_or(format!("rendered {url}"), || crate::fair::admit(url, crate::fair::Kind::Page).and_then(|()| crate::fair::in_line(|| rendered(url))))
 }
 
 /// A page as a person marking it sees it: rendered where Chrome is at hand, else as served.

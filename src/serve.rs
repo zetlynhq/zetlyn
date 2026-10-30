@@ -226,7 +226,7 @@ fn route(app: &App, store: &Store, a: &Asked) -> Result<Reply, String> {
         (Method::Get, ["og.png"]) => image(OG),
         (Method::Get, ["altcha.js"]) => Response::from_string(crate::altcha::WIDGET).with_header(header("Content-Type", "text/javascript; charset=utf-8")).with_header(header("Cache-Control", "public, max-age=86400")),
         (Method::Get, ["mark"]) => mark_page(app, store, a)?,
-        (Method::Get, ["frame"]) => frame(&a.q("url").unwrap_or_default(), &origin(app, a), a.q("browser").is_some()),
+        (Method::Get, ["frame"]) => frame(&a.q("url").unwrap_or_default(), &origin(app, a), a.q("browser").is_some(), || app.allow("render", &a.ip, 20, 600)),
         (Method::Get, ["r"]) => through(&a.q("u").unwrap_or_default(), &a.q("s").unwrap_or_default(), &origin(app, a)),
         (Method::Post, ["watch"]) => watch(app, store, a)?,
         (Method::Get, ["sent"]) => page_reply(app, a, "Check your inbox", &sent(app, a), 200),
@@ -650,8 +650,10 @@ fn enter(app: &App, store: &Store, token: &str, next: &str) -> Result<Reply, Str
     Ok(redirect(to).with_header(cookie(app, &session)))
 }
 
-fn frame(url: &str, origin: &str, browser: bool) -> Reply {
-    match address(url).and_then(|u| crate::fetch::get(&u)) {
+/// The page to mark, for the frame beside the panel. Read through `fair`; rendered in Chrome only
+/// while the one asking has not had it render too often (`may_render`), else as served.
+fn frame(url: &str, origin: &str, browser: bool, may_render: impl FnOnce() -> bool) -> Reply {
+    match address(url).and_then(|u| crate::fair::page(&u)) {
         // A wall instead of the page (a captcha): said, not shown as if it were the page.
         Ok(f) if f.is_html() && check::walled(&f.body) => message(&check::refused(url)),
         Ok(f) if f.is_html() && check::frames(&f.body, &f.url).is_some() => message(&check::framed_said(url, &check::frames(&f.body, &f.url).unwrap_or_default())),
@@ -660,8 +662,8 @@ fn frame(url: &str, origin: &str, browser: bool) -> Reply {
             // As served, which takes a moment, when that shows the page; in Chrome (seconds) when
             // its scripts make it, or when asked (`browser`). Its images, fonts and styles come
             // through this app either way (`through`), into the reader's browser.
-            let rendered = crate::render::available() && (browser || check::thin(&f.body));
-            let (at, body) = if rendered { crate::render::html(&f.url).unwrap_or((f.url, f.body)) } else { (f.url, f.body) };
+            let rendered = crate::render::available() && (browser || check::thin(&f.body)) && may_render();
+            let (at, body) = if rendered { crate::fair::rendered(&f.url).unwrap_or((f.url, f.body)) } else { (f.url, f.body) };
             if check::walled(&body) {
                 return message(&check::refused(url));
             }
@@ -694,7 +696,7 @@ fn through(target: &str, s: &str, origin: &str) -> Reply {
     if !page::signed(target, s) {
         return nothing();
     }
-    let Ok(got) = crate::fetch::get_bytes(target, 5 * 1024 * 1024) else { return nothing() };
+    let Ok(got) = crate::fair::resource(target) else { return nothing() };
     let kind = got.content_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
     let path = got.url.split(['?', '#']).next().unwrap_or("").to_ascii_lowercase();
     let font_file = [".woff2", ".woff", ".ttf", ".otf"].iter().any(|x| path.ends_with(x));

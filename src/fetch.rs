@@ -61,6 +61,7 @@ fn meta_charset(head: &str) -> Option<String> {
 }
 
 /// What was read, as it came: an image, a font, a stylesheet.
+#[derive(Clone)]
 pub struct Got {
     pub url: String,
     pub content_type: String,

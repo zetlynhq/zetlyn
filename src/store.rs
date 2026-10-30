@@ -404,6 +404,18 @@ impl Store {
         Ok(secret)
     }
 
+    /// The secret ALTCHA's challenges are signed with (`altcha.rs`): drawn the first time it is
+    /// asked for, then kept, so a page shown before a restart can still be answered after it.
+    pub fn altcha_secret(&self) -> Result<String, String> {
+        let kept = self.meta("altcha_secret");
+        if !kept.is_empty() {
+            return Ok(kept);
+        }
+        let secret = crate::crypto::token();
+        self.set_meta("altcha_secret", &secret)?;
+        Ok(secret)
+    }
+
     /// The name of the app an OAuth access token was given to.
     pub fn access_client(&self, token: &str) -> Result<Option<String>, String> {
         self.conn

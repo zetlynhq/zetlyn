@@ -215,6 +215,7 @@ body.marking{height:100vh;height:100dvh;display:flex;flex-direction:column;overf
 .panel-body p{font-size:15px}
 .panel .picked{margin:12px 0}
 .panel .email{margin:12px 0 10px}
+.panel altcha-widget{display:block;margin:0 0 14px}
 .panel .tell{margin:4px 0 12px}
 .panel .tell label{display:block;font-size:13px;color:var(--muted);margin-bottom:4px}
 .panel .tell-row{display:flex;gap:6px;flex-wrap:wrap}

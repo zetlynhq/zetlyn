@@ -6,6 +6,7 @@
 //! application on our servers, an instance per server, with one SQLite file each.
 
 pub mod alert;
+pub mod altcha;
 pub mod billing;
 pub mod api;
 pub mod anchor;

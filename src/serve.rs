@@ -224,13 +224,14 @@ fn route(app: &App, store: &Store, a: &Asked) -> Result<Reply, String> {
         (Method::Get, ["mark.png"]) => image(MARK),
         (Method::Get, ["favicon.png"]) => image(FAVICON),
         (Method::Get, ["og.png"]) => image(OG),
+        (Method::Get, ["altcha.js"]) => Response::from_string(crate::altcha::WIDGET).with_header(header("Content-Type", "text/javascript; charset=utf-8")).with_header(header("Cache-Control", "public, max-age=86400")),
         (Method::Get, ["mark"]) => mark_page(app, store, a)?,
         (Method::Get, ["frame"]) => frame(&a.q("url").unwrap_or_default(), &origin(app, a), a.q("browser").is_some()),
         (Method::Get, ["r"]) => through(&a.q("u").unwrap_or_default(), &a.q("s").unwrap_or_default(), &origin(app, a)),
         (Method::Post, ["watch"]) => watch(app, store, a)?,
         (Method::Get, ["sent"]) => page_reply(app, a, "Check your inbox", &sent(app, a), 200),
         (Method::Get, ["c", token]) if hosted.is_some() => confirm(app, store, token)?,
-        (Method::Get, ["signin"]) if hosted.is_some() => page_reply(app, a, "Sign in", &signin_page(app, a), 200),
+        (Method::Get, ["signin"]) if hosted.is_some() => page_reply(app, a, "Sign in", &signin_page(app, store, a)?, 200),
         (Method::Get, ["oauth", provider]) if hosted.is_some() => oauth_begin(app, a, provider),
         (Method::Get, ["oauth", provider, "back"]) if hosted.is_some() => oauth_back(app, store, a, provider, &a.q("state").unwrap_or_default(), &a.q("code").unwrap_or_default())?,
         // Apple answers by a form posted back.
@@ -562,6 +563,9 @@ fn watch(app: &App, store: &Store, a: &Asked) -> Result<Reply, String> {
     if !mail::plausible(&email) {
         return Ok(back("Please enter the email address the changes should go to."));
     }
+    if !answered(app, store, a)? {
+        return Ok(back("Please tick “I'm not a robot” and wait for its check before sending."));
+    }
     let account = store.account(&email)?;
     if store.account_by_id(account)?.is_some_and(|acc| acc.blocked) {
         return Ok(back("This address cannot be used for watches."));
@@ -595,11 +599,20 @@ fn confirm(app: &App, store: &Store, token: &str) -> Result<Reply, String> {
     Ok(redirect(&to).with_header(cookie(app, &session)))
 }
 
+/// Whether the form came with the browser's little work done (`altcha.rs`), each answer taken
+/// once: without it, any program could have Zetlyn mail whatever addresses it was given.
+fn answered(app: &App, store: &Store, a: &Asked) -> Result<bool, String> {
+    Ok(crate::altcha::verify(&store.altcha_secret()?, &a.f("altcha"), now()).is_some_and(|nonce| app.allow("altcha", &nonce, 1, crate::altcha::LIFE)))
+}
+
 fn signin(app: &App, store: &Store, a: &Asked) -> Result<Reply, String> {
     let h = app.hosted.as_ref().ok_or("not hosted")?;
     let email = a.f("email").trim().to_lowercase();
     if !mail::plausible(&email) {
         return Ok(redirect("/signin?bad=1"));
+    }
+    if !answered(app, store, a)? {
+        return Ok(redirect("/signin?robot=1"));
     }
     // An address without an account gets one: the link confirms it when it is clicked, and an
     // account nobody confirms goes with the unpaid ones after 30 days. A blocked one gets nothing,
@@ -859,7 +872,16 @@ fn mark_page(app: &App, store: &Store, a: &Asked) -> Result<Reply, String> {
         String::new()
     };
     let others = if others.is_empty() { others } else { format!("<p class=or><span>or</span></p><div class=oauth-buttons>{others}</div>") };
-    let email = if ask_email { r#"<label class=email>Your email address<input type=email name=email placeholder="you@example.com" required autocomplete=email></label>"# } else { "" };
+    // An address typed in gets a mail: the browser's little work first (`altcha.rs`), as for
+    // signing in. Google and Apple mail nothing, and pass by it (`formnovalidate`).
+    let email = if ask_email {
+        format!(
+            r#"<label class=email>Your email address<input type=email name=email placeholder="you@example.com" required autocomplete=email></label><altcha-widget challenge="{}" name=altcha></altcha-widget><script type=module src="/altcha.js"></script>"#,
+            esc(&crate::altcha::challenge(&store.altcha_secret()?, now()))
+        )
+    } else {
+        String::new()
+    };
     let error = a.q("error").map(|e| format!("<p class=error>{}</p>", esc(&e))).unwrap_or_default();
     let (title, button) = if remark.is_some() { ("Mark the place again", "Save") } else { ("What should Zetlyn watch?", "Watch") };
     let host = url.split_once("://").map_or(url.as_str(), |(_, r)| r).split(['/', '?', '#']).next().unwrap_or("");
@@ -1045,8 +1067,10 @@ fn webmail(to: &str, sender: &str) -> Option<(&'static str, String)> {
 
 /// `/signin`: Google or Apple where set up, or an address in and a link out; what went wrong with
 /// the last try, if anything.
-fn signin_page(app: &App, a: &Asked) -> String {
-    let said = if a.q("expired").is_some() {
+fn signin_page(app: &App, store: &Store, a: &Asked) -> Result<String, String> {
+    let said = if a.q("robot").is_some() {
+        "<p class=error>Please tick “I'm not a robot” and wait for its check before sending.</p>"
+    } else if a.q("expired").is_some() {
         "<p class=error>That link has expired or was used already. Links work once, for a short time; ask for a new one.</p>"
     } else if a.q("bad").is_some() {
         "<p class=error>That does not look like an email address. Please check it.</p>"
@@ -1075,7 +1099,9 @@ fn signin_page(app: &App, a: &Asked) -> String {
             format!("<div class=oauth-buttons>{buttons}</div><p class=or><span>or</span></p>"),
         )
     };
-    format!(
+    // The challenge in the page itself, as JSON in an attribute; no round trip to fetch one.
+    let challenge = esc(&crate::altcha::challenge(&store.altcha_secret()?, now()));
+    Ok(format!(
         r#"<section class=sent><div class="sent-card signin">
 <img src="/mark.png" alt="" class=signin-mark>
 <p class=overline>Sign in or sign up</p><h1>Welcome to Zetlyn</h1>
@@ -1084,10 +1110,12 @@ fn signin_page(app: &App, a: &Asked) -> String {
 <form method=post action=/signin class=signin-form>
   <label for=email>Email address</label>
   <input type=email id=email name=email placeholder="you@example.com" required autocomplete=email>
+  <altcha-widget challenge="{challenge}" name=altcha></altcha-widget>
   <button class=primary>Send sign-in link</button>
 </form>
+<script type=module src="/altcha.js"></script>
 </div></section>"#
-    )
+    ))
 }
 
 /// The marks the providers ask their buttons to carry.
